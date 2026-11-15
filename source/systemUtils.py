@@ -30,7 +30,9 @@ import winBindings.advapi32
 import winBindings.kernel32
 import winBindings.shell32
 import winKernel
-import winreg
+import sys
+if sys.platform == "win32":
+	import winreg
 import shellapi
 import winUser
 import functools

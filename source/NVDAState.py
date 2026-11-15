@@ -9,7 +9,8 @@ import platform
 import sys
 import sysconfig
 import time
-import winreg
+if sys.platform == "win32":
+	import winreg
 
 import buildVersion
 import globalVars
@@ -244,6 +245,8 @@ class _ReadPaths:
 				return self.versionedLibARM64Path
 			case "win32":
 				return self.versionedLibX86Path
+			case "linux-x86_64":
+				return os.path.join(self.versionedLibPath, "linux-x86_64")
 			case _:
 				raise RuntimeError("Unsupported platform")
 

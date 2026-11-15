@@ -6,6 +6,7 @@
 """Helper module to ease communication to and from liblouis."""
 
 import os  # noqa: I001
+import sys
 from collections.abc import Sequence
 from ctypes import (
 	WINFUNCTYPE,
@@ -22,7 +23,10 @@ import globalVars
 import languageHandler
 from logHandler import log
 
-with os.add_dll_directory(globalVars.appDir):
+if sys.platform == "win32":
+	with os.add_dll_directory(globalVars.appDir):
+		import louis
+else:
 	import louis
 
 

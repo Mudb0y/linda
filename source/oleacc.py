@@ -9,6 +9,7 @@ from ctypes.wintypes import HWND
 from comtypes import *
 from comtypes.automation import *
 import comtypes.client
+import sys
 from winBindings import user32
 import winUser
 import typing
@@ -17,7 +18,12 @@ import winBindings.oleacc
 
 
 # Include functions from oleacc.dll in the module namespace.
-m = comtypes.client.GetModule("oleacc.dll")
+if sys.platform == "win32":
+	m = comtypes.client.GetModule("oleacc.dll")
+else:
+	# GetModule returns the module comtypes generates from oleacc.dll's type library, which
+	# NVDA's build also generates as comInterfaces.Accessibility; Linux has only its stand-in.
+	import comInterfaces.Accessibility as m
 globals().update((key, val) for key, val in m.__dict__.items() if not key.startswith("_"))
 if typing.TYPE_CHECKING:
 	IAccessible = m.IAccessible

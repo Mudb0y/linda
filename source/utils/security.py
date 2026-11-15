@@ -6,6 +6,7 @@
 from ctypes import FormatError, GetLastError, byref, sizeof  # noqa: I001
 from ctypes.wintypes import DWORD
 import hashlib
+import sys
 from typing import (
 	Any,
 	BinaryIO,
@@ -431,6 +432,9 @@ def isRunningOnSecureDesktop() -> bool:
 	 - SystemWideParameters (information on the serviceDebug parameter)
 	 - SecureMode and SecureScreens
 	"""
+	if sys.platform != "win32":
+		# The secure desktop is Windows' own; X11 has no counterpart NVDA could be running on.
+		return False
 	return systemUtils._getDesktopName() == "Winlogon"
 
 

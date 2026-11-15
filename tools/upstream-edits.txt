@@ -34,3 +34,51 @@ include/wil
   submodule link, see .gitmodules
 miscDeps
   submodule link, see .gitmodules
+source/NVDAObjects/window/winword.py
+  import safety: RegisterWindowMessage at module level runs only on Windows;
+  documentNavigation.paragraphHelper, which kept code uses, imports winword
+source/NVDAState.py
+  import safety: winreg imported only on Windows; coreArchLibPath knows
+  linux-x86_64 instead of raising for it
+source/_remoteClient/localMachine.py
+  import safety: winreg imported only on Windows, and the SAS policy's
+  registry key class attribute defined only there
+source/_remoteClient/urlHandler.py
+  import safety: winreg imported only on Windows; the one annotation that
+  names it is quoted so it is not evaluated at import
+source/config/__init__.py
+  import safety: winreg imported only on Windows; isInstalledCopy() is
+  False on Linux, because NVDASettingsDialog's class body reaches it at
+  import through touchHandler.touchSupported()
+source/config/registry.py
+  import safety: winreg imported only on Windows
+source/gui/addonStoreGui/viewModels/store.py
+  import safety: os.startfile imported only on Windows
+source/hwIo/ble/_io.py
+  import safety: bleak's WinRT backend imported and used at module level
+  only on Windows
+source/hwPortUtils.py
+  import safety: winreg imported only on Windows
+source/installer.py
+  import safety: winreg imported only on Windows
+source/louisHelper.py
+  import safety: os.add_dll_directory around the louis import only on
+  Windows
+source/mathPres/MathCAT/MathCAT.py
+  import safety: RegisterClipboardFormat in MathCATInteraction's class body
+  runs only on Windows
+source/oleacc.py
+  import safety: on Linux the oleacc type library's names come from the
+  comInterfaces.Accessibility stand-in, since comtypes.client.GetModule
+  cannot run
+source/systemUtils.py
+  import safety: winreg imported only on Windows
+source/utils/security.py
+  import safety: isRunningOnSecureDesktop() is False on Linux, because
+  NVDASettingsDialog's class body calls it at import
+source/winVersion.py
+  import safety: winreg imported only on Windows; getWinVer() returns
+  0.0.0 with a Windows-spelled architecture on Linux, because eventHandler
+  and winAPI.constants call it at import
+source/windowUtils.py
+  import safety: GetModuleHandle at module level runs only on Windows

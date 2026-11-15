@@ -23,12 +23,13 @@ Main Functions:
 
 import os
 import sys
-import winreg
+if sys.platform == "win32":
+	import winreg
 
 from config.registry import RegistryKey, _deleteKeyAndSubkeys
 
 
-def _createRegistryStructure(keyHandle: winreg.HKEYType, data: dict):
+def _createRegistryStructure(keyHandle: "winreg.HKEYType", data: dict):
 	"""Creates a nested registry structure from a dictionary.
 
 	:param keyHandle: A handle to an open registry key

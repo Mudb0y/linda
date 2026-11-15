@@ -9,7 +9,9 @@ import comtypes.client
 import ctypes
 from enum import auto, Enum
 import pathlib
-import winreg
+import sys
+if sys.platform == "win32":
+	import winreg
 import time
 import os
 import tempfile

@@ -4,7 +4,9 @@
 # See the file COPYING for more details.
 
 from enum import Enum, nonmember  # noqa: I001
-import winreg
+import sys
+if sys.platform == "win32":
+	import winreg
 
 from winBindings.advapi32 import RegDeleteTree
 

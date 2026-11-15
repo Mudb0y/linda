@@ -5,9 +5,11 @@
 
 from os import (  # noqa: I001
 	PathLike,
-	startfile,
 )
 import os
+import sys
+if sys.platform == "win32":
+	from os import startfile
 from typing import (
 	cast,
 )

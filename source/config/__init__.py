@@ -16,9 +16,10 @@ from typing import Any
 from addonAPIVersion import BACK_COMPAT_TO
 
 import globalVars
-import winreg
 import os
 import sys
+if sys.platform == "win32":
+	import winreg
 import errno
 import itertools
 import contextlib
@@ -124,6 +125,9 @@ def saveOnExit():
 
 def isInstalledCopy() -> bool:
 	"""Checks to see if this running copy of NVDA is installed on the system"""
+	if sys.platform != "win32":
+		# Nothing installs NVDA on Linux yet, so every copy runs from where it was unpacked.
+		return False
 	try:
 		k = winreg.OpenKey(
 			winreg.HKEY_LOCAL_MACHINE,

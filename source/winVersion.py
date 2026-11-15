@@ -14,7 +14,8 @@ from typing import Any  # noqa: I001
 import sys
 import os
 import functools
-import winreg
+if sys.platform == "win32":
+	import winreg
 import platform
 import NVDAState
 from config.registry import RegistryKey
@@ -169,6 +170,10 @@ WIN11_25H2 = WinVersion(major=10, minor=0, build=26200)
 @functools.lru_cache(maxsize=1)
 def getWinVer() -> WinVersion:
 	"""Returns a record of current Windows version NVDA is running on."""
+	if sys.platform != "win32":
+		# Version 0.0.0 is below every Windows constant here, so no check selects a Windows-only path.
+		arch = {"x86_64": "AMD64", "aarch64": "ARM64"}[platform.machine()]
+		return WinVersion(major=0, minor=0, build=0, processorArchitecture=arch)
 	winVer = sys.getwindowsversion()
 	# #12509: on Windows 10, fetch whatever Windows Registry says for the current build.
 	# #12626: note that not all Windows 10 releases are labeled "Windows 10"

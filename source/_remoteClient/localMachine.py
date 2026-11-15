@@ -21,7 +21,9 @@ muting and uses wxPython's CallAfter for thread synchronization.
 from enum import IntEnum, nonmember  # noqa: I001
 import os
 from typing import Any
-import winreg
+import sys
+if sys.platform == "win32":
+	import winreg
 
 import winBindings.sas
 import api
@@ -64,7 +66,8 @@ class SoftwareSASGeneration(IntEnum):
 	BOTH = 3
 	"""both services and Ease of Access applications can simulate the SAS."""
 
-	KEY: int = nonmember(winreg.HKEY_LOCAL_MACHINE)
+	if sys.platform == "win32":
+		KEY: int = nonmember(winreg.HKEY_LOCAL_MACHINE)
 	SUBKEY: str = nonmember(RegistryKey.SYSTEM_POLICIES.value)
 	VALUE_NAME: str = nonmember("SoftwareSASGeneration")
 	DISPLAY_PATH: str = nonmember(

@@ -8,7 +8,9 @@ import ctypes  # noqa: I001
 import itertools
 import math
 import typing
-import winreg
+import sys
+if sys.platform == "win32":
+	import winreg
 from ctypes.wintypes import DWORD, WCHAR
 
 import config
