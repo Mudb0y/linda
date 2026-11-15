@@ -68,7 +68,8 @@ virtualBuffers.adobeAcrobat
 virtualBuffers.gecko_ia2
 virtualBuffers.lotusNotes
 virtualBuffers.webKit
-  imports NVDAObjects.IAccessible at module level, see above
+  imports NVDAObjects.IAccessible at module level, directly or through
+  another module, see above
 appModules.soffice
   imports IA2 from IAccessibleHandler, which on Linux is a replacement
   without IAccessible2
@@ -96,9 +97,9 @@ appModules.systemsettings
 appModules.taskmgr
 appModules.windowsinternal_composableshell_experiences_textinput_inputapp
 appModules.voiceaccess
-  UI Automation objects, Windows only: they import UIAHandler's submodules
-  or its UI Automation names, and on Linux UIAHandler is a replacement
-  without either
+  UI Automation objects and their users, Windows only: they import, directly
+  or through another module, UIAHandler's submodules or its UI Automation
+  names, and on Linux UIAHandler is a replacement without either
 UIAHandler.browseMode
 UIAHandler.constants
 UIAHandler.customAnnotations
