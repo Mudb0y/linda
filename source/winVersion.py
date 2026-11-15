@@ -173,8 +173,9 @@ def getWinVer() -> WinVersion:
 	"""Returns a record of current Windows version NVDA is running on."""
 	if sys.platform != "win32":
 		# Version 0.0.0 is below every Windows constant here, so no check selects a Windows-only path.
-		arch = {"x86_64": "AMD64", "aarch64": "ARM64"}[platform.machine()]
-		return WinVersion(major=0, minor=0, build=0, processorArchitecture=arch)
+		# Spelled as Windows spells it, so that architecture checks written for Windows still match.
+		arch = {"x86_64": "AMD64", "aarch64": "ARM64"}.get(platform.machine(), platform.machine())
+		return WinVersion(releaseName=f"Linux {platform.release()}", processorArchitecture=arch)
 	winVer = sys.getwindowsversion()
 	# #12509: on Windows 10, fetch whatever Windows Registry says for the current build.
 	# #12626: note that not all Windows 10 releases are labeled "Windows 10"

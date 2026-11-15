@@ -16,11 +16,15 @@ import weakref
 import locale
 import gettext
 import enum
+import sys
 import globalVars
 from logHandler import log
 import winBindings.kernel32
 import winKernel
 from utils._deprecate import RemovedSymbol, handleDeprecations
+
+if sys.platform != "win32":
+	from linuxPlatform import posixLocale
 
 # a few Windows locale constants
 LOCALE_USER_DEFAULT = 0x400
@@ -116,6 +120,9 @@ def localeNameToWindowsLCID(localeName: str) -> int:
 	or just language (2letterLanguage or 3letterLanguage)
 	@returns: a Windows LCID or L{LCID_NONE} if it could not be retrieved.
 	"""
+	if sys.platform != "win32":
+		# Locale identifiers are Windows' own; Linux names locales and has nothing to convert to.
+		return LCID_NONE
 	# Windows Vista (NT 6.0) and later is able to convert locale names to LCIDs.
 	# Because NVDA supports Windows 7 (NT 6.1) SP1 and later, just use it directly.
 	localeName = normalizeLocaleForWin32(localeName)
@@ -136,7 +143,10 @@ def windowsLCIDToLocaleName(lcid: int) -> str | None:
 	https://docs.microsoft.com/en-us/globalization/locale/locale-names
 	"""
 	localeName = _LCID_TO_LOCALE_NAME_OVERRIDES.get(lcid)
-	if not localeName:
+	if not localeName and sys.platform != "win32":
+		# Python's own table of Windows locale identifiers, for identifiers that come with content.
+		localeName = locale.windows_locale.get(lcid)
+	elif not localeName:
 		localeName = winKernel.LCIDToLocaleName(lcid)
 	if localeName:
 		return normalizeLanguage(localeName)
@@ -159,6 +169,8 @@ def getLanguageDescription(language: str) -> str | None:
 		if res == 0:
 			res = winBindings.kernel32.GetLocaleInfo(LCID, LOCALE.SLANGUAGE, buf, 1024)
 		desc = str(buf.value)
+	if sys.platform != "win32":
+		desc = posixLocale.languageDescription(language)
 	if not desc:
 		# Some hard-coded descriptions where we know the language fails on various configurations.
 		# Imported lazily since langs description are translatable
@@ -301,6 +313,8 @@ def getWindowsLanguage():
 	"""
 	Fetches the locale name of the user's configured language in Windows.
 	"""
+	if sys.platform != "win32":
+		return posixLocale.uiLanguage(listNVDALocales())
 	windowsLCID = winBindings.kernel32.GetUserDefaultUILanguage()
 	localeName = windowsLCIDToLocaleName(windowsLCID)
 	if localeName:
@@ -316,7 +330,11 @@ def _createGettextTranslation(
 	if localeName in LANGS_WITHOUT_TRANSLATIONS:
 		return gettext.translation("nvda", fallback=True), localeName
 	try:
-		trans = gettext.translation("nvda", localedir="locale", languages=[localeName])
+		trans = gettext.translation(
+			"nvda",
+			localedir=os.path.join(globalVars.appDir, "locale"),
+			languages=[localeName],
+		)
 		return trans, localeName
 	except OSError:
 		log.debugWarning(f"couldn't set the translation service locale to {localeName}")
@@ -339,7 +357,8 @@ def setLanguage(lang: str) -> None:
 		localeName = lang
 		# Set the windows locale for this thread (NVDA core) to this locale.
 		LCID = localeNameToWindowsLCID(lang)
-		if winBindings.kernel32.SetThreadLocale(LCID) == 0:
+		# Threads have no locale of their own on Linux; setLocale below sets the process's.
+		if sys.platform == "win32" and winBindings.kernel32.SetThreadLocale(LCID) == 0:
 			log.debugWarning(f"couldn't set windows thread locale to {lang}")
 
 	trans, validatedLocalName = _createGettextTranslation(localeName)
@@ -400,6 +419,9 @@ def setLocale(localeName: str) -> None:
 	results in locale being set to `('pl_PL', 'ISO8859-2')`
 	which is meaningless to Windows,
 	"""
+	if sys.platform != "win32":
+		posixLocale.setLocale(localeName)
+		return
 	originalLocaleName = localeName
 	localeString = ""
 	try:
@@ -461,6 +483,8 @@ def useImperialMeasurements() -> bool:
 	"""
 	Whether or not measurements should be reported as imperial, rather than metric.
 	"""
+	if sys.platform != "win32":
+		return posixLocale.usesImperialMeasurements()
 	bufLength = 2
 	buf = ctypes.create_unicode_buffer(bufLength)
 	if not winBindings.kernel32.GetLocaleInfoEx(None, LOCALE.IMEASURE, buf, bufLength):

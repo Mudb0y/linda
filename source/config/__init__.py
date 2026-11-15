@@ -51,6 +51,8 @@ from NVDAState import WritePaths
 
 if sys.platform == "win32":
 	import winreg
+else:
+	from linuxPlatform import xdg as _xdg
 
 #: True if NVDA is running as a Windows Store Desktop Bridge application
 isAppX = False
@@ -172,6 +174,9 @@ def isInstalledCopy() -> bool:
 
 
 def getInstalledUserConfigPath() -> str | None:
+	if sys.platform != "win32":
+		# Nothing installs NVDA on Linux yet, so there is no installed copy's configuration.
+		return None
 	try:
 		winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _RegistryKey.NVDA.value)
 	except FileNotFoundError:
@@ -201,6 +206,9 @@ def getUserDefaultConfigPath(useInstalledPathIfExists=False):
 	which includes temporary copies.
 	Most callers will want the C{NVDAState.WritePaths.configDir variable} instead.
 	"""
+	if sys.platform != "win32":
+		# The XDG configuration directory wherever NVDA runs from, so no copy writes into its own tree.
+		return _xdg.userConfigDir()
 	installedUserConfigPath = getInstalledUserConfigPath()
 	if installedUserConfigPath and (
 		isInstalledCopy() or isAppX or (useInstalledPathIfExists and os.path.isdir(installedUserConfigPath))

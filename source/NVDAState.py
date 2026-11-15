@@ -246,6 +246,11 @@ class _ReadPaths:
 				return self.versionedLibARM64Path
 			case "win32":
 				return self.versionedLibX86Path
+			case _ if sys.platform == "linux":
+				from linuxPlatform import NoLinuxImplementation
+
+				# NVDA's helper DLLs have no Linux counterpart to point at.
+				raise NoLinuxImplementation("NVDAState.ReadPaths.coreArchLibPath")
 			case _:
 				raise RuntimeError("Unsupported platform")
 
@@ -370,6 +375,9 @@ class _TrackNVDAInitialization:
 
 
 def _forceSecureModeEnabled() -> bool:
+	if sys.platform != "win32":
+		# An administrator sets this in the registry; Linux has no system-wide store for it yet.
+		return False
 	# Avoid circular import
 	from config.registry import RegistryKey
 
@@ -382,6 +390,9 @@ def _forceSecureModeEnabled() -> bool:
 
 
 def _serviceDebugEnabled() -> bool:
+	if sys.platform != "win32":
+		# An administrator sets this in the registry; Linux has no system-wide store for it yet.
+		return False
 	# Avoid circular import
 	from config.registry import RegistryKey
 

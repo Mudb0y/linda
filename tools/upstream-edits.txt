@@ -40,10 +40,12 @@ source/NVDAObjects/window/winword.py
   On Linux wm_winword_expandToLine is absent; nothing reads it
 source/NVDAState.py
   import safety: winreg imported only on Windows, after the module's other
-  imports so that upstream's import block stays whole. On Linux winreg is
-  absent, so each registry reader here raises NameError when called,
-  including _forceSecureModeEnabled and _serviceDebugEnabled, which
-  nvda.pyw calls at start-up; their Linux answers are A2's to decide
+  imports so that upstream's import block stays whole. On Linux
+  _forceSecureModeEnabled and _serviceDebugEnabled, which the launcher asks
+  at start-up, answer False, as Linux has no system-wide store for those
+  administrator settings yet; coreArchLibPath raises NoLinuxImplementation,
+  as NVDA's helper DLLs have no Linux counterpart. The installer-only
+  registry readers still raise NameError on Linux
 source/_remoteClient/localMachine.py
   import safety: winreg imported only on Windows, after the module's other
   imports; the SAS policy's registry key class attribute is defined only
@@ -54,18 +56,21 @@ source/_remoteClient/urlHandler.py
   imports; the one annotation that names it is quoted so it is not
   evaluated at import. On Linux winreg is absent, so registering the URL
   handler raises NameError
+source/argsParsing.py
+  Linux: help goes to standard output and a command-line error to standard
+  error with exit status 2, as argparse does, instead of a Windows message
+  box
 source/browseMode.py
   import safety when running: _extractStyles imports the UI Automation Word
   document class only on Windows; Linux has no UI Automation and uses an
   empty tuple, which no isinstance test matches
 source/config/__init__.py
   import safety: winreg imported only on Windows, after the module's other
-  imports, so on Linux the registry readers here raise NameError.
-  isInstalledCopy() is False on Linux, because NVDASettingsDialog's class
-  body reaches it at import through touchHandler.touchSupported(). That
-  answer is provisional and A2's to decide: it also turns off audio ducking,
+  imports. Linux: nothing installs NVDA, so isInstalledCopy() is False and
+  getInstalledUserConfigPath() is None; that also turns off audio ducking,
   touch, the installed-only settings, parts of the update check and part of
-  the remote client
+  the remote client. getUserDefaultConfigPath() is the XDG configuration
+  directory, XDG_CONFIG_HOME/basedreader, never a directory under appDir
 source/config/registry.py
   import safety: winreg imported only on Windows, after the module's other
   imports; on Linux winreg is absent, so its registry helpers raise NameError
@@ -73,6 +78,10 @@ source/documentNavigation/paragraphHelper.py
   import safety when running: after moving the caret, both paragraph moves
   import the UI Automation text class only on Windows; Linux has no UI
   Automation and uses an empty tuple, which no isinstance test matches
+source/fileUtils.py
+  Linux: FaultTolerantFile puts the synced temporary file in place with
+  os.replace and then syncs the directory, where Windows calls MoveFileEx,
+  so that a save replaces nvda.ini whole or not at all
 source/gui/addonStoreGui/viewModels/store.py
   import safety: os.startfile imported only on Windows, after the module's
   other imports; on Linux startfile is absent, so opening an add-on's home
@@ -88,6 +97,13 @@ source/hwPortUtils.py
 source/installer.py
   import safety: winreg imported only on Windows, after the module's other
   imports; on Linux winreg is absent, so installing raises NameError
+source/languageHandler.py
+  Linux: the interface language, the C locale, language names and the
+  measurement system come from linuxPlatform.posixLocale, which reads the
+  POSIX environment, instead of from Windows locale calls. Converting a name
+  to a Windows locale identifier gives LCID_NONE and the reverse uses
+  Python's table. The catalogue directory is absolute under appDir on every
+  platform, so translations no longer depend on the working directory
 source/louisHelper.py
   import safety: os.add_dll_directory around the louis import only on
   Windows
@@ -104,16 +120,26 @@ source/oleacc.py
   cannot run
 source/systemUtils.py
   import safety: winreg imported only on Windows, after the module's other
-  imports; on Linux winreg is absent, so its registry readers raise
-  NameError
+  imports. Linux: hasUiAccess() is True, as X11 isolates no client from
+  another; hasSyswow64Dir() and _isSystemClockSecondsVisible() are False;
+  the configuration directory opens through xdg-open; preventSystemIdle()
+  raises NoLinuxImplementation until the session's idle inhibitor is used,
+  and resetThreadExecutionState() has nothing to release. The process token,
+  logon session, elevation and desktop name functions still fail on Linux
+  through the Windows stand-ins
 source/utils/security.py
-  import safety: isRunningOnSecureDesktop() is False on Linux, because
-  NVDASettingsDialog's class body calls it at import. That answer is
-  provisional and A2's to decide
+  Linux: isRunningOnSecureDesktop() is True only in a display manager's
+  login screen session, the counterpart of the secure desktop, as
+  XDG_SESSION_CLASS says. NVDASettingsDialog's class body calls it at import
+source/winAPI/messageWindow.py
+  Linux: _MessageWindow creates no window and its destroy() does nothing, as
+  no other process sends NVDA window messages there; core.main still creates
+  and destroys it
 source/winVersion.py
   import safety: winreg imported only on Windows, after the module's other
-  imports; getWinVer() returns 0.0.0 with a Windows-spelled architecture on
-  Linux, because eventHandler and winAPI.constants call it at import
+  imports; getWinVer() returns 0.0.0 named after the Linux kernel release,
+  with the architecture spelled as Windows spells it, because eventHandler
+  and winAPI.constants call it at import
 source/windowUtils.py
   import safety: GetModuleHandle at module level runs only on Windows; on
   Linux appInstance is absent, so creating a CustomWindow, such as

@@ -26,6 +26,9 @@ from winBindings.advapi32 import (
 )
 import winUser
 
+if sys.platform != "win32":
+	from linuxPlatform import session as _linuxSession
+
 if TYPE_CHECKING:
 	import scriptHandler  # noqa: I001
 	import NVDAObjects
@@ -433,8 +436,8 @@ def isRunningOnSecureDesktop() -> bool:
 	 - SecureMode and SecureScreens
 	"""
 	if sys.platform != "win32":
-		# The secure desktop is Windows' own; X11 has no counterpart NVDA could be running on.
-		return False
+		# A display manager's login screen is the Linux counterpart of the secure desktop.
+		return _linuxSession.isGreeter()
 	return systemUtils._getDesktopName() == "Winlogon"
 
 

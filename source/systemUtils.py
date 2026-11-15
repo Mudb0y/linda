@@ -41,11 +41,17 @@ from winBindings import advapi32, user32
 
 if sys.platform == "win32":
 	import winreg
+else:
+	from linuxPlatform import NoLinuxImplementation
+	from linuxPlatform import xdg as _xdg
 
 
 @functools.lru_cache(maxsize=1)
 def hasSyswow64Dir() -> bool:
 	"""Returns `True` if the current system has separate system32 directories for 32-bit processes."""
+	if sys.platform != "win32":
+		# System32 and its 32-bit twin are Windows' own directories.
+		return False
 	nativeSys32 = shlobj.SHGetKnownFolderPath(shlobj.FolderId.SYSTEM)
 	Syswow64Sys32 = shlobj.SHGetKnownFolderPath(shlobj.FolderId.SYSTEM_X86)
 	return nativeSys32 != Syswow64Sys32
@@ -53,6 +59,8 @@ def hasSyswow64Dir() -> bool:
 
 def openUserConfigurationDirectory():
 	"""Opens directory containing config files for the current user"""
+	if sys.platform != "win32":
+		return _xdg.openWithDefaultApplication(WritePaths.configDir)
 	shellapi.ShellExecute(0, None, WritePaths.configDir, None, None, winUser.SW_SHOWNORMAL)
 
 
@@ -66,6 +74,8 @@ def openDefaultConfigurationDirectory():
 	if not path:
 		raise ValueError("no user default config path")
 	config.initConfigPath(path)
+	if sys.platform != "win32":
+		return _xdg.openWithDefaultApplication(path)
 	shellapi.ShellExecute(0, None, path, None, None, winUser.SW_SHOWNORMAL)
 
 
@@ -73,6 +83,10 @@ TokenUIAccess = 26
 
 
 def hasUiAccess():
+	if sys.platform != "win32":
+		# X11 does not isolate one client's windows from another's input or inspection, so every client
+		# already has what UI Access grants on Windows. Wayland does isolate them, so this is X11's answer.
+		return True
 	token = ctypes.wintypes.HANDLE()
 	advapi32.OpenProcessToken(
 		winBindings.kernel32.GetCurrentProcess(),
@@ -201,6 +215,9 @@ def _isSystemClockSecondsVisible() -> bool:
 
 	@return: True if the 'ShowSecondsInSystemClock' value is 1, False otherwise.
 	"""
+	if sys.platform != "win32":
+		# The clock belongs to the desktop's panel, and no desktop-wide setting says it shows seconds.
+		return False
 	# Import here to prevent circular import
 	from config.registry import RegistryKey
 
@@ -264,6 +281,10 @@ def preventSystemIdle(preventDisplayTurningOff: bool | None = None, persistent: 
 		if `None`, the general setting "prevent display turn off" will be used.
 	:param persistent: If `True`, the state will be maintained until calling :func:`resetThreadExecutionState` is called.
 	"""
+	if sys.platform != "win32":
+		# Braille display keys and say all are activity the X server never sees, so the session's idle
+		# time has to be reset, or inhibited for say all, through the screensaver or session manager.
+		raise NoLinuxImplementation("systemUtils.preventSystemIdle")
 	if preventDisplayTurningOff is None:
 		import config
 
@@ -277,6 +298,9 @@ def preventSystemIdle(preventDisplayTurningOff: bool | None = None, persistent: 
 
 def resetThreadExecutionState() -> None:
 	"""Reset the thread execution state to the default."""
+	if sys.platform != "win32":
+		# preventSystemIdle holds nothing on Linux yet, so there is nothing to release.
+		return
 	winBindings.kernel32.SetThreadExecutionState(winKernel.ES_CONTINUOUS)
 
 

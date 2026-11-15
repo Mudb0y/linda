@@ -6,6 +6,7 @@
 import os  # noqa: I001
 import ctypes
 import array
+import sys
 from contextlib import contextmanager
 from tempfile import NamedTemporaryFile
 from logHandler import log
@@ -14,6 +15,9 @@ import shlobj
 from functools import wraps
 import systemUtils
 import winBindings.version
+
+if sys.platform != "win32":
+	from linuxPlatform import files as _linuxFiles
 
 
 @contextmanager
@@ -40,6 +44,9 @@ def FaultTolerantFile(name):
 		f.flush()
 		os.fsync(f)
 		f.close()
+		if sys.platform != "win32":
+			_linuxFiles.replaceDurably(f.name, name)
+			return
 		winKernel.moveFileEx(f.name, name, winKernel.MOVEFILE_REPLACE_EXISTING)
 
 

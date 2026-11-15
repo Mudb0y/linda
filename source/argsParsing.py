@@ -31,10 +31,16 @@ class NoConsoleOptionParser(argparse.ArgumentParser):
 
 	def print_help(self, file: IO[str] | None = None):
 		"""Shows help in a standard Windows message dialog"""
+		if sys.platform != "win32":
+			# Linux starts NVDA from a terminal or a session script, which reads standard output.
+			return super().print_help(file)
 		winUser.MessageBox(0, self.format_help(), "Help", 0)
 
 	def error(self, message: str):
 		"""Shows an error in a standard Windows message dialog, and then exits NVDA"""
+		if sys.platform != "win32":
+			# Standard error and exit status 2, as argparse does; never a dialog on whatever display is set.
+			super().error(message)
 		out = ""
 		out = self.format_usage()
 		out += f"\nerror: {message}"

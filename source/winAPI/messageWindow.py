@@ -10,6 +10,7 @@ Message windows can be used to handle communications from other processes, new N
 """
 
 from enum import IntEnum  # noqa: I001
+import sys
 
 
 from . import (
@@ -80,9 +81,19 @@ class _MessageWindow(windowUtils.CustomWindow):
 	"""
 
 	def __init__(self, windowName: str | None = None):
+		if sys.platform != "win32":
+			# Nothing sends NVDA window messages on Linux, so there is no window. A new instance asks this
+			# one to quit with SIGTERM; power, display and device changes will come from UPower, RandR
+			# and udev.
+			return
 		super().__init__(windowName)
 		_displayTracking.initialize()
 		_powerTracking.initialize()
+
+	def destroy(self) -> None:
+		if sys.platform != "win32":
+			return
+		super().destroy()
 
 	def windowProc(self, hwnd: HWNDValT, msg: int, wParam: int, lParam: int) -> None:
 		"""
