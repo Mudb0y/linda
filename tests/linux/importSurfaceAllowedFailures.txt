@@ -1,0 +1,214 @@
+# Modules under source/ that are allowed to fail to import on Linux.
+# Module names start a line; an indented line gives the reason for the
+# modules listed above it, back to the previous reason.
+# test_importSurface.py fails when a module not listed here fails to
+# import, and when a module listed here imports.
+
+NVDAObjects.IAccessible
+NVDAObjects.IAccessible.MSHTML
+NVDAObjects.IAccessible.SysMonthCal32
+NVDAObjects.IAccessible.adobeAcrobat
+NVDAObjects.IAccessible.akelEdit
+NVDAObjects.IAccessible.chromium
+NVDAObjects.IAccessible.delphi
+NVDAObjects.IAccessible.hh
+NVDAObjects.IAccessible.ia2TextMozilla
+NVDAObjects.IAccessible.ia2Web
+NVDAObjects.IAccessible.mozilla
+NVDAObjects.IAccessible.msOffice
+NVDAObjects.IAccessible.mscandui
+NVDAObjects.IAccessible.qt
+NVDAObjects.IAccessible.scintilla
+NVDAObjects.IAccessible.sysListView32
+NVDAObjects.IAccessible.sysTreeView32
+NVDAObjects.IAccessible.webKit
+NVDAObjects.IAccessible.winConsole
+NVDAObjects.IAccessible.winword
+NVDAObjects.IAccessible.wx
+  MSAA and IAccessible2 objects, Windows only: they import interfaces and
+  constants from the comInterfaces modules NVDA's build generates from
+  Windows type libraries, which on Linux are empty stand-ins
+appModules.azardi20
+appModules.bookshelf
+appModules.calc
+appModules.code
+appModules.devenv
+appModules.eclipse
+appModules.explorer
+appModules.instantbird
+appModules.itunes
+appModules.kindle
+appModules.logonui
+appModules.loudtalks
+appModules.microsoftedgecp
+appModules.mintty
+appModules.miranda32
+appModules.mirc
+appModules.mmc
+appModules.msimn
+appModules.msnmsgr
+appModules.nlnotes
+appModules.nvda
+appModules.poedit
+appModules.powerpnt
+appModules.putty
+appModules.searchui
+appModules.shellexperiencehost
+appModules.spotify
+appModules.symphony
+appModules.teams
+appModules.totalcmd
+appModules.tween
+appModules.utorrent
+appModules.winamp
+appModules.winword
+appModules.wlmail
+virtualBuffers.MSHTML
+virtualBuffers.adobeAcrobat
+virtualBuffers.gecko_ia2
+virtualBuffers.lotusNotes
+virtualBuffers.webKit
+  imports NVDAObjects.IAccessible at module level, see above
+appModules.soffice
+  imports IA2 from IAccessibleHandler, which on Linux is a replacement
+  without IAccessible2
+
+NVDAObjects.UIA
+NVDAObjects.UIA.VisualStudio
+NVDAObjects.UIA.anaheimEdge
+NVDAObjects.UIA.chromium
+NVDAObjects.UIA.excel
+NVDAObjects.UIA.spartanEdge
+NVDAObjects.UIA.sysListView32
+NVDAObjects.UIA.web
+NVDAObjects.UIA.winConsoleUIA
+NVDAObjects.UIA.wordDocument
+appModules.calculator
+appModules.digitaleditions
+appModules.excel
+appModules.hxmail
+appModules.lockapp
+appModules.lync
+appModules.notepad
+appModules.openwith
+appModules.outlook
+appModules.systemsettings
+appModules.taskmgr
+appModules.windowsinternal_composableshell_experiences_textinput_inputapp
+appModules.voiceaccess
+  UI Automation objects, Windows only: they import UIAHandler's submodules
+  or its UI Automation names, and on Linux UIAHandler is a replacement
+  without either
+UIAHandler.browseMode
+UIAHandler.constants
+UIAHandler.customAnnotations
+UIAHandler.customProps
+UIAHandler.remote
+UIAHandler.types
+UIAHandler.utils
+UIAHandler._remoteOps
+UIAHandler._remoteOps.builder
+UIAHandler._remoteOps.instructions
+UIAHandler._remoteOps.instructions._base
+UIAHandler._remoteOps.instructions.arithmetic
+UIAHandler._remoteOps.instructions.array
+UIAHandler._remoteOps.instructions.bool
+UIAHandler._remoteOps.instructions.cacheRequest
+UIAHandler._remoteOps.instructions.controlFlow
+UIAHandler._remoteOps.instructions.element
+UIAHandler._remoteOps.instructions.extension
+UIAHandler._remoteOps.instructions.float
+UIAHandler._remoteOps.instructions.general
+UIAHandler._remoteOps.instructions.guid
+UIAHandler._remoteOps.instructions.int
+UIAHandler._remoteOps.instructions.null
+UIAHandler._remoteOps.instructions.status
+UIAHandler._remoteOps.instructions.string
+UIAHandler._remoteOps.instructions.textRange
+UIAHandler._remoteOps.localExecute
+UIAHandler._remoteOps.lowLevel
+UIAHandler._remoteOps.operation
+UIAHandler._remoteOps.remoteAPI
+UIAHandler._remoteOps.remoteAlgorithms
+UIAHandler._remoteOps.remoteFuncWrapper
+UIAHandler._remoteOps.remoteTypes
+UIAHandler._remoteOps.remoteTypes.cacheRequest
+UIAHandler._remoteOps.remoteTypes.element
+UIAHandler._remoteOps.remoteTypes.extensionTarget
+UIAHandler._remoteOps.remoteTypes.intEnum
+UIAHandler._remoteOps.remoteTypes.textRange
+  submodule of UIAHandler, which linuxPlatform replaces as a whole; a
+  replaced package's submodules are not provided
+IAccessibleHandler.internalWinEventHandler
+IAccessibleHandler.orderedWinEventLimiter
+IAccessibleHandler.types
+IAccessibleHandler.utils
+  submodule of IAccessibleHandler, which linuxPlatform replaces as a whole
+NVDAHelper.localWin10
+contentRecog._wgcCapture
+contentRecog.uwpOcr
+  NVDAHelper.localWin10 binds nvdaHelperLocalWin10.dll, Windows OCR and
+  screen capture; it is a submodule of NVDAHelper, which linuxPlatform
+  replaces, and is not provided
+
+NVDAObjects.window.akelEdit
+NVDAObjects.window.edit
+appModules.dllhost
+appModules.fastlogentry
+appModules.vipmud
+  Win32 Edit and RichEdit controls: edit.py reads Text Object Model
+  constants from comInterfaces.tom in a class body, and on Linux that
+  module is an empty stand-in
+NVDAObjects.window.excel
+  Microsoft Excel: imports EXCEL_CELLINFO, the structure of
+  nvdaHelperLocal's in-process Excel helper, which Linux does not have
+
+synthDrivers.mssp
+synthDrivers.sapi5
+  SAPI 5, Windows speech: imports names from comInterfaces.SpeechLib,
+  which NVDA's build generates from SAPI's type library
+_synthDrivers32.sapi5
+  SAPI 5 through the 32-bit bridge: loads sapi.dll's type library with
+  comtypes.client.GetModule at import
+_synthDrivers32.sapi4
+synthDrivers.oneCore
+synthDrivers.sapi4_32
+synthDrivers.sapi5_32
+mathType
+  Windows-only integration (SAPI 4, OneCore voices, the 32-bit SAPI
+  bridges, MathType): imports winreg, which Linux must never provide
+_bridge.base
+_bridge.clients.synthDriverHost32.launcher
+_bridge.clients.synthDriverHost32.synthDriver
+_bridge.components.proxies.nvwave
+_bridge.components.proxies.synthDriver
+_bridge.components.services.nvwave
+_bridge.components.services.synthDriver
+_bridge.runtimes.synthDriverHost.synthDriverHost
+  the bridge to 32-bit Windows synthesizer processes: imports msvcrt,
+  which Linux must never provide, and pywin32
+_bridge.runtimes.synthDriverHost.speech
+  imports speech.types, which SCons copies into the synth host runtime
+  at build time
+
+mathPres.MathCAT
+mathPres.MathCAT.MathCAT
+mathPres.MathCAT._navNodeMapping
+mathPres.MathCAT.localization
+mathPres.MathCAT.navCommands
+mathPres.MathCAT.preferences
+mathPres.MathCAT.rulesUtils
+mathPres.MathCAT.speech
+  needs libmathcat_py, MathCAT's native extension, which the dev shell does
+  not provide; mathPres itself imports and treats MathCAT as unavailable
+
+l10nUtil
+  translators' tool: needs crowdin_api, which is not a run-time dependency
+md2html
+  documentation build tool: needs l2m4m, which is not a run-time dependency
+oleTypes
+  asserts sizeof(tagDVTARGETDEVICE) == 16, which is 24 on every 64-bit
+  build, Windows included; nothing in source/ imports it
+updateCheck
+  raises RuntimeError on purpose when run from source, as on Windows;
+  core.main catches it
