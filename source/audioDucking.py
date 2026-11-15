@@ -13,6 +13,7 @@ import winBindings.kernel32
 import config
 from logHandler import log
 import systemUtils
+import sys
 
 
 def _isDebug():
@@ -179,6 +180,10 @@ _isAudioDuckingSupported = None
 
 def isAudioDuckingSupported():
 	global _isAudioDuckingSupported
+	if sys.platform != "win32":
+		# Ducking other applications on Linux would take a policy in the sound server's session
+		# manager, which does not exist yet.
+		return False
 	if _isAudioDuckingSupported is None:
 		_isAudioDuckingSupported = config.isInstalledCopy()
 		_isAudioDuckingSupported &= systemUtils.hasUiAccess()

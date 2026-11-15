@@ -5,12 +5,16 @@
 
 """Tools for interacting with Windows' MMDevice API."""
 
+import sys
 from collections.abc import Generator
 from typing import NamedTuple, cast
 
 import config
 from pycaw.constants import DEVICE_STATE, EDataFlow
 from pycaw.utils import AudioUtilities
+
+if sys.platform != "win32":
+	from linuxPlatform import audioOutput
 
 
 class AudioOutputDevice(NamedTuple):
@@ -43,6 +47,12 @@ def getOutputDevices(
 			# Translators: Value to show when choosing to use the default audio output device.
 			friendlyName=_("Default output device"),
 		)
+	if sys.platform != "win32":
+		# The audio sink lists only devices that are present and usable, which are ACTIVE ones.
+		if DEVICE_STATE.ACTIVE in stateMask:
+			for deviceId, friendlyName in audioOutput.getSink().devices():
+				yield AudioOutputDevice(deviceId, friendlyName)
+		return
 	endpointCollection = AudioUtilities.GetDeviceEnumerator().EnumAudioEndpoints(
 		EDataFlow.eRender.value,
 		stateMask.value,

@@ -17,6 +17,10 @@ from dataclasses import dataclass
 from comtypes import COMError
 from threading import Lock
 import core
+import sys
+
+if sys.platform != "win32":
+	from linuxPlatform import NoLinuxImplementation
 
 VolumeTupleT = tuple[float, float]
 
@@ -93,6 +97,11 @@ _activeCallback: AudioSessionNotification | None = None
 
 def initialize() -> None:
 	global _audioSessionManager
+	if sys.platform != "win32":
+		# Sound split sets other applications' volumes through Windows' audio session manager, which
+		# has no Linux counterpart yet; the manager stays None and sound split is unavailable.
+		log.debug("Sound split is not available on this platform")
+		return
 	try:
 		_audioSessionManager = AudioUtilities.GetAudioSessionManager()
 	except COMError:
@@ -182,6 +191,11 @@ class _VolumeSetter(AudioSessionNotification):
 
 
 def _setSoundSplitState(state: SoundSplitState, initial: bool = False) -> dict:
+	if sys.platform != "win32":
+		if state == SoundSplitState.OFF:
+			# Nothing was ever split, so nothing needs restoring.
+			return {"foundSessionWithNot2Channels": False}
+		raise NoLinuxImplementation("audio.soundSplit._setSoundSplitState")
 	applyToFuture = True
 	if state == SoundSplitState.OFF:
 		if initial:
@@ -201,6 +215,10 @@ def _setSoundSplitState(state: SoundSplitState, initial: bool = False) -> dict:
 
 
 def _toggleSoundSplitState() -> None:
+	if sys.platform != "win32":
+		# Translators: Reported when the sound split mode is toggled where sound split is unavailable.
+		ui.message(_("Sound split not supported"))
+		return
 	state = SoundSplitState(config.conf["audio"]["soundSplitState"])
 	allowedStates: list[int] = config.conf["audio"]["includedSoundSplitModes"]
 	try:
