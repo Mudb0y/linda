@@ -10,6 +10,7 @@ use futures_util::stream::StreamExt;
 use mirror::client::Client;
 use mirror::consts::{
     IFACE_ACCESSIBLE, IFACE_CACHE, IFACE_PROPERTIES, IFACE_TEXT, ROLE_HEADING, ROOT_PATH,
+    state_name,
 };
 use mirror::decode;
 use mirror::fetch::{self, WalkFields};
@@ -64,6 +65,9 @@ struct LoopStats {
     /// Every object a signal the mirror acts on came from or named.
     #[serde(skip)]
     signalled: HashSet<String>,
+    /// Every object and state named by a StateChanged.
+    #[serde(skip)]
+    state_signals: HashSet<(String, String)>,
 }
 
 fn describe(m: &Message) -> String {
@@ -238,45 +242,74 @@ async fn prime_attributes(client: &Client, document: &str) -> usize {
     50
 }
 
-/// Attribute differences between the walk and the mirror, by attribute
-/// name, split by whether any signal came from or named the object or its
-/// parent. Without one the mirror had nothing to act on: Firefox sends no
-/// signal at all when, for one, aria-roledescription changes.
+/// Differences in one kind of field between the walk and the mirror, by
+/// attribute name or state, split by whether a signal could have told the
+/// mirror. For an attribute that is any signal from or naming the object or
+/// its parent, since a structural change can change attributes; for a state
+/// it is a StateChanged for that state from that object, the only way the
+/// mirror learns of one. Without one the mirror had nothing to act on:
+/// Firefox sends no signal when, for one, aria-roledescription changes, or
+/// when layout moves an object into view and it gains the showing state.
 #[derive(Default, Serialize)]
-struct AttributeDrift {
+struct Drift {
     objects_with_signal: usize,
     objects_without_signal: usize,
     with_signal: BTreeMap<String, usize>,
     without_signal: BTreeMap<String, usize>,
 }
 
-fn attribute_drift(reference: &Tree, mirror: &Tree, signalled: &HashSet<String>) -> AttributeDrift {
-    let mut d = AttributeDrift::default();
+impl Drift {
+    fn add(&mut self, seen: bool, keys: impl IntoIterator<Item = String>) {
+        let (objects, by_key) = if seen {
+            (&mut self.objects_with_signal, &mut self.with_signal)
+        } else {
+            (&mut self.objects_without_signal, &mut self.without_signal)
+        };
+        *objects += 1;
+        for k in keys {
+            *by_key.entry(k).or_default() += 1;
+        }
+    }
+}
+
+#[derive(Default, Serialize)]
+struct FieldDrift {
+    attributes: Drift,
+    states: Drift,
+}
+
+fn field_drift(reference: &Tree, mirror: &Tree, stats: &LoopStats) -> FieldDrift {
+    let signalled = &stats.signalled;
+    let mut d = FieldDrift::default();
     for (path, r) in &reference.nodes {
         let Some(m) = mirror.nodes.get(path) else {
             continue;
         };
-        let (Some(a), Some(b)) = (&r.attributes, &m.attributes) else {
-            continue;
-        };
-        if a == b {
-            continue;
-        }
         let seen =
             signalled.contains(path) || r.parent.as_ref().is_some_and(|p| signalled.contains(p));
-        let (objects, keys) = if seen {
-            (&mut d.objects_with_signal, &mut d.with_signal)
-        } else {
-            (&mut d.objects_without_signal, &mut d.without_signal)
-        };
-        *objects += 1;
-        let ma: BTreeMap<_, _> = a.iter().cloned().collect();
-        let mb: BTreeMap<_, _> = b.iter().cloned().collect();
-        let names: BTreeSet<&String> = ma.keys().chain(mb.keys()).collect();
-        for k in names {
-            if ma.get(k) != mb.get(k) {
-                *keys.entry(k.clone()).or_default() += 1;
-            }
+        if let (Some(a), Some(b)) = (&r.attributes, &m.attributes)
+            && a != b
+        {
+            let ma: BTreeMap<_, _> = a.iter().cloned().collect();
+            let mb: BTreeMap<_, _> = b.iter().cloned().collect();
+            let names: BTreeSet<&String> = ma.keys().chain(mb.keys()).collect();
+            let keys = names
+                .into_iter()
+                .filter(|k| ma.get(*k) != mb.get(*k))
+                .cloned();
+            d.attributes.add(seen, keys);
+        }
+        if let (Some(a), Some(b)) = (r.states, m.states)
+            && a != b
+        {
+            let names: Vec<String> = (0..64u32)
+                .filter(|&i| (a[i as usize / 32] ^ b[i as usize / 32]) & (1 << (i % 32)) != 0)
+                .map(|i| state_name(i).to_owned())
+                .collect();
+            let told = names
+                .iter()
+                .any(|n| stats.state_signals.contains(&(path.clone(), n.clone())));
+            d.states.add(told, names);
         }
     }
     d
@@ -295,6 +328,11 @@ fn apply_batch(
         match decode::event(m) {
             Ok(Some(e)) if e.minor == "accessible-parent" => {}
             Ok(Some(e)) => {
+                if e.member == "StateChanged" {
+                    stats
+                        .state_signals
+                        .insert((e.path.clone(), e.minor.clone()));
+                }
                 stats.signalled.insert(e.path);
                 if let decode::AnyData::Ref(r) = e.any {
                     stats.signalled.insert(r.path);
@@ -478,8 +516,12 @@ pub async fn run(args: &Args) -> Result<(), String> {
     let fresh_pruned_count = fresh_pruned.prune_unreachable();
 
     let mirror_diff = tree::diff(&reference, &mirror.tree, Compared::ALL);
-    let drift = attribute_drift(&reference, &mirror.tree, &stats.signalled);
-    let unexplained = mirror_diff.total() - drift.objects_without_signal;
+    let drift = field_drift(&reference, &mirror.tree, &stats);
+    // Each object counts once per kind of field it differs in, as in the
+    // diff's total.
+    let unexplained = mirror_diff.total()
+        - drift.attributes.objects_without_signal
+        - drift.states.objects_without_signal;
     // Both trees in full, for working out why a mirror went wrong.
     if mirror_diff.total() > 0
         && let Some(path) = args.0.get("dump")
@@ -529,7 +571,7 @@ pub async fn run(args: &Args) -> Result<(), String> {
                 "status": status(&reference),
             },
             "mirror_vs_walk": mirror_diff,
-            "mirror_attribute_drift": drift,
+            "mirror_drift": drift,
             "mirror_differences_unexplained": unexplained,
             "cache_signals_only_vs_walk": tree::diff(&reference, &naive.tree, Compared::ITEM),
             "fresh_getitems_vs_walk": tree::diff(&reference, &fresh, Compared::ITEM),

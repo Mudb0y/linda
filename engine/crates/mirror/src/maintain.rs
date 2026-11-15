@@ -17,6 +17,8 @@
 //!   added without a `ChildrenChanged` the mirror saw, as a frame's document
 //!   is when it finishes loading, so the object is located through its
 //!   parent.
+//! - A document that finishes loading is walked again, since a frame's
+//!   document gains its content without a `ChildrenChanged`.
 //! - Attributes change without a signal of their own: a state or property
 //!   change can change them, and so can a structural change, since the
 //!   bridge derives `posinset`, `setsize`, `child-item-count` and
@@ -89,6 +91,7 @@ pub struct MaintenanceStats {
     pub objects_dropped_with_subtrees: usize,
     pub children_remove_for_unknown_child: usize,
     pub positional_attributes_refetched: usize,
+    pub documents_walked_on_load: usize,
     pub reconcile_added: usize,
     pub reconcile_removed: usize,
     pub reconcile_moved: usize,
@@ -250,6 +253,12 @@ impl Mirror {
                 }
             }
             ("Object", "TextChanged") => self.text_changed(e, &mut out),
+            // A frame's document fills in when it finishes loading, with no
+            // ChildrenChanged for what it gained, so it is walked again.
+            ("Document", "LoadComplete" | "Reload") => {
+                self.stats.documents_walked_on_load += 1;
+                self.request(&mut out, Repair::FetchSubtree(e.path.clone()));
+            }
             _ => {}
         }
         out
@@ -740,6 +749,21 @@ mod tests {
         assert_eq!(m.tree.nodes["/x"].parent.as_deref(), Some("/b"));
         assert_eq!(m.tree.nodes["/x"].children, vec!["/x1"]);
         assert_eq!(m.tree.reachable().len(), 7);
+    }
+
+    #[test]
+    fn a_document_that_finishes_loading_is_walked_again() {
+        let mut m = mirror();
+        let mut e = ev(
+            "LoadComplete",
+            "",
+            "/doc",
+            0,
+            0,
+            AnyData::Str("Frame".into()),
+        );
+        e.class = "Document".into();
+        assert_eq!(m.apply_event(&e), vec![Repair::FetchSubtree("/doc".into())]);
     }
 
     #[test]

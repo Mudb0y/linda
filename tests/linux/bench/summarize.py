@@ -291,16 +291,17 @@ def summarizeMirror(results: list[Result], problems: Problems) -> None:
 				+ (", ".join(parts) + f"; no differences in {clean} of {len(runs)} runs" if parts else "no differences in any run")
 				+ "."
 			)
-		without: dict[str, int] = defaultdict(int)
-		for r in runs:
-			for k, n in r["mirror_attribute_drift"]["without_signal"].items():
-				without[k] += n
-		print(
-			"  Attributes that changed with no signal from the object or its parent, which no mirror fed by "
-			"signals can follow, summed over runs: "
-			+ (", ".join(f"{k} on {n} objects" for k, n in sorted(without.items())) if without else "none")
-			+ "."
-		)
+		for field, what in (("attributes", "Attributes"), ("states", "States")):
+			without: dict[str, int] = defaultdict(int)
+			for r in runs:
+				for k, n in r["mirror_drift"][field]["without_signal"].items():
+					without[k] += n
+			print(
+				f"  {what} that changed with no signal from the object or its parent, which no mirror fed by "
+				"signals can follow, summed over runs: "
+				+ (", ".join(f"{k} on {n} objects" for k, n in sorted(without.items())) if without else "none")
+				+ "."
+			)
 		for r in runs:
 			where = f"{r['_file']} mirror"
 			if r["mirror_differences_unexplained"]:
