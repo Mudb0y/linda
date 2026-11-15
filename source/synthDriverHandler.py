@@ -25,6 +25,7 @@ from autoSettingsUtils.driverSetting import BooleanDriverSetting, DriverSetting,
 from autoSettingsUtils.utils import StringParameterInfo
 
 from abc import abstractmethod
+import sys
 
 if TYPE_CHECKING:
 	from speech.commands import SynthCommand
@@ -462,6 +463,8 @@ def getSynthList() -> list[tuple[str, str]]:
 	for loader, name, isPkg in pkgutil.iter_modules(synthDrivers.__path__):
 		if name.startswith("_"):
 			continue
+		if sys.platform == "linux" and name in _windowsOnlySynthDrivers:
+			continue
 		try:
 			synth = _getSynthDriver(name)
 		except:  # noqa: E722 # Legacy bare except
@@ -499,6 +502,11 @@ def getSynthInstance(name: str, asDefault: bool = False):
 # The synthDrivers that should be used by default.
 # The first that successfully initializes will be used when config is set to auto (I.e. new installs of NVDA).
 defaultSynthPriorityList = ["oneCore", "espeak", "silence"]
+if sys.platform == "linux":
+	# eSpeak joins once its library loads on Linux; until then, trying it would log an error at every start.
+	defaultSynthPriorityList = ["silence"]
+	#: Left out of getSynthList, where each would otherwise log an error for failing to import.
+	_windowsOnlySynthDrivers = frozenset({"mssp", "oneCore", "sapi4_32", "sapi5", "sapi5_32"})
 
 
 def setSynth(name: str | None, isFallback: bool = False, *, _leftToTry: list[str] | None = None) -> bool:

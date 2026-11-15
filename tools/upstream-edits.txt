@@ -151,6 +151,13 @@ source/oleacc.py
   import safety: on Linux the oleacc type library's names come from the
   comInterfaces.Accessibility stand-in, since comtypes.client.GetModule
   cannot run
+source/synthDriverHandler.py
+  synthesizer selection on Linux: getSynthList skips the Windows-only
+  driver modules (mssp, oneCore, sapi4_32, sapi5, sapi5_32), which cannot
+  import and would each log an error, and the default priority list, which
+  "auto" resolves through, is silence alone until eSpeak loads on Linux.
+  test_transcriptSynth.py checks that the skipped set is exactly the set
+  that fails to import
 source/systemUtils.py
   import safety: winreg imported only on Windows, after the module's other
   imports. Linux: hasUiAccess() is True, as X11 isolates no client from
