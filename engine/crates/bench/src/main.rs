@@ -1,0 +1,249 @@
+//! Times fetching an application's whole accessibility tree, and keeping a
+//! mirror of it current. Runs only inside tests/linux/rig.
+//!
+//! basedreader-bench wait   --title T [--app NAME] [--timeout-s N]
+//! basedreader-bench fetch  --title T --page NAME --out FILE [--run-index N]
+//!                          [--wait-info FILE] [--methods LABEL,...]
+//!                          [--app NAME] [--method-timeout-ms N]
+//! basedreader-bench mirror --title T --out FILE --watch-ms N [--run-index N]
+//!                          [--wait-info FILE] [--coalesce-ms N]
+//!                          [--app NAME] [--method-timeout-ms N]
+
+mod delay;
+mod fetchcmd;
+mod mirrorcmd;
+mod procstat;
+
+use std::collections::HashMap;
+use std::process::ExitCode;
+use std::time::{Duration, Instant};
+
+use mirror::client::Client;
+use mirror::discovery::{self, BusAddress};
+use mirror::fetch::{self, WalkFields};
+use mirror::{Error, app, consts};
+use serde::Serialize;
+use zbus::Connection;
+
+pub struct Args(HashMap<String, String>);
+
+impl Args {
+    fn parse(it: impl Iterator<Item = String>) -> Result<Self, String> {
+        let mut m = HashMap::new();
+        let mut it = it.peekable();
+        while let Some(k) = it.next() {
+            let Some(k) = k.strip_prefix("--") else {
+                return Err(format!("unexpected argument {k}"));
+            };
+            let v = it.next().ok_or_else(|| format!("--{k} needs a value"))?;
+            m.insert(k.to_owned(), v);
+        }
+        Ok(Args(m))
+    }
+
+    pub fn get(&self, k: &str) -> Result<&str, String> {
+        self.0
+            .get(k)
+            .map(String::as_str)
+            .ok_or_else(|| format!("--{k} is required"))
+    }
+
+    pub fn or<'a>(&'a self, k: &str, default: &'a str) -> &'a str {
+        self.0.get(k).map_or(default, String::as_str)
+    }
+
+    pub fn num(&self, k: &str, default: u64) -> Result<u64, String> {
+        self.0.get(k).map_or(Ok(default), |v| {
+            v.parse().map_err(|_| format!("--{k}: not a number"))
+        })
+    }
+}
+
+/// Everything about the application under test that every subcommand needs.
+pub struct Target {
+    pub bus: Connection,
+    pub bus_address: BusAddress,
+    pub app_bus: String,
+    pub pid: u32,
+    pub method_timeout: Duration,
+}
+
+#[derive(Serialize)]
+pub struct TargetInfo {
+    pub bus_discovery: discovery::Source,
+    pub app_bus_name: String,
+    pub pid: u32,
+    pub process_name: String,
+    pub counted_processes: Vec<(u32, String)>,
+    pub toolkit: String,
+    pub toolkit_version: String,
+    pub document: Option<String>,
+    pub method_timeout_ms: u128,
+}
+
+pub async fn connect(args: &Args) -> Result<Target, String> {
+    let method_timeout = Duration::from_millis(args.num("method-timeout-ms", 30_000)?);
+    let bus_address = discovery::find_bus_address(method_timeout)
+        .await
+        .map_err(|e| format!("finding the accessibility bus: {e}"))?;
+    let bus = discovery::connect_bus(&bus_address.address, method_timeout)
+        .await
+        .map_err(|e| format!("connecting to {}: {e}", bus_address.address))?;
+    let want = args.or("app", "Firefox");
+    let timeout = Duration::from_secs(args.num("timeout-s", 120)?);
+    let app_bus = app::find_app(&bus, want, timeout)
+        .await
+        .map_err(|e| e.to_string())?;
+    let pid = app::owner_pid(&bus, &app_bus)
+        .await
+        .map_err(|e| format!("pid of {app_bus}: {e}"))?;
+    Ok(Target {
+        bus,
+        bus_address,
+        app_bus,
+        pid,
+        method_timeout,
+    })
+}
+
+impl Target {
+    pub fn bus_client(&self) -> Client {
+        Client::bus(self.bus.clone(), &self.app_bus)
+    }
+
+    pub async fn info(&self, title: &str) -> TargetInfo {
+        let c = self.bus_client();
+        let prop = |name: &'static str| {
+            let c = &c;
+            async move {
+                app::property_string(c, consts::ROOT_PATH, consts::IFACE_APPLICATION, name)
+                    .await
+                    .unwrap_or_default()
+            }
+        };
+        TargetInfo {
+            bus_discovery: self.bus_address.source,
+            app_bus_name: self.app_bus.clone(),
+            pid: self.pid,
+            process_name: procstat::comm(self.pid),
+            counted_processes: procstat::process_tree(self.pid)
+                .into_iter()
+                .map(|p| (p, procstat::comm(p)))
+                .collect(),
+            toolkit: prop("ToolkitName").await,
+            toolkit_version: prop("Version").await,
+            document: app::find_document(&c, title).await.ok().flatten(),
+            method_timeout_ms: self.method_timeout.as_millis(),
+        }
+    }
+}
+
+pub fn write_json<T: Serialize>(path: &str, value: &T) -> Result<(), String> {
+    let f = std::fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
+    serde_json::to_writer_pretty(std::io::BufWriter::new(f), value)
+        .map_err(|e| format!("{path}: {e}"))
+}
+
+/// What `wait` printed for this run, when the run script hands it over.
+pub fn wait_info(args: &Args) -> serde_json::Value {
+    args.0
+        .get("wait-info")
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+pub fn unix_time() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Waits until the document titled `--title` exists, is not busy, and its
+/// object count has stopped changing. Uses only calls that do not activate
+/// the bridge, so the measurements that follow start from an inactive one.
+async fn wait(args: &Args) -> Result<(), String> {
+    let t0 = Instant::now();
+    let title = args.get("title")?;
+    let target = connect(args).await?;
+    let t_app = t0.elapsed().as_secs_f64();
+    let c = target.bus_client();
+    let deadline = t0 + Duration::from_secs(args.num("timeout-s", 120)?);
+    let doc = loop {
+        if let Ok(Some(doc)) = app::find_document(&c, title).await {
+            let busy = c
+                .call(&doc, consts::IFACE_ACCESSIBLE, "GetState", &())
+                .await
+                .ok()
+                .and_then(|m| mirror::decode::states(&m).ok())
+                .is_none_or(|s| consts::has_state(s, consts::STATE_BUSY));
+            if !busy {
+                break doc;
+            }
+        }
+        if Instant::now() > deadline {
+            return Err(format!("no loaded document titled {title:?}"));
+        }
+        delay::sleep(Duration::from_millis(250)).await;
+    };
+    let t_doc = t0.elapsed().as_secs_f64();
+    let mut last = 0;
+    let mut stable = 0;
+    while stable < 2 && Instant::now() < deadline {
+        let n = fetch::walk(&c, &doc, 64, WalkFields::STRUCTURE, None)
+            .await
+            .tree
+            .len();
+        if n == last {
+            stable += 1;
+        } else {
+            stable = 0;
+            last = n;
+        }
+        delay::sleep(Duration::from_millis(500)).await;
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "app_bus_name": target.app_bus,
+            "pid": target.pid,
+            "document": doc,
+            "t_app_s": t_app,
+            "t_document_s": t_doc,
+            "t_settled_s": t0.elapsed().as_secs_f64(),
+            "document_objects": last,
+        })
+    );
+    Ok(())
+}
+
+fn main() -> ExitCode {
+    let mut argv = std::env::args().skip(1);
+    let cmd = argv.next().unwrap_or_default();
+    let args = match Args::parse(argv) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("basedreader-bench: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let r = zbus::block_on(async {
+        match cmd.as_str() {
+            "wait" => wait(&args).await,
+            "fetch" => fetchcmd::run(&args).await,
+            "mirror" => mirrorcmd::run(&args).await,
+            _ => Err("usage: basedreader-bench wait|fetch|mirror --title T ...".to_owned()),
+        }
+    });
+    match r {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("basedreader-bench {cmd}: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+pub fn err(e: Error) -> String {
+    e.to_string()
+}

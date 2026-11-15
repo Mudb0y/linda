@@ -1,0 +1,15 @@
+[package]
+name = "basedreader-mirror"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mirror"
+
+[dependencies]
+zbus.workspace = true
+futures-util.workspace = true
+x11rb.workspace = true
+serde.workspace = true

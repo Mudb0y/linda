@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["crates/mirror", "crates/bench"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-or-later"
+publish = false
+
+[workspace.dependencies]
+# zbus 6 shipped a breaking change in a minor release, so it is pinned exactly.
+zbus = { version = "=6.3.0", default-features = false, features = ["default-rt", "proxy", "p2p"] }
+futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
+x11rb = { version = "=0.14.0", default-features = false }
+libc = "=0.2.191"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+mirror = { path = "crates/mirror", package = "basedreader-mirror" }
+
+[profile.release]
+lto = "thin"
+debug = "line-tables-only"

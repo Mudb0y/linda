@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Runs the tree-fetch benchmark against Firefox. Only inside the rig:
+#   nix develop ROOT -c ROOT/tests/linux/rig ROOT/tests/linux/bench/run PAGE OUTDIR [RUNS]
+# PAGE is normal, large or mutation. Each run starts Firefox afresh, waits for
+# the page to load as seen over AT-SPI, runs the bench and writes one JSON file
+# into OUTDIR. Build the bench first: cargo build --release in engine/.
+# BENCH_METHODS, a comma-separated list of method labels such as walk-64 or
+# getitems, limits a fetch run to those methods. BENCH_COALESCE_MS makes a
+# mirror run collect signals for that long before applying a batch.
+set -euo pipefail
+
+if [ -z "${RIG_PID:-}" ]; then
+	echo "bench: run this inside tests/linux/rig" >&2
+	exit 2
+fi
+if [ $# -lt 2 ]; then
+	echo "usage: run normal|large|mutation OUTDIR [RUNS]" >&2
+	exit 2
+fi
+page=$1
+outdir=$2
+runs=${3:-5}
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$here/../../.." && pwd)
+bench=${BENCH_BIN:-$root/engine/target/release/basedreader-bench}
+if [ ! -x "$bench" ]; then
+	echo "bench: $bench is missing; build it with cargo build --release in engine/" >&2
+	exit 2
+fi
+mkdir -p "$outdir"
+outdir=$(cd "$outdir" && pwd)
+
+# The mutation page's schedule. The bench watches from its own start, which is
+# after the page loaded, until the last change plus time to settle.
+start_ms=10000
+interval_ms=500
+steps=48
+watch_ms=$((start_ms + (steps + 2) * interval_ms + 5000))
+
+work=$(mktemp -d "$HOME/bench.XXXXXX")
+case "$page" in
+normal | large)
+	title=$(python3 "$here/makePage.py" "$page" "$work/page.html")
+	;;
+mutation)
+	title=$(python3 "$here/makePage.py" mutation "$work/page.html" "$start_ms" "$interval_ms" "$steps")
+	;;
+*)
+	echo "bench: unknown page $page" >&2
+	exit 2
+	;;
+esac
+
+ff=
+stop_firefox() {
+	if [ -n "$ff" ]; then
+		kill -TERM "$ff" 2>/dev/null || true
+		for _ in $(seq 100); do
+			kill -0 "$ff" 2>/dev/null || break
+			sleep 0.1
+		done
+		kill -KILL "$ff" 2>/dev/null || true
+		wait "$ff" 2>/dev/null || true
+		ff=
+	fi
+}
+trap stop_firefox EXIT
+
+echo "bench: $page page, $runs runs, results in $outdir"
+for run in $(seq 0 $((runs - 1))); do
+	prof="$work/profile$run"
+	mkdir -p "$prof"
+	cp "$here/user.js" "$prof/user.js"
+	MOZ_CRASHREPORTER_DISABLE=1 firefox --no-remote --new-instance --profile "$prof" \
+		"file://$work/page.html" >"$work/firefox$run.log" 2>&1 &
+	ff=$!
+	if ! "$bench" wait --title "$title" >"$work/wait$run.json"; then
+		echo "bench: run $run: the page did not load" >&2
+		stop_firefox
+		continue
+	fi
+	out="$outdir/$page-$(date +%Y%m%dT%H%M%S)-run$run.json"
+	if [ "$page" = mutation ]; then
+		"$bench" mirror --title "$title" --watch-ms "$watch_ms" --run-index "$run" \
+			--coalesce-ms "${BENCH_COALESCE_MS:-0}" \
+			--wait-info "$work/wait$run.json" --out "$out" || echo "bench: run $run failed" >&2
+	else
+		"$bench" fetch --title "$title" --page "$page" --run-index "$run" \
+			${BENCH_METHODS:+--methods "$BENCH_METHODS"} \
+			--wait-info "$work/wait$run.json" --out "$out" || echo "bench: run $run failed" >&2
+	fi
+	stop_firefox
+	if [ -f "$out" ]; then
+		echo "bench: wrote $out"
+	fi
+done
