@@ -24,3 +24,4 @@ user_pref("browser.sessionstore.resume_from_crash", false);
 user_pref("browser.warnOnQuit", false);
 user_pref("media.autoplay.default", 5);
 user_pref("media.cubeb.backend", "none");
+user_pref("devtools.console.stdout.content", true);

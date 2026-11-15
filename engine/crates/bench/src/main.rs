@@ -1,12 +1,15 @@
 //! Times fetching an application's whole accessibility tree, and keeping a
 //! mirror of it current. Runs only inside tests/linux/rig.
 //!
-//! basedreader-bench wait   --title T [--app NAME] [--timeout-s N]
+//! basedreader-bench wait   --title T [--mode cold|warm] [--settle-ms N]
+//!                          [--app NAME] [--timeout-s N]
 //! basedreader-bench fetch  --title T --page NAME --out FILE [--run-index N]
-//!                          [--wait-info FILE] [--methods LABEL,...]
+//!                          [--seed N] [--wait-info FILE]
+//!                          [--methods LABEL,...|none]
 //!                          [--app NAME] [--method-timeout-ms N]
 //! basedreader-bench mirror --title T --out FILE --watch-ms N [--run-index N]
-//!                          [--wait-info FILE] [--coalesce-ms N]
+//!                          [--seed N] [--interval-ms N] [--wait-info FILE]
+//!                          [--coalesce-ms N] [--dump FILE]
 //!                          [--app NAME] [--method-timeout-ms N]
 
 mod delay;
@@ -159,12 +162,37 @@ pub fn unix_time() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Waits until the document titled `--title` exists, is not busy, and its
-/// object count has stopped changing. Uses only calls that do not activate
-/// the bridge, so the measurements that follow start from an inactive one.
+/// Sums the CPU of `pid` and its descendants over `window`, in seconds.
+async fn tree_cpu_over(pid: u32, window: Duration) -> f64 {
+    let sum = || -> f64 {
+        procstat::process_tree(pid)
+            .into_iter()
+            .filter_map(procstat::proc_cpu)
+            .sum()
+    };
+    let before = sum();
+    delay::sleep(window).await;
+    sum() - before
+}
+
+/// Waits until the document titled `--title` exists and is not busy, then
+/// until the page has settled, without activating the bridge.
+///
+/// With `--mode cold`, the default, the document is never walked: walking it
+/// makes the application create an accessible object for every node, which
+/// is the work that activation otherwise pays for. The page counts as settled
+/// once `--settle-ms` has passed and the application's processes have then
+/// been idle for two half-second windows in a row.
+///
+/// With `--mode warm` the document is walked over the bus until its object
+/// count stops changing, so every object exists before activation.
 async fn wait(args: &Args) -> Result<(), String> {
     let t0 = Instant::now();
     let title = args.get("title")?;
+    let mode = args.or("mode", "cold");
+    if mode != "cold" && mode != "warm" {
+        return Err(format!("--mode {mode}: not cold or warm"));
+    }
     let target = connect(args).await?;
     let t_app = t0.elapsed().as_secs_f64();
     let c = target.bus_client();
@@ -187,31 +215,50 @@ async fn wait(args: &Args) -> Result<(), String> {
         delay::sleep(Duration::from_millis(250)).await;
     };
     let t_doc = t0.elapsed().as_secs_f64();
-    let mut last = 0;
-    let mut stable = 0;
-    while stable < 2 && Instant::now() < deadline {
-        let n = fetch::walk(&c, &doc, 64, WalkFields::STRUCTURE, None)
-            .await
-            .tree
-            .len();
-        if n == last {
-            stable += 1;
-        } else {
-            stable = 0;
-            last = n;
+    let mut document_objects = None;
+    let mut quiet = None;
+    if mode == "warm" {
+        let mut last = 0;
+        let mut stable = 0;
+        while stable < 2 && Instant::now() < deadline {
+            let n = fetch::walk(&c, &doc, 64, WalkFields::STRUCTURE, None)
+                .await
+                .tree
+                .len();
+            if n == last {
+                stable += 1;
+            } else {
+                stable = 0;
+                last = n;
+            }
+            delay::sleep(Duration::from_millis(500)).await;
         }
-        delay::sleep(Duration::from_millis(500)).await;
+        document_objects = Some(last);
+    } else {
+        delay::sleep(Duration::from_millis(args.num("settle-ms", 3000)?)).await;
+        let window = Duration::from_millis(500);
+        let mut idle = 0;
+        while idle < 2 && Instant::now() < deadline {
+            if tree_cpu_over(target.pid, window).await <= 0.02 {
+                idle += 1;
+            } else {
+                idle = 0;
+            }
+        }
+        quiet = Some(idle >= 2);
     }
     println!(
         "{}",
         serde_json::json!({
+            "mode": mode,
             "app_bus_name": target.app_bus,
             "pid": target.pid,
             "document": doc,
             "t_app_s": t_app,
             "t_document_s": t_doc,
             "t_settled_s": t0.elapsed().as_secs_f64(),
-            "document_objects": last,
+            "quiet": quiet,
+            "document_objects": document_objects,
         })
     );
     Ok(())

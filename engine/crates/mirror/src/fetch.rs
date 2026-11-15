@@ -123,6 +123,12 @@ impl WalkFields {
         attributes: true,
         text: true,
     };
+    /// What `GetItems` returns, for comparing the two with equal data.
+    pub const ITEM: WalkFields = WalkFields {
+        data: true,
+        attributes: false,
+        text: false,
+    };
     pub const STRUCTURE: WalkFields = WalkFields {
         data: false,
         attributes: false,

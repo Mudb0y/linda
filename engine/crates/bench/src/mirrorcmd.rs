@@ -1,18 +1,20 @@
 //! Part two: build a mirror from `GetItems`, keep it current from signals
 //! while the page mutates on its schedule, then compare it with a fresh walk.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 use futures_util::future::{Either, select};
 use futures_util::stream::StreamExt;
 use mirror::client::Client;
-use mirror::consts::{IFACE_ACCESSIBLE, IFACE_CACHE, IFACE_TEXT, ROLE_HEADING, ROOT_PATH};
+use mirror::consts::{
+    IFACE_ACCESSIBLE, IFACE_CACHE, IFACE_PROPERTIES, IFACE_TEXT, ROLE_HEADING, ROOT_PATH,
+};
 use mirror::decode;
 use mirror::fetch::{self, WalkFields};
 use mirror::maintain::{Mirror, NaiveMirror, Repair};
-use mirror::tree::{self, Tree};
+use mirror::tree::{self, Compared, Tree};
 use mirror::{app, discovery};
 use serde::Serialize;
 use serde_json::json;
@@ -24,6 +26,10 @@ use crate::procstat::Meter;
 use crate::{Args, delay, unix_time, write_json};
 
 const STATUS_PREFIX: &str = "Mutations ";
+
+/// Calls in flight for the build and for repair walks; four to sixteen
+/// already keep Firefox's main thread busy.
+const REPAIR_WINDOW: usize = 16;
 
 fn status(t: &Tree) -> Option<String> {
     t.nodes
@@ -45,7 +51,70 @@ struct LoopStats {
     subtree_roots_gone: usize,
     objects_fetched_by_repairs: usize,
     repair_wall_s: f64,
+    /// Calls made by repairs that failed or whose reply did not decode, by
+    /// method. On a page that is changing, an object can go between the
+    /// signal and the repair, so some failures are expected; what matters is
+    /// whether the mirror still matches the walk at the end.
+    repair_call_errors: BTreeMap<String, usize>,
+    repair_timeouts: usize,
+    repair_undecodable_replies: usize,
+    /// Every signal, one line each, kept only when the run dumps its trees.
+    #[serde(skip)]
+    signal_log: Option<Vec<String>>,
+    /// Every object a signal the mirror acts on came from or named.
+    #[serde(skip)]
+    signalled: HashSet<String>,
 }
+
+fn describe(m: &Message) -> String {
+    let h = m.header();
+    let member = h.member().map(|x| x.to_string()).unwrap_or_default();
+    let path = h.path().map(|x| x.to_string()).unwrap_or_default();
+    if let Ok(Some(e)) = decode::event(m) {
+        return format!(
+            "{}.{} {} {} {} {:?} on {}",
+            e.class, e.member, e.minor, e.detail1, e.detail2, e.any, e.path
+        );
+    }
+    match member.as_str() {
+        "AddAccessible" => match decode::add_accessible(m) {
+            Ok(it) => format!(
+                "Cache.AddAccessible {} parent {} index {} role {}",
+                it.object.path, it.parent.path, it.index_in_parent, it.role
+            ),
+            Err(_) => "Cache.AddAccessible undecodable".into(),
+        },
+        "RemoveAccessible" => match decode::remove_accessible(m) {
+            Ok(r) => format!("Cache.RemoveAccessible {}", r.path),
+            Err(_) => "Cache.RemoveAccessible undecodable".into(),
+        },
+        _ => format!("{member} on {path}"),
+    }
+}
+
+impl LoopStats {
+    fn call_failed(&mut self, method: &str, e: &zbus::Error) {
+        *self
+            .repair_call_errors
+            .entry(method.to_owned())
+            .or_default() += 1;
+        if mirror::client::is_timeout(e) {
+            self.repair_timeouts += 1;
+        }
+    }
+
+    fn undecodable(&mut self, method: &str) {
+        *self
+            .repair_call_errors
+            .entry(method.to_owned())
+            .or_default() += 1;
+        self.repair_undecodable_replies += 1;
+    }
+}
+
+/// What the mirror fetches for every object, and so what the reference walk
+/// fetches to compare with it.
+const MIRROR_FIELDS: WalkFields = WalkFields::ALL;
 
 async fn run_repairs(
     client: &Client,
@@ -54,39 +123,52 @@ async fn run_repairs(
     stats: &mut LoopStats,
 ) {
     let mut seen = HashSet::new();
-    let mut queue: VecDeque<Repair> = repairs
-        .into_iter()
-        .filter(|r| seen.insert(r.clone()))
-        .collect();
+    let mut queue = VecDeque::new();
+    let enqueue = |queue: &mut VecDeque<Repair>, seen: &mut HashSet<Repair>, rs: Vec<Repair>| {
+        queue.extend(rs.into_iter().filter(|r| seen.insert(r.clone())));
+    };
+    enqueue(&mut queue, &mut seen, repairs);
     let t = Instant::now();
     while let Some(r) = queue.pop_front() {
-        let path = match &r {
-            Repair::RefetchChildren(p) | Repair::FetchSubtree(p) | Repair::RefetchText(p) => p,
-        };
-        if !mirror.tree.nodes.contains_key(path) {
-            stats.repairs_skipped_object_gone += 1;
+        let path = r.path();
+        let held = mirror.tree.nodes.contains_key(path);
+        // Every repair but Locate needs the object in the mirror; Locate is
+        // done once it is.
+        if held == matches!(r, Repair::Locate(_)) {
+            stats.repairs_skipped_object_gone += usize::from(!held);
             continue;
         }
         stats.repairs_run += 1;
+        if let Some(log) = stats.signal_log.as_mut() {
+            log.push(format!("repair {r:?}"));
+        }
         match &r {
             Repair::RefetchChildren(p) => {
                 match client.call(p, IFACE_ACCESSIBLE, "GetChildren", &()).await {
-                    Ok(msg) => {
-                        if let Ok(live) = decode::children(&msg) {
-                            queue.extend(mirror.reconcile_children(p, &live));
+                    Ok(msg) => match decode::children(&msg) {
+                        Ok(live) => {
+                            let more = mirror.reconcile_children(p, &live);
+                            enqueue(&mut queue, &mut seen, more);
+                        }
+                        Err(_) => stats.undecodable("GetChildren"),
+                    },
+                    Err(e) => {
+                        stats.call_failed("GetChildren", &e);
+                        if !mirror::client::is_timeout(&e) {
+                            mirror.forget(p);
                         }
                     }
-                    Err(e) if !mirror::client::is_timeout(&e) => mirror.forget(p),
-                    Err(_) => {}
                 }
             }
             Repair::FetchSubtree(p) => {
-                let fields = WalkFields {
-                    data: true,
-                    attributes: false,
-                    text: true,
-                };
-                let res = fetch::walk(client, p, 64, fields, Some(mirror.pool())).await;
+                let res =
+                    fetch::walk(client, p, REPAIR_WINDOW, MIRROR_FIELDS, Some(mirror.pool())).await;
+                for (method, n) in &res.errors {
+                    *stats
+                        .repair_call_errors
+                        .entry((*method).to_owned())
+                        .or_default() += n;
+                }
                 if res.children_failed.iter().any(|f| f == p) {
                     stats.subtree_roots_gone += 1;
                     mirror.forget(p);
@@ -96,15 +178,108 @@ async fn run_repairs(
                 }
             }
             Repair::RefetchText(p) => {
-                if let Ok(msg) = client.call(p, IFACE_TEXT, "GetText", &(0i32, -1i32)).await
-                    && let Ok(text) = decode::string(&msg)
-                {
-                    mirror.set_text(p, text);
+                match client.call(p, IFACE_TEXT, "GetText", &(0i32, -1i32)).await {
+                    Ok(msg) => match decode::string(&msg) {
+                        Ok(text) => mirror.set_text(p, text),
+                        Err(_) => stats.undecodable("Text.GetText"),
+                    },
+                    Err(e) => stats.call_failed("Text.GetText", &e),
+                }
+            }
+            Repair::Locate(p) => {
+                let parent = client
+                    .call(p, IFACE_PROPERTIES, "Get", &(IFACE_ACCESSIBLE, "Parent"))
+                    .await;
+                match parent.map(|m| decode::ref_property(&m)) {
+                    Ok(Ok(parent)) if parent.bus == client.app_bus && !parent.is_null() => {
+                        let next = match mirror.tree.nodes.get(&parent.path) {
+                            Some(n) if n.children.contains(p) => None,
+                            Some(_) => Some(Repair::RefetchChildren(parent.path)),
+                            None => Some(Repair::Locate(parent.path)),
+                        };
+                        enqueue(&mut queue, &mut seen, next.into_iter().collect());
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(_)) => stats.undecodable("Get(Parent)"),
+                    // The object is gone, which is why the mirror lacks it.
+                    Err(e) => stats.call_failed("Get(Parent)", &e),
+                }
+            }
+            Repair::RefetchAttributes(p) => {
+                match client.call(p, IFACE_ACCESSIBLE, "GetAttributes", &()).await {
+                    Ok(msg) => match decode::attributes(&msg) {
+                        Ok(a) => mirror.set_attributes(p, a),
+                        Err(_) => stats.undecodable("GetAttributes"),
+                    },
+                    Err(e) => stats.call_failed("GetAttributes", &e),
                 }
             }
         }
     }
     stats.repair_wall_s += t.elapsed().as_secs_f64();
+}
+
+/// Firefox's parent process fetches each kind of data from the content
+/// process the first time a client asks for it, and the first GetAttributes
+/// into a page answers empty while that happens; no signal follows when the
+/// data arrives. A web document always has attributes, so asking it until
+/// it answers makes every later answer complete. Returns the calls made.
+async fn prime_attributes(client: &Client, document: &str) -> usize {
+    for n in 1..=50 {
+        if let Ok(msg) = client
+            .call(document, IFACE_ACCESSIBLE, "GetAttributes", &())
+            .await
+            && decode::attributes(&msg).is_ok_and(|a| !a.is_empty())
+        {
+            return n;
+        }
+        delay::sleep(Duration::from_millis(10)).await;
+    }
+    50
+}
+
+/// Attribute differences between the walk and the mirror, by attribute
+/// name, split by whether any signal came from or named the object or its
+/// parent. Without one the mirror had nothing to act on: Firefox sends no
+/// signal at all when, for one, aria-roledescription changes.
+#[derive(Default, Serialize)]
+struct AttributeDrift {
+    objects_with_signal: usize,
+    objects_without_signal: usize,
+    with_signal: BTreeMap<String, usize>,
+    without_signal: BTreeMap<String, usize>,
+}
+
+fn attribute_drift(reference: &Tree, mirror: &Tree, signalled: &HashSet<String>) -> AttributeDrift {
+    let mut d = AttributeDrift::default();
+    for (path, r) in &reference.nodes {
+        let Some(m) = mirror.nodes.get(path) else {
+            continue;
+        };
+        let (Some(a), Some(b)) = (&r.attributes, &m.attributes) else {
+            continue;
+        };
+        if a == b {
+            continue;
+        }
+        let seen =
+            signalled.contains(path) || r.parent.as_ref().is_some_and(|p| signalled.contains(p));
+        let (objects, keys) = if seen {
+            (&mut d.objects_with_signal, &mut d.with_signal)
+        } else {
+            (&mut d.objects_without_signal, &mut d.without_signal)
+        };
+        *objects += 1;
+        let ma: BTreeMap<_, _> = a.iter().cloned().collect();
+        let mb: BTreeMap<_, _> = b.iter().cloned().collect();
+        let names: BTreeSet<&String> = ma.keys().chain(mb.keys()).collect();
+        for k in names {
+            if ma.get(k) != mb.get(k) {
+                *keys.entry(k.clone()).or_default() += 1;
+            }
+        }
+    }
+    d
 }
 
 fn apply_batch(
@@ -116,6 +291,28 @@ fn apply_batch(
     stats.batches += 1;
     stats.largest_batch = stats.largest_batch.max(batch.len());
     stats.signals += batch.len();
+    for m in batch {
+        match decode::event(m) {
+            Ok(Some(e)) if e.minor == "accessible-parent" => {}
+            Ok(Some(e)) => {
+                stats.signalled.insert(e.path);
+                if let decode::AnyData::Ref(r) = e.any {
+                    stats.signalled.insert(r.path);
+                }
+            }
+            _ => {
+                if let Ok(it) = decode::add_accessible(m) {
+                    stats.signalled.insert(it.object.path);
+                } else if let Some(p) = m.header().path() {
+                    stats.signalled.insert(p.to_string());
+                }
+            }
+        }
+    }
+    let n = stats.batches;
+    if let Some(log) = stats.signal_log.as_mut() {
+        log.extend(batch.iter().map(|m| format!("batch {n}: {}", describe(m))));
+    }
     let is_cache = |m: &Message, member: &str| {
         let h = m.header();
         h.interface().is_some_and(|i| i.as_str() == IFACE_CACHE)
@@ -202,19 +399,25 @@ pub async fn run(args: &Args) -> Result<(), String> {
 
     let t_build = Instant::now();
     let meter = Meter::start(target.pid, client.counters());
+    let attribute_priming_calls = match &info.document {
+        Some(doc) => prime_attributes(client, doc).await,
+        None => 0,
+    };
     let items = app::get_items_once_active(client, Duration::from_secs(10))
         .await
         .map_err(crate::err)?;
     let mut tree = Tree::from_items(&target.app_bus, &items);
     let naive_tree = tree.clone();
     let pruned_at_build = tree.prune_unreachable();
-    let text_fields = WalkFields {
-        data: false,
-        attributes: false,
-        text: true,
-    };
-    let build_errors = fetch::supplement(client, &mut tree, 64, text_fields).await;
+    let build_errors = fetch::supplement(client, &mut tree, REPAIR_WINDOW, MIRROR_FIELDS).await;
     let build_cost = meter.stop(client.counters());
+    let empty_attributes: Vec<&String> = tree
+        .nodes
+        .iter()
+        .filter(|(_, n)| n.attributes.as_ref().is_some_and(Vec::is_empty))
+        .map(|(p, _)| p)
+        .collect();
+    let empty_attributes = json!(empty_attributes);
     let status_at_build = status(&tree);
     let build_objects = tree.len();
     let mut mirror = Mirror::new(tree);
@@ -222,7 +425,10 @@ pub async fn run(args: &Args) -> Result<(), String> {
     let build_s = t_build.elapsed().as_secs_f64();
     let watch_left = watch.saturating_sub(t_start.elapsed());
 
-    let mut stats = LoopStats::default();
+    let mut stats = LoopStats {
+        signal_log: args.0.contains_key("dump").then(Vec::new),
+        ..LoopStats::default()
+    };
     let meter = Meter::start(target.pid, client.counters());
     let mut deadline = Delay::new(watch_left);
     loop {
@@ -260,13 +466,8 @@ pub async fn run(args: &Args) -> Result<(), String> {
     }
 
     delay::sleep(Duration::from_millis(300)).await;
-    let reference_fields = WalkFields {
-        data: true,
-        attributes: false,
-        text: true,
-    };
     let meter = Meter::start(target.pid, client.counters());
-    let walked = fetch::walk(client, ROOT_PATH, 64, reference_fields, None).await;
+    let walked = fetch::walk(client, ROOT_PATH, REPAIR_WINDOW, MIRROR_FIELDS, None).await;
     let reference_cost = meter.stop(client.counters());
     let reference = walked.tree;
     let fresh_items = fetch::get_items(client)
@@ -276,12 +477,26 @@ pub async fn run(args: &Args) -> Result<(), String> {
     let mut fresh_pruned = fresh.clone();
     let fresh_pruned_count = fresh_pruned.prune_unreachable();
 
+    let mirror_diff = tree::diff(&reference, &mirror.tree, Compared::ALL);
+    let drift = attribute_drift(&reference, &mirror.tree, &stats.signalled);
+    let unexplained = mirror_diff.total() - drift.objects_without_signal;
+    // Both trees in full, for working out why a mirror went wrong.
+    if mirror_diff.total() > 0
+        && let Some(path) = args.0.get("dump")
+    {
+        write_json(
+            path,
+            &json!({"mirror": mirror.tree, "walk": reference, "signals": stats.signal_log}),
+        )?;
+    }
     write_json(
         out,
         &json!({
-            "schema": "basedreader-bench/mirror/1",
+            "schema": "basedreader-bench/mirror/2",
             "title": title,
             "run_index": run_index,
+            "seed": args.num("seed", 0)?,
+            "interval_ms": args.num("interval-ms", 0)?,
             "unix_time": unix_time(),
             "wait": crate::wait_info(args),
             "target": info,
@@ -292,7 +507,9 @@ pub async fn run(args: &Args) -> Result<(), String> {
                 "objects": build_objects,
                 "getitems_items": items.len(),
                 "pruned_unreachable": pruned_at_build,
-                "text_fetch_errors": build_errors,
+                "call_errors": build_errors,
+                "attribute_priming_calls": attribute_priming_calls,
+                "objects_with_empty_attributes": empty_attributes,
                 "status": status_at_build,
             },
             "build_s": build_s,
@@ -311,10 +528,12 @@ pub async fn run(args: &Args) -> Result<(), String> {
                 "call_errors": walked.errors,
                 "status": status(&reference),
             },
-            "mirror_vs_walk": tree::diff(&reference, &mirror.tree),
-            "cache_signals_only_vs_walk": tree::diff(&reference, &naive.tree),
-            "fresh_getitems_vs_walk": tree::diff(&reference, &fresh),
-            "fresh_getitems_pruned_vs_walk": tree::diff(&reference, &fresh_pruned),
+            "mirror_vs_walk": mirror_diff,
+            "mirror_attribute_drift": drift,
+            "mirror_differences_unexplained": unexplained,
+            "cache_signals_only_vs_walk": tree::diff(&reference, &naive.tree, Compared::ITEM),
+            "fresh_getitems_vs_walk": tree::diff(&reference, &fresh, Compared::ITEM),
+            "fresh_getitems_pruned_vs_walk": tree::diff(&reference, &fresh_pruned, Compared::ITEM),
             "fresh_getitems_pruned_count": fresh_pruned_count,
         }),
     )

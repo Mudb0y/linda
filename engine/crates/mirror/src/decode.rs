@@ -148,6 +148,14 @@ pub fn string(msg: &Message) -> zbus::Result<String> {
     Ok(s.to_owned())
 }
 
+/// The reply of `Properties.Get` for an object property such as `Parent`,
+/// `(v)` holding `(so)`.
+pub fn ref_property(msg: &Message) -> zbus::Result<ObjRef> {
+    let body = msg.body();
+    let v: Variant<'_> = body.deserialize()?;
+    variant_ref(&v).ok_or(zbus::Error::IncorrectType)
+}
+
 /// The reply of `Properties.Get` for a string property, `(v)` holding `s`.
 pub fn string_property(msg: &Message) -> zbus::Result<String> {
     let body = msg.body();

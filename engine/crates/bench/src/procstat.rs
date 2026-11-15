@@ -23,6 +23,25 @@ pub fn proc_cpu(pid: u32) -> Option<f64> {
     Some((utime + stime) / clock_ticks())
 }
 
+/// Time on CPU of one thread from its schedstat, in nanoseconds. Unlike
+/// /proc/PID/stat, which counts in clock ticks of 10 ms, this resolves the
+/// cost of a single short call.
+pub fn thread_cpu_ns(pid: u32, tid: u32) -> Option<u64> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/schedstat")).ok()?;
+    s.split_whitespace().next()?.parse().ok()
+}
+
+/// Every live thread of `pid` with its schedstat CPU time.
+fn threads_cpu_ns(pid: u32) -> HashMap<u32, u64> {
+    let Ok(dir) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return HashMap::new();
+    };
+    dir.flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+        .filter_map(|tid| Some((tid, thread_cpu_ns(pid, tid)?)))
+        .collect()
+}
+
 fn ppid(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     stat.rsplit_once(')')?
@@ -78,8 +97,15 @@ pub fn self_cpu() -> f64 {
 pub struct Cost {
     pub wall_s: f64,
     pub client_cpu_s: f64,
-    /// The process that owns the application's bus name.
+    /// The process that owns the application's bus name, from /proc/PID/stat
+    /// in 10 ms clock ticks, threads that exited meanwhile included.
     pub app_cpu_s: f64,
+    /// The same process from per-thread schedstat in nanoseconds: threads
+    /// alive at the end, counted from the start or from their creation.
+    pub app_threads_cpu_s: f64,
+    /// Its main thread alone, which is where the ATK bridge serves every
+    /// call.
+    pub app_main_thread_cpu_s: f64,
     /// That process and every process descended from it.
     pub app_tree_cpu_s: f64,
     pub calls: u64,
@@ -93,6 +119,7 @@ pub struct Meter {
     wall: Instant,
     client: f64,
     tree: HashMap<u32, f64>,
+    threads: HashMap<u32, u64>,
     counters: Counters,
 }
 
@@ -102,11 +129,13 @@ impl Meter {
             .into_iter()
             .filter_map(|p| Some((p, proc_cpu(p)?)))
             .collect();
+        let threads = threads_cpu_ns(pid);
         Meter {
             pid,
             wall: Instant::now(),
             client: self_cpu(),
             tree,
+            threads,
             counters,
         }
     }
@@ -127,11 +156,22 @@ impl Meter {
                 }
             }
         }
+        let mut threads_ns = 0u64;
+        let mut main_ns = 0u64;
+        for (tid, now) in threads_cpu_ns(self.pid) {
+            let d = now.saturating_sub(self.threads.get(&tid).copied().unwrap_or(0));
+            threads_ns += d;
+            if tid == self.pid {
+                main_ns = d;
+            }
+        }
         let c = counters - self.counters;
         Cost {
             wall_s: round(wall),
             client_cpu_s: round(client),
             app_cpu_s: round(owner),
+            app_threads_cpu_s: round(threads_ns as f64 * 1e-9),
+            app_main_thread_cpu_s: round(main_ns as f64 * 1e-9),
             app_tree_cpu_s: round(tree),
             calls: c.calls,
             reply_bytes: c.reply_bytes,
@@ -142,5 +182,5 @@ impl Meter {
 }
 
 fn round(x: f64) -> f64 {
-    (x * 1e4).round() / 1e4
+    (x * 1e6).round() / 1e6
 }

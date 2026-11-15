@@ -16,6 +16,8 @@ pub const EVENT_PREFIX: &str = "org.a11y.atspi.Event.";
 
 pub const ROLE_DOCUMENT_WEB: u32 = 95;
 pub const ROLE_HEADING: u32 = 83;
+pub const ROLE_TABLE: u32 = 55;
+pub const ROLE_TREE_TABLE: u32 = 66;
 
 pub const STATE_BUSY: u32 = 3;
 pub const STATE_DEFUNCT: u32 = 6;

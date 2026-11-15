@@ -1,12 +1,15 @@
-//! Part one: the cost of fetching the whole tree by each method.
+//! Part one: the cost of loading an application's tree for the first time,
+//! and of fetching it again by each method once it is loaded.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use mirror::client::{Client, Transport};
-use mirror::consts::ROOT_PATH;
+use futures_util::future::join3;
+use mirror::client::{Client, Counters, Transport};
+use mirror::consts::{IFACE_ACCESSIBLE, ROOT_PATH};
 use mirror::fetch::{self, WalkFields};
-use mirror::tree::{self, ObjectSetComparison, Tree, TreeDiff};
+use mirror::tree::{self, Compared, ObjectSetComparison, Tree, TreeDiff};
 use mirror::{app, discovery};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -18,41 +21,72 @@ use crate::{Args, delay, unix_time, write_json};
 /// property of every interface when the list is empty.
 const TREE_PROPERTIES: [&str; 5] = ["Name", "Description", "Parent", "ChildCount", "Attributes"];
 
+/// The window for the methods that fill in what GetItems leaves out, and for
+/// the walk that fetches the same fields as GetItems. Four to sixteen calls
+/// in flight already keep Firefox's main thread busy.
+const FILL_WINDOW: usize = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Method {
+    /// Every field a virtual buffer needs, attributes and text included.
     Walk(usize),
+    /// Only the fields GetItems returns, so the two compare with equal data.
+    WalkItemFields(usize),
     Items,
     ItemsSupplemented(usize),
     GetTree,
+    /// A full walk while single calls on the side measure how long an
+    /// interactive call waits behind it.
+    Latency(usize),
 }
 
 impl Method {
     fn label(self) -> String {
         match self {
             Method::Walk(w) => format!("walk-{w}"),
+            Method::WalkItemFields(w) => format!("walk-itemfields-{w}"),
             Method::Items => "getitems".into(),
             Method::ItemsSupplemented(w) => format!("getitems+attrs+text-{w}"),
             Method::GetTree => "gettree".into(),
+            Method::Latency(w) => format!("latency-{w}"),
         }
     }
 
     fn window(self) -> Option<usize> {
         match self {
-            Method::Walk(w) | Method::ItemsSupplemented(w) => Some(w),
+            Method::Walk(w)
+            | Method::WalkItemFields(w)
+            | Method::ItemsSupplemented(w)
+            | Method::Latency(w) => Some(w),
             _ => None,
+        }
+    }
+
+    fn compared(self) -> Compared {
+        match self {
+            Method::Walk(_) | Method::ItemsSupplemented(_) | Method::Latency(_) => Compared::ALL,
+            Method::WalkItemFields(_) | Method::Items => Compared::ITEM,
+            Method::GetTree => Compared::TREE,
         }
     }
 }
 
-const METHODS: [Method; 7] = [
+const METHODS: [Method; 11] = [
     Method::Walk(1),
+    Method::Walk(2),
+    Method::Walk(4),
+    Method::Walk(8),
     Method::Walk(16),
     Method::Walk(64),
     Method::Walk(256),
+    Method::WalkItemFields(FILL_WINDOW),
     Method::Items,
-    Method::ItemsSupplemented(64),
+    Method::ItemsSupplemented(FILL_WINDOW),
     Method::GetTree,
 ];
+
+/// Measured over peer-to-peer only, the transport the engine will use.
+const LATENCY_WINDOWS: [usize; 4] = [4, 16, 64, 256];
 
 #[derive(Serialize)]
 struct MethodResult {
@@ -75,12 +109,69 @@ struct Fetched {
     details: BTreeMap<&'static str, Value>,
 }
 
-async fn fetch_by(method: Method, client: &Client) -> Result<Fetched, String> {
+/// Wall time of each probe call, in seconds.
+#[derive(Default)]
+struct Probe {
+    samples: Vec<f64>,
+    errors: usize,
+}
+
+impl Probe {
+    fn summary(&self) -> Value {
+        let mut s = self.samples.clone();
+        s.sort_by(f64::total_cmp);
+        let q = |p: f64| -> Value {
+            if s.is_empty() {
+                return Value::Null;
+            }
+            let i = ((s.len() - 1) as f64 * p).round() as usize;
+            json!((s[i] * 1e6).round() / 1e3)
+        };
+        json!({
+            "calls": s.len(),
+            "errors": self.errors,
+            "median_ms": q(0.5),
+            "p90_ms": q(0.9),
+            "p99_ms": q(0.99),
+            "max_ms": q(1.0),
+        })
+    }
+}
+
+/// Sends one GetRole at a time until `done`, pausing between calls so that
+/// the probe never adds more than one call to what the application has
+/// queued.
+async fn probe(client: &Client, done: &Cell<bool>, limit: Option<usize>) -> Probe {
+    let mut p = Probe::default();
+    while !done.get() && limit.is_none_or(|n| p.samples.len() + p.errors < n) {
+        let t = Instant::now();
+        match client
+            .call(ROOT_PATH, IFACE_ACCESSIBLE, "GetRole", &())
+            .await
+        {
+            Ok(_) => p.samples.push(t.elapsed().as_secs_f64()),
+            Err(_) => p.errors += 1,
+        }
+        delay::sleep(Duration::from_millis(5)).await;
+    }
+    p
+}
+
+async fn fetch_by(
+    method: Method,
+    client: &Client,
+    side: Option<&Client>,
+) -> Result<Fetched, String> {
     let mut details = BTreeMap::new();
     let mut call_errors = BTreeMap::new();
     let tree = match method {
-        Method::Walk(w) => {
-            let r = fetch::walk(client, ROOT_PATH, w, WalkFields::ALL, None).await;
+        Method::Walk(w) | Method::WalkItemFields(w) => {
+            let fields = if matches!(method, Method::Walk(_)) {
+                WalkFields::ALL
+            } else {
+                WalkFields::ITEM
+            };
+            let r = fetch::walk(client, ROOT_PATH, w, fields, None).await;
             call_errors = r.errors;
             details.insert("foreign_children", json!(r.foreign_children));
             r.tree
@@ -103,6 +194,31 @@ async fn fetch_by(method: Method, client: &Client) -> Result<Fetched, String> {
             details.insert("properties", json!(TREE_PROPERTIES));
             Tree::from_tree_entries(&client.app_bus, ROOT_PATH, &entries)
         }
+        Method::Latency(w) => {
+            let side = side.ok_or("no second peer-to-peer connection for the probe")?;
+            let idle_same = probe(client, &Cell::new(false), Some(100)).await;
+            let idle_side = probe(side, &Cell::new(false), Some(100)).await;
+            let done = Cell::new(false);
+            let walk = async {
+                let r = fetch::walk(client, ROOT_PATH, w, WalkFields::ALL, None).await;
+                done.set(true);
+                r
+            };
+            let (r, same, other) =
+                join3(walk, probe(client, &done, None), probe(side, &done, None)).await;
+            call_errors = r.errors;
+            details.insert(
+                "probe",
+                json!({
+                    "call": "GetRole on the application root, one at a time",
+                    "idle_same_connection": idle_same.summary(),
+                    "idle_second_connection": idle_side.summary(),
+                    "loaded_same_connection": same.summary(),
+                    "loaded_second_connection": other.summary(),
+                }),
+            );
+            r.tree
+        }
     };
     Ok(Fetched {
         tree,
@@ -114,13 +230,14 @@ async fn fetch_by(method: Method, client: &Client) -> Result<Fetched, String> {
 async fn measure(
     method: Method,
     client: &Client,
+    side: Option<&Client>,
     pid: u32,
     reference: Option<&Tree>,
 ) -> (MethodResult, Option<Tree>) {
     // Lets the application go idle, and its timers fire, outside the timing.
     delay::sleep(Duration::from_millis(300)).await;
     let meter = Meter::start(pid, client.counters());
-    let r = fetch_by(method, client).await;
+    let r = fetch_by(method, client, side).await;
     let cost = meter.stop(client.counters());
     let mut res = MethodResult {
         method: method.label(),
@@ -160,20 +277,59 @@ async fn measure(
             }
             if let Some(r) = reference {
                 res.same_objects_as_reference = Some(r.same_objects(&f.tree));
-                res.differences_from_reference = Some(tree::diff(r, &f.tree));
+                res.differences_from_reference = Some(tree::diff(r, &f.tree, method.compared()));
             }
             (res, Some(f.tree))
         }
     }
 }
 
+/// The first contact with an application: activating its bridge, opening the
+/// peer-to-peer connection, and the first GetItems.
 #[derive(Serialize)]
-struct Activation {
-    cost: Cost,
+struct Load {
+    /// Whether the wait step walked the document first, so that its objects
+    /// already existed when the bridge was activated.
+    wait_mode: String,
+    /// Activation through the first GetItems, decoded into a tree.
+    total: Cost,
+    activation: Cost,
     p2p_address_offered: bool,
-    getitems_ready_after_s: f64,
-    first_getitems_objects: usize,
     p2p_connect_s: Option<f64>,
+    first_getitems: Cost,
+    first_getitems_transport: Transport,
+    first_getitems_objects: usize,
+    /// Against the sequential walk taken later, which shows whether the page
+    /// was complete when it was loaded.
+    first_getitems_vs_reference: Option<ObjectSetComparison>,
+    first_getitems_differences: Option<TreeDiff>,
+}
+
+fn transport_name(c: &Client) -> &'static str {
+    match c.transport {
+        Transport::Bus => "bus",
+        Transport::PeerToPeer => "peer-to-peer",
+    }
+}
+
+/// SplitMix64, so that a run's order follows from its seed alone.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn shuffle<T>(&mut self, v: &mut [T]) {
+        for i in (1..v.len()).rev() {
+            let j = (self.next() % (i as u64 + 1)) as usize;
+            v.swap(i, j);
+        }
+    }
 }
 
 pub async fn run(args: &Args) -> Result<(), String> {
@@ -181,18 +337,22 @@ pub async fn run(args: &Args) -> Result<(), String> {
     let page = args.get("page")?;
     let out = args.get("out")?;
     let run_index = args.num("run-index", 0)? as usize;
+    let seed = args.num("seed", run_index as u64 + 1)?;
+    let wait = crate::wait_info(args);
+    let wait_mode = wait
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    let only: Option<Vec<&str>> = args.0.get("methods").map(|s| s.split(',').collect());
     let target = crate::connect(args).await?;
     let info = target.info(title).await;
     let bus_client = target.bus_client();
 
+    let total = Meter::start(target.pid, bus_client.counters());
     let meter = Meter::start(target.pid, bus_client.counters());
     let address = app::activate(&bus_client).await.map_err(crate::err)?;
-    let activation_cost = meter.stop(bus_client.counters());
-    let t = Instant::now();
-    let first = app::get_items_once_active(&bus_client, Duration::from_secs(10))
-        .await
-        .map_err(crate::err)?;
-    let ready_after = t.elapsed().as_secs_f64();
+    let activation = meter.stop(bus_client.counters());
     let mut p2p_connect_s = None;
     let p2p_client = if address.is_empty() {
         None
@@ -204,64 +364,104 @@ pub async fn run(args: &Args) -> Result<(), String> {
         p2p_connect_s = Some(t.elapsed().as_secs_f64());
         Some(Client::p2p(conn, &target.app_bus))
     };
-    let activation = Activation {
-        cost: activation_cost,
+    let main_client = p2p_client.as_ref().unwrap_or(&bus_client);
+    let meter = Meter::start(target.pid, main_client.counters());
+    let first = app::get_items_once_active(main_client, Duration::from_secs(10))
+        .await
+        .map_err(crate::err)?;
+    let first_tree = Tree::from_items(&target.app_bus, &first);
+    let first_getitems = meter.stop(main_client.counters());
+    let both = |c: Counters| match &p2p_client {
+        Some(p) => c + p.counters(),
+        None => c,
+    };
+    let total = total.stop(both(bus_client.counters()));
+    let mut load = Load {
+        wait_mode,
+        total,
+        activation,
         p2p_address_offered: !address.is_empty(),
-        getitems_ready_after_s: ready_after,
-        first_getitems_objects: first.len(),
         p2p_connect_s,
+        first_getitems,
+        first_getitems_transport: main_client.transport,
+        first_getitems_objects: first_tree.len(),
+        first_getitems_vs_reference: None,
+        first_getitems_differences: None,
     };
 
-    let main_client = p2p_client.as_ref().unwrap_or(&bus_client);
     let mut warmup = Vec::new();
-    for m in [Method::Walk(64), Method::Items] {
-        warmup.push(measure(m, main_client, target.pid, None).await.0);
-    }
-
-    let (reference_result, reference) =
-        measure(Method::Walk(1), main_client, target.pid, None).await;
-    let reference = reference.ok_or("the reference walk failed")?;
-    let mut results = vec![reference_result];
-
-    let mut plan: Vec<(Method, &Client)> = Vec::new();
-    for client in [p2p_client.as_ref(), Some(&bus_client)]
-        .into_iter()
-        .flatten()
-    {
-        for m in METHODS {
-            if m == Method::Walk(1) && std::ptr::eq(client, main_client) {
-                continue;
-            }
-            plan.push((m, client));
+    let mut results = Vec::new();
+    let mut reference = None;
+    let mut order = Vec::new();
+    if only.as_ref().is_none_or(|o| !o.contains(&"none")) {
+        for m in [Method::Walk(64), Method::Items] {
+            warmup.push(measure(m, main_client, None, target.pid, None).await.0);
         }
-    }
-    let only: Option<Vec<&str>> = args.0.get("methods").map(|s| s.split(',').collect());
-    plan.retain(|(m, _)| {
-        only.as_ref()
-            .is_none_or(|o| o.contains(&m.label().as_str()))
-    });
-    if !plan.is_empty() {
-        let k = run_index % plan.len();
-        plan.rotate_left(k);
-    }
-    for (m, client) in plan {
-        results.push(measure(m, client, target.pid, Some(&reference)).await.0);
+        let (reference_result, walked) =
+            measure(Method::Walk(1), main_client, None, target.pid, None).await;
+        let walked = walked.ok_or("the reference walk failed")?;
+        results.push(reference_result);
+        load.first_getitems_vs_reference = Some(walked.same_objects(&first_tree));
+        load.first_getitems_differences = Some(tree::diff(&walked, &first_tree, Compared::ITEM));
+
+        let side = match &p2p_client {
+            Some(_) => Some(Client::p2p(
+                discovery::connect_p2p(&address, target.method_timeout)
+                    .await
+                    .map_err(|e| format!("second peer-to-peer connection: {e}"))?,
+                &target.app_bus,
+            )),
+            None => None,
+        };
+        let mut plan: Vec<(Method, &Client)> = Vec::new();
+        for client in [p2p_client.as_ref(), Some(&bus_client)]
+            .into_iter()
+            .flatten()
+        {
+            for m in METHODS {
+                if m == Method::Walk(1) && std::ptr::eq(client, main_client) {
+                    continue;
+                }
+                plan.push((m, client));
+            }
+        }
+        if let Some(p) = &p2p_client {
+            plan.extend(LATENCY_WINDOWS.iter().map(|&w| (Method::Latency(w), p)));
+        }
+        plan.retain(|(m, _)| {
+            only.as_ref()
+                .is_none_or(|o| o.contains(&m.label().as_str()))
+        });
+        Rng(seed).shuffle(&mut plan);
+        for (m, client) in plan {
+            order.push(format!("{} over {}", m.label(), transport_name(client)));
+            let r = measure(m, client, side.as_ref(), target.pid, Some(&walked)).await;
+            results.push(r.0);
+        }
+        reference = Some(walked);
     }
 
+    let document_objects = match (&reference, &info.document) {
+        (Some(r), Some(doc)) => Some(r.subtree_len(doc)),
+        _ => None,
+    };
     write_json(
         out,
         &json!({
-            "schema": "basedreader-bench/fetch/1",
+            "schema": "basedreader-bench/fetch/2",
             "page": page,
             "title": title,
             "run_index": run_index,
+            "seed": seed,
             "unix_time": unix_time(),
-            "wait": crate::wait_info(args),
+            "wait": wait,
             "target": info,
-            "activation": activation,
+            "load": load,
             "warmup": warmup,
-            "reference": format!("walk-1 over {}", if p2p_client.is_some() { "peer-to-peer" } else { "bus" }),
-            "reference_objects": reference.len(),
+            "reference": format!("walk-1 over {}", transport_name(main_client)),
+            "application_objects": reference.as_ref().map(Tree::len),
+            "document_objects": document_objects,
+            "order": order,
             "methods": results,
         }),
     )

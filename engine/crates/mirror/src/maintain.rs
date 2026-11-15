@@ -13,6 +13,15 @@
 //!   a `ChildrenChanged` or a live child list admits the object.
 //! - `RemoveAccessible` and `defunct` are removal hints.
 //! - Siblings are renumbered after every structural change.
+//! - An event from an object the mirror does not hold means the object was
+//!   added without a `ChildrenChanged` the mirror saw, as a frame's document
+//!   is when it finishes loading, so the object is located through its
+//!   parent.
+//! - Attributes change without a signal of their own: a state or property
+//!   change can change them, and so can a structural change, since the
+//!   bridge derives `posinset`, `setsize`, `child-item-count` and
+//!   `table-cell-index` from the structure. Those are fetched again for the
+//!   objects that carry them.
 //!
 //! Applying an event never makes a call. Whatever needs the application is
 //! returned as a [`Repair`] for the caller to carry out and feed back.
@@ -21,7 +30,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
-use crate::consts::{INTERFACE_TEXT_BIT, STATE_DEFUNCT, set_state, state_from_name};
+use crate::consts::{ROLE_TABLE, ROLE_TREE_TABLE, STATE_DEFUNCT, set_state, state_from_name};
 use crate::decode::{AnyData, CacheItem, Event, ObjRef};
 use crate::tree::{Node, Tree};
 
@@ -33,6 +42,11 @@ pub enum Repair {
     FetchSubtree(String),
     /// Fetch this object's text again.
     RefetchText(String),
+    /// Fetch this object's attributes again.
+    RefetchAttributes(String),
+    /// Find where an object the mirror does not hold belongs, through its
+    /// parent, and fetch that parent's children again.
+    Locate(String),
 }
 
 impl Repair {
@@ -41,6 +55,18 @@ impl Repair {
             Repair::RefetchChildren(_) => "refetch_children",
             Repair::FetchSubtree(_) => "fetch_subtree",
             Repair::RefetchText(_) => "refetch_text",
+            Repair::RefetchAttributes(_) => "refetch_attributes",
+            Repair::Locate(_) => "locate",
+        }
+    }
+
+    pub fn path(&self) -> &str {
+        match self {
+            Repair::RefetchChildren(p)
+            | Repair::FetchSubtree(p)
+            | Repair::RefetchText(p)
+            | Repair::RefetchAttributes(p)
+            | Repair::Locate(p) => p,
         }
     }
 }
@@ -62,6 +88,7 @@ pub struct MaintenanceStats {
     pub children_removed: usize,
     pub objects_dropped_with_subtrees: usize,
     pub children_remove_for_unknown_child: usize,
+    pub positional_attributes_refetched: usize,
     pub reconcile_added: usize,
     pub reconcile_removed: usize,
     pub reconcile_moved: usize,
@@ -145,36 +172,26 @@ impl Mirror {
     }
 
     /// A node for a newly admitted object, from its pooled item where there
-    /// is one. Returns the repairs that complete it.
+    /// is one, and the walk that completes it. A cache item carries neither
+    /// attributes nor text, so even a pooled leaf needs that walk; with the
+    /// item it asks only for what the item lacks.
     fn admit(&mut self, path: &str, parent: &str, out: &mut Vec<Repair>) {
         let bus = self.tree.bus.clone();
-        match self.pool.remove(path) {
+        let node = match self.pool.get(path) {
             Some(item) => {
                 self.stats.children_added_with_pooled_data += 1;
-                let mut node = Node::from_item(&item, &bus);
-                node.parent = Some(parent.to_owned());
-                let needs_children = item.child_count != 0;
-                let needs_text = item.interfaces & INTERFACE_TEXT_BIT != 0;
-                self.tree.nodes.insert(path.to_owned(), node);
-                // The pool goes back so that the subtree walk can use it.
-                self.pool.insert(path.to_owned(), item);
-                if needs_children {
-                    self.request(out, Repair::FetchSubtree(path.to_owned()));
-                } else if needs_text {
-                    self.request(out, Repair::RefetchText(path.to_owned()));
-                }
+                Node::from_item(item, &bus)
             }
-            None => {
-                self.tree.nodes.insert(
-                    path.to_owned(),
-                    Node {
-                        parent: Some(parent.to_owned()),
-                        ..Node::default()
-                    },
-                );
-                self.request(out, Repair::FetchSubtree(path.to_owned()));
-            }
-        }
+            None => Node::default(),
+        };
+        self.tree.nodes.insert(
+            path.to_owned(),
+            Node {
+                parent: Some(parent.to_owned()),
+                ..node
+            },
+        );
+        self.request(out, Repair::FetchSubtree(path.to_owned()));
     }
 
     pub fn apply_event(&mut self, e: &Event) -> Vec<Repair> {
@@ -185,6 +202,7 @@ impl Mirror {
         }
         if !self.tree.nodes.contains_key(&e.path) {
             self.stats.events_for_unknown_objects += 1;
+            self.request(&mut out, Repair::Locate(e.path.clone()));
             return out;
         }
         match (e.class.as_str(), e.member.as_str()) {
@@ -199,6 +217,8 @@ impl Mirror {
                         set_state(&mut s, bit, e.detail1 != 0);
                         n.states = Some(s);
                         self.stats.states_applied += 1;
+                        // aria-pressed, for one, is a state and an attribute.
+                        self.request(&mut out, Repair::RefetchAttributes(e.path.clone()));
                     }
                 }
             }
@@ -218,6 +238,15 @@ impl Mirror {
                         self.stats.roles_applied += 1;
                     }
                     _ => {}
+                }
+                // A name from aria-label, for one, adds explicit-name. The
+                // flood of accessible-parent changes that follows activation
+                // changes nothing the mirror holds.
+                if matches!(
+                    e.minor.as_str(),
+                    "accessible-name" | "accessible-description" | "accessible-role"
+                ) {
+                    self.request(&mut out, Repair::RefetchAttributes(e.path.clone()));
                 }
             }
             ("Object", "TextChanged") => self.text_changed(e, &mut out),
@@ -261,6 +290,7 @@ impl Mirror {
                 p.children.insert(at, child);
                 p.child_count = p.children.len() as i32;
                 self.tree.renumber(&parent);
+                self.refresh_positions(&parent, out);
             }
             "remove" => {
                 if self.tree.nodes.contains_key(&child) {
@@ -269,6 +299,7 @@ impl Mirror {
                     if let Some(p) = self.tree.nodes.get_mut(&parent) {
                         p.child_count = p.children.len() as i32;
                     }
+                    self.refresh_positions(&parent, out);
                 } else {
                     self.stats.children_remove_for_unknown_child += 1;
                 }
@@ -340,11 +371,68 @@ impl Mirror {
             self.stats.reconcile_added += 1;
             self.admit(c, parent, &mut out);
         }
+        let changed = old != live;
         let p = self.tree.nodes.get_mut(parent).expect("checked");
         p.children = live;
         p.child_count = p.children.len() as i32;
         self.tree.renumber(parent);
+        if changed {
+            self.refresh_positions(parent, &mut out);
+        }
         out
+    }
+
+    /// After `parent`'s children changed, fetches the attributes the bridge
+    /// derives from the structure again: the parent's child count, its
+    /// children's places in their set, and, inside a table, every cell's
+    /// index, since a row or cell added anywhere shifts all that follow.
+    fn refresh_positions(&mut self, parent: &str, out: &mut Vec<Repair>) {
+        let has = |n: &Node, keys: &[&str]| {
+            n.attributes
+                .as_ref()
+                .is_some_and(|a| a.iter().any(|(k, _)| keys.contains(&k.as_str())))
+        };
+        let mut paths = Vec::new();
+        if let Some(p) = self.tree.nodes.get(parent) {
+            if has(p, &["child-item-count"]) {
+                paths.push(parent.to_owned());
+            }
+            for c in &p.children {
+                if self
+                    .tree
+                    .nodes
+                    .get(c)
+                    .is_some_and(|n| has(n, &["posinset", "setsize"]))
+                {
+                    paths.push(c.clone());
+                }
+            }
+        }
+        let mut up = Some(parent.to_owned());
+        while let Some(p) = up {
+            let Some(n) = self.tree.nodes.get(&p) else {
+                break;
+            };
+            if matches!(n.role, Some(ROLE_TABLE | ROLE_TREE_TABLE)) {
+                let mut stack = vec![p.clone()];
+                while let Some(q) = stack.pop() {
+                    if let Some(m) = self.tree.nodes.get(&q) {
+                        if has(m, &["table-cell-index", "child-item-count", "posinset"]) {
+                            paths.push(q.clone());
+                        }
+                        stack.extend(m.children.iter().cloned());
+                    }
+                }
+                break;
+            }
+            up = n.parent.clone();
+        }
+        paths.sort();
+        paths.dedup();
+        for p in paths {
+            self.stats.positional_attributes_refetched += 1;
+            self.request(out, Repair::RefetchAttributes(p));
+        }
     }
 
     /// Takes in a walked subtree whose root is already in the mirror. The
@@ -378,6 +466,12 @@ impl Mirror {
     pub fn set_text(&mut self, path: &str, text: String) {
         if let Some(n) = self.tree.nodes.get_mut(path) {
             n.text = Some(text);
+        }
+    }
+
+    pub fn set_attributes(&mut self, path: &str, attributes: Vec<(String, String)>) {
+        if let Some(n) = self.tree.nodes.get_mut(path) {
+            n.attributes = Some(attributes);
         }
     }
 }
@@ -555,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn children_changed_admits_a_pooled_leaf_without_calls() {
+    fn children_changed_admits_a_pooled_leaf_at_its_index() {
         let mut m = mirror();
         m.apply_add_accessible(item("/new", "/doc", 1, 0));
         let repairs = m.apply_event(&ev(
@@ -566,7 +660,8 @@ mod tests {
             0,
             AnyData::Ref(r("/new")),
         ));
-        assert!(repairs.is_empty());
+        // Only for attributes and text, which a cache item lacks.
+        assert_eq!(repairs, vec![Repair::FetchSubtree("/new".into())]);
         assert_eq!(m.tree.nodes["/doc"].children, vec!["/a", "/new", "/b"]);
         assert_eq!(m.tree.nodes["/b"].index_in_parent, 2);
         assert_eq!(m.tree.nodes["/new"].name.as_deref(), Some("name of /new"));
@@ -617,7 +712,7 @@ mod tests {
         let mut m = mirror();
         m.apply_add_accessible(item("/c", "/doc", 0, 0));
         let repairs = m.reconcile_children("/doc", &[r("/c"), r("/b"), r("/a1")]);
-        assert!(repairs.is_empty());
+        assert_eq!(repairs, vec![Repair::FetchSubtree("/c".into())]);
         assert_eq!(m.tree.nodes["/doc"].children, vec!["/c", "/b", "/a1"]);
         assert!(!m.tree.nodes.contains_key("/a"));
         assert_eq!(m.stats.reconcile_moved, 1);
@@ -645,6 +740,54 @@ mod tests {
         assert_eq!(m.tree.nodes["/x"].parent.as_deref(), Some("/b"));
         assert_eq!(m.tree.nodes["/x"].children, vec!["/x1"]);
         assert_eq!(m.tree.reachable().len(), 7);
+    }
+
+    #[test]
+    fn an_event_from_an_unknown_object_locates_it() {
+        let mut m = mirror();
+        let repairs = m.apply_event(&ev(
+            "StateChanged",
+            "busy",
+            "/frame-doc",
+            0,
+            0,
+            AnyData::Int(0),
+        ));
+        assert_eq!(repairs, vec![Repair::Locate("/frame-doc".into())]);
+    }
+
+    #[test]
+    fn a_structural_change_refetches_positional_attributes() {
+        let mut m = mirror();
+        let attrs = |k: &str| Some(vec![(k.to_owned(), "1".to_owned())]);
+        m.tree.nodes.get_mut("/doc").unwrap().attributes = attrs("child-item-count");
+        m.tree.nodes.get_mut("/b").unwrap().attributes = attrs("posinset");
+        m.tree.nodes.get_mut("/a1").unwrap().attributes = attrs("posinset");
+        let mut repairs = m.apply_event(&ev(
+            "ChildrenChanged",
+            "remove",
+            "/doc",
+            0,
+            0,
+            AnyData::Ref(r("/a")),
+        ));
+        repairs.sort();
+        assert_eq!(
+            repairs,
+            vec![
+                Repair::RefetchAttributes("/b".into()),
+                Repair::RefetchAttributes("/doc".into()),
+            ]
+        );
+        // Inside a table, every cell after a change may have a new index.
+        m.tree.nodes.get_mut("/doc").unwrap().role = Some(crate::consts::ROLE_TABLE);
+        m.tree.nodes.get_mut("/b").unwrap().children = vec!["/cell".into()];
+        let mut cell = node(Some("/b"), &[]);
+        cell.attributes = attrs("table-cell-index");
+        m.tree.nodes.insert("/cell".into(), cell);
+        let repairs = m.reconcile_children("/doc", &[r("/row"), r("/b")]);
+        assert!(repairs.contains(&Repair::FetchSubtree("/row".into())));
+        assert!(repairs.contains(&Repair::RefetchAttributes("/cell".into())));
     }
 
     #[test]

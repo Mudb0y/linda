@@ -25,6 +25,18 @@ impl std::ops::Sub for Counters {
     }
 }
 
+impl std::ops::Add for Counters {
+    type Output = Counters;
+    fn add(self, o: Counters) -> Counters {
+        Counters {
+            calls: self.calls + o.calls,
+            reply_bytes: self.reply_bytes + o.reply_bytes,
+            errors: self.errors + o.errors,
+            timeouts: self.timeouts + o.timeouts,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Transport {

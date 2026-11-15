@@ -7,9 +7,9 @@ use serde::Serialize;
 use crate::consts::{ROOT_PATH, state_name};
 use crate::decode::{CacheItem, TreeEntry};
 
-/// A field is None when the method that built the tree does not fetch it, so
-/// a comparison skips it rather than counting it as different.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// A field is None when the method that built the tree does not fetch it or
+/// its call failed; [`diff`] is told which fields both trees should carry.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Node {
     pub parent: Option<String>,
     pub children: Vec<String>,
@@ -45,7 +45,7 @@ impl Node {
 
 /// Keyed by object path within one application, whose unique bus name is
 /// `bus`; references to other bus names are not followed.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Tree {
     pub bus: String,
     pub root: String,
@@ -169,6 +169,19 @@ impl Tree {
         seen
     }
 
+    /// How many objects the subtree under `path` holds, `path` included.
+    pub fn subtree_len(&self, path: &str) -> usize {
+        let mut n = 0;
+        let mut stack = vec![path];
+        while let Some(p) = stack.pop() {
+            if let Some(node) = self.nodes.get(p) {
+                n += 1;
+                stack.extend(node.children.iter().map(String::as_str));
+            }
+        }
+        n
+    }
+
     /// Drops every node that cannot be reached from the root, which is how a
     /// `GetItems` reply is cleaned of removed objects and phantom text leaves.
     /// Returns how many were dropped.
@@ -247,6 +260,10 @@ pub struct TreeDiff {
     pub interfaces_wrong: usize,
     pub attributes_wrong: usize,
     pub text_wrong: usize,
+    /// Objects where a compared field is set on one side and empty on the
+    /// other, by field. That means a call failed or was never made, so it is
+    /// counted rather than taken as a match.
+    pub absent: BTreeMap<&'static str, usize>,
     /// For objects whose states differ, how often each state bit differed.
     pub state_bits_wrong: BTreeMap<String, usize>,
     /// Up to five object paths for each kind of difference.
@@ -267,6 +284,7 @@ impl TreeDiff {
             + self.interfaces_wrong
             + self.attributes_wrong
             + self.text_wrong
+            + self.absent.values().sum::<usize>()
     }
 
     fn note(&mut self, kind: &str, path: &str) {
@@ -275,13 +293,102 @@ impl TreeDiff {
             s.push(path.to_owned());
         }
     }
+
+    /// Returns whether both sides held a value and the values differed.
+    fn record(&mut self, field: &'static str, outcome: Field, path: &str) -> bool {
+        match outcome {
+            Field::Same => false,
+            Field::Wrong => {
+                *self.wrong_mut(field) += 1;
+                self.note(&format!("{field}_wrong"), path);
+                true
+            }
+            Field::Absent => {
+                *self.absent.entry(field).or_default() += 1;
+                self.note(&format!("{field}_absent"), path);
+                false
+            }
+        }
+    }
+
+    fn wrong_mut(&mut self, field: &str) -> &mut usize {
+        match field {
+            "role" => &mut self.role_wrong,
+            "name" => &mut self.name_wrong,
+            "description" => &mut self.description_wrong,
+            "states" => &mut self.states_wrong,
+            "interfaces" => &mut self.interfaces_wrong,
+            "attributes" => &mut self.attributes_wrong,
+            "text" => &mut self.text_wrong,
+            _ => unreachable!("no field {field}"),
+        }
+    }
 }
 
-fn differs<T: PartialEq>(a: &Option<T>, b: &Option<T>) -> bool {
-    matches!((a, b), (Some(x), Some(y)) if x != y)
+/// Which optional fields two trees are both expected to carry. A field one
+/// fetch method never asks for is left out; for any other, an empty side is
+/// a failure and is counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Compared {
+    pub role: bool,
+    pub name: bool,
+    pub description: bool,
+    pub states: bool,
+    pub interfaces: bool,
+    pub attributes: bool,
+    /// Only objects with the Text interface carry text, so for text an
+    /// object empty on both sides matches.
+    pub text: bool,
 }
 
-pub fn diff(reference: &Tree, other: &Tree) -> TreeDiff {
+impl Compared {
+    pub const ALL: Compared = Compared {
+        role: true,
+        name: true,
+        description: true,
+        states: true,
+        interfaces: true,
+        attributes: true,
+        text: true,
+    };
+    /// What `GetItems` returns.
+    pub const ITEM: Compared = Compared {
+        attributes: false,
+        text: false,
+        ..Compared::ALL
+    };
+    /// What `Collection.GetTree` returns with the properties the bench asks
+    /// for.
+    pub const TREE: Compared = Compared {
+        role: false,
+        name: true,
+        description: true,
+        states: false,
+        interfaces: false,
+        attributes: true,
+        text: false,
+    };
+}
+
+enum Field {
+    Same,
+    Wrong,
+    Absent,
+}
+
+/// `optional` is for a field only some objects have, where both sides empty
+/// is a match; for any other field every object must carry it.
+fn compare<T: PartialEq>(on: bool, optional: bool, a: &Option<T>, b: &Option<T>) -> Field {
+    match (a, b) {
+        _ if !on => Field::Same,
+        (Some(x), Some(y)) if x == y => Field::Same,
+        (Some(_), Some(_)) => Field::Wrong,
+        (None, None) if optional => Field::Same,
+        _ => Field::Absent,
+    }
+}
+
+pub fn diff(reference: &Tree, other: &Tree, fields: Compared) -> TreeDiff {
     let mut d = TreeDiff {
         reference_objects: reference.len(),
         other_objects: other.len(),
@@ -314,23 +421,23 @@ pub fn diff(reference: &Tree, other: &Tree) -> TreeDiff {
             d.index_wrong += 1;
             d.note("index_wrong", path);
         }
-        if differs(&r.role, &o.role) {
-            d.role_wrong += 1;
-            d.note("role_wrong", path);
-        }
-        if differs(&r.name, &o.name) {
-            d.name_wrong += 1;
-            d.note("name_wrong", path);
-        }
-        if differs(&r.description, &o.description) {
-            d.description_wrong += 1;
-            d.note("description_wrong", path);
-        }
-        if let (Some(a), Some(b)) = (r.states, o.states)
-            && a != b
+        let f = fields;
+        d.record("role", compare(f.role, false, &r.role, &o.role), path);
+        d.record("name", compare(f.name, false, &r.name, &o.name), path);
+        d.record(
+            "description",
+            compare(f.description, false, &r.description, &o.description),
+            path,
+        );
+        let i = compare(f.interfaces, false, &r.interfaces, &o.interfaces);
+        d.record("interfaces", i, path);
+        let a = compare(f.attributes, false, &r.attributes, &o.attributes);
+        d.record("attributes", a, path);
+        d.record("text", compare(f.text, true, &r.text, &o.text), path);
+        let s = compare(f.states, false, &r.states, &o.states);
+        if d.record("states", s, path)
+            && let (Some(a), Some(b)) = (r.states, o.states)
         {
-            d.states_wrong += 1;
-            d.note("states_wrong", path);
             for bit in 0..64 {
                 if (a[bit / 32] ^ b[bit / 32]) & (1 << (bit % 32)) != 0 {
                     *d.state_bits_wrong
@@ -338,18 +445,6 @@ pub fn diff(reference: &Tree, other: &Tree) -> TreeDiff {
                         .or_default() += 1;
                 }
             }
-        }
-        if differs(&r.interfaces, &o.interfaces) {
-            d.interfaces_wrong += 1;
-            d.note("interfaces_wrong", path);
-        }
-        if differs(&r.attributes, &o.attributes) {
-            d.attributes_wrong += 1;
-            d.note("attributes_wrong", path);
-        }
-        if differs(&r.text, &o.text) {
-            d.text_wrong += 1;
-            d.note("text_wrong", path);
         }
     }
     let mut extra: Vec<&String> = other
@@ -444,17 +539,40 @@ mod tests {
         other.nodes.get_mut("/c").unwrap().states = Some([1 << 12, 0]);
         other.nodes.get_mut("/c").unwrap().text = Some("x".into());
         other.nodes.insert("/stale".into(), Node::default());
-        let d = diff(&reference, &other);
+        let d = diff(&reference, &other, Compared::ITEM);
         assert_eq!(d.missing, 1);
         assert_eq!(d.extra, 1);
         assert_eq!(d.name_wrong, 1);
         assert_eq!(d.states_wrong, 1);
         assert_eq!(d.state_bits_wrong.get("focused"), Some(&1));
         assert_eq!(d.child_order_wrong, 1);
-        // Text is not compared where the reference never fetched it.
+        // Text is not compared when neither method fetches it.
         assert_eq!(d.text_wrong, 0);
+        assert!(d.absent.is_empty());
         assert!(!reference.same_objects(&other).equal);
         assert!(reference.same_objects(&reference).equal);
+    }
+
+    #[test]
+    fn a_field_empty_on_one_side_is_counted() {
+        let mut reference = Tree::from_items(APP, &sample_items());
+        for n in reference.nodes.values_mut() {
+            n.attributes = Some(Vec::new());
+        }
+        reference.nodes.get_mut("/b").unwrap().text = Some("b".into());
+        let mut other = reference.clone();
+        other.nodes.get_mut("/b").unwrap().text = None;
+        other.nodes.get_mut("/c").unwrap().name = None;
+        other.nodes.get_mut("/c").unwrap().attributes = None;
+        let d = diff(&reference, &other, Compared::ALL);
+        assert_eq!(d.absent.get("text"), Some(&1));
+        assert_eq!(d.absent.get("name"), Some(&1));
+        assert_eq!(d.absent.get("attributes"), Some(&1));
+        assert_eq!(d.name_wrong + d.text_wrong + d.attributes_wrong, 0);
+        // The sample's /t carries index -1 against its place, on both sides.
+        let baseline = diff(&reference, &reference, Compared::ALL);
+        assert!(baseline.absent.is_empty());
+        assert_eq!(d.total(), baseline.total() + 3);
     }
 
     #[test]
