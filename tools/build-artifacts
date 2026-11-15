@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+# Produces what NVDA's Windows build would have produced and Linux needs, from
+# the tree and the directories the dev shell exports. Safe to run repeatedly:
+# a second run changes nothing. Writes only to paths upstream's .gitignore
+# already ignores.
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parent.parent
+localeDir = root / "source" / "locale"
+louisDir = root / "source" / "louis"
+unitTablesDir = root / "tests" / "unit" / "brailleTables"
+
+# NVDA registers these in mixed case; liblouis ships them in lower case.
+mixedCaseTables = (
+	"No-No-g0.utb",
+	"No-No-g1.ctb",
+	"No-No-g2.ctb",
+	"No-No-g3.ctb",
+	"Pt-Pt-g1.utb",
+	"Pt-Pt-g2.ctb",
+	"Se-Se.ctb",
+)
+
+
+def fail(message: str) -> None:
+	print(f"build-artifacts: error: {message}", file=sys.stderr)
+	sys.exit(1)
+
+
+def envDir(name: str) -> Path:
+	value = os.environ.get(name)
+	if not value:
+		fail(f"{name} is not set; run this inside the dev shell")
+	path = Path(value)
+	if not path.is_dir():
+		fail(f"{name} points at {value}, which is not a directory")
+	return path
+
+
+def writeIfDifferent(source: Path, target: Path) -> bool:
+	if target.is_file() and target.read_bytes() == source.read_bytes():
+		return False
+	target.parent.mkdir(parents=True, exist_ok=True)
+	temp = target.with_name(target.name + ".tmp")
+	shutil.copyfile(source, temp)
+	temp.replace(target)
+	return True
+
+
+def buildCatalogues() -> tuple[int, int]:
+	# Compiled by hand rather than by glob on LC_MESSAGES because the Albanian
+	# source is NVDA.po, and Linux gettext only finds a lower case nvda.mo.
+	built = total = 0
+	for po in sorted(localeDir.glob("*/LC_MESSAGES/*.po")):
+		if po.name.lower() != "nvda.po":
+			continue
+		total += 1
+		mo = po.with_name("nvda.mo")
+		if mo.is_file() and mo.stat().st_mtime >= po.stat().st_mtime:
+			continue
+		temp = mo.with_name("nvda.mo.tmp")
+		result = subprocess.run(["msgfmt", "-o", str(temp), str(po)], capture_output=True, text=True)
+		if result.returncode != 0:
+			temp.unlink(missing_ok=True)
+			fail(f"msgfmt failed on {po.relative_to(root)}: {result.stderr.strip()}")
+		temp.replace(mo)
+		built += 1
+	return built, total
+
+
+def copyCldr(cldrDir: Path) -> tuple[int, int]:
+	# nvda-cldr spells some locales differently in case (pt_pt) from the
+	# translation directories (pt_PT); Windows merges them, so match the same way.
+	existing = {d.name.lower(): d for d in localeDir.iterdir() if d.is_dir()}
+	copied = total = 0
+	for source in sorted((cldrDir / "locale").glob("*/cldr.dic")):
+		total += 1
+		target = existing.get(source.parent.name.lower(), localeDir / source.parent.name)
+		if writeIfDifferent(source, target / "cldr.dic"):
+			copied += 1
+	return copied, total
+
+
+def arrangeTables(tablesDir: Path) -> int:
+	changed = 0
+	missing = [name for name in mixedCaseTables if not (tablesDir / name).is_file()]
+	if missing:
+		fail(f"{tablesDir} lacks the aliases {', '.join(missing)}")
+	louisDir.mkdir(exist_ok=True)
+	link = louisDir / "tables"
+	if not link.is_symlink() or Path(os.readlink(link)) != tablesDir:
+		if link.is_symlink() or link.is_file():
+			link.unlink()
+		elif link.exists():
+			fail(f"{link.relative_to(root)} is a real directory; remove it by hand")
+		link.symlink_to(tablesDir)
+		changed += 1
+	fixtures = (
+		("en-us-comp8-ext.utb", "en-us-comp8-ext.utb"),
+		("latinLetterDef8Dots.uti", "latinLetterDef8Dots.uti"),
+		("en-us-comp8-ext.utb", "test.utb"),
+	)
+	for sourceName, targetName in fixtures:
+		if writeIfDifferent(tablesDir / sourceName, unitTablesDir / targetName):
+			changed += 1
+	return changed
+
+
+def main() -> None:
+	print("build-artifacts: start")
+	cldrDir = envDir("BASEDREADER_NVDA_CLDR_DIR")
+	tablesDir = envDir("BASEDREADER_LOUIS_TABLES_DIR")
+	if shutil.which("msgfmt") is None:
+		fail("msgfmt is not on PATH; run this inside the dev shell")
+	built, total = buildCatalogues()
+	print(f"catalogues: {built} compiled, {total - built} already current")
+	copied, total = copyCldr(cldrDir)
+	print(f"cldr.dic: {copied} copied, {total - copied} already current")
+	changed = arrangeTables(tablesDir)
+	print(f"braille tables: {changed} changes")
+	print("build-artifacts: done")
+
+
+main()
