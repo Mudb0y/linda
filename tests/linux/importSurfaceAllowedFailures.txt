@@ -3,77 +3,39 @@
 # modules listed above it, back to the previous reason.
 # test_importSurface.py fails when a module not listed here fails to
 # import, and when a module listed here imports.
+#
+# A module that imports cleanly can still import one of these later,
+# inside a function. Each such module is named under the reason, on a
+# line starting "reached from", followed by "safe" or "not safe" and why.
+# The test fails when such a module is not named, and when a module named
+# no longer imports any module of that group.
 
-NVDAObjects.IAccessible
-NVDAObjects.IAccessible.MSHTML
-NVDAObjects.IAccessible.SysMonthCal32
-NVDAObjects.IAccessible.adobeAcrobat
-NVDAObjects.IAccessible.akelEdit
 NVDAObjects.IAccessible.chromium
-NVDAObjects.IAccessible.delphi
-NVDAObjects.IAccessible.hh
-NVDAObjects.IAccessible.ia2TextMozilla
 NVDAObjects.IAccessible.ia2Web
 NVDAObjects.IAccessible.mozilla
-NVDAObjects.IAccessible.msOffice
-NVDAObjects.IAccessible.mscandui
-NVDAObjects.IAccessible.qt
-NVDAObjects.IAccessible.scintilla
-NVDAObjects.IAccessible.sysListView32
-NVDAObjects.IAccessible.sysTreeView32
-NVDAObjects.IAccessible.webKit
-NVDAObjects.IAccessible.winConsole
-NVDAObjects.IAccessible.winword
-NVDAObjects.IAccessible.wx
-  MSAA and IAccessible2 objects, Windows only: they import interfaces and
-  constants from the comInterfaces modules NVDA's build generates from
-  Windows type libraries, which on Linux are empty stand-ins
 appModules.azardi20
-appModules.bookshelf
-appModules.calc
 appModules.code
-appModules.devenv
-appModules.eclipse
-appModules.explorer
 appModules.instantbird
-appModules.itunes
-appModules.kindle
-appModules.logonui
-appModules.loudtalks
-appModules.microsoftedgecp
-appModules.mintty
-appModules.miranda32
-appModules.mirc
-appModules.mmc
-appModules.msimn
-appModules.msnmsgr
-appModules.nlnotes
-appModules.nvda
-appModules.poedit
-appModules.powerpnt
-appModules.putty
-appModules.searchui
-appModules.shellexperiencehost
-appModules.spotify
-appModules.symphony
 appModules.teams
-appModules.totalcmd
-appModules.tween
-appModules.utorrent
-appModules.winamp
-appModules.winword
-appModules.wlmail
-virtualBuffers.MSHTML
-virtualBuffers.adobeAcrobat
 virtualBuffers.gecko_ia2
-virtualBuffers.lotusNotes
-virtualBuffers.webKit
-  imports NVDAObjects.IAccessible at module level, directly or through
-  another module, see above
-appModules.soffice
-  imports IA2 from IAccessibleHandler, which on Linux is a replacement
-  without IAccessible2
+  IAccessible2 web content and its users, Windows only: they import,
+  directly or through NVDAObjects.IAccessible.ia2Web, IAccessibleHandler's
+  utils submodule, which the Linux IAccessibleHandler does not provide
+  reached from NVDAObjects.IAccessible: safe while Linux makes no
+  IAccessible objects, which wrap MSAA objects only Windows has; it
+  imports these only while choosing the classes of such an object
 
+NVDAObjects.IAccessible.adobeAcrobat
+virtualBuffers.adobeAcrobat
+  Adobe Acrobat: imports AcrobatAccessLib, which comtypes generates on
+  Windows from Acrobat's type library into comtypes.gen; on Linux
+  comtypes.gen holds nothing
+  reached from NVDAObjects.IAccessible: safe while Linux makes no
+  IAccessible objects, which wrap MSAA objects only Windows has; it
+  imports these only while choosing the classes of such an object
+
+NVDAObjects.IAccessible.MSHTML
+NVDAObjects.IAccessible.sysTreeView32
 NVDAObjects.UIA
 NVDAObjects.UIA.VisualStudio
 NVDAObjects.UIA.anaheimEdge
@@ -85,21 +47,42 @@ NVDAObjects.UIA.web
 NVDAObjects.UIA.winConsoleUIA
 NVDAObjects.UIA.wordDocument
 appModules.calculator
+appModules.devenv
 appModules.digitaleditions
+appModules.dllhost
 appModules.excel
+appModules.explorer
 appModules.hxmail
+appModules.itunes
 appModules.lockapp
+appModules.logonui
 appModules.lync
 appModules.notepad
 appModules.openwith
 appModules.outlook
+appModules.searchui
+appModules.shellexperiencehost
 appModules.systemsettings
 appModules.taskmgr
-appModules.windowsinternal_composableshell_experiences_textinput_inputapp
 appModules.voiceaccess
+appModules.windowsinternal_composableshell_experiences_textinput_inputapp
+appModules.winword
+appModules.wlmail
+virtualBuffers.MSHTML
   UI Automation objects and their users, Windows only: they import, directly
   or through another module, UIAHandler's submodules or its UI Automation
   names, and on Linux UIAHandler is a replacement without either
+  reached from NVDAObjects.IAccessible: safe while Linux makes no
+  IAccessible objects, which wrap MSAA objects only Windows has; it
+  imports these only while choosing the classes of such an object
+  reached from NVDAObjects.window: safe, because Window objects import
+  NVDAObjects.UIA only when UIAHandler.handler exists, and on Linux it is
+  always None
+  reached from globalCommands: safe while Linux has no touch input: only the
+  touch hover script imports it, only touchHandler sends that gesture, and
+  touchHandler.touchSupported() is False on Linux because
+  config.isInstalledCopy() is
+
 UIAHandler.browseMode
 UIAHandler.constants
 UIAHandler.customAnnotations
@@ -142,27 +125,35 @@ UIAHandler._remoteOps.remoteTypes.textRange
   replaced package's submodules are not provided
 IAccessibleHandler.internalWinEventHandler
 IAccessibleHandler.orderedWinEventLimiter
-IAccessibleHandler.types
 IAccessibleHandler.utils
-  submodule of IAccessibleHandler, which linuxPlatform replaces as a whole
+  submodule of IAccessibleHandler, which linuxPlatform replaces as a whole;
+  of its submodules only the portable types is kept
+  reached from NVDAObjects.window.winConsole: safe while Linux makes no
+  Window objects; choosing a Window object's classes starts by reading its
+  Win32 class name through a Win32 call, which raises on Linux, and
+  WinConsole is one of those classes
 NVDAHelper.localWin10
 contentRecog._wgcCapture
 contentRecog.uwpOcr
   NVDAHelper.localWin10 binds nvdaHelperLocalWin10.dll, Windows OCR and
   screen capture; it is a submodule of NVDAHelper, which linuxPlatform
   replaces, and is not provided
+  reached from contentRecog.recogUi: safe, because it imports _wgcCapture
+  only while screen curtain or NVDA's magnifier is active, or for a
+  recognition result object, and none can exist on Linux yet: the first two
+  drive Windows' Magnification API, and a result object is a Window object
+  reached from globalCommands: safe, because both OCR scripts first ask
+  winVersion.isUwpOcrAvailable(), which looks for Windows' OCR data under
+  %windir% and is False on Linux
+  reached from gui.settingsDialogs: safe, because the Windows OCR settings
+  panel is offered only when winVersion.isUwpOcrAvailable() is True
 
-NVDAObjects.window.akelEdit
-NVDAObjects.window.edit
-appModules.dllhost
-appModules.fastlogentry
-appModules.vipmud
-  Win32 Edit and RichEdit controls: edit.py reads Text Object Model
-  constants from comInterfaces.tom in a class body, and on Linux that
-  module is an empty stand-in
 NVDAObjects.window.excel
   Microsoft Excel: imports EXCEL_CELLINFO, the structure of
   nvdaHelperLocal's in-process Excel helper, which Linux does not have
+  reached from NVDAObjects.window: safe while Linux makes no Window
+  objects; choosing a Window object's classes starts by reading its Win32
+  class name through a Win32 call, which raises on Linux
 
 synthDrivers.mssp
 synthDrivers.sapi5
@@ -178,6 +169,10 @@ synthDrivers.sapi5_32
 mathType
   Windows-only integration (SAPI 4, OneCore voices, the 32-bit SAPI
   bridges, MathType): imports winreg, which Linux must never provide
+  reached from NVDAObjects.window.winword: safe, because it imports mathType
+  inside a try whose handler reports MathType as not installed
+  reached from appModules.powerpnt: safe, because it imports mathType inside
+  a try whose handler reports MathType as not installed
 _bridge.base
 _bridge.clients.synthDriverHost32.launcher
 _bridge.clients.synthDriverHost32.synthDriver
@@ -192,6 +187,10 @@ _bridge.runtimes.synthDriverHost.speech
   imports speech.types, which SCons copies into the synth host runtime
   at build time
 
+appModules.soffice
+  imports IA2 and splitIA2Attribs from IAccessibleHandler, which on Linux
+  is a replacement without IAccessible2
+
 mathPres.MathCAT
 mathPres.MathCAT.MathCAT
 mathPres.MathCAT._navNodeMapping
@@ -201,7 +200,14 @@ mathPres.MathCAT.preferences
 mathPres.MathCAT.rulesUtils
 mathPres.MathCAT.speech
   needs libmathcat_py, MathCAT's native extension, which the dev shell does
-  not provide; mathPres itself imports and treats MathCAT as unavailable
+  not provide
+  reached from mathPres: safe, because initialize() imports MathCAT inside
+  the try that reports a MathCAT that cannot start as the warning "MathCAT
+  not available."
+  reached from gui.settingsDialogs: not safe: the settings dialog offers the
+  Math category on Linux, and opening it imports MathCAT's preferences and
+  localization, which raise ModuleNotFoundError; B decides whether the
+  category is offered, unless E packages libmathcat_py first
 
 l10nUtil
   translators' tool: needs crowdin_api, which is not a run-time dependency
@@ -213,3 +219,11 @@ oleTypes
 updateCheck
   raises RuntimeError on purpose when run from source, as on Windows;
   core.main catches it
+  reached from core: safe, because each import of it sits in a try that
+  catches that RuntimeError
+  reached from gui: safe, because its import sits in a try that catches
+  that RuntimeError
+  reached from gui.exit: safe, because its import sits in a try that
+  catches that RuntimeError
+  reached from gui.settingsDialogs: safe, because its import sits in a try
+  that catches that RuntimeError
