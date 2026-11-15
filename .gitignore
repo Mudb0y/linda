@@ -63,3 +63,4 @@ source/_bridge/runtimes/synthDriverHost/speech/types.py
 /result
 /.direnv
 /engine/target
+/.claude/

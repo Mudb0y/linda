@@ -9,6 +9,7 @@ usage: summarize.py DIR [DIR...]
 
 import glob
 import json
+import math
 import os
 import statistics
 import sys
@@ -108,7 +109,9 @@ def summarizeLoad(page: str, runs: list[Result], problems: Problems) -> None:
 		)
 		print(f"{page} page, first load, {label}, {len(rs)} runs:")
 		print(f"  Activation: {costLine([{'cost': x['activation']} for x in loads])}.")
-		print(f"  Peer-to-peer connect: {spread([x['p2p_connect_s'] for x in loads if x['p2p_connect_s'] is not None], 1000)} ms.")
+		print(
+			f"  Peer-to-peer connect: {spread([x['p2p_connect_s'] for x in loads if x['p2p_connect_s'] is not None], 1000)} ms."
+		)
 		print(
 			f"  First GetItems over {loads[0]['first_getitems_transport']}: "
 			f"{costLine([{'cost': x['first_getitems']} for x in loads])}, objects {spread([x['first_getitems_objects'] for x in loads])}."
@@ -160,7 +163,9 @@ def summarizeFetch(results: list[Result], problems: Problems) -> None:
 			same = [m["same_objects_as_reference"] for m in ok if m["same_objects_as_reference"]]
 			line = f"  {method} over {transport}, {len(ok)} runs: {costLine(ok)}"
 			if same:
-				line += f", same objects as the sequential walk in {sum(s['equal'] for s in same)} of {len(same)}"
+				line += (
+					f", same objects as the sequential walk in {sum(s['equal'] for s in same)} of {len(same)}"
+				)
 			print(line + ".")
 			for r in full:
 				for m in r["methods"]:
@@ -192,28 +197,33 @@ def derived(page: str, groups: dict[tuple[str, str], list[Result]]) -> None:
 			("getitems", "walk-itemfields-16", "only what GetItems returns"),
 		):
 			wa, wb = med(groups, a, transport, "wall_s"), med(groups, b, transport, "wall_s")
-			ca, cb = med(groups, a, transport, "app_main_thread_cpu_s"), med(groups, b, transport, "app_main_thread_cpu_s")
-			if wa == wa and wb == wb:
+			ca, cb = (
+				med(groups, a, transport, "app_main_thread_cpu_s"),
+				med(groups, b, transport, "app_main_thread_cpu_s"),
+			)
+			if not math.isnan(wa) and not math.isnan(wb):
 				print(
 					f"    {what}, over {transport}: {a} took {wa:.3f} s of wall time against {wb:.3f} s for {b}, "
 					f"{wb / wa:.1f} times less; Firefox main thread {ca:.3f} s against {cb:.3f} s, {cb / ca:.1f} times less."
 				)
 	for transport in (p2p, bus):
 		windows = sorted(
-			int(m.split("-")[1]) for (m, t) in groups if t == transport and m.startswith("walk-") and m.split("-")[1].isdigit()
+			int(m.split("-")[1])
+			for (m, t) in groups
+			if t == transport and m.startswith("walk-") and m.split("-")[1].isdigit()
 		)
 		parts = [f"{w}: {med(groups, f'walk-{w}', transport, 'wall_s'):.2f} s" for w in windows]
 		print(f"    Full walk by calls in flight over {transport}: " + ", ".join(parts) + ".")
 	for transport in (p2p, bus):
 		calls = med(groups, "walk-1", transport, "calls")
-		if calls == calls and calls:
+		if not math.isnan(calls) and calls:
 			print(
 				f"    Sequential walk over {transport}, per call: wall {med(groups, 'walk-1', transport, 'wall_s') / calls * 1e6:.0f} microseconds, "
 				f"a property of this client; Firefox main thread {med(groups, 'walk-1', transport, 'app_main_thread_cpu_s') / calls * 1e6:.0f}; "
 				f"client {med(groups, 'walk-1', transport, 'client_cpu_s') / calls * 1e6:.0f}."
 			)
 		calls = med(groups, "walk-64", transport, "calls")
-		if calls == calls and calls:
+		if not math.isnan(calls) and calls:
 			print(
 				f"    Walk with 64 in flight over {transport}, per call: Firefox main thread "
 				f"{med(groups, 'walk-64', transport, 'app_main_thread_cpu_s') / calls * 1e6:.0f} microseconds."
@@ -223,7 +233,7 @@ def derived(page: str, groups: dict[tuple[str, str], list[Result]]) -> None:
 			continue
 		probes = [m["details"]["probe"] for m in ms if not m["error"]]
 
-		def q(which: str, key: str) -> str:
+		def q(which: str, key: str, probes: list[Any] = probes) -> str:
 			return spread([p[which][key] for p in probes if p[which][key] is not None])
 
 		print(
@@ -274,7 +284,9 @@ def summarizeMirror(results: list[Result], problems: Problems) -> None:
 			+ "."
 		)
 		ruleKeys = sorted({k for x in m for k, v in x["rules"].items() if isinstance(v, int)})
-		rules = [f"{k} {spread([x['rules'][k] for x in m])}" for k in ruleKeys if any(x["rules"][k] for x in m)]
+		rules = [
+			f"{k} {spread([x['rules'][k] for x in m])}" for k in ruleKeys if any(x["rules"][k] for x in m)
+		]
 		print("  Rules applied: " + ", ".join(rules) + ".")
 		for key, label in (
 			("mirror_vs_walk", "Mirror against a fresh walk"),
@@ -288,7 +300,11 @@ def summarizeMirror(results: list[Result], problems: Problems) -> None:
 			clean = sum(not d for d in diffs)
 			print(
 				f"  {label}: "
-				+ (", ".join(parts) + f"; no differences in {clean} of {len(runs)} runs" if parts else "no differences in any run")
+				+ (
+					", ".join(parts) + f"; no differences in {clean} of {len(runs)} runs"
+					if parts
+					else "no differences in any run"
+				)
 				+ "."
 			)
 		for field, what in (("attributes", "Attributes"), ("states", "States")):
@@ -299,7 +315,11 @@ def summarizeMirror(results: list[Result], problems: Problems) -> None:
 			print(
 				f"  {what} that changed with no signal from the object or its parent, which no mirror fed by "
 				"signals can follow, summed over runs: "
-				+ (", ".join(f"{k} on {n} objects" for k, n in sorted(without.items())) if without else "none")
+				+ (
+					", ".join(f"{k} on {n} objects" for k, n in sorted(without.items()))
+					if without
+					else "none"
+				)
 				+ "."
 			)
 		for r in runs:

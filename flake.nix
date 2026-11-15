@@ -73,6 +73,7 @@
           clippy
           rustfmt
           maturin
+          ruff
           pkg-config
           gobject-introspection
           gettext

@@ -36,7 +36,9 @@ def form(fields: int) -> str:
 	for i in range(fields):
 		kind = i % 5
 		if kind == 0:
-			p.append(f'<label for="t{i}">Text {i}</label> <input id="t{i}" type="text" value="value {i}"><br>')
+			p.append(
+				f'<label for="t{i}">Text {i}</label> <input id="t{i}" type="text" value="value {i}"><br>'
+			)
 		elif kind == 1:
 			p.append(f'<label><input type="checkbox" id="c{i}"> Check {i}</label><br>')
 		elif kind == 2:

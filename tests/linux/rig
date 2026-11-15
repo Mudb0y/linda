@@ -72,7 +72,8 @@ trap 'exit 143' TERM
 
 unset DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS \
 	AT_SPI_BUS_ADDRESS PIPEWIRE_REMOTE PIPEWIRE_RUNTIME_DIR \
-	PULSE_RUNTIME_PATH SPEECHD_ADDRESS GTK_MODULES NO_AT_BRIDGE
+	PULSE_RUNTIME_PATH SPEECHD_ADDRESS GTK_MODULES NO_AT_BRIDGE \
+	LD_LIBRARY_PATH
 export HOME="$root/home"
 export XDG_RUNTIME_DIR="$root/run"
 export XDG_CONFIG_HOME="$HOME/.config"
@@ -89,6 +90,7 @@ export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
 # The rig hides everything but the checkout itself, and several runs share
 # that; bytecode caches written into it by one would be read by the others.
 export PYTHONDONTWRITEBYTECODE=1
+export PYTEST_ADDOPTS="-p no:cacheprovider"
 export RIG_PID=$$
 
 # Its own session, so that cleanup can signal everything the command started
