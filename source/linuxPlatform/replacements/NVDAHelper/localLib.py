@@ -187,7 +187,9 @@ def calculateCharacterOffsets(
 		return True
 	with _characterBreaks(text, textLength) as iterator:
 		end = icu.ubrk_following(iterator, offset)
-		start = icu.ubrk_preceding(iterator, offset + 1)
+		# Searching back from offset + 1 instead would go wrong when that is inside a surrogate pair,
+		# which ICU first moves back to the start of the pair.
+		start = icu.ubrk_preceding(iterator, textLength if end == icu.UBRK_DONE else end)
 	_store(startOffset, 0 if start == icu.UBRK_DONE else start)
 	_store(endOffset, textLength if end == icu.UBRK_DONE else end)
 	return True

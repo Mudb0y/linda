@@ -9,6 +9,7 @@ somewhere it changes the count.
 import math
 import os
 import struct
+from itertools import pairwise
 from pathlib import Path
 
 import harness
@@ -73,15 +74,17 @@ def test_graphemeBoundaries(tmp_path: Path):
 		offsets = (ctypes.c_int * (length + 1))()
 		count = ctypes.c_int()
 		ok = localLib.calculateCharacterBoundaries(text, length, offsets, ctypes.byref(count))
-		inCluster = ctypes.c_int(), ctypes.c_int()
-		localLib.calculateCharacterOffsets(text, length, 5, *map(ctypes.byref, inCluster))
+		def characterAt(offset):
+			bounds = ctypes.c_int(), ctypes.c_int()
+			localLib.calculateCharacterOffsets(text, length, offset, *map(ctypes.byref, bounds))
+			return [bound.value for bound in bounds]
 		pastEnd = ctypes.c_int(), ctypes.c_int()
 		localLib.calculateCharacterOffsets(text, length, length + 3, *map(ctypes.byref, pastEnd))
 		result = {{
 			"ok": ok,
 			"boundaries": offsets[: count.value],
 			"split": list(uniscribe.splitAtCharacterBoundaries(text)),
-			"inCluster": [v.value for v in inCluster],
+			"characters": [characterAt(offset) for offset in range(length)],
 			"pastEnd": [v.value for v in pastEnd],
 			"empty": localLib.calculateCharacterBoundaries("", 0, offsets, ctypes.byref(count)),
 		}}
@@ -94,8 +97,11 @@ def test_graphemeBoundaries(tmp_path: Path):
 	assert done.value["ok"] is True
 	assert done.value["boundaries"] == expected
 	assert done.value["split"] == list(cases.values())
-	assert done.value["inCluster"] == [0, 14]
 	length = utf16Length(text)
+	# Every code unit, either half of a surrogate pair included, belongs to its whole cluster.
+	assert done.value["characters"] == [
+		[start, end] for start, end in pairwise(expected) for _ in range(end - start)
+	]
 	assert done.value["pastEnd"] == [length + 3, length + 4]
 	assert done.value["empty"] is False
 
