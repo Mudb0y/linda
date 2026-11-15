@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import ctypes.wintypes
 import itertools
+import sys
 import threading
 import time
 from typing import (
@@ -77,6 +78,9 @@ from .regions.base import TextRegion
 from .regions.NVDAObject import NVDAObjectRegion
 from .regions.textInfo import TextInfoRegion
 from .regions.focus import getFocusContextRegions, getFocusRegions
+
+if sys.platform != "win32":
+	from linuxPlatform.ioThread import WaitableTimer
 
 FALLBACK_TABLE = config.conf.getConfigValidation(("braille", "translationTable")).default
 """Table to use if the output table configuration is invalid."""
@@ -153,7 +157,10 @@ class BrailleHandler(baseObject.AutoPropertyObject):
 		self._rawText = ""
 
 		self.queuedWriteLock = threading.Lock()
-		self.ackTimerHandle = winKernel.createWaitableTimer()
+		if sys.platform == "win32":
+			self.ackTimerHandle = winKernel.createWaitableTimer()
+		else:
+			self.ackTimerHandle = WaitableTimer()
 
 		post_sessionLockStateChanged.register(self._onSessionLockStateChanged)
 		post_secureDesktopStateChange.register(self._onSecureDesktopStateChanged)
@@ -186,6 +193,10 @@ class BrailleHandler(baseObject.AutoPropertyObject):
 		if self.display:
 			self.display.terminate()
 			self.display = None
+		if self.ackTimerHandle and sys.platform != "win32":
+			# A Linux timer is a Python object, with no kernel handle to close.
+			self.ackTimerHandle.close()
+			self.ackTimerHandle = None
 		if self.ackTimerHandle:
 			if not winBindings.kernel32.CancelWaitableTimer(self.ackTimerHandle):
 				raise ctypes.WinError()

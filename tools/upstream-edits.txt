@@ -71,6 +71,13 @@ source/audioDucking.py
   Linux, which would need a ducking policy in the sound server's session
   manager. It answers before the Windows checks, as hasUiAccess has no
   Linux body
+source/braille/brailleHandler.py
+  Linux runtime: the display acknowledgement timer is a
+  linuxPlatform.ioThread.WaitableTimer, since Linux has no waitable timer
+  handles; terminate closes it instead of cancelling and closing a handle
+source/braille/display/driver.py
+  Linux runtime: an acknowledgement from the display cancels the Linux
+  timer object rather than calling CancelWaitableTimer
 source/brailleTables/__init__.py
   Linux: TABLES_DIR is the directory BASEDREADER_LOUIS_TABLES_DIR names when
   it is set, and otherwise upstream's appDir/louis/tables, which
@@ -102,6 +109,10 @@ source/gui/addonStoreGui/viewModels/store.py
   import safety: os.startfile imported only on Windows, after the module's
   other imports; on Linux startfile is absent, so opening an add-on's home
   page, source, scan results or downloaded file raises NameError
+source/hwIo/__init__.py
+  Linux runtime: the background I/O thread is linuxPlatform.ioThread's
+  subclass of upstream's, which waits on a condition rather than in an
+  alertable wait for APCs, which Linux does not have
 source/hwIo/ble/_io.py
   import safety: WinRTClientArgs comes from bleak.args.winrt, where bleak 3
   defines it on every platform and where bleak says to import it from, not
@@ -110,6 +121,9 @@ source/hwPortUtils.py
   import safety: winreg imported only on Windows, after the module's other
   imports; on Linux winreg is absent, so the port listing functions that
   read the registry raise NameError
+  Linux runtime: listComPorts, listUsbDevices and listHidDevices list
+  nothing, as there is no SetupAPI and nothing in hwIo can open a Linux
+  device yet
 source/installer.py
   import safety: winreg imported only on Windows, after the module's other
   imports; on Linux winreg is absent, so installing raises NameError

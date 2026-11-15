@@ -21,6 +21,11 @@ from .base import (  # noqa: F401, I001
 from .hid import Hid  # noqa: F401
 from .ioThread import IoThread
 from . import ble
+import sys
+
+if sys.platform != "win32":
+	# Upstream's thread runs only through Windows APCs; Linux's subclass keeps its interface.
+	from linuxPlatform.ioThread import IoThread
 
 bgThread: IoThread
 

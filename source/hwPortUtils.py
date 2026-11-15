@@ -126,6 +126,10 @@ def listComPorts(onlyAvailable: bool = True) -> typing.Iterator[dict]:
 	:param onlyAvailable: Only return ports that are currently available.
 	:return: Dicts including keys of port, friendlyName and hardwareID.
 	"""
+	if sys.platform != "win32":
+		# Linux has no SetupAPI, and nothing in hwIo can open a Linux device yet, so there is
+		# nothing to offer a driver; listing from udev belongs with Linux device I/O.
+		return
 	for g_hdi, _idd, devinfo, buf in _listDevices(_GUID_CLASS_COMPORT, onlyAvailable):
 		entry = {}
 		# hardware ID
@@ -329,6 +333,9 @@ def listUsbDevices(onlyAvailable: bool = True) -> typing.Iterator[dict]:
 	:param onlyAvailable: Only return devices that are currently available.
 	:return: Generates dicts including keys of usbID (VID and PID), devicePath and hardwareID.
 	"""
+	if sys.platform != "win32":
+		# As for listComPorts.
+		return
 	for g_hdi, idd, devinfo, buf in _listDevices(_GUID_DEVINTERFACE_USB_DEVICE, onlyAvailable):
 		entry = {}
 		# hardware ID
@@ -467,6 +474,9 @@ def listHidDevices(onlyAvailable: bool = True) -> typing.Iterator[dict]:
 		and devicePath.
 	"""
 	global _hidGuid
+	if sys.platform != "win32":
+		# As for listComPorts.
+		return
 	if not _hidGuid:
 		_hidGuid = GUID()
 		_HidD_GetHidGuid(ctypes.byref(_hidGuid))
