@@ -121,7 +121,8 @@ class WideStringOffsetConverter(OffsetConverter):
 	"""
 
 	_encoding: str = WCHAR_ENCODING
-	_bytesPerIndex: int = ctypes.sizeof(ctypes.c_wchar)
+	# The encoding is UTF-16 everywhere, while c_wchar is four bytes wide off Windows.
+	_bytesPerIndex: int = ctypes.sizeof(ctypes.c_uint16)
 
 	def __init__(self, text: str):
 		super().__init__(text)

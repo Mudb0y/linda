@@ -26,6 +26,7 @@ replacedModules: tuple[str, ...] = (
 	"wasapi",
 	"watchdog",
 	"winAPI.sessionTracking",
+	"winBindings.icu",
 )
 
 #: Portable submodules of a replaced package, loaded from upstream's own unchanged file because the

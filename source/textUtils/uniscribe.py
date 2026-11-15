@@ -6,7 +6,15 @@
 """Wrapper functions for NVDAHelper uniscribe functions."""
 
 import ctypes
+import sys
 from collections.abc import Generator
+
+# The boundaries come back in UTF-16 code units, and the buffer is sliced with them; a c_wchar
+# buffer counts code units only on Windows.
+if sys.platform == "win32":
+	_createUtf16Buffer = ctypes.create_unicode_buffer
+else:
+	from linuxPlatform.utf16 import Utf16Buffer as _createUtf16Buffer
 
 
 def splitAtCharacterBoundaries(text: str) -> Generator[str]:
@@ -20,7 +28,7 @@ def splitAtCharacterBoundaries(text: str) -> Generator[str]:
 		raise RuntimeError("NVDAHelper not initialized")
 	if not text:
 		return
-	buffer = ctypes.create_unicode_buffer(text)
+	buffer = _createUtf16Buffer(text)
 	textLength = len(buffer) - 1  # Length without terminating NULL character
 	offsetsCount = ctypes.c_int()
 	offsets = (ctypes.c_int * (textLength + 1))()

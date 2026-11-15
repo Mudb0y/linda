@@ -59,6 +59,10 @@ source/argsParsing.py
   Linux: help goes to standard output and a command-line error to standard
   error with exit status 2, as argparse does, instead of a Windows message
   box
+source/brailleTables/__init__.py
+  Linux: TABLES_DIR is the directory BASEDREADER_LOUIS_TABLES_DIR names when
+  it is set, and otherwise upstream's appDir/louis/tables, which
+  tools/build-artifacts links to the same tables
 source/browseMode.py
   import safety when running: _extractStyles imports the UI Automation Word
   document class only on Windows; Linux has no UI Automation and uses an
@@ -153,6 +157,18 @@ source/systemUtils.py
   its thread while yielding to the wx main loop instead of pumping Windows
   messages. The process token, logon session, elevation and desktop name
   functions still fail on Linux through the Windows stand-ins
+source/textUtils/__init__.py
+  UTF-16 offsets: WideStringOffsetConverter counts two bytes per code unit,
+  the size of c_uint16, instead of the size of c_wchar, which is four on
+  Linux and made every length and offset wrong there. Same value on Windows
+source/textUtils/icu.py
+  UTF-16 offsets: on Linux the text buffer handed to ICU and sliced with its
+  offsets is a linuxPlatform.utf16.Utf16Buffer, because a c_wchar buffer is
+  UTF-32 there; Windows keeps create_unicode_buffer
+source/textUtils/uniscribe.py
+  UTF-16 offsets: on Linux the buffer splitAtCharacterBoundaries passes to
+  calculateCharacterBoundaries and slices with its offsets is a
+  linuxPlatform.utf16.Utf16Buffer, for the same reason as textUtils/icu.py
 source/utils/security.py
   Linux: isRunningOnSecureDesktop() is True only in a display manager's
   login screen session, the counterpart of the secure desktop, as

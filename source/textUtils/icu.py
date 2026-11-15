@@ -11,10 +11,18 @@ Requires Windows 10 version 1703 (Creators Update) or later.
 import ctypes  # noqa: I001
 from collections.abc import Callable
 from contextlib import contextmanager
+import sys
 
 import textUtils
 from winBindings import icu
 from logHandler import log
+
+# ICU's offsets and this module's slices count UTF-16 code units; a c_wchar buffer counts them only
+# on Windows.
+if sys.platform == "win32":
+	_createUtf16Buffer = ctypes.create_unicode_buffer
+else:
+	from linuxPlatform.utf16 import Utf16Buffer as _createUtf16Buffer
 
 _ROOT_LOCALE: bytes = b""
 """ICU root locale.
@@ -102,7 +110,7 @@ def calculateWordOffsets(
 	"""
 	# A c_wchar buffer is UTF-16 code-unit indexed on Windows, so buf[a:b] is exactly
 	# the segment ICU's offsets refer to (lone surrogates decode as non-space).
-	buf = ctypes.create_unicode_buffer(text)
+	buf = _createUtf16Buffer(text)
 	textLength = len(buf) - 1
 	if offset >= textLength:
 		return (offset, offset + 1)
@@ -168,7 +176,7 @@ def calculateSentenceOffsets(
 	:return: (startOffset, endOffset) as UTF-16 code unit indices (endOffset exclusive),
 	    or None if the ICU call failed.
 	"""
-	buf = ctypes.create_unicode_buffer(text)
+	buf = _createUtf16Buffer(text)
 	textLength = len(buf) - 1
 	if offset >= textLength:
 		return (offset, offset + 1)
