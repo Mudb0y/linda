@@ -55,6 +55,14 @@ source/_remoteClient/urlHandler.py
   imports; the one annotation that names it is quoted so it is not
   evaluated at import. On Linux winreg is absent, so registering the URL
   handler raises NameError
+source/appModuleHandler.py
+  process identity: on Linux the application name, executable path,
+  architecture, user and liveness of a process come from /proc and a pidfd
+  through linuxPlatform.processes, not from Toolhelp, a process handle,
+  IsWow64Process2 or the logon session. processHandle is None, so
+  getAppModuleForNVDAObject never asks a window for one; product name and
+  version raise NoLinuxImplementation; a Windows app module that fails to
+  import while a name is looked up is reported by fetchAppModule instead
 source/argsParsing.py
   Linux: help goes to standard output and a command-line error to standard
   error with exit status 2, as argparse does, instead of a Windows message

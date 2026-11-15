@@ -45,6 +45,9 @@ from comInterfaces import UIAutomationClient as UIA
 import winBindings.rpcrt4
 from utils import _deprecate
 
+if sys.platform != "win32":
+	from linuxPlatform import processes as _linuxProcesses
+
 
 __getattr__ = _deprecate.handleDeprecations(
 	_deprecate.MovedSymbol(
@@ -149,6 +152,20 @@ def getAppNameFromProcessID(processID: int, includeExt: bool = False) -> str:
 	C{False} to exclude it.
 	@returns: application name
 	"""
+	if sys.platform != "win32":
+		# Linux executables have no extension to include or strip.
+		if processID == globalVars.appPid:
+			return "nvda"
+		appName = _linuxProcesses.getAppName(processID)
+		if not appName:
+			return appName
+		# A Windows app module named like a Linux program can fail to import here; fetchAppModule
+		# imports it again straight after and reports the failure there.
+		try:
+			return _importAppModuleForExecutable(appName).getAppNameFromHost(processID)
+		except (AttributeError, LookupError, ImportError):
+			pass
+		return appName
 	if processID == globalVars.appPid:
 		return "nvda.exe" if includeExt else "nvda"
 	FSnapshotHandle = winBindings.kernel32.CreateToolhelp32Snapshot(2, 0)
@@ -189,6 +206,11 @@ def getProcessHandleFromProcessId(processId: int, fallBackToTopLevelWindowEnumer
 		as a fallback method if direct process opening fails. Defaults to True
 	:return: A handle to the process, or 0 if no handle could be obtained
 	"""
+	if sys.platform != "win32":
+		# Linux has no process handles; AppModule watches the process through a pidfd instead. None
+		# rather than 0, which would make getAppModuleForNVDAObject ask a window for a handle on
+		# every lookup.
+		return None
 	processHandle: int = 0
 	try:
 		if not (
@@ -506,6 +528,8 @@ class AppModule(baseObject.ScriptableObject):
 			appName = getAppNameFromProcessID(processID)
 		self.appName = appName
 		self.processHandle = getProcessHandleFromProcessId(processID)
+		if sys.platform != "win32":
+			self._processWatch = _linuxProcesses.ProcessWatch(processID)
 		self.helperLocalBindingHandle: ctypes.c_long | None = None
 		"""RPC binding handle pointing to the RPC server for this process"""
 
@@ -515,6 +539,8 @@ class AppModule(baseObject.ScriptableObject):
 	"""The path to the executable of the current process."""
 
 	def _get_processExecutablePath(self) -> str:
+		if sys.platform != "win32":
+			return _linuxProcesses.getExecutablePath(self.processID)
 		# Create the buffer to get the executable name
 		exeFileName = ctypes.create_unicode_buffer(ctypes.wintypes.MAX_PATH)
 		length = ctypes.wintypes.DWORD(ctypes.wintypes.MAX_PATH)
@@ -561,6 +587,9 @@ class AppModule(baseObject.ScriptableObject):
 		* Package info for hosted apps
 		* File version info for other apps and for some hosted apps
 		"""
+		if sys.platform != "win32":
+			self.productName, self.productVersion = _linuxProcesses.getProductInfo(self.processID)
+			return
 		# Sometimes (I.E. when NVDA starts) handle is 0, so stop if it is the case
 		if not self.processHandle:
 			raise RuntimeError("processHandle is 0")
@@ -609,6 +638,8 @@ class AppModule(baseObject.ScriptableObject):
 	def _get_isAlive(self) -> bool:
 		if self._liveForEver:
 			return True
+		if sys.platform != "win32":
+			return self._processWatch.isAlive
 		try:
 			return bool(winKernel.waitForSingleObject(self.processHandle, 0))
 		except OSError as e:
@@ -635,7 +666,10 @@ class AppModule(baseObject.ScriptableObject):
 		This is called to perform any clean up when this app module is being destroyed.
 		Subclasses should call the superclass method first.
 		"""
-		winKernel.closeHandle(self.processHandle)
+		if sys.platform != "win32":
+			self._processWatch.close()
+		else:
+			winKernel.closeHandle(self.processHandle)
 		if getattr(self, "_helperPreventDisconnect", False):
 			return
 		if self._inprocRegistrationHandle:
@@ -661,6 +695,9 @@ class AppModule(baseObject.ScriptableObject):
 		"""Returns the full path for the executable e.g. 'C:\\Windows\\explorer.exe' for Explorer.
 		@rtype: str
 		"""
+		if sys.platform != "win32":
+			self.appPath = _linuxProcesses.findExecutablePath(self.processID)
+			return self.appPath
 		size = ctypes.wintypes.DWORD(ctypes.wintypes.MAX_PATH)
 		path = ctypes.create_unicode_buffer(size.value)
 		winBindings.kernel32.QueryFullProcessImageName(self.processHandle, 0, path, ctypes.byref(size))
@@ -671,6 +708,9 @@ class AppModule(baseObject.ScriptableObject):
 		"""Whether the underlying process is a 64 bit process.
 		@rtype: bool
 		"""
+		if sys.platform != "win32":
+			self.is64BitProcess = _linuxProcesses.is64Bit(self.processID)
+			return self.is64BitProcess
 		if winVersion.getWinVer().processorArchitecture not in ("AMD64", "ARM64"):
 			# This is 32 bit Windows.
 			self.is64BitProcess = False
@@ -710,6 +750,9 @@ class AppModule(baseObject.ScriptableObject):
 		e.g. File Explorer reports itself as immersive when it is not.
 		@rtype: bool
 		"""
+		if sys.platform != "win32":
+			# Store apps exist only on Windows; Flatpak and Snap sandboxes are not packaged apps in this sense.
+			return False
 		# Package info is much more accurate than IsImmersiveProcess
 		# because IsImmersive Process returns nonzero for File Explorer
 		# and zero for Store version of Office.
@@ -724,6 +767,9 @@ class AppModule(baseObject.ScriptableObject):
 		This applies to applications started with the Windows runas command
 		or when choosing "run as a different user" from an application's (shortcut) context menu.
 		"""
+		if sys.platform != "win32":
+			self.isRunningUnderDifferentLogonSession = _linuxProcesses.isOtherUser(self.processID)
+			return self.isRunningUnderDifferentLogonSession
 		try:
 			self.isRunningUnderDifferentLogonSession = (
 				getCurrentProcessLogonSessionId() != getProcessLogonSessionId(self.processHandle)
@@ -743,6 +789,9 @@ class AppModule(baseObject.ScriptableObject):
 		* ARM64: 64-bit ARM app on ARM64 Windows.
 		@rtype: str
 		"""
+		if sys.platform != "win32":
+			self.appArchitecture = _linuxProcesses.getArchitecture(self.processID)
+			return self.appArchitecture
 		# Details: https://docs.microsoft.com/en-us/windows/desktop/SysInfo/image-file-machine-constants
 		archValues2ArchNames = {
 			0x014C: "x86",  # I386-32
