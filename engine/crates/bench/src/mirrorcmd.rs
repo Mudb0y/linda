@@ -321,6 +321,7 @@ fn apply_batch(
     naive: &mut NaiveMirror,
     stats: &mut LoopStats,
 ) -> Vec<Repair> {
+    mirror.start_batch();
     stats.batches += 1;
     stats.largest_batch = stats.largest_batch.max(batch.len());
     stats.signals += batch.len();

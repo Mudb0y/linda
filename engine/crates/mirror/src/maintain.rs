@@ -28,7 +28,7 @@
 //! Applying an event never makes a call. Whatever needs the application is
 //! returned as a [`Repair`] for the caller to carry out and feed back.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 
@@ -101,6 +101,7 @@ pub struct MaintenanceStats {
     pub roles_applied: usize,
     pub text_patched: usize,
     pub text_patch_refused: usize,
+    pub text_refetched_not_patched: usize,
     pub repairs_requested: BTreeMap<String, usize>,
 }
 
@@ -108,15 +109,38 @@ pub struct Mirror {
     pub tree: Tree,
     pool: HashMap<String, CacheItem>,
     pub stats: MaintenanceStats,
+    /// Objects whose text a repair fetched since the batch before last, and
+    /// since the last one. Signals arrive over the bus and replies over the
+    /// peer-to-peer connection, so nothing orders a fetched text against the
+    /// TextChanged signals sent before it was read; such a signal can arrive
+    /// after the text that already holds its change.
+    text_fetched_before: HashSet<String>,
+    text_fetched: HashSet<String>,
 }
 
 impl Mirror {
+    /// The texts of `tree` count as just fetched, since the signals that
+    /// follow its build can predate them.
     pub fn new(tree: Tree) -> Self {
+        let text_fetched = tree
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.text.is_some())
+            .map(|(p, _)| p.clone())
+            .collect();
         Self {
             tree,
             pool: HashMap::new(),
             stats: MaintenanceStats::default(),
+            text_fetched_before: HashSet::new(),
+            text_fetched,
         }
+    }
+
+    /// Marks the start of a batch of signals, after the previous batch's
+    /// repairs.
+    pub fn start_batch(&mut self) {
+        self.text_fetched_before = std::mem::take(&mut self.text_fetched);
     }
 
     pub fn pool(&self) -> &HashMap<String, CacheItem> {
@@ -319,6 +343,13 @@ impl Mirror {
     }
 
     fn text_changed(&mut self, e: &Event, out: &mut Vec<Repair>) {
+        // A text fetched since the last batch may already hold this change,
+        // and patching it again would apply it twice.
+        if self.text_fetched_before.contains(&e.path) {
+            self.stats.text_refetched_not_patched += 1;
+            self.request(out, Repair::RefetchText(e.path.clone()));
+            return;
+        }
         let n = self.tree.nodes.get_mut(&e.path).expect("checked above");
         let Some(text) = n.text.as_mut() else {
             return;
@@ -458,6 +489,9 @@ impl Mirror {
         }
         for (path, mut node) in sub.nodes {
             self.pool.remove(&path);
+            if node.text.is_some() {
+                self.text_fetched.insert(path.clone());
+            }
             if path == root {
                 node.parent = old.parent.clone();
                 node.index_in_parent = old.index_in_parent;
@@ -475,6 +509,7 @@ impl Mirror {
     pub fn set_text(&mut self, path: &str, text: String) {
         if let Some(n) = self.tree.nodes.get_mut(path) {
             n.text = Some(text);
+            self.text_fetched.insert(path.to_owned());
         }
     }
 
@@ -868,6 +903,29 @@ mod tests {
             AnyData::Str("x".into()),
         ));
         assert_eq!(r2, vec![Repair::RefetchText("/b".into())]);
+    }
+
+    #[test]
+    fn text_fetched_since_the_last_batch_is_fetched_again_not_patched() {
+        let mut m = mirror();
+        m.set_text("/b", "Hello world".into());
+        m.start_batch();
+        let insert = ev(
+            "TextChanged",
+            "insert",
+            "/b",
+            5,
+            6,
+            AnyData::Str(" world".into()),
+        );
+        assert_eq!(
+            m.apply_event(&insert),
+            vec![Repair::RefetchText("/b".into())]
+        );
+        assert_eq!(m.tree.nodes["/b"].text.as_deref(), Some("Hello world"));
+        // Two batches on, with no fetch in between, patching resumes.
+        m.start_batch();
+        assert!(m.apply_event(&insert).is_empty());
     }
 
     #[test]
