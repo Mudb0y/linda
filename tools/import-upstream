@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Records an NVDA release on the upstream branch as one commit holding its
+# untouched tree, so that main can merge it three-way against the release
+# imported before it.
+set -euo pipefail
+
+if [ $# -ne 1 ]; then
+	echo "usage: import-upstream tag, for example release-2026.4" >&2
+	exit 2
+fi
+tag=$1
+version=${tag#release-}
+url=https://github.com/nvaccess/nvda.git
+
+cd "$(git rev-parse --show-toplevel)"
+echo "importing NVDA $version from $url"
+
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+
+# Fetching a single commit of upstream straight into this repository would
+# mark it shallow, and a shallow repository cannot be pushed to a new remote.
+# A parentless copy of the tree, made in a throwaway clone, has no history to
+# be shallow about.
+git clone --quiet --depth 1 --branch "$tag" "$url" "$scratch/nvda"
+commit=$(git -C "$scratch/nvda" rev-parse 'HEAD^{commit}')
+snapshot=$(git -C "$scratch/nvda" commit-tree 'HEAD^{tree}' -m snapshot)
+git -C "$scratch/nvda" update-ref refs/heads/snapshot "$snapshot"
+git fetch --quiet "$scratch/nvda" snapshot
+
+new=$(git commit-tree 'FETCH_HEAD^{tree}' -p upstream \
+	-m "Import NVDA $version" \
+	-m "Pristine tree of upstream commit $commit, tag $tag of ${url%.git}.")
+git update-ref refs/heads/upstream "$new"
+echo "upstream now holds NVDA $version as $new; merge it with: git merge upstream"

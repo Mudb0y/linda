@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Runs a command on a private X display with its own session bus,
+# accessibility bus, HOME and runtime directory. Nothing started here can
+# reach the live desktop, its screen reader or its sound server, which is
+# what makes it safe to crash a screen reader under test.
+set -euo pipefail
+
+if [ "${1:-}" = --inside ]; then
+	shift
+	# The rig can be killed outright by a test runner's timeout, which skips
+	# its cleanup; this notices the parent is gone and takes the session down.
+	(
+		while kill -0 "$RIG_PID" 2>/dev/null; do sleep 1; done
+		kill -TERM -- -$$ 2>/dev/null
+	) &
+
+	"$AT_SPI_BUS_LAUNCHER" --launch-immediately &
+	up=
+	for _ in $(seq 100); do
+		# Asking the bus who owns the name, rather than calling the launcher,
+		# because a call would make the bus activate a second launcher if
+		# ours has not claimed the name yet.
+		if dbus-send --session --print-reply --dest=org.freedesktop.DBus \
+			/org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner \
+			string:org.a11y.Bus 2>/dev/null | grep -q 'boolean true'; then
+			up=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ -z "$up" ]; then
+		echo "rig: the accessibility bus did not start" >&2
+		exit 1
+	fi
+	# Toolkits and browsers build their accessibility trees only once
+	# something claims to be an assistive technology.
+	set_status() {
+		dbus-send --session --print-reply --dest=org.a11y.Bus /org/a11y/bus \
+			org.freedesktop.DBus.Properties.Set \
+			string:org.a11y.Status string:"$1" variant:boolean:true >/dev/null
+	}
+	set_status IsEnabled
+	# Only some at-spi2-core builds have this one.
+	set_status ScreenReaderEnabled 2>/dev/null || true
+	exec "$@"
+fi
+
+if [ $# -eq 0 ]; then
+	echo "usage: rig command [argument...]" >&2
+	exit 2
+fi
+: "${AT_SPI_BUS_LAUNCHER:?rig: run inside the dev shell, nix develop}"
+
+root=$(mktemp -d "${TMPDIR:-/tmp}/basedreader-rig.XXXXXX")
+mkdir -m 700 "$root/home" "$root/run"
+
+session=
+cleanup() {
+	if [ -n "$session" ]; then
+		kill -TERM -- -"$session" 2>/dev/null || true
+		for _ in $(seq 20); do
+			kill -0 -- -"$session" 2>/dev/null || break
+			sleep 0.1
+		done
+		kill -KILL -- -"$session" 2>/dev/null || true
+	fi
+	rm -rf "$root"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+unset DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS \
+	AT_SPI_BUS_ADDRESS PIPEWIRE_REMOTE PIPEWIRE_RUNTIME_DIR \
+	PULSE_RUNTIME_PATH SPEECHD_ADDRESS GTK_MODULES NO_AT_BRIDGE
+export HOME="$root/home"
+export XDG_RUNTIME_DIR="$root/run"
+export XDG_CONFIG_HOME="$HOME/.config"
+export XDG_CACHE_HOME="$HOME/.cache"
+export XDG_DATA_HOME="$HOME/.local/share"
+export XDG_STATE_HOME="$HOME/.local/state"
+# A socket that does not exist, so a client that goes looking for the sound
+# server fails at once instead of finding the real one by another route.
+export PULSE_SERVER="unix:$root/run/no-sound-server"
+export GSETTINGS_BACKEND=memory
+export GNOME_ACCESSIBILITY=1
+export QT_ACCESSIBILITY=1
+export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
+export RIG_PID=$$
+
+# Its own session, so that cleanup can signal everything the command started
+# as one process group without touching anything else on the machine.
+setsid dbus-run-session -- \
+	xvfb-run -a -s "-screen 0 1280x1024x24 -nolisten tcp" \
+	"$0" --inside "$@" &
+session=$!
+status=0
+wait "$session" || status=$?
+exit "$status"
