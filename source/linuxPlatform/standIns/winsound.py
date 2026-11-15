@@ -4,6 +4,10 @@ Its constants are Windows' values; every function raises, because a sound on Lin
 through NVDA's own audio output and never through a second route.
 """
 
+from typing import Any, NoReturn
+
+from linuxPlatform import NoLinuxImplementation
+
 SND_FILENAME = 0x20000
 SND_ALIAS = 0x10000
 SND_LOOP = 0x0008
@@ -21,13 +25,13 @@ MB_ICONQUESTION = 0x20
 MB_OK = 0x0
 
 
-def Beep(frequency: int, duration: int) -> None:
-	raise NotImplementedError("winsound.Beep has no Linux implementation")
+def Beep(frequency: int, duration: int) -> NoReturn:
+	raise NoLinuxImplementation("winsound.Beep")
 
 
-def PlaySound(sound, flags: int) -> None:
-	raise NotImplementedError("winsound.PlaySound has no Linux implementation")
+def PlaySound(sound: Any, flags: int) -> NoReturn:
+	raise NoLinuxImplementation("winsound.PlaySound")
 
 
-def MessageBeep(type: int = MB_OK) -> None:
-	raise NotImplementedError("winsound.MessageBeep has no Linux implementation")
+def MessageBeep(type: int = MB_OK) -> NoReturn:
+	raise NoLinuxImplementation("winsound.MessageBeep")

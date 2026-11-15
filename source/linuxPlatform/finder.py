@@ -3,13 +3,17 @@
 A directory placed ahead of source/ on sys.path cannot do this job: a submodule such as
 winAPI.sessionTracking is looked up through its parent package's __path__, not through sys.path.
 So a finder on sys.meta_path answers for exactly the dotted names listed below, and for nothing
-else. Each name's file sits at the same dotted path under replacements/ or standIns/.
+else. Each name's file sits at the same dotted path under replacements/ or standIns/, or, for a
+kept submodule, in upstream's own tree.
 """
 
 import importlib.abc
 import importlib.util
 import os
 import sys
+import types
+from collections.abc import Sequence
+from importlib.machinery import ModuleSpec
 
 #: Upstream modules that are Windows to the core but imported by code that stays.
 #: The upstream file is never loaded; the file at the same path under replacements/ is.
@@ -23,6 +27,10 @@ replacedModules: tuple[str, ...] = (
 	"watchdog",
 	"winAPI.sessionTracking",
 )
+
+#: Portable submodules of a replaced package, loaded from upstream's own unchanged file because the
+#: replacement or code that stays needs them.
+keptSubmodules: tuple[str, ...] = ("IAccessibleHandler.types",)
 
 #: Windows-only third-party packages and the comInterfaces modules NVDA's build generates from
 #: Windows type libraries. Neither the standard library nor any dependency in the dev shell
@@ -55,6 +63,7 @@ standInModules: tuple[str, ...] = (
 neverProvided: frozenset[str] = frozenset({"winreg", "msvcrt", "_winapi"})
 
 _here = os.path.dirname(os.path.abspath(__file__))
+_upstreamSource = os.path.dirname(_here)
 
 
 def _locate(baseDir: str, fullname: str) -> tuple[str, bool]:
@@ -70,34 +79,61 @@ def _locate(baseDir: str, fullname: str) -> tuple[str, bool]:
 
 
 def _buildTable() -> dict[str, tuple[str, bool]]:
-	table = {}
-	for baseName, names in (("replacements", replacedModules), ("standIns", standInModules)):
-		baseDir = os.path.join(_here, baseName)
+	table: dict[str, tuple[str, bool]] = {}
+	for baseDir, names in (
+		(os.path.join(_here, "replacements"), replacedModules),
+		(_upstreamSource, keptSubmodules),
+		(os.path.join(_here, "standIns"), standInModules),
+	):
 		for fullname in names:
 			if fullname.split(".")[0] in neverProvided:
 				raise RuntimeError(f"{fullname} must never be importable on Linux")
 			if fullname in table:
-				raise RuntimeError(f"{fullname} is both replaced and stood in")
+				raise RuntimeError(f"{fullname} is listed twice")
 			table[fullname] = _locate(baseDir, fullname)
+	for fullname in keptSubmodules:
+		if fullname.rpartition(".")[0] not in replacedModules:
+			raise RuntimeError(f"{fullname} is kept, but its package is not replaced")
 	return table
 
 
 class PlatformFinder(importlib.abc.MetaPathFinder):
-	def __init__(self):
+	def __init__(self) -> None:
 		self._table = _buildTable()
+		self._packages = frozenset(name for name, (_, isPackage) in self._table.items() if isPackage)
 
-	def find_spec(self, fullname, path, target=None):
+	def find_spec(
+		self,
+		fullname: str,
+		path: Sequence[str] | None,
+		target: types.ModuleType | None = None,
+	) -> ModuleSpec | None:
+		if fullname.partition(".")[0] in neverProvided:
+			# Refused here, ahead of every other finder, so that a file of the same name anywhere
+			# on sys.path, such as one an add-on bundles, can never be imported either.
+			raise ModuleNotFoundError(f"No module named {fullname!r}: Linux never provides it", name=fullname)
 		entry = self._table.get(fullname)
 		if entry is None:
+			parent = fullname.rpartition(".")[0]
+			if parent in self._packages:
+				# A package's submodules come from this table or not at all, even if something
+				# extends the package's __path__.
+				raise ModuleNotFoundError(
+					f"No module named {fullname!r}: {parent} is replaced on Linux and does not provide it",
+					name=fullname,
+				)
 			return None
 		location, isPackage = entry
-		# A package's submodules come from this table or not at all, so an unlisted
-		# submodule of a replaced package fails to import instead of loading upstream's.
-		return importlib.util.spec_from_file_location(
+		spec = importlib.util.spec_from_file_location(
 			fullname,
 			location,
 			submodule_search_locations=[] if isPackage else None,
 		)
+		if isPackage:
+			# spec_from_file_location fills an empty list with the package's own directory, which
+			# would make every file there importable without being listed.
+			spec.submodule_search_locations = []
+		return spec
 
 
 def install() -> None:

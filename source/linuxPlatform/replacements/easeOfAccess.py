@@ -5,6 +5,9 @@ screen reader at login works differently on Linux, so each function raises until
 """
 
 from enum import IntEnum
+from typing import NoReturn
+
+from linuxPlatform import NoLinuxImplementation
 
 
 class AutoStartContext(IntEnum):
@@ -14,21 +17,17 @@ class AutoStartContext(IntEnum):
 	AFTER_LOGON = 0x80000001
 
 
-def _notImplemented(name: str) -> NotImplementedError:
-	return NotImplementedError(f"easeOfAccess.{name} has no Linux implementation")
+def isRegistered() -> NoReturn:
+	raise NoLinuxImplementation("easeOfAccess.isRegistered")
 
 
-def isRegistered() -> bool:
-	raise _notImplemented("isRegistered")
+def notify(signal: int) -> NoReturn:
+	raise NoLinuxImplementation("easeOfAccess.notify")
 
 
-def notify(signal: int) -> None:
-	raise _notImplemented("notify")
+def willAutoStart(autoStartContext: AutoStartContext) -> NoReturn:
+	raise NoLinuxImplementation("easeOfAccess.willAutoStart")
 
 
-def willAutoStart(autoStartContext: AutoStartContext) -> bool:
-	raise _notImplemented("willAutoStart")
-
-
-def setAutoStart(autoStartContext: AutoStartContext, enable: bool) -> None:
-	raise _notImplemented("setAutoStart")
+def setAutoStart(autoStartContext: AutoStartContext, enable: bool) -> NoReturn:
+	raise NoLinuxImplementation("easeOfAccess.setAutoStart")

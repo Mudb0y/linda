@@ -2,30 +2,31 @@
 
 Upstream code binds Windows library functions at import time, so binding has to work:
 attribute access on a library, setting argtypes and restype, and building a prototype from a
-(name, library) pair. Calling any of those functions raises NotImplementedError naming the
+(name, library) pair. Calling any of those functions raises NoLinuxImplementation naming the
 library and function; nothing here ever returns a value a caller could mistake for a result.
 """
 
 import ctypes
 import os
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NoReturn
+
+from linuxPlatform import NoLinuxImplementation
 
 
 class StandInFunction:
 	"""A function exported by a Windows library, as seen from Linux."""
 
-	def __init__(self, libraryName: str, name: str | int):
+	def __init__(self, libraryName: str | None, name: str | int):
 		self._libraryName = libraryName
 		self.__name__ = str(name)
 		self.argtypes = None
 		self.restype = None
 		self.errcheck = None
 
-	def __call__(self, *args, **kwargs):
-		raise NotImplementedError(
-			f"{self._libraryName}.{self.__name__} is a Windows function with no Linux implementation",
-		)
+	def __call__(self, *args: Any, **kwargs: Any) -> NoReturn:
+		what = f"{self._libraryName}.{self.__name__}"
+		raise NoLinuxImplementation(what, f"{what} is a Windows function with no Linux implementation")
 
 	def __repr__(self) -> str:
 		return f"<Windows function {self._libraryName}.{self.__name__}, not callable on Linux>"
@@ -98,7 +99,7 @@ def WINFUNCTYPE(restype: Any, *argtypes: Any, use_errno: bool = False, use_last_
 		pass
 	base = ctypes.CFUNCTYPE(restype, *argtypes, use_errno=use_errno, use_last_error=use_last_error)
 
-	def __new__(cls, *args):
+	def __new__(cls: type, *args: Any) -> Any:
 		if args and isinstance(args[0], tuple) and len(args[0]) == 2 and isinstance(args[0][1], WinDLL):
 			name, library = args[0]
 			return library[name]
@@ -122,12 +123,12 @@ def WINFUNCTYPE(restype: Any, *argtypes: Any, use_errno: bool = False, use_last_
 	return prototype
 
 
-def WinError(code: int | None = None, descr: str | None = None) -> OSError:
-	raise NotImplementedError("ctypes.WinError has no Linux implementation")
+def WinError(code: int | None = None, descr: str | None = None) -> NoReturn:
+	raise NoLinuxImplementation("ctypes.WinError")
 
 
-def FormatError(code: int | None = None) -> str:
-	raise NotImplementedError("ctypes.FormatError has no Linux implementation")
+def FormatError(code: int | None = None) -> NoReturn:
+	raise NoLinuxImplementation("ctypes.FormatError")
 
 
 GetLastError: Callable[[], int] = windll.kernel32.GetLastError

@@ -4,8 +4,8 @@ On Windows NVDA's build generates this module from the type library in oleacc.dl
 type library, so only the interface that modules on the import path name at import is here.
 """
 
-from comtypes.automation import IDispatch
 from comtypes import GUID
+from comtypes.automation import IDispatch
 
 
 class IAccessible(IDispatch):

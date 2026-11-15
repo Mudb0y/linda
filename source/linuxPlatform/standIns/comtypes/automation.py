@@ -1,14 +1,15 @@
 """Stand-in for comtypes.automation: IDispatch, VARIANT and the VT_ constants."""
 
 from ctypes import Structure, Union, c_double, c_int64, c_uint16, c_void_p
+from typing import Any, NoReturn
 
 from comtypes import BSTR, GUID, IUnknown, _notOnLinux
 
 __all__ = [
 	"BSTR",
+	"VARIANT",
 	"IDispatch",
 	"IEnumVARIANT",
-	"VARIANT",
 	"tagVARIANT",
 ]
 
@@ -75,17 +76,17 @@ class tagVARIANT(Structure):
 		("_", _variantValue),
 	]
 
-	def __init__(self, *args):
+	def __init__(self, *args: Any):
 		super().__init__()
 		if args:
 			self.value = args[0]
 
 	@property
-	def value(self):
+	def value(self) -> NoReturn:
 		raise _notOnLinux("Reading a VARIANT's value")
 
 	@value.setter
-	def value(self, value):
+	def value(self, value: Any) -> NoReturn:
 		raise _notOnLinux("Setting a VARIANT's value")
 
 

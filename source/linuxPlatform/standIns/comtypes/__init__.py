@@ -20,7 +20,9 @@ from ctypes import (
 	c_void_p,
 	c_wchar_p,
 )
-from typing import Any
+from typing import Any, ClassVar, NoReturn
+
+from linuxPlatform import NoLinuxImplementation
 
 __version__ = "0+linux.standin"
 
@@ -28,20 +30,20 @@ __all__ = [
 	"BSTR",
 	"CLSCTX_INPROC_SERVER",
 	"COINIT_MULTITHREADED",
-	"COMError",
 	"COMMETHOD",
+	"DISPMETHOD",
+	"GUID",
+	"HRESULT",
+	"STDMETHOD",
+	"COMError",
 	"COMObject",
 	"CoCreateInstance",
 	"CoInitialize",
 	"CoInitializeEx",
 	"CoUninitialize",
-	"DISPMETHOD",
-	"GUID",
-	"HRESULT",
 	"IServiceProvider",
 	"IUnknown",
 	"ReturnHRESULT",
-	"STDMETHOD",
 	"byref",
 	"dispid",
 	"tagBIND_OPTS2",
@@ -52,8 +54,8 @@ CLSCTX_INPROC_SERVER = 0x1
 COINIT_MULTITHREADED = 0x0
 
 
-def _notOnLinux(what: str):
-	return NotImplementedError(f"{what} needs COM, which does not exist on Linux")
+def _notOnLinux(what: str) -> NoLinuxImplementation:
+	return NoLinuxImplementation(what, f"{what} needs COM, which does not exist on Linux")
 
 
 class COMError(Exception):
@@ -119,7 +121,7 @@ class _InterfacePointer(c_void_p):
 
 
 class _InterfaceMeta(type):
-	def __new__(mcls, name: str, bases: tuple, namespace: dict):
+	def __new__(mcls, name: str, bases: tuple, namespace: dict) -> "_InterfaceMeta":
 		cls = super().__new__(mcls, name, bases, namespace)
 		# As comtypes does, POINTER(interface) is a pointer-sized type of its own, so that
 		# interfaces can be named in argtypes, structure fields and other declarations.
@@ -130,7 +132,7 @@ class _InterfaceMeta(type):
 
 class IUnknown(metaclass=_InterfaceMeta):
 	_iid_ = GUID("{00000000-0000-0000-C000-000000000046}")
-	_methods_: list = []
+	_methods_: ClassVar[list] = []
 	_case_insensitive_ = False
 
 
@@ -157,25 +159,25 @@ def DISPMETHOD(idlflags: list, restype: Any, name: str, *argspec: Any) -> tuple:
 class COMObject:
 	"""Base of COM objects implemented in Python. None can be created on Linux."""
 
-	_com_interfaces_: list = []
+	_com_interfaces_: ClassVar[list] = []
 
-	def __new__(cls, *args, **kwargs):
+	def __new__(cls, *args: Any, **kwargs: Any) -> NoReturn:
 		raise _notOnLinux(f"Creating the COM object {cls.__qualname__}")
 
 
-def CoCreateInstance(*args, **kwargs):
+def CoCreateInstance(*args: Any, **kwargs: Any) -> NoReturn:
 	raise _notOnLinux("comtypes.CoCreateInstance")
 
 
-def CoInitialize(*args, **kwargs):
+def CoInitialize(*args: Any, **kwargs: Any) -> NoReturn:
 	raise _notOnLinux("comtypes.CoInitialize")
 
 
-def CoInitializeEx(*args, **kwargs):
+def CoInitializeEx(*args: Any, **kwargs: Any) -> NoReturn:
 	raise _notOnLinux("comtypes.CoInitializeEx")
 
 
-def CoUninitialize(*args, **kwargs):
+def CoUninitialize(*args: Any, **kwargs: Any) -> NoReturn:
 	raise _notOnLinux("comtypes.CoUninitialize")
 
 

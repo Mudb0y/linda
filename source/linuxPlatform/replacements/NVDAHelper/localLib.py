@@ -7,11 +7,14 @@ each raises until it has a Linux implementation. Entry points that only Windows-
 
 from collections.abc import Callable
 from ctypes import c_ulonglong, c_void_p
+from typing import Any, NoReturn
+
+from linuxPlatform import NoLinuxImplementation
 
 
-def _notImplemented(name: str) -> Callable:
-	def entryPoint(*args, **kwargs):
-		raise NotImplementedError(f"NVDAHelper.localLib.{name} has no Linux implementation")
+def _notImplemented(name: str) -> Callable[..., NoReturn]:
+	def entryPoint(*args: Any, **kwargs: Any) -> NoReturn:
+		raise NoLinuxImplementation(f"NVDAHelper.localLib.{name}")
 
 	entryPoint.__name__ = entryPoint.__qualname__ = name
 	return entryPoint
