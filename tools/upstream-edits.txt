@@ -107,6 +107,17 @@ source/languageHandler.py
   to a Windows locale identifier gives LCID_NONE and the reverse uses
   Python's table. The catalogue directory is absolute under appDir on every
   platform, so translations no longer depend on the working directory
+source/logHandler.py
+  running on Linux: the time comes from logging's own formatTime, not Win32
+  time conversion; log.exception reads comtypes only on Windows; NVDA's own
+  modules are told from external code with the platform's path separator,
+  which on Windows is the backslash upstream wrote; a record that cannot be
+  written is reported on the real standard error, since sys.stderr is
+  redirected into the log and the report would fail again without end; the
+  default log is under XDG_STATE_HOME/basedreader; the error sound is
+  requested from a thread of its own and CRITICAL has no sound, not the
+  winsound beep; faulthandler is armed with a crash file beside the log.
+  The Linux code is in linuxPlatform/logSupport.py
 source/louisHelper.py
   import safety: os.add_dll_directory around the louis import only on
   Windows

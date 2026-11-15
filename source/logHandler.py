@@ -32,6 +32,9 @@ import RPCConstants
 import NVDAState
 from NVDAState import WritePaths
 
+if sys.platform != "win32":
+	from linuxPlatform import logSupport
+
 
 if TYPE_CHECKING:
 	import extensionPoints
@@ -74,7 +77,7 @@ def isPathExternalToNVDA(path: str) -> bool:
 	if (  # noqa: SIM103
 		path[0] != "<"
 		and os.path.isabs(path)
-		and not os.path.normpath(path).startswith(_NVDA_CODE_PATH + "\\")
+		and not os.path.normpath(path).startswith(_NVDA_CODE_PATH + os.sep)
 		or (
 			# Handle messages logged before config is initialized
 			WritePaths.configDir is not None and path.startswith(WritePaths.configDir)
@@ -335,7 +338,8 @@ class Logger(logging.Logger):
 		Normally, it will be logged at level "ERROR".
 		However, certain exceptions which aren't considered errors (or aren't errors that we can fix) are expected and will therefore be logged at a lower level.
 		"""
-		import comtypes
+		if sys.platform == "win32":
+			import comtypes
 
 		if exc_info is True:
 			exc_info = sys.exc_info()
@@ -358,7 +362,8 @@ class Logger(logging.Logger):
 				)
 			)
 			or (
-				isinstance(exc, comtypes.COMError)
+				sys.platform == "win32"
+				and isinstance(exc, comtypes.COMError)
 				and (
 					exc.hresult
 					in (
@@ -448,11 +453,22 @@ class RemoteHandler(logging.Handler):
 
 class FileHandler(logging.FileHandler):
 	def handle(self, record):
+		if sys.platform != "win32":
+			# CRITICAL's sound on Windows is the system's own beep, a second route to the speakers
+			# that Linux does not take, so on Linux it has none.
+			if logging.ERROR <= record.levelno < logging.CRITICAL:
+				logSupport.requestErrorSound()
+			return super().handle(record)
 		if record.levelno >= logging.CRITICAL:
 			winsound.MessageBeep(winsound.MB_ICONHAND)
 		elif record.levelno >= logging.ERROR and shouldPlayErrorSound():
 			getOnErrorSoundRequested().notify()
 		return super().handle(record)
+
+	def handleError(self, record: logging.LogRecord) -> None:
+		if sys.platform == "win32":
+			return super().handleError(record)
+		logSupport.reportUnwritableRecord(record)
 
 
 class Formatter(logging.Formatter):
@@ -478,6 +494,9 @@ class Formatter(logging.Formatter):
 		since it causes a crash under some versions of Universal CRT when Python locale
 		is set to a Unicode one (#12160, Python issue 36792)
 		"""
+		if sys.platform != "win32":
+			# The crash is in Windows' C runtime; glibc's localtime is safe.
+			return super().formatTime(record, datefmt)
 		timeAsFileTime = winKernel.time_tToFileTime(record.created)
 		timeAsSystemTime = winBindings.kernel32.SYSTEMTIME()
 		winKernel.FileTimeToSystemTime(timeAsFileTime, timeAsSystemTime)
@@ -531,6 +550,8 @@ logHandler: logging.Handler | None = None
 
 
 def _getDefaultLogFilePath():
+	if sys.platform != "win32":
+		return os.path.join(logSupport.stateDirectory(), "nvda.log")
 	if NVDAState.isRunningAsSource():
 		return os.path.join(globalVars.appDir, "nvda.log")
 	else:
@@ -656,6 +677,8 @@ def initialize(shouldDoRemoteLogging=False):
 				globalVars.appArgs.logFileName = None
 				logHandler = logging.NullHandler()
 				log.error("Faile to open log file, redirecting to standard output")
+			if sys.platform != "win32" and globalVars.appArgs.logFileName:
+				logSupport.enableCrashDump(os.path.dirname(globalVars.appArgs.logFileName))
 			logLevel = globalVars.appArgs.logLevel
 			if globalVars.appArgs.debugLogging:
 				logLevel = Logger.DEBUG
