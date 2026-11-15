@@ -103,6 +103,8 @@ def test_sweepMatchesAllowedFailures(tmp_path):
 		report.append("listed as allowed to fail, but now import; remove them:\n" + "\n".join(stale))
 	if missing:
 		report.append("listed as allowed to fail, but no such module exists:\n" + "\n".join(missing))
+	if result["windowsModulesLoaded"]:
+		report.append(f"importing these put winreg, msvcrt or _winapi in sys.modules: {result['windowsModulesLoaded']}")
 	assert not report, "\n\n".join(report)
 	print(f"{len(imported)} modules import, {len(failed)} are allowed to fail")
 

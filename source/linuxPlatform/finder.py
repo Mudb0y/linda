@@ -7,7 +7,6 @@ else. Each name's file sits at the same dotted path under replacements/ or stand
 """
 
 import importlib.abc
-import importlib.machinery
 import importlib.util
 import os
 import sys
@@ -97,7 +96,6 @@ class PlatformFinder(importlib.abc.MetaPathFinder):
 		return importlib.util.spec_from_file_location(
 			fullname,
 			location,
-			loader=importlib.machinery.SourceFileLoader(fullname, location),
 			submodule_search_locations=[] if isPackage else None,
 		)
 

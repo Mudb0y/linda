@@ -8,6 +8,8 @@ test's job.
 
 import ast
 import builtins
+import importlib
+import importlib.util
 import io
 import json
 import os
@@ -22,6 +24,8 @@ SOURCE = os.path.join(ROOT, "source")
 _protected = (os.path.join(SOURCE, ""), os.path.join(ROOT, "tests", "unit", ""))
 writeViolations: list[str] = []
 configDir: str | None = None
+#: The standard library changes behaviour when any of these imports.
+neverImportable = frozenset({"winreg", "msvcrt", "_winapi"})
 
 #: Modules the sweep never imports, because importing them does something other than define them.
 notImported = {
@@ -49,8 +53,10 @@ def _auditHook(event: str, args: tuple) -> None:
 			paths = (path,)
 	elif event in ("os.mkdir", "os.remove", "os.rmdir", "os.truncate", "os.chmod", "os.utime", "shutil.rmtree"):
 		paths = (args[0],)
-	elif event in ("os.rename", "os.replace", "os.link", "os.symlink", "shutil.copyfile", "shutil.move"):
+	elif event in ("os.rename", "os.replace", "shutil.move"):
 		paths = args[:2]
+	elif event in ("os.link", "os.symlink", "shutil.copyfile"):
+		paths = (args[1],)
 	for path in paths:
 		if _isProtected(path):
 			writeViolations.append(f"{event} {path!r}")
@@ -59,6 +65,7 @@ def _auditHook(event: str, args: tuple) -> None:
 
 def prepare() -> None:
 	"""bootstrap.install() and the preconditions nvda.pyw and core.main establish before imports."""
+	global configDir
 	sys.dont_write_bytecode = True
 	sys.addaudithook(_auditHook)
 	sys.path.insert(0, SOURCE)
@@ -74,7 +81,6 @@ def prepare() -> None:
 
 	globalVars.appDir = SOURCE
 	globalVars.appPid = os.getpid()
-	global configDir
 	globalVars.appArgs.configPath = configDir = tempfile.mkdtemp(prefix="nvda-config-")
 	import config
 	import winKernel
@@ -199,14 +205,14 @@ def _importInChild(module: str, timeout: int) -> dict:
 		os.close(readFd)
 		signal.alarm(timeout)
 		sys.stdout = sys.stderr = io.StringIO()
+		del writeViolations[:]
 		try:
-			importlib = __import__("importlib")
 			importlib.import_module(module)
 			result = {"status": "ok"}
 		except BaseException as e:
 			result = {"status": "fail", **_failure(e)}
-		if writeViolations:
-			result["writeViolations"] = writeViolations
+		result["writeViolations"] = writeViolations
+		result["windowsModulesLoaded"] = sorted(neverImportable & set(sys.modules))
 		with os.fdopen(writeFd, "w") as pipe:
 			json.dump(result, pipe)
 		os._exit(0)
@@ -225,24 +231,26 @@ def runSweep() -> dict:
 	import threading
 
 	if threading.active_count() != 1:
-		return {"error": f"cannot fork a clean child: {threading.active_count()} threads are running"}
+		raise RuntimeError(f"cannot fork a clean child: {threading.active_count()} threads are running")
 	results = {}
+	windowsModulesLoaded = {}
 	for module in allSourceModules():
 		if module in notImported:
 			results[module] = {"status": "notImported", "reason": notImported[module]}
 			continue
-		results[module] = _importInChild(module, timeout=60)
-	return {"results": results}
+		result = results[module] = _importInChild(module, timeout=60)
+		writeViolations.extend(result.pop("writeViolations", ()))
+		if loaded := result.pop("windowsModulesLoaded", None):
+			windowsModulesLoaded[module] = loaded
+	return {"results": results, "windowsModulesLoaded": windowsModulesLoaded}
 
 
 def runHazard(name: str) -> dict:
 	import ctypes
 
 	if name == "windowsModulesAbsent":
-		import importlib.util
-
 		found = {}
-		for module in ("winreg", "msvcrt", "_winapi"):
+		for module in sorted(neverImportable):
 			found[module] = {
 				"inSysModules": module in sys.modules,
 				"findable": importlib.util.find_spec(module) is not None,
