@@ -6,7 +6,8 @@
 # into OUTDIR. Build the bench first: cargo build --release in engine/.
 # BENCH_METHODS, a comma-separated list of method labels such as walk-64 or
 # getitems, limits a fetch run to those methods. BENCH_COALESCE_MS makes a
-# mirror run collect signals for that long before applying a batch.
+# mirror run collect signals for that long before applying a batch, and
+# BENCH_INTERVAL_MS sets the time between the mutation page's changes.
 set -euo pipefail
 
 if [ -z "${RIG_PID:-}" ]; then
@@ -33,7 +34,7 @@ outdir=$(cd "$outdir" && pwd)
 # The mutation page's schedule. The bench watches from its own start, which is
 # after the page loaded, until the last change plus time to settle.
 start_ms=10000
-interval_ms=500
+interval_ms=${BENCH_INTERVAL_MS:-500}
 steps=48
 watch_ms=$((start_ms + (steps + 2) * interval_ms + 5000))
 
