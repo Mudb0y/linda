@@ -38,6 +38,7 @@ from ctypes.wintypes import (
 	RECT,
 )
 import re
+import sys
 from winAPI.winUser.constants import SystemMetrics
 import winBindings.kernel32
 import winBindings.gdi32
@@ -609,6 +610,11 @@ def touchSupported(debugLog: bool = False) -> bool:
 	"""Returns if the system and current NVDA session supports touchscreen interaction.
 	@param debugLog: Whether to log additional details about touch support to the NVDA log.
 	"""
+	if sys.platform != "win32":
+		# Touch input on Linux would come from libinput, and nothing reads it yet.
+		if debugLog:
+			log.debugWarning("Touch input is not implemented on Linux")
+		return False
 	if not config.isInstalledCopy() and not config.isAppX:
 		if debugLog:
 			log.debugWarning("Touch only supported on installed copies")

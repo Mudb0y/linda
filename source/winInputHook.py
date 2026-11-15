@@ -8,6 +8,7 @@ When working on this file, consider moving to winAPI.
 """
 
 import threading  # noqa: I001
+import sys
 from ctypes import (
 	Structure,
 	byref,
@@ -23,6 +24,9 @@ import winBindings.user32
 import watchdog
 import winUser
 from winBindings import user32, kernel32
+
+if sys.platform != "win32":
+	from linuxPlatform import inputHook as _linuxInputHook
 
 
 # Some Windows constants
@@ -130,6 +134,10 @@ def hookThreadFunc():
 
 def initialize():
 	global hookThread, hookThreadRefCount
+	if sys.platform != "win32":
+		# A capture layer takes the hooks' place on Linux, delivering events to the same callbacks.
+		_linuxInputHook.initialize()
+		return
 	hookThreadRefCount += 1
 	if hookThreadRefCount == 1:
 		hookThread = threading.Thread(
@@ -152,6 +160,9 @@ def setCallbacks(keyUp=None, keyDown=None, mouse=None):
 
 def terminate():
 	global hookThread, hookThreadRefCount
+	if sys.platform != "win32":
+		_linuxInputHook.terminate()
+		return
 	if not hookThread:
 		raise RuntimeError("winInputHook not running")
 	hookThreadRefCount -= 1

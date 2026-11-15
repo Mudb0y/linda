@@ -5,6 +5,7 @@
 
 from dataclasses import dataclass  # noqa: I001
 import time
+import sys
 import wx
 import gui
 import tones
@@ -252,8 +253,13 @@ def executeMouseMoveEvent(x, y):
 
 def initialize():
 	global curMousePos, scrBmpObj, _shapeTimer
-	scrBmpObj = screenBitmap.ScreenBitmap(1, 1)
-	(x, y) = winUser.getCursorPos()
+	if sys.platform == "win32":
+		scrBmpObj = screenBitmap.ScreenBitmap(1, 1)
+		(x, y) = winUser.getCursorPos()
+	else:
+		# Linux has no GDI screen capture, which only the brightness of audio coordinates reads, so
+		# scrBmpObj stays None. The X server knows where the pointer is.
+		(x, y) = wx.GetMousePosition().Get()
 	desktopObject = api.getDesktopObject()
 	try:
 		mouseObject = desktopObject.objectFromPoint(x, y)
@@ -284,9 +290,10 @@ def pumpAll():
 
 def terminate():
 	global scrBmpObj, _shapeTimer
-	if isLeftMouseButtonLocked():
+	# NVDA locks a button by injecting a press, which Linux cannot do yet, so none can be locked.
+	if sys.platform == "win32" and isLeftMouseButtonLocked():
 		unlockLeftMouseButton()
-	if isRightMouseButtonLocked():
+	if sys.platform == "win32" and isRightMouseButtonLocked():
 		unlockRightMouseButton()
 	scrBmpObj = None
 	winInputHook.terminate()

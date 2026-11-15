@@ -127,6 +127,11 @@ source/hwPortUtils.py
 source/installer.py
   import safety: winreg imported only on Windows, after the module's other
   imports; on Linux winreg is absent, so installing raises NameError
+source/keyboardHandler.py
+  Linux runtime: the sticky keys flags come from linuxPlatform.inputHook,
+  where a capture layer will report them, and a single character in a key
+  name is looked up there without the live layout, which answers for lower
+  case letters only and raises NoLinuxImplementation otherwise
 source/languageHandler.py
   Linux: the interface language, the C locale, language names and the
   measurement system come from linuxPlatform.posixLocale, which reads the
@@ -161,6 +166,11 @@ source/mathPres/__init__.py
   packaged, and core.main calls initialize() at every start. On Windows a
   MathCAT that fails to import now gives the same warning instead of
   stopping NVDA's start-up
+source/mouseHandler.py
+  Linux runtime: initialize takes the pointer position from wx and makes no
+  GDI screen bitmap, so scrBmpObj stays None and audio coordinates cannot
+  read brightness; terminate does not ask whether NVDA locked a button,
+  which it cannot do on Linux
 source/oleacc.py
   import safety: on Linux the oleacc type library's names come from the
   comInterfaces.Accessibility stand-in, since comtypes.client.GetModule
@@ -208,6 +218,9 @@ source/textUtils/uniscribe.py
   UTF-16 offsets: on Linux the buffer splitAtCharacterBoundaries passes to
   calculateCharacterBoundaries and slices with its offsets is a
   linuxPlatform.utf16.Utf16Buffer, for the same reason as textUtils/icu.py
+source/touchHandler.py
+  Linux runtime: touchSupported() is False, as nothing reads touch input on
+  Linux yet
 source/utils/mmdevice.py
   output devices, workstream A5: on Linux getOutputDevices lists the
   devices of the audio sink in linuxPlatform.audioOutput instead of
@@ -221,6 +234,10 @@ source/winAPI/messageWindow.py
   Linux: _MessageWindow creates no window and its destroy() does nothing, as
   no other process sends NVDA window messages there; core.main still creates
   and destroys it
+source/winInputHook.py
+  Linux runtime: initialize and terminate go to linuxPlatform.inputHook,
+  which installs no hook; a capture layer will deliver events there to the
+  callbacks set here
 source/winVersion.py
   import safety: winreg imported only on Windows, after the module's other
   imports; getWinVer() returns 0.0.0 named after the Linux kernel release,

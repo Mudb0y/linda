@@ -9,6 +9,7 @@
 import ctypes  # noqa: I001
 import time
 import re
+import sys
 import typing
 from typing import (
 	Optional,
@@ -36,6 +37,9 @@ import threading
 import winBindings.kernel32
 import winKernel
 from winBindings import user32
+
+if sys.platform != "win32":
+	from linuxPlatform import inputHook as _linuxInputHook
 
 if typing.TYPE_CHECKING:
 	from NVDAObjects import NVDAObject
@@ -238,7 +242,10 @@ def internal_keyDownEvent(vkCode: int, scanCode: int, extended: bool, injected: 
 			return True
 
 		keyCounter += 1
-		stickyKeysFlags = winUser.getSystemStickyKeys().dwFlags
+		if sys.platform == "win32":
+			stickyKeysFlags = winUser.getSystemStickyKeys().dwFlags
+		else:
+			stickyKeysFlags = _linuxInputHook.stickyKeysFlags
 		if stickyNVDAModifier and not stickyKeysFlags & winUser.SKF_STICKYKEYSON:
 			# Sticky keys has been disabled,
 			# so clear the sticky NVDA modifier.
@@ -836,7 +843,10 @@ class KeyboardInputGesture(inputCore.InputGesture):
 				vk, ext = getNVDAModifierKeys()[0]
 			elif len(keyName) == 1:
 				ext = False
-				requiredMods, vk = winUser.VkKeyScanEx(keyName, getInputHkl())
+				if sys.platform == "win32":
+					requiredMods, vk = winUser.VkKeyScanEx(keyName, getInputHkl())
+				else:
+					requiredMods, vk = _linuxInputHook.vkKeyScan(keyName)
 				if requiredMods & 1:
 					keys.append((winUser.VK_SHIFT, False))
 				if requiredMods & 2:
