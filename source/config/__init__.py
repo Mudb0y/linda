@@ -18,8 +18,6 @@ from addonAPIVersion import BACK_COMPAT_TO
 import globalVars
 import os
 import sys
-if sys.platform == "win32":
-	import winreg
 import errno
 import itertools
 import contextlib
@@ -50,6 +48,9 @@ from .featureFlag import (
 from .registry import RegistryKey as _RegistryKey
 import NVDAState
 from NVDAState import WritePaths
+
+if sys.platform == "win32":
+	import winreg
 
 #: True if NVDA is running as a Windows Store Desktop Bridge application
 isAppX = False

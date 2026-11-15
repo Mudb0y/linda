@@ -12,7 +12,6 @@ from ctypes import (
 	windll,
 )
 from os import path
-import sys
 from typing import TYPE_CHECKING
 
 import braille
@@ -85,11 +84,10 @@ class MathCATInteraction(mathPres.MathInteractionNVDAObject):
 	# MathML is put on the clipboard using the two formats below (defined by MathML spec)
 	# We use both formats because some apps may only use one or the other
 	# Note: filed https://github.com/nvaccess/nvda/issues/13240 to make this usable outside of MathCAT
-	if sys.platform == "win32":
-		CF_MathML: int = windll.user32.RegisterClipboardFormatW("MathML")
-		CF_MathML_Presentation: int = windll.user32.RegisterClipboardFormatW(
-			"MathML Presentation",
-		)
+	CF_MathML: int = windll.user32.RegisterClipboardFormatW("MathML")
+	CF_MathML_Presentation: int = windll.user32.RegisterClipboardFormatW(
+		"MathML Presentation",
+	)
 
 	def __init__(
 		self,

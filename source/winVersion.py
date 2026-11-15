@@ -14,12 +14,13 @@ from typing import Any  # noqa: I001
 import sys
 import os
 import functools
-if sys.platform == "win32":
-	import winreg
 import platform
 import NVDAState
 from config.registry import RegistryKey
 from logHandler import log
+
+if sys.platform == "win32":
+	import winreg
 
 
 # Records a mapping between Windows builds and release names.

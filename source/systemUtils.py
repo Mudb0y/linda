@@ -31,8 +31,6 @@ import winBindings.kernel32
 import winBindings.shell32
 import winKernel
 import sys
-if sys.platform == "win32":
-	import winreg
 import shellapi
 import winUser
 import functools
@@ -40,6 +38,9 @@ import shlobj
 from logHandler import log
 from NVDAState import WritePaths
 from winBindings import advapi32, user32
+
+if sys.platform == "win32":
+	import winreg
 
 
 @functools.lru_cache(maxsize=1)

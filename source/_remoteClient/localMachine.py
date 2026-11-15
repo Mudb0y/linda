@@ -22,8 +22,6 @@ from enum import IntEnum, nonmember  # noqa: I001
 import os
 from typing import Any
 import sys
-if sys.platform == "win32":
-	import winreg
 
 import winBindings.sas
 import api
@@ -44,6 +42,9 @@ from logHandler import log
 from utils.security import isRunningOnSecureDesktop
 
 from . import cues, input
+
+if sys.platform == "win32":
+	import winreg
 
 
 class SoftwareSASGeneration(IntEnum):

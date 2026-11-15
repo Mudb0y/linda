@@ -8,8 +8,6 @@ from os import (  # noqa: I001
 )
 import os
 import sys
-if sys.platform == "win32":
-	from os import startfile
 from typing import (
 	cast,
 )
@@ -57,6 +55,9 @@ from .addonList import (
 	AddonListItemVM,
 	AddonListVM,
 )
+
+if sys.platform == "win32":
+	from os import startfile
 
 
 class AddonStoreVM:

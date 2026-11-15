@@ -9,6 +9,7 @@ from collections.abc import Callable, Generator
 import os
 import itertools
 import collections
+import sys
 import winsound
 import time
 import weakref
@@ -2629,7 +2630,11 @@ class BrowseModeDocumentTreeInterceptor(
 		2. Then we drop all control fields, leaving only formatChange fields and text.
 		@raise RuntimeError: found unknown command in getTextWithFields()
 		"""
-		from NVDAObjects.UIA.wordDocument import WordBrowseModeDocument
+		if sys.platform == "win32":
+			from NVDAObjects.UIA.wordDocument import WordBrowseModeDocument
+		else:
+			# Linux has no UI Automation; isinstance against an empty tuple is always False.
+			WordBrowseModeDocument = ()
 		from NVDAObjects.window.winword import WordDocumentTreeInterceptor
 
 		microsoftWordMode: bool = isinstance(self, (WordBrowseModeDocument, WordDocumentTreeInterceptor))

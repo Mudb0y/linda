@@ -4,7 +4,6 @@
 # For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
 import time  # noqa: I001
-import sys
 from itertools import count, takewhile
 from queue import Empty, Queue
 from threading import Event, Thread
@@ -19,12 +18,10 @@ from logHandler import log
 import bleak
 from bleak.backends.device import BLEDevice
 from bleak.backends.characteristic import BleakGATTCharacteristic
-if sys.platform == "win32":
-	from bleak.backends.winrt.client import WinRTClientArgs
+from bleak.args.winrt import WinRTClientArgs
 
 CONNECT_TIMEOUT_SECONDS: int = 2
-if sys.platform == "win32":
-	WINRT_CLIENT_ARGS = WinRTClientArgs(use_cached_services=True)
+WINRT_CLIENT_ARGS = WinRTClientArgs(use_cached_services=True)
 
 
 @requiresBackgroundThread

@@ -9,8 +9,6 @@ import itertools
 import math
 import typing
 import sys
-if sys.platform == "win32":
-	import winreg
 from ctypes.wintypes import DWORD, WCHAR
 
 import config
@@ -56,6 +54,9 @@ from winBindings.setupapi import (
 	SetupDiOpenDevRegKey as _SetupDiOpenDevRegKey,
 	_Dummy,
 )
+
+if sys.platform == "win32":
+	import winreg
 
 
 def _ValidHandle(value):

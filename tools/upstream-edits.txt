@@ -36,49 +36,85 @@ miscDeps
   submodule link, see .gitmodules
 source/NVDAObjects/window/winword.py
   import safety: RegisterWindowMessage at module level runs only on Windows;
-  documentNavigation.paragraphHelper, which kept code uses, imports winword
+  documentNavigation.paragraphHelper, which kept code uses, imports winword.
+  On Linux wm_winword_expandToLine is absent; nothing reads it
 source/NVDAState.py
-  import safety: winreg imported only on Windows; coreArchLibPath knows
-  linux-x86_64 instead of raising for it
+  import safety: winreg imported only on Windows, after the module's other
+  imports so that upstream's import block stays whole. On Linux winreg is
+  absent, so each registry reader here raises NameError when called,
+  including _forceSecureModeEnabled and _serviceDebugEnabled, which
+  nvda.pyw calls at start-up; their Linux answers are A2's to decide
 source/_remoteClient/localMachine.py
-  import safety: winreg imported only on Windows, and the SAS policy's
-  registry key class attribute defined only there
+  import safety: winreg imported only on Windows, after the module's other
+  imports; the SAS policy's registry key class attribute is defined only
+  there, so on Linux SoftwareSASGeneration.KEY is absent and reading the SAS
+  policy raises AttributeError
 source/_remoteClient/urlHandler.py
-  import safety: winreg imported only on Windows; the one annotation that
-  names it is quoted so it is not evaluated at import
+  import safety: winreg imported only on Windows, after the module's other
+  imports; the one annotation that names it is quoted so it is not
+  evaluated at import. On Linux winreg is absent, so registering the URL
+  handler raises NameError
+source/browseMode.py
+  import safety when running: _extractStyles imports the UI Automation Word
+  document class only on Windows; Linux has no UI Automation and uses an
+  empty tuple, which no isinstance test matches
 source/config/__init__.py
-  import safety: winreg imported only on Windows; isInstalledCopy() is
-  False on Linux, because NVDASettingsDialog's class body reaches it at
-  import through touchHandler.touchSupported()
+  import safety: winreg imported only on Windows, after the module's other
+  imports, so on Linux the registry readers here raise NameError.
+  isInstalledCopy() is False on Linux, because NVDASettingsDialog's class
+  body reaches it at import through touchHandler.touchSupported(). That
+  answer is provisional and A2's to decide: it also turns off audio ducking,
+  touch, the installed-only settings, parts of the update check and part of
+  the remote client
 source/config/registry.py
-  import safety: winreg imported only on Windows
+  import safety: winreg imported only on Windows, after the module's other
+  imports; on Linux winreg is absent, so its registry helpers raise NameError
+source/documentNavigation/paragraphHelper.py
+  import safety when running: after moving the caret, both paragraph moves
+  import the UI Automation text class only on Windows; Linux has no UI
+  Automation and uses an empty tuple, which no isinstance test matches
 source/gui/addonStoreGui/viewModels/store.py
-  import safety: os.startfile imported only on Windows
+  import safety: os.startfile imported only on Windows, after the module's
+  other imports; on Linux startfile is absent, so opening an add-on's home
+  page, source, scan results or downloaded file raises NameError
 source/hwIo/ble/_io.py
-  import safety: bleak's WinRT backend imported and used at module level
-  only on Windows
+  import safety: WinRTClientArgs comes from bleak.args.winrt, where bleak 3
+  defines it on every platform and where bleak says to import it from, not
+  from bleak's WinRT backend, which imports only on Windows
 source/hwPortUtils.py
-  import safety: winreg imported only on Windows
+  import safety: winreg imported only on Windows, after the module's other
+  imports; on Linux winreg is absent, so the port listing functions that
+  read the registry raise NameError
 source/installer.py
-  import safety: winreg imported only on Windows
+  import safety: winreg imported only on Windows, after the module's other
+  imports; on Linux winreg is absent, so installing raises NameError
 source/louisHelper.py
   import safety: os.add_dll_directory around the louis import only on
   Windows
-source/mathPres/MathCAT/MathCAT.py
-  import safety: RegisterClipboardFormat in MathCATInteraction's class body
-  runs only on Windows
+source/mathPres/__init__.py
+  import safety when running: initialize() imports MathCAT inside the try
+  that already turns a MathCAT that cannot start into the warning "MathCAT
+  not available.". On Linux that import fails, as libmathcat_py is not
+  packaged, and core.main calls initialize() at every start. On Windows a
+  MathCAT that fails to import now gives the same warning instead of
+  stopping NVDA's start-up
 source/oleacc.py
   import safety: on Linux the oleacc type library's names come from the
   comInterfaces.Accessibility stand-in, since comtypes.client.GetModule
   cannot run
 source/systemUtils.py
-  import safety: winreg imported only on Windows
+  import safety: winreg imported only on Windows, after the module's other
+  imports; on Linux winreg is absent, so its registry readers raise
+  NameError
 source/utils/security.py
   import safety: isRunningOnSecureDesktop() is False on Linux, because
-  NVDASettingsDialog's class body calls it at import
+  NVDASettingsDialog's class body calls it at import. That answer is
+  provisional and A2's to decide
 source/winVersion.py
-  import safety: winreg imported only on Windows; getWinVer() returns
-  0.0.0 with a Windows-spelled architecture on Linux, because eventHandler
-  and winAPI.constants call it at import
+  import safety: winreg imported only on Windows, after the module's other
+  imports; getWinVer() returns 0.0.0 with a Windows-spelled architecture on
+  Linux, because eventHandler and winAPI.constants call it at import
 source/windowUtils.py
-  import safety: GetModuleHandle at module level runs only on Windows
+  import safety: GetModuleHandle at module level runs only on Windows; on
+  Linux appInstance is absent, so creating a CustomWindow, such as
+  winAPI.messageWindow's, raises NameError

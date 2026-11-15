@@ -23,10 +23,11 @@ Main Functions:
 
 import os
 import sys
-if sys.platform == "win32":
-	import winreg
 
 from config.registry import RegistryKey, _deleteKeyAndSubkeys
+
+if sys.platform == "win32":
+	import winreg
 
 
 def _createRegistryStructure(keyHandle: "winreg.HKEYType", data: dict):

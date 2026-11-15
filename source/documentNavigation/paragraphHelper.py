@@ -14,6 +14,7 @@ from NVDAObjects.window.winword import BrowseModeWordDocumentTextInfo
 from displayModel import EditableTextDisplayModelTextInfo
 from collections.abc import Generator
 from enum import IntEnum
+import sys
 
 MAX_LINES = 250  # give up after searching this many lines
 PREFERRED_CHUNK_SIZE = 1024  # preferred size of chunk sent to synthesizer at one time
@@ -197,7 +198,11 @@ def moveToSingleLineBreakParagraph(
 	moved = _moveTextInfoToSingleLineBreakParagraph(nextParagraph, ti)
 	if moved:
 		ti.updateCaret()
-		from NVDAObjects.UIA import UIATextInfo
+		if sys.platform == "win32":
+			from NVDAObjects.UIA import UIATextInfo
+		else:
+			# Linux has no UI Automation; isinstance against an empty tuple is always False.
+			UIATextInfo = ()
 
 		if isinstance(ti, UIATextInfo):
 			# Updating caret position in UIATextInfo does not scroll the display. Force it to scroll here.
@@ -288,7 +293,11 @@ def moveToMultiLineBreakParagraph(
 	moved = _moveTextInfoToMultiLineBreakParagraph(nextParagraph, ti)
 	if moved:
 		ti.updateCaret()
-		from NVDAObjects.UIA import UIATextInfo
+		if sys.platform == "win32":
+			from NVDAObjects.UIA import UIATextInfo
+		else:
+			# Linux has no UI Automation; isinstance against an empty tuple is always False.
+			UIATextInfo = ()
 
 		if isinstance(ti, UIATextInfo):
 			# Updating caret position in UIATextInfo does not scroll the display. Force it to scroll here.
