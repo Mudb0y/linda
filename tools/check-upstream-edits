@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Every change to a file that came from NVDA costs something at each upstream
+# merge, so each one is listed in tools/upstream-edits.txt with its reason.
+# This fails when that list and the tree disagree.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+ledger=tools/upstream-edits.txt
+echo "checking edits to upstream files against $ledger"
+
+actual=$(git diff --no-renames --name-only --diff-filter=MD upstream -- . | sort)
+listed=$(grep -E '^[^[:space:]#]' "$ledger" | sort)
+unlisted=$(comm -23 <(printf '%s\n' "$actual") <(printf '%s\n' "$listed"))
+stale=$(comm -13 <(printf '%s\n' "$actual") <(printf '%s\n' "$listed"))
+
+status=0
+if [ -n "$unlisted" ]; then
+	echo "edited or deleted but not listed:" >&2
+	printf '%s\n' "$unlisted" >&2
+	status=1
+fi
+if [ -n "$stale" ]; then
+	echo "listed but identical to upstream:" >&2
+	printf '%s\n' "$stale" >&2
+	status=1
+fi
+if [ "$status" -eq 0 ]; then
+	echo "$(printf '%s\n' "$actual" | grep -c .) upstream files differ, all listed"
+fi
+exit "$status"

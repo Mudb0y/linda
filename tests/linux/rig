@@ -86,12 +86,18 @@ export GSETTINGS_BACKEND=memory
 export GNOME_ACCESSIBILITY=1
 export QT_ACCESSIBILITY=1
 export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
+# The rig hides everything but the checkout itself, and several runs share
+# that; bytecode caches written into it by one would be read by the others.
+export PYTHONDONTWRITEBYTECODE=1
 export RIG_PID=$$
 
 # Its own session, so that cleanup can signal everything the command started
 # as one process group without touching anything else on the machine.
+# -noreset, because the server otherwise resets when its first client leaves
+# and drops the root window property the accessibility bus is advertised on,
+# which is how clients find that bus on a real desktop.
 setsid dbus-run-session -- \
-	xvfb-run -a -s "-screen 0 1280x1024x24 -nolisten tcp" \
+	xvfb-run -a -s "-screen 0 1280x1024x24 -nolisten tcp -noreset" \
 	"$0" --inside "$@" &
 session=$!
 status=0

@@ -8,9 +8,11 @@
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
 
-      # NVDA pins Python 3.13 and wxPython 4.3. Staying on both keeps the
-      # imported code, and the add-ons written against it, on the interpreter
-      # they were tested with rather than on whatever python3 currently is.
+      # NVDA pins Python 3.13. Staying on it keeps the imported code, and the
+      # add-ons written against it, on the interpreter they were tested with
+      # rather than on whatever python3 currently is. wxPython is 4.3 where
+      # this NVDA release pins 4.2: under 4.2 on GTK a list control reaches
+      # AT-SPI as an empty panel, so its items cannot be read at all.
       python = pkgs.python313.withPackages (ps: with ps; [
         bleak
         configobj
