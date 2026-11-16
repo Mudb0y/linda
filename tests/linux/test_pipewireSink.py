@@ -1266,7 +1266,10 @@ def test_nvdasSoundsAreHeardAtTheirLevelAndARepeatStartsAtOnce(pipewire: Pipewir
 			off = 10 * math.log10(energy(heard) / expected)
 			levels[f"{play['name']} {name}"] = round(off, 2)
 			heardPeak = max(abs(x) for x in heard)
-			if abs(off) > 0.5 or heardPeak > peak * 1.12 + 0.01:
+			# A wrong gain or format is 6 dB out or noise. Within a decibel leaves room for what
+			# PipeWire's resampler filters out above about 10 kHz of a 22050 Hz file: textError.wav,
+			# a third of whose energy lies above 9 kHz, comes out half a decibel down.
+			if abs(off) > 1 or heardPeak > peak * 1.12 + 0.01:
 				failures.append(
 					f"{play['name']} {name}: {off:+.2f} dB, peak {heardPeak:.3f} against {peak:.3f}"
 				)
