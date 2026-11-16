@@ -912,6 +912,11 @@ class SpinButton(EditableTextWithoutAutoSelectDetection, AtSpi):
 		# Said as its value on focus, as Windows' up-down controls are, not as the text of a field.
 		return False
 
+	def script_caret_moveByLine(self, gesture) -> None:
+		# Up, Down and the page keys change the number, which its value change then speaks once; read
+		# as a line too, it would be spoken twice.
+		gesture.send()
+
 	def _get_states(self):
 		states = super().states
 		states.discard(State.EDITABLE)
