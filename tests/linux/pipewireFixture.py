@@ -11,7 +11,7 @@ signals only processes it started itself.
 		done = harness.runChild(tmp_path, code, env=pipewire.childEnv())
 		assertCleanThroughPipewire(done)
 
-or, as a pytest fixture, import runningPipewire from here and take a parameter named pipewire.
+or, as a pytest fixture, which tests/linux/conftest.py registers, take a parameter named pipewire.
 """
 
 import json
@@ -66,21 +66,25 @@ def requireVariables() -> None:
 def assertCleanThroughPipewire(done: harness.ChildResult, *, ignoring: Collection[str] = ()) -> None:
 	"""A child that played through the PipeWire sink was clean, apart from the checks in ignoring.
 
-	Playing maps PipeWire's client library and the modules and plugins it loads, which the harness's
-	sound check counts. That check is replaced here by a narrower one: the only sound libraries mapped
-	are libpwsink and files of the PipeWire package the fixture's daemon comes from, and nothing was
-	loaded as a sound library from Python, opened as a sound device or connected to as a sound server.
+	Playing maps PipeWire's client library and the client modules it loads, which the harness's sound
+	check counts. That check is replaced here by a narrower one: the only sound libraries mapped are
+	libpipewire-0.3 and its modules, from the PipeWire package the fixture's daemon comes from, and
+	nothing was loaded as a sound library from Python, opened as a sound device or connected to as a
+	sound server. Anything else of that package, such as its JACK or PulseAudio libraries, still counts.
 	"""
 	done.assertClean(ignoring={"audio", *ignoring})
-	library = os.path.realpath(os.environ["BASEDREADER_PWSINK_LIB"])
 	pipewireLib = Path(os.path.realpath(os.environ["BASEDREADER_PIPEWIRE_BIN"])).parent / "lib"
 	unexpected = []
 	for what in done.audio:
-		how, _, path = what.partition(" ")
-		if how == "mapped" and (path == library or Path(path).is_relative_to(pipewireLib)):
+		how, _, mapped = what.partition(" ")
+		path = Path(mapped)
+		if how == "mapped" and (
+			(path.parent == pipewireLib and path.name.startswith("libpipewire-0.3.so"))
+			or (path.parent == pipewireLib / "pipewire-0.3" and path.name.startswith("libpipewire-module-"))
+		):
 			continue
 		unexpected.append(what)
-	assert not unexpected, "sound reached other than through libpwsink and PipeWire's client:\n" + "\n".join(
+	assert not unexpected, "sound reached other than through PipeWire's client library:\n" + "\n".join(
 		unexpected,
 	)
 
@@ -373,7 +377,7 @@ class Monitor:
 
 @pytest.fixture(name="pipewire")
 def runningPipewire(tmp_path: Path) -> Iterator[PipewireFixture]:
-	"""A running daemon with WirePlumber and both sinks, stopped after the test. Imported into a
-	test module, it gives tests that take a parameter named pipewire a PipewireFixture."""
+	"""A running daemon with WirePlumber and both sinks, stopped after the test, for every test that
+	takes a parameter named pipewire."""
 	with PipewireFixture(tmp_path / "pipewire") as fixture:
 		yield fixture

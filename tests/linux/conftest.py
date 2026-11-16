@@ -1,11 +1,13 @@
 """Stops a test run that was started outside tests/linux/rig, before any test is collected, fails a
-test that skips unless its skip is expected, and gives every test the launches fixture."""
+test that skips unless its skip is expected, and gives every test the launches fixture and, from
+pipewireFixture, the pipewire fixture."""
 
 from collections.abc import Iterator
 from pathlib import Path
 
 import harness
 import pytest
+from pipewireFixture import runningPipewire  # noqa: F401
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:

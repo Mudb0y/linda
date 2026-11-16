@@ -28,7 +28,7 @@ from typing import Self
 
 import harness
 import pytest
-from pipewireFixture import RATE, PipewireFixture, assertCleanThroughPipewire, runningPipewire  # noqa: F401
+from pipewireFixture import RATE, PipewireFixture, assertCleanThroughPipewire
 
 CRATE = harness.ROOT / "engine" / "crates" / "pwsink"
 WAVES = harness.SOURCE / "waves"
