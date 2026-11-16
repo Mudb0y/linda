@@ -651,6 +651,8 @@ def test_stopIsSilentAndStartIsHeardWithinTheQuantum(pipewire: PipewireFixture, 
 			""",
 			{**pipewire.childEnv(), **steps.env()},
 			params={"rounds": STOP_ROUNDS},
+			# A round at each of the four quanta and rates takes about 0.85 s.
+			timeout=60 + STOP_ROUNDS,
 		)
 	measured = {}
 	failures = []
