@@ -12,6 +12,7 @@
   at-spi2-core,
   gtk3,
   librsvg,
+  strace,
   python,
   louisTables,
   nvdaCldr,
@@ -27,6 +28,24 @@ let
   programs = {
     basedreader = [ ];
   };
+
+  # A caller's values for these would load code from outside the package into
+  # the screen reader: a host's alsa-lib or PipeWire's libjack through the
+  # loader, or a desktop's event-sound GTK module, which plays sounds through
+  # the sound server on its own. GTK finds a module the desktop's settings
+  # name, as GNOME's settings daemon names canberra-gtk-module while event
+  # sounds are on, only on GTK_PATH; its accessibility bridge it loads by
+  # itself.
+  callerVariablesCleared = [
+    "LD_LIBRARY_PATH"
+    "LD_PRELOAD"
+    "LD_AUDIT"
+    "PYTHONPATH"
+    "PYTHONHOME"
+    "GTK_PATH"
+    "GTK_MODULES"
+    "GTK3_MODULES"
+  ];
 
   wrapperEnv =
     runtimeEnv
@@ -109,11 +128,42 @@ stdenvNoCC.mkDerivation {
       makeWrapper ${python}/bin/python3 $out/bin/${name} \
         "''${gappsWrapperArgs[@]}" \
         ${lib.concatStringsSep " " (lib.mapAttrsToList (n: v: "--set-default ${n} ${lib.escapeShellArg v}") wrapperEnv)} \
-        --unset LD_LIBRARY_PATH --unset PYTHONPATH --unset PYTHONHOME \
+        ${lib.concatMapStringsSep " " (n: "--unset ${n}") callerVariablesCleared} \
         --add-flags "-I -B ${appDir}/basedreader.py" \
         ${lib.concatMapStrings (a: "--add-flags ${lib.escapeShellArg a} ") arguments}
     '') programs
   );
+
+  # Each wrapper, started with every cleared variable set, has its exec of
+  # Python failed by strace, which records the environment it was handed: so
+  # the check sees what the program would get without running it.
+  doInstallCheck = true;
+  nativeInstallCheckInputs = [ strace ];
+  installCheckPhase = ''
+    runHook preInstallCheck
+    for program in ${lib.escapeShellArgs (lib.attrNames programs)}; do
+      env ${lib.concatMapStringsSep " " (n: "${n}=/caller") callerVariablesCleared} \
+        strace -f -v -s 65536 -e trace=execve -e inject=execve:error=ENOENT:when=2 -o execve.log \
+        $out/bin/$program 2>/dev/null || true
+      if ! grep -F 'execve("${python}/bin/python3"' execve.log >python.log; then
+        echo "error: $program does not run ${python}/bin/python3"
+        exit 1
+      fi
+      for name in ${lib.escapeShellArgs callerVariablesCleared}; do
+        if grep -qF "\"$name=" python.log; then
+          echo "error: $program hands Python the caller's $name"
+          exit 1
+        fi
+      done
+      for setting in ${lib.escapeShellArgs (lib.mapAttrsToList (n: v: ''"${n}=${v}"'') wrapperEnv)}; do
+        if ! grep -qF "$setting" python.log; then
+          echo "error: $program does not hand Python $setting"
+          exit 1
+        fi
+      done
+    done
+    runHook postInstallCheck
+  '';
 
   passthru = { inherit programs; };
 
