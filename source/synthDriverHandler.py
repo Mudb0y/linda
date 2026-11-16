@@ -464,7 +464,7 @@ def getSynthList() -> list[tuple[str, str]]:
 	for loader, name, isPkg in pkgutil.iter_modules(synthDrivers.__path__):
 		if name.startswith("_"):
 			continue
-		if sys.platform == "linux" and name in _windowsOnlySynthDrivers and loader.path == _builtInDriversDir:
+		if sys.platform != "win32" and name in _windowsOnlySynthDrivers and loader.path == _builtInDriversDir:
 			log.debugWarning(f"Skipping synthesizer {name}, which runs only on Windows")
 			continue
 		try:
@@ -504,7 +504,7 @@ def getSynthInstance(name: str, asDefault: bool = False):
 # The synthDrivers that should be used by default.
 # The first that successfully initializes will be used when config is set to auto (I.e. new installs of NVDA).
 defaultSynthPriorityList = ["oneCore", "espeak", "silence"]
-if sys.platform == "linux":
+if sys.platform != "win32":
 	# oneCore is Windows only. Silence must not come first: auto would save it as the user's choice, and
 	# eSpeak would never take over once it loads. As a fallback it leaves the configuration on auto.
 	defaultSynthPriorityList = ["espeak", "silence"]

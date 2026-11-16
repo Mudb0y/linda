@@ -73,7 +73,7 @@ class SynthDriver(SynthDriver):
 
 	@classmethod
 	def check(cls):
-		if sys.platform == "linux":
+		if sys.platform != "win32":
 			# _espeak.initialize loads espeak.dll, which does not exist on Linux, so setSynth would fail.
 			return False
 		return True
