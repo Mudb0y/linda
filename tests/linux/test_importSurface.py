@@ -693,6 +693,14 @@ def test_refusedInstallChangesNothing(tmp_path: Path, condition: str, raised: st
 	assert result["findersAdded"] == 0
 
 
+def test_refusedWindowsCtypesInstallChangesNothing(tmp_path: Path):
+	"""windowsCtypes.install() called on its own refuses before it adds the first name, not partway
+	through; the name it refuses over is the one the condition put there."""
+	result = runProbe(tmp_path, "refuseWhen", "ctypesNameTaken", "windowsCtypes")
+	assert result["raised"] == ["RuntimeError", "RuntimeError"]
+	assert result["ctypesNames"] == ["HRESULT"]
+
+
 def test_installRefusesOffLinux(tmp_path: Path):
 	result = runProbe(tmp_path, "refuse")
 	assert result["raised"] == "RuntimeError"

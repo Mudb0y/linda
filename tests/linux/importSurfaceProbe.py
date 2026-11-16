@@ -1,6 +1,6 @@
 """One import-surface check, run in a fresh interpreter; test_importSurface.py starts it.
 
-usage: importSurfaceProbe.py RESULT_JSON core|sweep|hazard NAME|refuse|noLouis|refuseWhen CONDITION
+usage: importSurfaceProbe.py RESULT_JSON core|sweep|hazard NAME|refuse|noLouis|refuseWhen CONDITION [ENTRY]
 
 It writes its findings to RESULT_JSON and exits 0 whatever they are; deciding pass or fail is the
 test's job.
@@ -698,9 +698,10 @@ def runRefuse() -> dict:
 	return {"raised": None}
 
 
-def runRefuseWhen(condition: str) -> dict:
+def runRefuseWhen(condition: str, entry: str = "bootstrap") -> dict:
 	"""install() refused by a condition found only after its first check, and called twice, since a
-	caller that catches the refusal may well try again."""
+	caller that catches the refusal may well try again. entry "windowsCtypes" calls
+	windowsCtypes.install() itself, which must refuse as wholly as bootstrap does."""
 	import ctypes
 	import types
 
@@ -721,7 +722,7 @@ def runRefuseWhen(condition: str) -> dict:
 	raised = []
 	for _ in range(2):
 		try:
-			bootstrap.install()
+			(windowsCtypes.install if entry == "windowsCtypes" else bootstrap.install)()
 		except Exception as e:  # noqa: BLE001
 			raised.append(type(e).__name__)
 		else:
@@ -756,7 +757,7 @@ def main() -> None:
 		elif mode == "noLouis":
 			result.update(runNoLouis())
 		elif mode == "refuseWhen":
-			result.update(runRefuseWhen(sys.argv[3]))
+			result.update(runRefuseWhen(*sys.argv[3:5]))
 		else:
 			prepare()
 			result["core"] = runCoreMainImports()
