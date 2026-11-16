@@ -29,7 +29,8 @@ def _unwrap(name: str) -> str:
 #: Audacity do, would load one and fail in it on every object. A bundled module therefore stays unused
 #: until it is ported and named here. Add-on app modules are not limited, since their authors chose the
 #: program and the platform they serve.
-portedAppModules: frozenset[str] = frozenset({"nvda"})
+#: marco's was written for MATE's window manager, not for a Windows program of that name.
+portedAppModules: frozenset[str] = frozenset({"nvda", "marco"})
 
 
 def isAppModuleUsable(name: str, origin: str | None, bundledDirectory: str) -> bool:
