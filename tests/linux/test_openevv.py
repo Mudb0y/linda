@@ -324,15 +324,18 @@ def test_cancelIsReadyAgainQuicklyAtAnySampleRate(tmp_path: Path):
 		for rate in ("11025", "48000"):
 			synth.samplerate = rate
 			assert waitFor(lambda: engine.sampleRate == int(rate), 5)
-			medians[rate] = {"idle": cancelToReady(12, 0), "busy": cancelToReady(12, 0.05)}
+			medians[rate] = {"idle": cancelToReady(20, 0), "busy": cancelToReady(20, 0.05)}
 		result = medians
 		""",
 	)
 	done.assertClean()
 	# Busy is NVDA's main thread holding the GIL for 50 ms after the cancel, as handling a key press
 	# does; making the cancelled audio needs the GIL for every buffer, aborting does not. Medians in
-	# milliseconds, by sample rate.
-	assert all(median < 100 for medians in done.value.values() for median in medians.values()), done.value
+	# milliseconds, by sample rate. At 48 kHz making the rest of the sentence instead costs more than
+	# twice the bound; at 11,025 Hz there is too little of it to tell the two apart, and the bound only
+	# holds the cancel to what a key press can wait. Aborting takes about half the bound, which leaves
+	# room for a machine that is busy with other work.
+	assert all(median < 150 for medians in done.value.values() for median in medians.values()), done.value
 
 
 @needsDriver
