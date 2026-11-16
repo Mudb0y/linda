@@ -15,6 +15,7 @@ import importlib.util
 import os
 import re
 import shutil
+import struct
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -158,6 +159,23 @@ def _qt6PluginPath(value: str) -> None:
 	_holds(_directory(value), "platforms/libqxcb.so")
 
 
+def _storePath(path: Path) -> Path:
+	"""The store path a file is in."""
+	return Path(STORE) / path.relative_to(STORE).parts[0]
+
+
+def _pwsinkLib(value: str) -> None:
+	assert _elfFile(value).name == "libpwsink.so", value
+
+
+def _pwmon(value: str) -> None:
+	path = _elfFile(value)
+	assert path.name == "pwmon" and os.access(path, os.X_OK), value
+	# The program's package takes the library's store path, which must not hold a program that
+	# records sound.
+	assert _storePath(path) != _storePath(Path(os.environ["BASEDREADER_PWSINK_LIB"])), value
+
+
 def _benchBin(value: str) -> None:
 	# Named without depending on the bench, so that entering the shell never builds the engine: it
 	# exists once nix build .#basedreader-bench has built it.
@@ -178,6 +196,8 @@ SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
 	"BASEDREADER_OPENEVV_DRIVER_DIR": _openevvDriverDir,
 	"BASEDREADER_PIPEWIRE_BIN": _pipewireBin,
 	"BASEDREADER_WIREPLUMBER_BIN": _wireplumberBin,
+	"BASEDREADER_PWSINK_LIB": _pwsinkLib,
+	"BASEDREADER_PWMON": _pwmon,
 	"BASEDREADER_BENCH_BIN": _benchBin,
 	"BASEDREADER_QT6_PLUGIN_PATH": _qt6PluginPath,
 	"BASEDREADER_RIG_PATH": _searchPath,
@@ -263,6 +283,84 @@ def test_synthesizerLibraryNeedsNoSoundLibrary(tmp_path: Path, variable: str, re
 	done = harness.runChild(tmp_path, LOAD_LIBRARY, prepare="none", env=env)
 	done.assertClean()
 	assert done.value["sound"] == [], "\n".join(done.value["mapped"])
+
+
+PT_LOAD = 1
+PT_DYNAMIC = 2
+DT_NULL = 0
+DT_NEEDED = 1
+DT_STRTAB = 5
+DT_RPATH = 15
+DT_RUNPATH = 29
+
+
+def _dynamicStrings(path: Path) -> dict[int, list[str]]:
+	"""The string entries of a 64-bit little-endian ELF file's dynamic section, by tag."""
+	data = path.read_bytes()
+	assert data[4:6] == b"\x02\x01", f"{path} is not a 64-bit little-endian ELF file"
+	(programHeaders,) = struct.unpack_from("<Q", data, 0x20)
+	entrySize, count = struct.unpack_from("<HH", data, 0x36)
+	# Each as p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align.
+	segments = [struct.unpack_from("<IIQQQQQQ", data, programHeaders + i * entrySize) for i in range(count)]
+	(dynamic,) = [s for s in segments if s[0] == PT_DYNAMIC]
+	entries = []
+	for at in range(dynamic[2], dynamic[2] + dynamic[5], 16):
+		tag, value = struct.unpack_from("<qQ", data, at)
+		if tag == DT_NULL:
+			break
+		entries.append((tag, value))
+	# The string table is named by its address once loaded, which a loaded segment maps to the file.
+	address = next(value for tag, value in entries if tag == DT_STRTAB)
+	(table,) = [s[2] + address - s[3] for s in segments if s[0] == PT_LOAD and s[3] <= address < s[3] + s[5]]
+	strings: dict[int, list[str]] = {}
+	for tag, value in entries:
+		if tag in (DT_NEEDED, DT_RPATH, DT_RUNPATH):
+			start = table + value
+			strings.setdefault(tag, []).append(data[start : data.index(b"\0", start)].decode())
+	return strings
+
+
+def test_pwsinkNeedsOnlyPipewiresClientFromTheStore(tmp_path: Path):
+	"""libpwsink finds the libraries it needs only in the store, whatever the caller's directory or
+	loader path holds; the one sound library it needs, and the only one loading it maps, is
+	PipeWire's client library; and nothing in its store path names pwmon's, so a package that holds
+	the library does not hold the recorder."""
+	library = _elfFile(os.environ["BASEDREADER_PWSINK_LIB"])
+	strings = _dynamicStrings(library)
+	searched = [
+		d for tag in (DT_RPATH, DT_RUNPATH) for value in strings.get(tag, []) for d in value.split(":")
+	]
+	assert searched, f"{library} has no RUNPATH, so the loader would look for its libraries elsewhere"
+	assert all(d.startswith(STORE) for d in searched), searched
+	needed = strings.get(DT_NEEDED, [])
+	assert [name for name in needed if harness.isAudioLibrary(name)] == ["libpipewire-0.3.so.0"], needed
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import ctypes
+		import os
+
+		ctypes.CDLL(os.environ["BASEDREADER_PWSINK_LIB"])
+		result = harness.soundReached(allowLinked=False)
+		""",
+		prepare="none",
+	)
+	done.assertClean(ignoring={"audio"})
+	pipewireLib = Path(os.path.realpath(os.environ["BASEDREADER_PIPEWIRE_BIN"])).parent / "lib"
+	mapped = [what.removeprefix("mapped ") for what in done.value]
+	assert len(mapped) == len(done.value) == 1, done.value
+	assert Path(mapped[0]).parent == pipewireLib and Path(mapped[0]).name.startswith("libpipewire-0.3.so"), (
+		mapped
+	)
+	assert done.audio == done.value, done.audio
+	# How Nix itself finds a store path's references.
+	pwmonHash = _storePath(Path(os.environ["BASEDREADER_PWMON"])).name[:32].encode()
+	naming = [
+		str(path)
+		for path in _storePath(library).rglob("*")
+		if path.is_file() and not path.is_symlink() and pwmonHash in path.read_bytes()
+	]
+	assert not naming, naming
 
 
 def _loadTool(name: str) -> ModuleType:

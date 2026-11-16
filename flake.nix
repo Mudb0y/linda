@@ -102,8 +102,10 @@
         BASEDREADER_OPENEVV_DRIVER_DIR = "${openevvDriver}";
       };
 
+      pwsink = pkgs.callPackage ./nix/pwsink.nix { };
+
       basedreader = pkgs.callPackage ./nix/basedreader.nix {
-        inherit python runtimeEnv louisTables nvdaCldr;
+        inherit python runtimeEnv louisTables nvdaCldr pwsink;
       };
       app = name: description: {
         type = "app";
@@ -153,6 +155,7 @@
         espeak-ng = espeak;
         openevv-libeci = openevvLibeci;
         openevv-driver = openevvDriver;
+        inherit pwsink;
       };
 
       devShells.${system}.default = pkgs.mkShell (runtimeEnv // {
@@ -204,6 +207,11 @@
         # rig.
         BASEDREADER_PIPEWIRE_BIN = "${lib.getBin pkgs.pipewire}/bin";
         BASEDREADER_WIREPLUMBER_BIN = "${lib.getBin pkgs.wireplumber}/bin";
+        # The library the PipeWire sink loads, the same file the package's wrappers name, and the
+        # recorder its tests listen with. The shell does not choose the sink: a run that wants
+        # PipeWire sets BASEDREADER_AUDIO_SINK itself.
+        BASEDREADER_PWSINK_LIB = "${pwsink}/lib/libpwsink.so";
+        BASEDREADER_PWMON = "${pwsink.pwmon}/bin/pwmon";
 
         # setup.sh would put $out/lib first in every RUNPATH the linker
         # writes, and in a shell $out is outputs/out under the working

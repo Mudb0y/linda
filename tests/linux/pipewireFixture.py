@@ -34,10 +34,10 @@ CONFIG_DIR = HERE / "pipewire"
 #: The graph's rate in the daemon's configuration, and the rate pwmon records at.
 RATE = 48000
 
-#: What has to be named for the fixture and the sink under test, and what names it.
+#: What has to be named for the fixture and the sink under test. The dev shell names each.
 VARIABLES = {
-	"BASEDREADER_PIPEWIRE_BIN": "PipeWire's bin directory, which the dev shell names",
-	"BASEDREADER_WIREPLUMBER_BIN": "WirePlumber's bin directory, which the dev shell names",
+	"BASEDREADER_PIPEWIRE_BIN": "PipeWire's bin directory",
+	"BASEDREADER_WIREPLUMBER_BIN": "WirePlumber's bin directory",
 	"BASEDREADER_PWSINK_LIB": "libpwsink.so",
 	"BASEDREADER_PWMON": "pwmon",
 }
@@ -51,9 +51,7 @@ def missingVariables() -> str | None:
 	return (
 		"Set "
 		+ ", ".join(missing)
-		+ ". The two built files come from engine/crates/pwsink, for example: nix develop . -c env "
-		"BASEDREADER_PWSINK_LIB=$PWD/engine/target/release/libpwsink.so "
-		"BASEDREADER_PWMON=$PWD/engine/target/release/pwmon tests/linux/rig python3 -m pytest "
+		+ ". The dev shell names them all: nix develop . -c tests/linux/rig python3 -m pytest "
 		"tests/linux/test_pipewireSink.py"
 	)
 
