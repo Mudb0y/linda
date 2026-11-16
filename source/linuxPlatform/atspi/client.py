@@ -4,9 +4,16 @@ Everything above this module asks for facts about a Node and never touches libat
 accessible's identity, (unique bus name, object path), with a reference this client uses to reach it.
 This client answers each question with libatspi through PyGObject, one D-Bus round trip at a time;
 the engine's mirror can stand behind the same calls later and answer most of them from memory.
+
+Every round trip goes through call, which keeps an application that stops answering from stalling NVDA
+more than once: libatspi waits for an answer on NVDA's main thread, and a property read that times out
+returns 0 instead of failing.
 """
 
 import dataclasses
+import inspect
+import threading
+import time
 from collections.abc import Callable
 
 import gi
@@ -16,10 +23,27 @@ from gi.repository import Atspi, GLib
 
 #: The registry's path for the desktop, which every application root shares with it.
 ROOT_PATH = "/org/a11y/atspi/accessible/root"
+#: libatspi's deadline for one call, in milliseconds, also for applications it met in the last 15 s,
+#: which otherwise get 15 s each.
+TIMEOUT_MS = 300
+#: A call that takes this long marks its application hung.
+HUNG_AFTER_SECONDS = 0.25
+#: A call that takes this long has met libatspi's deadline, and its answer, if any, is not one.
+TIMED_OUT_AFTER_SECONDS = TIMEOUT_MS / 1000 - 0.01
+#: How long a hung application that sends no event is left alone before one call may try it again.
+PROBE_AFTER_SECONDS = 2.0
+#: Children read from one accessible at most; one GetChildren on Caja's list view froze it 4 s.
+CHILDREN_LIMIT = 200
+#: Accessibles visited at most when walking for one that has a state, where Collection is missing.
+WALK_LIMIT = 500
 
 
 class NodeGone(LookupError):
 	"""The accessible no longer exists, or its application does not answer."""
+
+
+class AppHung(NodeGone):
+	"""The accessible's application has stopped answering, so it was not asked."""
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -46,17 +70,90 @@ class Relation:
 	targets: list[Node]
 
 
-#: Round trips made through _call, for measurement.
+#: Round trips made through call, and the seconds spent in them, for measurement.
 callCount = 0
+callSeconds = 0.0
+#: When each application that stopped answering was last given up on, by bus name.
+_hungSince: dict[str, float] = {}
+#: Applications no longer asked anything, by bus name.
+_refused: set[str] = set()
+_mainThreadId = threading.main_thread().ident
 
 
-def _call(func, *args):
-	global callCount
+def _isPlainCallable(func: Callable) -> bool:
+	return inspect.isfunction(func) or inspect.ismethod(func)
+
+
+def call[T](node: Node, func: Callable[..., T], *args) -> T:
+	"""One round trip to node's application: func(node.ref, *args), or func(*args) when args already
+	start with node.ref or func is a Python function or bound method.
+
+	Main thread only: libatspi is not thread safe. A call to an application marked hung raises AppHung
+	without asking it; a call that takes HUNG_AFTER_SECONDS or more marks it; and one that met libatspi's
+	deadline raises AppHung, since its answer cannot be told from a real zero.
+
+	:raise NodeGone: The accessible is gone, or this is not the main thread.
+	:raise AppHung: Its application does not answer.
+	"""
+	global callCount, callSeconds
+	if threading.get_ident() != _mainThreadId:
+		raise NodeGone("AT-SPI is only read on the main thread")
+	busName = node.busName
+	if busName in _refused:
+		raise NodeGone(busName)
+	since = _hungSince.get(busName)
+	if since is not None:
+		now = time.monotonic()
+		if now - since < PROBE_AFTER_SECONDS:
+			raise AppHung(busName)
+		# This call is the probe; until it answers, the application stays marked.
+		_hungSince[busName] = now
+	if not (args and args[0] is node.ref) and not _isPlainCallable(func):
+		args = (node.ref, *args)
 	callCount += 1
+	start = time.monotonic()
 	try:
-		return func(*args)
+		result = func(*args)
 	except GLib.Error as e:
-		raise NodeGone(e.message) from None
+		error: NodeGone = NodeGone(e.message)
+		result = None
+	else:
+		error = None
+	elapsed = time.monotonic() - start
+	callSeconds += elapsed
+	if elapsed >= HUNG_AFTER_SECONDS:
+		if busName not in _hungSince:
+			from logHandler import log
+
+			log.debugWarning(
+				f"AT-SPI: {busName} took {elapsed * 1000:.0f} ms to answer; not asking it for now"
+			)
+		_hungSince[busName] = time.monotonic()
+		if elapsed >= TIMED_OUT_AFTER_SECONDS:
+			raise AppHung(busName) from None
+	elif since is not None:
+		_hungSince.pop(busName, None)
+	if error is not None:
+		raise error
+	return result
+
+
+def heardFrom(busName: str) -> None:
+	"""An event came from busName, so it answers again."""
+	_hungSince.pop(busName, None)
+
+
+def refuse(busName: str) -> None:
+	"""Ask busName nothing more: every later call to it raises NodeGone."""
+	_refused.add(busName)
+
+
+def forgetApplications() -> None:
+	_hungSince.clear()
+	_toolkits.clear()
+
+
+_toolkits: dict[str, str] = {}
 
 
 class Client:
@@ -64,6 +161,7 @@ class Client:
 
 	def __init__(self) -> None:
 		Atspi.init()
+		Atspi.set_timeout(TIMEOUT_MS, TIMEOUT_MS)
 		self._listener = None
 
 	def node(self, acc) -> Node | None:
@@ -78,128 +176,147 @@ class Client:
 		return self.node(Atspi.get_desktop(0))
 
 	def applications(self) -> list[Node]:
-		desktop = Atspi.get_desktop(0)
+		desktop = self.desktop()
 		apps = []
-		for i in range(_call(desktop.get_child_count)):
-			app = self.node(_call(desktop.get_child_at_index, i))
+		for i in range(call(desktop, Atspi.Accessible.get_child_count)):
+			app = self.node(call(desktop, Atspi.Accessible.get_child_at_index, i))
 			if app:
 				apps.append(app)
 		return apps
 
+	def isHung(self, busName: str) -> bool:
+		return busName in _hungSince
+
+	def toolkit(self, node: Node) -> str:
+		"""The application's ToolkitName: "gtk" for GTK 3, "GTK" for GTK 4, "Qt", and so on."""
+		name = _toolkits.get(node.busName)
+		if name is None:
+			name = call(node, Atspi.Accessible.get_toolkit_name) or ""
+			_toolkits[node.busName] = name
+		return name
+
 	def role(self, node: Node) -> str:
-		return _call(Atspi.Accessible.get_role_name, node.ref)
+		# GTK 4 and Qt give their own names from GetRoleName; the number is AT-SPI's.
+		return Atspi.role_get_name(call(node, Atspi.Accessible.get_role)) or ""
 
 	def name(self, node: Node) -> str:
-		return _call(Atspi.Accessible.get_name, node.ref) or ""
+		return call(node, Atspi.Accessible.get_name) or ""
 
 	def description(self, node: Node) -> str:
-		return _call(Atspi.Accessible.get_description, node.ref) or ""
+		return call(node, Atspi.Accessible.get_description) or ""
 
 	def states(self, node: Node) -> frozenset[str]:
-		stateSet = _call(Atspi.Accessible.get_state_set, node.ref)
+		stateSet = call(node, Atspi.Accessible.get_state_set)
 		return frozenset(s.value_nick for s in stateSet.get_states())
 
 	def attributes(self, node: Node) -> dict[str, str]:
-		return dict(_call(Atspi.Accessible.get_attributes, node.ref) or {})
+		return dict(call(node, Atspi.Accessible.get_attributes) or {})
 
 	def interfaces(self, node: Node) -> frozenset[str]:
-		return frozenset(_call(Atspi.Accessible.get_interfaces, node.ref))
+		return frozenset(call(node, Atspi.Accessible.get_interfaces))
 
 	def processID(self, node: Node) -> int:
-		return _call(Atspi.Accessible.get_process_id, node.ref)
+		return call(node, Atspi.Accessible.get_process_id)
 
 	def parent(self, node: Node) -> Node | None:
-		return self.node(_call(Atspi.Accessible.get_parent, node.ref))
+		return self.node(call(node, Atspi.Accessible.get_parent))
 
 	def childCount(self, node: Node) -> int:
-		return _call(Atspi.Accessible.get_child_count, node.ref)
+		return call(node, Atspi.Accessible.get_child_count)
 
 	def childAt(self, node: Node, index: int) -> Node | None:
-		return self.node(_call(Atspi.Accessible.get_child_at_index, node.ref, index))
+		return self.node(call(node, Atspi.Accessible.get_child_at_index, index))
 
-	def children(self, node: Node) -> list[Node]:
-		count = self.childCount(node)
+	def children(self, node: Node, limit: int = CHILDREN_LIMIT) -> list[Node]:
+		"""node's first limit children, one at a time; none for a container that manages its
+		descendants, which may have thousands made on demand."""
+		if "manages-descendants" in self.states(node):
+			return []
+		count = min(self.childCount(node), limit)
 		return [c for c in (self.childAt(node, i) for i in range(count)) if c]
 
 	def indexInParent(self, node: Node) -> int:
-		return _call(Atspi.Accessible.get_index_in_parent, node.ref)
+		return call(node, Atspi.Accessible.get_index_in_parent)
 
 	def relations(self, node: Node) -> list[Relation]:
 		result = []
-		for rel in _call(Atspi.Accessible.get_relation_set, node.ref) or []:
+		for rel in call(node, Atspi.Accessible.get_relation_set) or []:
 			targets = [self.node(rel.get_target(i)) for i in range(rel.get_n_targets())]
 			result.append(Relation(rel.get_relation_type().value_nick, [t for t in targets if t]))
 		return result
 
 	def extents(self, node: Node) -> tuple[int, int, int, int] | None:
-		rect = _call(Atspi.Component.get_extents, node.ref, Atspi.CoordType.SCREEN)
+		rect = call(node, Atspi.Component.get_extents, Atspi.CoordType.SCREEN)
 		if rect.width <= 0 and rect.height <= 0:
 			return None
 		return (rect.x, rect.y, rect.width, rect.height)
 
 	def accessibleAtPoint(self, node: Node, x: int, y: int) -> Node | None:
 		return self.node(
-			_call(Atspi.Component.get_accessible_at_point, node.ref, x, y, Atspi.CoordType.SCREEN),
+			call(node, Atspi.Component.get_accessible_at_point, x, y, Atspi.CoordType.SCREEN),
 		)
 
 	def grabFocus(self, node: Node) -> bool:
-		return _call(Atspi.Component.grab_focus, node.ref)
+		return call(node, Atspi.Component.grab_focus)
 
 	def value(self, node: Node) -> tuple[float, float, float, str]:
-		ref = node.ref
 		return (
-			_call(Atspi.Value.get_current_value, ref),
-			_call(Atspi.Value.get_minimum_value, ref),
-			_call(Atspi.Value.get_maximum_value, ref),
-			_call(Atspi.Value.get_text, ref) or "",
+			call(node, Atspi.Value.get_current_value),
+			call(node, Atspi.Value.get_minimum_value),
+			call(node, Atspi.Value.get_maximum_value),
+			call(node, Atspi.Value.get_text) or "",
 		)
 
 	def actions(self, node: Node) -> list[tuple[str, str]]:
-		ref = node.ref
+		# get_action_name reaches a deprecated function, whose warning would be logged.
 		return [
-			(_call(Atspi.Action.get_action_name, ref, i), _call(Atspi.Action.get_key_binding, ref, i))
-			for i in range(_call(Atspi.Action.get_n_actions, ref))
+			(
+				call(node, Atspi.Action.get_localized_name, i),
+				call(node, Atspi.Action.get_key_binding, i),
+			)
+			for i in range(call(node, Atspi.Action.get_n_actions))
 		]
 
 	def doAction(self, node: Node, index: int) -> bool:
-		return _call(Atspi.Action.do_action, node.ref, index)
+		return call(node, Atspi.Action.do_action, index)
 
 	def selectedChild(self, node: Node, index: int = 0) -> Node | None:
-		return self.node(_call(Atspi.Selection.get_selected_child, node.ref, index))
+		return self.node(call(node, Atspi.Selection.get_selected_child, index))
 
 	def selectedCount(self, node: Node) -> int:
-		return _call(Atspi.Selection.get_n_selected_children, node.ref)
+		return call(node, Atspi.Selection.get_n_selected_children)
 
 	def tableSize(self, node: Node) -> tuple[int, int]:
-		return (_call(Atspi.Table.get_n_rows, node.ref), _call(Atspi.Table.get_n_columns, node.ref))
+		return (call(node, Atspi.Table.get_n_rows), call(node, Atspi.Table.get_n_columns))
 
 	def cellPosition(self, node: Node) -> tuple[int, int]:
-		_ok, row, column = _call(Atspi.TableCell.get_position, node.ref)
+		_ok, row, column = call(node, Atspi.TableCell.get_position)
 		return (row, column)
 
 	def cellTable(self, node: Node) -> Node | None:
-		return self.node(_call(Atspi.TableCell.get_table, node.ref))
+		return self.node(call(node, Atspi.TableCell.get_table))
 
 	def columnHeaderNames(self, node: Node) -> list[str]:
-		return [h.get_name() or "" for h in _call(Atspi.TableCell.get_column_header_cells, node.ref) or []]
+		headers = call(node, Atspi.TableCell.get_column_header_cells) or []
+		return call(node, lambda: [h.get_name() or "" for h in headers])
 
 	def text(self, node: Node, start: int = 0, end: int = -1) -> str:
-		return _call(Atspi.Text.get_text, node.ref, start, end) or ""
+		return call(node, Atspi.Text.get_text, start, end) or ""
 
 	def characterCount(self, node: Node) -> int:
-		return _call(Atspi.Text.get_character_count, node.ref)
+		return call(node, Atspi.Text.get_character_count)
 
 	def caretOffset(self, node: Node) -> int:
-		return _call(Atspi.Text.get_caret_offset, node.ref)
+		return call(node, Atspi.Text.get_caret_offset)
 
 	def setCaretOffset(self, node: Node, offset: int) -> bool:
-		return _call(Atspi.Text.set_caret_offset, node.ref, offset)
+		return call(node, Atspi.Text.set_caret_offset, offset)
 
 	def selections(self, node: Node) -> list[tuple[int, int]]:
-		count = _call(Atspi.Text.get_n_selections, node.ref)
+		count = call(node, Atspi.Text.get_n_selections)
 		result = []
 		for i in range(count):
-			r = _call(Atspi.Text.get_selection, node.ref, i)
+			r = call(node, Atspi.Text.get_selection, i)
 			result.append((r.start_offset, r.end_offset))
 		return result
 
@@ -211,8 +328,19 @@ class Client:
 			"line": Atspi.TextGranularity.LINE,
 			"paragraph": Atspi.TextGranularity.PARAGRAPH,
 		}[unit]
-		r = _call(Atspi.Text.get_string_at_offset, node.ref, offset, granularity)
+		r = call(node, Atspi.Text.get_string_at_offset, offset, granularity)
 		return (r.start_offset, r.end_offset, r.content or "")
+
+	def _firstMatch(self, node: Node, rule) -> Node | None:
+		matches = call(
+			node,
+			Atspi.Collection.get_matches,
+			rule,
+			Atspi.CollectionSortOrder.CANONICAL,
+			1,
+			True,
+		)
+		return self.node(matches[0]) if matches else None
 
 	def firstMatchWithRole(self, node: Node, roleName: str) -> Node | None:
 		"""The first descendant of node, in tree order, with the role libatspi names roleName."""
@@ -230,19 +358,14 @@ class Client:
 			Atspi.CollectionMatchType.NONE,
 			False,
 		)
-		matches = _call(
-			Atspi.Collection.get_matches,
-			node.ref,
-			rule,
-			Atspi.CollectionSortOrder.CANONICAL,
-			1,
-			True,
-		)
-		return self.node(matches[0]) if matches else None
+		return self._firstMatch(node, rule)
 
-	def firstMatchWithState(self, node: Node, state: str) -> Node | None:
-		"""The first descendant of node, in tree order, that has state; through Collection."""
+	def firstMatchWithState(self, node: Node, state: str, limit: int = WALK_LIMIT) -> Node | None:
+		"""The first descendant of node, in tree order, that has state and is showing: through
+		Collection, or for GTK 4, which has none, by a walk of at most limit accessibles."""
 		# Showing too: Qt leaves a closed combo box's current item focused.
+		if "Collection" not in self.interfaces(node):
+			return self._walkForState(node, state, limit)
 		stateSet = Atspi.StateSet.new(
 			[getattr(Atspi.StateType, state.upper().replace("-", "_")), Atspi.StateType.SHOWING],
 		)
@@ -257,15 +380,36 @@ class Client:
 			Atspi.CollectionMatchType.NONE,
 			False,
 		)
-		matches = _call(
-			Atspi.Collection.get_matches,
-			node.ref,
-			rule,
-			Atspi.CollectionSortOrder.CANONICAL,
-			1,
-			True,
-		)
-		return self.node(matches[0]) if matches else None
+		return self._firstMatch(node, rule)
+
+	def _walkForState(self, node: Node, state: str, limit: int) -> Node | None:
+		stack = list(reversed(self.children(node)))
+		visited = 0
+		while stack and visited < limit:
+			current = stack.pop()
+			visited += 1
+			try:
+				states = self.states(current)
+			except AppHung:
+				raise
+			except NodeGone:
+				continue
+			if "showing" not in states:
+				continue
+			if state in states:
+				return current
+			if "manages-descendants" in states:
+				continue
+			try:
+				count = min(self.childCount(current), CHILDREN_LIMIT)
+				stack.extend(
+					c for c in (self.childAt(current, i) for i in reversed(range(count))) if c is not None
+				)
+			except AppHung:
+				raise
+			except NodeGone:
+				continue
+		return None
 
 	def listen(self, eventTypes: list[str], callback: Callable[..., None]) -> None:
 		"""Call callback(type, node, detail1, detail2, anyData) for each event, on the main thread,
@@ -286,3 +430,20 @@ class Client:
 			for eventType in eventTypes:
 				self._listener.deregister(eventType)
 			self._listener = None
+
+
+_client: Client | None = None
+
+
+def _instance() -> Client:
+	global _client
+	if _client is None:
+		_client = Client()
+	return _client
+
+
+def __getattr__(name: str) -> Client:
+	# The client connects to the accessibility bus, which importing this module must not do.
+	if name == "client":
+		return _instance()
+	raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
