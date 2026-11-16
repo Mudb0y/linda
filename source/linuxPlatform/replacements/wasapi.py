@@ -151,11 +151,18 @@ class _Player:
 			# utterance stalls speech, so they are all due now, even when no new stream opened.
 			self._call(feedId for feedId, _end in pending)
 
-	def _bufferedFrames(self) -> int:
+	def _bufferedFrames(self) -> int | None:
+		"""The frames still to be played, or None when the stream was lost and the player has none.
+
+		That happens at interpreter exit, when no new stream is opened, or when the exit hook closed
+		the new one while a stranded callback had the lock released.
+		"""
 		try:
 			return self._stream.bufferedFrames()
 		except StreamLost:
 			self._reopenAfterLoss()
+			if self._stream is None:
+				return None
 			return self._stream.bufferedFrames()
 
 	def _playPos(self) -> int:
@@ -243,12 +250,16 @@ class _Player:
 				if not self._continueUnlessStopping():
 					return
 				paddingFrames = self._bufferedFrames()
+				if paddingFrames is None:
+					return
 				bufferFrames = self._stream.bufferFrames
 				if paddingFrames > bufferFrames // 2:
 					self._waitUntilNeeded(fmt.framesToSeconds(paddingFrames - bufferFrames // 2))
 					if not self._continueUnlessStopping():
 						return
 					paddingFrames = self._bufferedFrames()
+					if paddingFrames is None:
+						return
 				sendFrames = min(remainingFrames, bufferFrames - paddingFrames)
 				if sendFrames <= 0:
 					continue
@@ -354,6 +365,8 @@ class _Player:
 			stream, self._stream = self._stream, None
 			# Stopping, so that a feed or sync now waiting returns as it does after stop().
 			self._state = _PlayState.stopping
+			# A sync that a callback left with the lock released would otherwise wait on the next end,
+			# asking a stream that is gone how far it has played.
 			self._feedEnds = []
 			self._wakePending = True
 			self._wakeCondition.notify_all()

@@ -1023,6 +1023,92 @@ def test_aPlayerStillPlayingAtExitIsClosedBeforeTheInterpreterGoes(tmp_path: Pat
 	assert calls[-1] == "close" and calls.count("close") == 1, calls
 
 
+def test_streamLostWhileTheExitHookRunsEndsTheFeed(tmp_path: Path):
+	"""A stream lost after the exit hook has begun, so that no new stream is opened, and one lost
+	before it, whose stranded callback runs the exit hook and so closes the new stream: either way
+	the feed returns quietly with nothing left to play, and the stranded callback still runs."""
+	value = runAudio(
+		tmp_path,
+		"""
+		from linuxPlatform import audioOutput
+		from linuxPlatform.audioOutput.nullSink import NullSink, NullStream
+
+		class LosingStream(NullStream):
+			lose = False
+
+			def bufferedFrames(self):
+				if LosingStream.lose:
+					LosingStream.lose = False
+					raise audioOutput.StreamLost("device went away")
+				return super().bufferedFrames()
+
+		class LosingSink(NullSink):
+			opened = 0
+
+			def openStream(self, deviceId, fmt, wake):
+				LosingSink.opened += 1
+				return LosingStream(fmt)
+
+		def lose(whileExiting):
+			LosingSink.opened = 0
+			player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+
+			def stranded():
+				events.append(("stranded", threading.current_thread().name, time.monotonic()))
+				if not whileExiting:
+					wasapi._closeForExit()
+
+			player.feed(bytes(8000), onDone=stranded)  # 500 ms
+			wasapi._isExiting = whileExiting
+			LosingStream.lose = True
+			try:
+				player.feed(bytes(1600))
+				error = None
+			except BaseException as e:
+				error = repr(e)
+			wasapi._isExiting = False
+			calls = [tag for tag, _thread, _at in events]
+			events.clear()
+			return {"error": error, "opened": LosingSink.opened, "calls": calls}
+
+		audioOutput._sink = LosingSink()
+		result = {"whileExiting": lose(True), "beforeExiting": lose(False)}
+		""",
+	)
+	assert value == {
+		"whileExiting": {"error": None, "opened": 1, "calls": ["stranded"]},
+		"beforeExiting": {"error": None, "opened": 2, "calls": ["stranded"]},
+	}
+
+
+def test_exitHookRunFromACallbackInsideSyncEndsTheSync(tmp_path: Path):
+	"""A callback releases the player's lock, so the exit hook can close the stream while sync still
+	has a later end of audio to wait for. sync returns without touching the closed stream, and the
+	later callback is discarded."""
+	value = runAudio(
+		tmp_path,
+		"""
+		player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+
+		def first():
+			events.append(("first", threading.current_thread().name, time.monotonic()))
+			wasapi._closeForExit()
+
+		# Short enough that neither feed waits, so the first callback comes due inside sync.
+		player.feed(bytes(800), onDone=first)  # 50 ms
+		player.feed(bytes(1600), onDone=done("second"))  # 100 ms
+		try:
+			player.sync()
+			error = None
+		except BaseException as e:
+			error = repr(e)
+		result = {"error": error, "calls": [tag for tag, _thread, _at in events]}
+		""",
+	)
+	assert value["error"] is None
+	assert value["calls"] == ["first"]
+
+
 def test_lostStreamFoundByPlayedFramesCountsAsHeard(tmp_path: Path):
 	"""A stream that reports its loss from playedFrames: what was written counts as played, so the
 	waiting sync returns and its callback runs rather than waiting on a clock that has stopped."""
