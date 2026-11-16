@@ -30,6 +30,9 @@ the innermost is open. Each call that showed a dialog logs the answer it got, as
 - "nestedDialogs" opens a wx dialog, and another inside it.
 - "dialogInWelcome" opens a wx dialog inside the welcome dialog of a first start.
 - "reopening" opens wx.MessageBox again each time it is answered, for ever.
+- "followUp" opens a wx dialog, and another inside it. Once the inner one is answered, the call that
+	showed it goes on handling events for a while, as code that reports what its cancelled dialog
+	left undone may, and then asks a question with wx.MessageBox, logged as "followUp".
 Those that wait, wait for something to signal NVDA, or with "+exit" appended ask NVDA to exit through
 core.triggerNVDAExit once they are ready, from inside the innermost dialog where there is one.
 Unset, the plugin does nothing, so that other tests which add this directory to globalPlugins
@@ -61,6 +64,7 @@ dialogModes = (
 	"nestedDialogs",
 	"dialogInWelcome",
 	"reopening",
+	"followUp",
 )
 otherModes = (
 	"exit",
@@ -76,6 +80,9 @@ otherModes = (
 )
 #: Seconds "slowExit" adds to this plugin's terminate.
 SLOW_EXIT = 2.0
+#: Seconds "followUp" goes on handling events after its inner dialog is answered: many turns of the
+#: main loop, and well within modalDialogs.RETURN_TIMEOUT.
+FOLLOW_UP_DELAY = 0.5
 #: test_boot.py looks for exactly these in the transcript.
 sentence = "the boot probe has started"
 dialogSentence = "the boot probe's dialog is open"
@@ -226,6 +233,24 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		with wx.Dialog(outer, title="Inner boot probe dialog") as inner:
 			self._whenOpen(inner.IsModal)
 			self._answered("inner", inner.ShowModal())
+
+	def _followUp(self) -> None:
+		import gui
+
+		with wx.Dialog(gui.mainFrame, title="Outer boot probe dialog") as outer:
+			wx.CallAfter(self._innerThenFollowUp, outer)
+			self._answered("outer", outer.ShowModal())
+
+	def _innerThenFollowUp(self, outer: wx.Dialog) -> None:
+		self._innerDialog(outer)
+		deadline = time.monotonic() + FOLLOW_UP_DELAY
+		while time.monotonic() < deadline:
+			wx.GetApp().Yield(onlyIfNeeded=True)
+			time.sleep(0.01)
+		answer = wx.MessageBox(
+			"Asked by the boot probe after its dialog.", "Boot probe", wx.OK | wx.CANCEL, outer
+		)
+		self._answered("followUp", answer)
 
 	def _dialogInWelcome(self) -> None:
 		import gui.startupDialogs
