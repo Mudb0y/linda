@@ -371,6 +371,15 @@ impl Stream {
         self.write_pos.load(SeqCst) <= self.consumed()
     }
 
+    /// How long what the stream holds will take to play, or None while it is paused.
+    pub(crate) fn pending_ns(&self) -> Option<u64> {
+        if self.paused.load(Relaxed) {
+            return None;
+        }
+        let frames = self.write_pos.load(Relaxed).saturating_sub(self.consumed());
+        Some((frames as u128 * NS as u128 / self.format.rate as u128) as u64)
+    }
+
     /// Whether the callback has handed over the silence that follows the last frames, which a
     /// stream must have done before it is deactivated: what PipeWire still held would otherwise
     /// play when it is next activated.
@@ -737,7 +746,10 @@ mod tests {
         s.note_handed(100, 128);
         assert!(s.draining() && !s.is_drained());
         s.note_handed(0, 40);
-        assert!(s.draining(), "40 frames of silence are fewer than the 64 due");
+        assert!(
+            s.draining(),
+            "40 frames of silence are fewer than the 64 due"
+        );
         s.note_handed(0, 40);
         assert!(!s.draining() && s.is_drained());
         assert_eq!(s.silence_byte(), 0);

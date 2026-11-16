@@ -31,9 +31,12 @@ use crate::stream::{NS, Stream};
 const RECONNECT_NS: u64 = NS;
 const POOL_MAX: usize = 8;
 const POOL_IDLE_NS: u64 = 60 * NS;
-/// How often streams the deadline has passed but which still hold audio are looked at again,
-/// since nothing wakes the loop when they run dry.
+/// How often streams that cannot be deactivated yet are looked at again, since nothing wakes the
+/// loop when they could be.
 const RECHECK_NS: u64 = NS;
+/// The time the callback takes to hand over the silence after a stream's last frames: a cycle or
+/// two of the longest quantum.
+const DRAIN_CHECK_NS: u64 = 100_000_000;
 
 /// The gain every stream is multiplied by, as f32 bits.
 pub(crate) static PROCESS_GAIN: AtomicU32 = AtomicU32::new(0x3f80_0000);
@@ -502,12 +505,12 @@ impl Engine {
                     continue;
                 }
                 if !s.is_empty() {
-                    sooner(now + RECHECK_NS);
+                    // Looked at again when what it holds will have played, unless it is paused.
+                    sooner(now + s.pending_ns().unwrap_or(RECHECK_NS) + DRAIN_CHECK_NS);
                     continue;
                 }
                 if !s.is_drained() {
-                    // The callback hands over the last silence within a cycle or two.
-                    sooner(now + RECHECK_NS / 10);
+                    sooner(now + DRAIN_CHECK_NS);
                     continue;
                 }
                 s.active.store(false, SeqCst);
@@ -523,7 +526,8 @@ impl Engine {
                 s.active.store(true, SeqCst);
                 // SAFETY: as above.
                 unsafe { pws::pw_stream_set_active(stream, true) };
-                sooner(deadline.max(now + RECHECK_NS));
+                let played = now + s.pending_ns().unwrap_or(RECHECK_NS) + DRAIN_CHECK_NS;
+                sooner(deadline.max(played));
             }
         }
         due
