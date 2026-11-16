@@ -524,7 +524,7 @@ def test_badOptionIsReportedOnStandardError(tmp_path):
 			result = e.code
 		""",
 	)
-	done.assertClean()
+	done.assertClean(ignoring={"stderr"})
 	assert done.value == 2
 	assert "usage:" in done.stderr
 	assert "error: argument -l/--log-level" in done.stderr

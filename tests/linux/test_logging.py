@@ -154,7 +154,7 @@ def test_failingHandlerDoesNotRecurse(tmp_path: Path):
 		result = "returned"
 		""",
 	)
-	done.assertClean()
+	done.assertClean(ignoring={"stderr"})
 	assert done.value == "returned"
 	assert done.stderr.count("--- Logging error") == 2, done.stderr
 	assert "ValueError: formatting broken by the test" in done.stderr
@@ -186,7 +186,7 @@ def test_unwritableRecordIsNotReportedWhenLoggingSaysNotOrHasNowhereTo(tmp_path:
 		result = "returned"
 		""",
 	)
-	done.assertClean()
+	done.assertClean(ignoring={"stderr"})
 	assert done.value == "returned"
 	assert done.stderr.count("--- Logging error") == 1, done.stderr
 
