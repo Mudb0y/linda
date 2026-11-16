@@ -87,6 +87,7 @@ pub struct Stream {
     /// Cycles in which the stream could hand over audio, since it was last given a pw_stream.
     process_calls: AtomicU64,
     cycle_ns: AtomicU64,
+    /// The graph time of the last such cycle, on CLOCK_MONOTONIC like the producer's clock.
     last_graph_ns: AtomicU64,
     /// Silence still to hand over after the last frames, so that none of them stays in PipeWire.
     drain_frames: AtomicU64,
@@ -94,9 +95,6 @@ pub struct Stream {
 
     clock_pos: AtomicU64,
     clock_ns: AtomicU64,
-    seen_calls: AtomicU64,
-    /// When the producer last saw process_calls move.
-    progress_ns: AtomicU64,
     /// When the producer last asked the loop thread to wake the stream.
     kick_ns: AtomicU64,
     played_high: AtomicU64,
@@ -166,8 +164,6 @@ impl Stream {
             resampler_frames: AtomicU64::new(0),
             clock_pos: AtomicU64::new(0),
             clock_ns: AtomicU64::new(0),
-            seen_calls: AtomicU64::new(0),
-            progress_ns: AtomicU64::new(0),
             kick_ns: AtomicU64::new(0),
             played_high: AtomicU64::new(0),
             attached_ns: AtomicU64::new(0),
@@ -277,10 +273,6 @@ impl Stream {
     /// late.
     fn tick(&self, now: u64) {
         let calls = self.process_calls.load(Acquire);
-        if calls != self.seen_calls.load(Relaxed) {
-            self.seen_calls.store(calls, Relaxed);
-            self.progress_ns.store(now, Relaxed);
-        }
         let wp = self.write_pos.load(Relaxed);
         let consumed = self.consumed();
         if self.paused.load(Relaxed)
@@ -323,7 +315,10 @@ impl Stream {
         } else if calls == 0 {
             (attached, START_BOUND_NS)
         } else {
-            let progress = self.progress_ns.load(Relaxed).max(attached);
+            // When the graph last ran the stream, not when this thread happened to notice: a stream
+            // that drained and was put to sleep while nobody looked must not seem to have run just
+            // now, when it is woken.
+            let progress = self.last_graph_ns.load(Relaxed).max(attached);
             let kick = self.kick_ns.load(Relaxed);
             if kick > progress {
                 (kick, START_BOUND_NS)
@@ -837,7 +832,9 @@ mod tests {
         s.start(t0);
         cycle(&s, 80, t0);
         s.played(t0);
-        // Deactivated by the loop thread while dry, then written to.
+        // It runs on, handing over silence, while the producer does not look; then the loop thread
+        // puts it to sleep, and the producer writes to it.
+        cycle(&s, 80, t0 + 10 * MS);
         assert!(s.deactivate_if_still_empty());
         let t1 = t0 + 1000 * MS;
         assert!(s.write(&frames(3200, 1), t1).1, "asks to be woken");

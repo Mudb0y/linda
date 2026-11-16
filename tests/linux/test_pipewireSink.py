@@ -1202,7 +1202,11 @@ def test_theStartOfASoundIsNeverLost(pipewire: PipewireFixture, tmp_path: Path):
 def test_aWokenStreamWaitsForASlowDaemonRatherThanLoseItsStart(pipewire: PipewireFixture, tmp_path: Path):
 	"""A stream asleep after a sound is woken by the next one, which the daemon has to schedule
 	again; when the daemon takes 150 ms to answer, as a loaded desktop's can, the sound plays late
-	but whole, since the clock waits for the daemon before it discards anything."""
+	but whole, since the clock waits for the daemon before it discards anything.
+
+	The stream runs at the graph's rate: after a daemon has been stopped and continued, PipeWire's
+	resampler sometimes drops a few milliseconds of what it is handed, which would hide whether the
+	library handed it all over."""
 	pipewire.setQuantum(256)
 	monitor = pipewire.monitor()
 	actions = {}
@@ -1214,9 +1218,10 @@ def test_aWokenStreamWaitsForASlowDaemonRatherThanLoseItsStart(pipewire: Pipewir
 			tmp_path,
 			"""
 			sink.stopKeepingAwake()
-			data = tone(SPEECH, 0.12)
-			frames = len(data) // SPEECH.blockAlign
-			stream = sink.openStream("", SPEECH, lambda: None)
+			fmt = StreamFormat(1, 1, 48000, 16)
+			data = tone(fmt, 0.12)
+			frames = len(data) // fmt.blockAlign
+			stream = sink.openStream("", fmt, lambda: None)
 			stream.write(data)
 			stream.start()
 			waitPlayed(stream, frames)
@@ -1229,25 +1234,35 @@ def test_aWokenStreamWaitsForASlowDaemonRatherThanLoseItsStart(pipewire: Pipewir
 				time.sleep(1.2 if i == 0 else 0.4)
 				asleep = not lib.pwsink_is_active(stream.handle)
 				ask(f"freeze{i}")
+				before = sink.deliveredFrames()
 				start = mono()
 				stream.write(data)
 				stream.start()
 				time.sleep(0.15)
 				ask(f"thaw{i}")
 				waitPlayed(stream, frames)
-				sounds.append(dict(start=start, asleep=asleep))
+				time.sleep(0.05)
+				sounds.append(dict(start=start, asleep=asleep, delivered=sink.deliveredFrames() - before))
 			stream.close()
-			result = sounds
+			result = dict(sounds=sounds, frames=frames)
 			""",
 			{**pipewire.childEnv(), **steps.env()},
 		)
 	heard = []
-	for sound in value:
-		start = monitor.soundAfter(sound["start"])
-		heard.append(round((monitor.silenceAfter(start) - start) / MS, 2))
+	for sound in value["sounds"]:
+		# Counted in frames recorded rather than between graph times: the driver, stopped with the
+		# daemon, may run its first cycles after the thaw closer together than a quantum.
+		left, _ = monitor.samples(sound["start"], sound["start"] + 600 * MS)
+		heard.append(round(sum(1 for x in left if abs(x) > 0.001) / (RATE / 1000), 2))
 	report("120 ms sounds woken while the daemon was frozen for 150 ms, heard for ms", heard)
-	assert all(sound["asleep"] for sound in value), "the stream was not asleep, so this showed nothing"
-	assert all(ms > 120 - 1 for ms in heard), heard
+	assert all(sound["asleep"] for sound in value["sounds"]), (
+		"the stream was not asleep, so this showed nothing"
+	)
+	# Every frame was handed to the graph: the clock discarded none while the daemon was away.
+	assert [sound["delivered"] for sound in value["sounds"]] == [value["frames"]] * 3
+	# Once in a few dozen wakes after the daemon has been stopped and continued, one cycle handed
+	# over is not heard; in hundreds of wakes from a daemon that kept running it never was.
+	assert all(ms > 120 - quantumMs(256) - 1 for ms in heard), heard
 
 
 def test_stopNeverWaitsWhileOtherStreamsOpenAndClose(pipewire: PipewireFixture, tmp_path: Path):
