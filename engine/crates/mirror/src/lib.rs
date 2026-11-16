@@ -12,6 +12,7 @@ pub mod fetch;
 pub mod maintain;
 pub mod time;
 pub mod tree;
+pub mod x11;
 
 #[cfg(test)]
 mod testing;

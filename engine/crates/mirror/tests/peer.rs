@@ -241,6 +241,33 @@ fn a_walk_after_a_change_in_the_same_batch_does_not_undo_it() {
 }
 
 #[test]
+fn the_bus_on_the_root_window_is_the_one_the_session_bus_names() {
+    rig();
+    let (found, named) = zbus::block_on(async {
+        let found = discovery::find_bus_address(timeouts(5000)).await.unwrap();
+        let session = zbus::connection::Builder::session().build().await.unwrap();
+        let reply = session
+            .call_method(
+                Some("org.a11y.Bus"),
+                "/org/a11y/bus",
+                Some("org.a11y.Bus"),
+                "GetAddress",
+                &(),
+            )
+            .await
+            .unwrap();
+        (found, reply.body().deserialize::<String>().unwrap())
+    });
+    assert_eq!(
+        found.source,
+        discovery::Source::X11RootProperty,
+        "{found:?}"
+    );
+    assert_eq!(found.address, named);
+    assert!(found.refused.is_empty(), "{found:?}");
+}
+
+#[test]
 fn what_a_supplement_did_not_get_is_named() {
     rig();
     let answer: Answer = Box::new(|call| match path(call).as_str() {

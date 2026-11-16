@@ -4,6 +4,20 @@ use std::io::Write;
 use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::Duration;
 
+/// Fails the test anywhere but inside tests/linux/rig, for a test that
+/// opens a socket a live session could also be using. The variable alone
+/// could be copied into another shell; the rig's sandbox is also the first
+/// process and has no /run/user.
+pub fn rig() {
+    let inside = std::env::var("BASEDREADER_RIG").as_deref() == Ok("1")
+        && std::fs::read_to_string("/proc/1/comm").is_ok_and(|c| c.trim_end() == "bwrap")
+        && !std::path::Path::new("/run/user").exists();
+    assert!(
+        inside,
+        "opens sockets, so runs only inside tests/linux/rig, as cargo test does"
+    );
+}
+
 /// Runs `f` on a thread of its own and returns what it returns. A climb or
 /// walk that a cycle keeps going never returns, and may take memory as it
 /// goes, so a test that has not returned in five seconds ends the whole test

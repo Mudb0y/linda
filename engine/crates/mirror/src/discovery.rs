@@ -14,11 +14,10 @@ use std::os::unix::net::SocketAddr;
 use std::time::Duration;
 
 use serde::Serialize;
-use x11rb::connection::Connection as _;
-use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
 use zbus::Connection;
 use zbus::address::transport::{Transport, UnixSocket};
 
+use crate::x11::{self, Display};
 use crate::{Error, time};
 
 /// How long to wait for what. The two are kept apart because a busy
@@ -51,8 +50,8 @@ pub enum Source {
 pub struct BusAddress {
     pub address: String,
     pub source: Source,
-    /// Earlier routes that named an address of another kind, which were
-    /// passed over.
+    /// Earlier routes that failed or named an address of another kind,
+    /// which were passed over.
     pub refused: Vec<String>,
 }
 
@@ -95,10 +94,19 @@ pub async fn find_bus_address(timeouts: Timeouts) -> Result<BusAddress, Error> {
         .ok()
         .filter(|a| !a.is_empty())
         .and_then(|a| usable(a, Source::Environment));
-    let x11 = std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty())
-        && std::env::var_os("WAYLAND_DISPLAY").is_none_or(|d| d.is_empty());
-    if found.is_none() && x11 {
-        found = x11_root_property().and_then(|a| usable(a, Source::X11RootProperty));
+    let display = std::env::var("DISPLAY").ok().filter(|d| !d.is_empty());
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|d| !d.is_empty());
+    if found.is_none()
+        && !wayland
+        && let Some(display) = display
+    {
+        found = match x11_root_property(&display, timeouts).await {
+            Ok(a) => a.and_then(|a| usable(a, Source::X11RootProperty)),
+            Err(e) => {
+                refused.push(format!("{:?}: {e}", Source::X11RootProperty));
+                None
+            }
+        };
     }
     let mut found = match found {
         Some(f) => f,
@@ -134,27 +142,17 @@ pub async fn find_bus_address(timeouts: Timeouts) -> Result<BusAddress, Error> {
 }
 
 /// The `AT_SPI_BUS` string on the root window, which the bus launcher sets on
-/// X11. Any failure means "not advertised here", so the caller falls back.
-fn x11_root_property() -> Option<String> {
-    let (conn, screen) = x11rb::connect(None).ok()?;
-    let root = conn.setup().roots.get(screen)?.root;
-    let atom = conn
-        .intern_atom(true, b"AT_SPI_BUS")
-        .ok()?
-        .reply()
-        .ok()?
-        .atom;
-    if atom == 0 {
-        return None;
-    }
-    let reply = conn
-        .get_property(false, root, atom, AtomEnum::STRING, 0, 4096)
-        .ok()?
-        .reply()
-        .ok()?;
-    let value = String::from_utf8(reply.value).ok()?;
-    let value = value.trim_end_matches('\0').to_owned();
-    (!value.is_empty()).then_some(value)
+/// X11, bounded by the connect timeout. A failure means "not advertised
+/// here", and the caller falls back to the session bus.
+async fn x11_root_property(display: &str, timeouts: Timeouts) -> Result<Option<String>, Error> {
+    let display = Display::parse(display)
+        .ok_or_else(|| Error::Refused(format!("DISPLAY {display:?} is not a local display")))?;
+    time::within(
+        timeouts.connect,
+        "reading the X server's root window",
+        x11::root_property(display, "AT_SPI_BUS"),
+    )
+    .await?
 }
 
 /// Opens a bus connection to the accessibility bus. Connecting and the
@@ -211,7 +209,33 @@ pub async fn connect_p2p(
 
 #[cfg(test)]
 mod tests {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::UnixListener;
+    use std::time::Instant;
+
     use super::*;
+    use crate::testing::{returns, rig};
+
+    #[test]
+    fn an_x_server_that_never_answers_is_given_up_on_in_time() {
+        rig();
+        // The rig's own network namespace holds this name, and no server.
+        let name = SocketAddr::from_abstract_name(b"/tmp/.X11-unix/X42").unwrap();
+        let listener = UnixListener::bind_addr(&name).unwrap();
+        let timeouts = Timeouts {
+            method: Duration::from_secs(30),
+            connect: Duration::from_millis(300),
+        };
+        let t = Instant::now();
+        let r = returns(move || {
+            let _held = listener;
+            zbus::block_on(x11_root_property(":42", timeouts)).map(|_| ())
+        });
+        assert!(matches!(r, Err(Error::TimedOut(_))), "{r:?}");
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        let r = zbus::block_on(x11_root_property("elsewhere:0", timeouts));
+        assert!(matches!(r, Err(Error::Refused(_))), "{r:?}");
+    }
 
     #[test]
     fn only_unix_sockets_are_accepted() {
