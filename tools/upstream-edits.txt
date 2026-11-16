@@ -20,12 +20,17 @@ source/NVDAObjects/window/winword.py
   documentNavigation.paragraphHelper, which kept code uses, imports winword.
   On Linux wm_winword_expandToLine is absent; nothing reads it
 source/NVDAState.py
-  import safety: winreg imported only on Windows, after the module's other
-  imports so that upstream's import block stays whole. On Linux
-  _forceSecureModeEnabled and _serviceDebugEnabled, which the launcher asks
-  at start-up, answer False, as Linux has no system-wide store for those
-  administrator settings yet. The installer-only registry readers still
-  raise NameError on Linux
+  every platform: winreg comes from linuxPlatform.windowsOnly, the real
+  module on Windows and on Linux a stand-in whose functions raise
+  NoLinuxImplementation, so the installer's registry readers fail naming the
+  call.
+  Linux runtime: _forceSecureModeEnabled and _serviceDebugEnabled, which the
+  launcher asks at start-up, answer False, as an administrator sets them in
+  the registry, which Linux does not have. coreArchLibPath raises
+  linuxPlatform.windowsOnly.NoWindowsLibrary, a NoLinuxImplementation that is
+  also a FileNotFoundError, as NVDA's helper DLLs do not exist on Linux;
+  Chinese word segmentation then finds cppjieba missing, as it does on a
+  Windows copy without it, instead of a RuntimeError escaping its initializer
 source/_magnifier/__init__.py
   Linux runtime: initialize() makes no magnifier, as every magnified view is
   built on Windows' Magnification API and its constructor reads the cursor
@@ -34,20 +39,22 @@ source/_magnifier/__init__.py
   records it as disabled, so the toggle command speaks that, as it does any
   failure to start, instead of logging an error and announcing it enabled
 source/_remoteClient/localMachine.py
-  import safety: winreg imported only on Windows, after the module's other
-  imports; the SAS policy's registry key class attribute is defined only
-  there, so on Linux SoftwareSASGeneration.KEY is absent and reading the SAS
-  policy raises AttributeError
+  every platform: winreg comes from linuxPlatform.windowsOnly, whose
+  placeholder for HKEY_LOCAL_MACHINE the SAS policy class body holds on
+  Linux.
+  Linux runtime: _canSendSAS answers False on Linux, which has no secure
+  attention sequence, so a remote control+alt+delete is refused with
+  upstream's own message for a SAS it cannot send
 source/_remoteClient/transport.py
   Linux runtime: an outbound connection gets the same TCP keep-alive as on
   Windows, on with the first probe after 60 s idle, then every 2 s, and 10
   probes, through setsockopt, as socket.ioctl and SIO_KEEPALIVE_VALS exist
   only on Windows
 source/_remoteClient/urlHandler.py
-  import safety: winreg imported only on Windows, after the module's other
-  imports; the one annotation that names it is quoted so it is not
-  evaluated at import. On Linux winreg is absent, so registering the URL
-  handler raises NameError
+  every platform: winreg comes from linuxPlatform.windowsOnly, so
+  registering or removing the nvdaremote URL handler raises
+  NoLinuxImplementation on Linux. The one annotation that names
+  winreg.HKEYType is quoted, as the stand-in refuses that name at import
 source/appModuleHandler.py
   Linux runtime: on Linux the application name, executable path,
   architecture, user and liveness of a process come from /proc and a pidfd
@@ -63,7 +70,8 @@ source/appModuleHandler.py
 source/argsParsing.py
   Linux runtime: help goes to standard output and a command-line error to standard
   error with exit status 2, as argparse does, instead of a Windows message
-  box
+  box; the help for -f names the default log under the XDG state directory,
+  where logHandler puts it on Linux, instead of %TEMP%
 source/audio/soundSplit.py
   Linux runtime: Linux has no counterpart yet of Windows' audio
   session manager, through which sound split sets other applications'
@@ -92,16 +100,16 @@ source/browseMode.py
   document class only on Windows; Linux has no UI Automation and uses an
   empty tuple, which no isinstance test matches
 source/config/__init__.py
-  import safety: winreg imported only on Windows, after the module's other
-  imports.
+  every platform: winreg comes from linuxPlatform.windowsOnly, which on
+  Windows is the real module.
   Linux runtime: nothing installs NVDA, so isInstalledCopy() is False and
-  getInstalledUserConfigPath() is None; that also turns off audio ducking,
-  touch, the installed-only settings, parts of the update check and part of
-  the remote client. getUserDefaultConfigPath() is the XDG configuration
-  directory, XDG_CONFIG_HOME/basedreader, never a directory under appDir
+  getInstalledUserConfigPath() is None; that also turns off the
+  installed-only settings, parts of the update check and part of the remote
+  client. getUserDefaultConfigPath() is the XDG configuration directory,
+  XDG_CONFIG_HOME/basedreader, never a directory under appDir
 source/config/registry.py
-  import safety: winreg imported only on Windows, after the module's other
-  imports; on Linux winreg is absent, so its registry helpers raise NameError
+  every platform: winreg comes from linuxPlatform.windowsOnly, so
+  _deleteKeyAndSubkeys raises NoLinuxImplementation on Linux
 source/core.py
   Linux runtime: the desktop object is linuxPlatform.desktop's placeholder,
   which belongs to no process and finds no object with focus, in the
@@ -135,9 +143,10 @@ source/gui/__init__.py
   by itself. Every dialog NVDA opens goes through these, the welcome dialog
   at a first start and the exit dialog among them
 source/gui/addonStoreGui/viewModels/store.py
-  import safety: os.startfile imported only on Windows, after the module's
-  other imports; on Linux startfile is absent, so opening an add-on's home
-  page, source, scan results or downloaded file raises NameError
+  every platform: startfile comes from linuxPlatform.windowsOnly, which is
+  os.startfile on Windows and on Linux opens an add-on's home page, licence,
+  source, reviews, scan results or help with the desktop's default
+  application through xdg-open
 source/gui/message.py
   Linux runtime: MessageDialog._playSound plays nothing, as the sounds are
   Windows' system sounds through winsound.MessageBeep and Linux has no
@@ -157,15 +166,15 @@ source/hwIo/ble/_io.py
   defines it on every platform and where bleak says to import it from, not
   from bleak's WinRT backend, which imports only on Windows
 source/hwPortUtils.py
-  import safety: winreg imported only on Windows, after the module's other
-  imports; on Linux winreg is absent, so the port listing functions that
-  read the registry raise NameError
+  every platform: winreg comes from linuxPlatform.windowsOnly, so the
+  Bluetooth port readers raise NoLinuxImplementation on Linux.
   Linux runtime: listComPorts, listUsbDevices and listHidDevices list
   nothing, as there is no SetupAPI and hwIo refuses to open serial, HID
   and USB devices on Linux
 source/installer.py
-  import safety: winreg imported only on Windows, after the module's other
-  imports; on Linux winreg is absent, so installing raises NameError
+  every platform: winreg comes from linuxPlatform.windowsOnly, so
+  installing raises NoLinuxImplementation on Linux, naming the first
+  registry call it reaches
 source/keyboardHandler.py
   Linux runtime: what a key press needs from the live keyboard comes from
   linuxPlatform.inputHook, where a capture layer will answer it: the sticky
@@ -182,7 +191,9 @@ source/languageHandler.py
   and otherwise the user's own language whether translated or not, as
   Windows reports its display language. Converting a name
   to a Windows locale identifier gives LCID_NONE and the reverse uses
-  Python's table.
+  Python's table. The English names of a locale's language and country come
+  from ICU; asking for its ANSI code page raises NoLinuxImplementation, as
+  the code page only names a Windows C runtime locale, which Linux never sets.
   every platform: the catalogue directory is absolute under appDir, so
   translations no longer depend on the working directory
 source/logHandler.py
@@ -237,20 +248,18 @@ source/synthDrivers/espeak.py
   the driver loads espeak.dll, so the synthesizer list does not offer a
   voice that fails to load. The eSpeak port replaces this
 source/systemUtils.py
-  import safety: winreg imported only on Windows, after the module's other
-  imports.
+  every platform: winreg comes from linuxPlatform.windowsOnly, which on
+  Windows is the real module.
   Linux runtime: hasUiAccess() is True, as X11 isolates no client from
-  another; Wayland sessions are not handled. Its consumers then do this:
-  gui's MainFrame skips the Show and Hide trick, which is wanted; the
-  full-screen magnifier believes input transforms are supported; touch and
-  audio ducking answer unsupported through their own Linux guards; the
-  remote client's _canSendSAS goes on to winreg, which is absent, so a
-  remote control+alt+delete raises NameError; and _isObjectBelowLockScreen
-  goes on to Win32 z-order calls, which fail through the stand-ins once lock
-  tracking exists. hasSyswow64Dir() and _isSystemClockSecondsVisible() are
-  False; the configuration directory opens through xdg-open;
-  preventSystemIdle() warns once that the session may still go idle and
-  returns, as say all and braille keys call it, and
+  another; it answers for X11 in a Wayland session too. Its consumers then do this: gui's
+  MainFrame skips the Show and Hide trick, which is wanted; touch, audio
+  ducking, the remote client's _canSendSAS and
+  utils.security._isObjectBelowLockScreen answer through their own Linux
+  guards; the full-screen magnifier, which would take it to mean input
+  transforms are supported, is never built on Linux. hasSyswow64Dir() and
+  _isSystemClockSecondsVisible() are False; the configuration directory
+  opens through xdg-open; preventSystemIdle() warns once that the session may
+  still go idle and returns, as say all and braille keys call it, and
   resetThreadExecutionState() has nothing to release. ExecAndPump waits for
   its thread while yielding to the wx main loop instead of pumping Windows
   messages. The process token, logon session, elevation and desktop name
@@ -282,7 +291,12 @@ source/utils/mmdevice.py
 source/utils/security.py
   Linux runtime: isRunningOnSecureDesktop() is True only in a display manager's
   login screen session, the counterpart of the secure desktop, as
-  XDG_SESSION_CLASS says. NVDASettingsDialog's class body calls it at import
+  XDG_SESSION_CLASS says. NVDASettingsDialog's class body calls it at import.
+  _isObjectBelowLockScreen answers from linuxPlatform.session, which fails
+  closed: while the session is locked, everything but the desktop counts as
+  below the locker. Upstream's Win32 z-order checks would raise there, and
+  objectBelowLockScreenAndWindowsIsLocked takes any exception to mean the
+  object is safe to present
 source/winAPI/dpiAwareness.py
   Linux runtime: setDPIAwareness() returns at once, as GTK scales for the
   display by itself and a process has no DPI awareness to declare; core.main
@@ -298,13 +312,15 @@ source/winInputHook.py
   which installs no hook; a capture layer will deliver events there to the
   callbacks set here
 source/winVersion.py
-  import safety: winreg imported only on Windows, after the module's other
-  imports; getWinVer() returns 0.0.0 named after the Linux kernel release,
-  with the architecture spelled as Windows spells it, because eventHandler
-  and winAPI.constants call it at import
+  every platform: winreg comes from linuxPlatform.windowsOnly, which on
+  Windows is the real module.
+  import safety: getWinVer() returns 0.0.0 named after the Linux kernel release, with the
+  architecture spelled as Windows spells it, because eventHandler and
+  winAPI.constants call it at import
 source/windowUtils.py
   import safety: GetModuleHandle at module level runs only on Windows; on
-  Linux appInstance is absent, so creating a CustomWindow raises NameError;
+  Linux appInstance is None, as there is no module handle, and creating a
+  CustomWindow raises NoLinuxImplementation at RegisterClassEx;
   winAPI.messageWindow's _MessageWindow creates no window on Linux.
   Linux runtime: getWindowScalingFactor() is 1, as wxGTK sizes are logical
   pixels that GTK scales for the display itself; every message box and settings

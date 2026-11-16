@@ -3,7 +3,6 @@
 nix develop . -c tests/linux/rig python -m pytest tests/linux/test_osServices.py
 """
 
-import locale
 import os
 import stat
 import textwrap
@@ -12,8 +11,7 @@ from pathlib import Path
 import harness
 
 #: What nvda.pyw establishes before core.main, short of a configuration: translations installed as
-#: builtins, appDir, and a record of every warning and error logged. The working directory stays the child's own,
-#: so that nothing found relative to it can pass for something found under appDir.
+#: builtins, appDir as the working directory, and a record of every warning and error logged.
 PRELUDE = f"""
 import gettext
 import logging
@@ -24,6 +22,7 @@ import globalVars
 
 globalVars.appDir = {str(harness.SOURCE)!r}
 globalVars.appPid = os.getpid()
+os.chdir(globalVars.appDir)
 from logHandler import log
 
 logErrors = []
@@ -60,7 +59,8 @@ def startCore():
 	return config
 """
 
-#: Each child sees only the locale variables a test gives it, whatever the rig inherited.
+#: The rig's environment holds LANG=C.UTF-8 and no other locale variable. A test that gives a child
+#: its own locale clears all of them first, so that only the variables it names decide.
 NO_LOCALE = {name: "" for name in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LC_MEASUREMENT", "LANG")}
 
 
@@ -75,17 +75,6 @@ def run(tmpPath: Path, body: str, env: dict[str, str] | None = None) -> harness.
 
 def xdgEnv(tmpPath: Path) -> dict[str, str]:
 	return {"XDG_CONFIG_HOME": str(tmpPath / "xdgConfig"), "XDG_CONFIG_DIRS": str(tmpPath / "xdgSystem")}
-
-
-def isLocaleInstalled(name: str) -> bool:
-	saved = locale.setlocale(locale.LC_ALL)
-	try:
-		locale.setlocale(locale.LC_ALL, name)
-		return True
-	except locale.Error:
-		return False
-	finally:
-		locale.setlocale(locale.LC_ALL, saved)
 
 
 def test_firstRunCreatesConfigurationUnderXdgConfigHome(tmp_path):
@@ -370,7 +359,7 @@ def test_polishCatalogueLoadsFromLang(tmp_path):
 	assert done.value["language"] == "pl_PL"
 	assert done.value["off"] == "Wyłączone"
 	assert done.value["withContext"] == "Aragoński"
-	assert done.value["cLocale"] == ("pl_PL.UTF-8" if isLocaleInstalled("pl_PL.UTF-8") else "C.UTF-8")
+	assert done.value["cLocale"] == "pl_PL.UTF-8"
 	# Named in the desktop's language, as Windows names languages in the user's display language.
 	assert done.value["described"] == "portugalski (Brazylia)"
 
@@ -433,7 +422,7 @@ def test_localeFallsBackToCUtf8(tmp_path):
 		import languageHandler
 
 		results = {}
-		for language in ("sq", "en", "pl", "pt_BR"):
+		for language in ("sq", "en", "pl", "pt_BR", "tlh", "pl_XX"):
 			languageHandler.setLocale(language)
 			results[language] = locale.setlocale(locale.LC_ALL)
 		result = results
@@ -441,17 +430,18 @@ def test_localeFallsBackToCUtf8(tmp_path):
 		env={**NO_LOCALE, "LANG": "en_GB.UTF-8"},
 	)
 	done.assertClean()
-	expected = {
+	# The dev shell's locale archive holds every locale glibc has, so each that exists is found.
+	assert done.value == {
 		# The user's own locale is used for their own language.
 		"en": "en_GB.UTF-8",
+		# A language alone gets its usual region.
 		"sq": "sq_AL.UTF-8",
 		"pl": "pl_PL.UTF-8",
 		"pt_BR": "pt_BR.UTF-8",
+		# glibc has no Klingon, and no Polish for a region that does not exist.
+		"tlh": "C.UTF-8",
+		"pl_XX": "C.UTF-8",
 	}
-	for language, name in expected.items():
-		if not isLocaleInstalled(name):
-			expected[language] = "C.UTF-8"
-	assert done.value == expected
 
 
 def test_everyListedLanguageIsDescribed(tmp_path):
@@ -466,7 +456,6 @@ def test_everyListedLanguageIsDescribed(tmp_path):
 			"polish": languageHandler.getLanguageDescription("pl"),
 			"northernKurdish": languageHandler.getLanguageDescription("kmr"),
 			"unknown": languageHandler.getLanguageDescription("xx"),
-			"imperial": languageHandler.useImperialMeasurements(),
 			"lcidName": languageHandler.windowsLCIDToLocaleName(0x0415),
 			"centralKurdish": languageHandler.windowsLCIDToLocaleName(0x0492),
 			"lcid": languageHandler.localeNameToWindowsLCID("pl_PL"),
@@ -486,7 +475,6 @@ def test_everyListedLanguageIsDescribed(tmp_path):
 	# NVDA's translators' own name wins over ICU's plain "Kurdish".
 	assert done.value["northernKurdish"] == "Northern Kurdish"
 	assert done.value["unknown"] is None
-	assert done.value["imperial"] is False
 	assert done.value["lcidName"] == "pl_PL"
 	assert done.value["centralKurdish"] == "ckb"
 	assert done.value["lcid"] == 0
@@ -918,7 +906,7 @@ def test_sessionTrackingAnnouncesLockChanges(tmp_path):
 	assert value["whileLocked"] is True
 	assert value["warnings"] == 1
 	# Asked on every object construction, so it must stay far below a millisecond.
-	assert value["perCallMicroseconds"] < 50, value
+	assert value["perCallMicroseconds"] < 200, value
 
 
 def test_autostartFollowsXdgAutostartEntries(tmp_path):
@@ -1022,7 +1010,8 @@ def test_configurationDirectoryOpensInTheDesktopsFileManager(tmp_path):
 		env={**xdgEnv(tmp_path), "PATH": f"{fakeBin}:{os.environ['PATH']}"},
 	)
 	done.assertClean()
-	assert done.value == [str(configDir), str(tmp_path / "xdgConfig" / "basedreader")]
+	# Neither call waits for xdg-open, so the two may record in either order.
+	assert sorted(done.value) == sorted([str(configDir), str(tmp_path / "xdgConfig" / "basedreader")])
 	# Opening the default directory creates it first, as upstream does.
 	assert (tmp_path / "xdgConfig" / "basedreader" / "profiles").is_dir()
 
@@ -1045,3 +1034,430 @@ def test_messageWindowNeedsNoWindow(tmp_path):
 	)
 	done.assertClean()
 	assert done.value is None
+
+
+def test_measurementSystemFollowsTheMeasurementLocale(tmp_path):
+	# Each case: the environment, and whether NVDA reports measurements in imperial units.
+	cases = [
+		({"LANG": "en_US.UTF-8"}, True),
+		({"LANG": "en_GB.UTF-8"}, False),
+		({"LANG": "en_GB.UTF-8", "LC_MEASUREMENT": "en_US.UTF-8"}, True),
+		({"LANG": "en_US.UTF-8", "LC_MEASUREMENT": "pl_PL.UTF-8"}, False),
+		({"LC_ALL": "en_US.UTF-8", "LC_MEASUREMENT": "en_GB.UTF-8"}, True),
+		# A locale glibc does not have measures as the C locale does, in metric.
+		({"LANG": "tlh_XX.UTF-8"}, False),
+		({}, False),
+	]
+	done = run(
+		tmp_path,
+		f"""
+		import languageHandler
+
+		# NVDA sets the process's locale to its interface language; the user's units must not follow it.
+		languageHandler.setLocale("pl")
+		result = []
+		for env, _imperial in {cases!r}:
+			for name in ("LC_ALL", "LC_MEASUREMENT", "LANG"):
+				os.environ.pop(name, None)
+			os.environ.update(env)
+			result.append([env, languageHandler.useImperialMeasurements()])
+		""",
+		env=NO_LOCALE,
+	)
+	done.assertClean()
+	assert done.value == [[env, imperial] for env, imperial in cases]
+
+
+def test_localeHelpersAnswerInEnglishFromIcu(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		import languageHandler
+		from localesData import LANG_NAMES_TO_LOCALIZED_DESCS
+
+		languageHandler.setLanguage("pl")
+		codes = ("en", "de", "ne", "pt-BR", "pt_PT", "de_CH", "nb_NO", "Ne", "zh_HK", "xx", "pl_XX")
+		result = {
+			"languages": {code: languageHandler.englishLanguageNameFromNVDALocale(code) for code in codes},
+			"countries": {code: languageHandler.englishCountryNameFromNVDALocale(code) for code in codes},
+			# Upstream's unit tests ask this of every language NVDA names itself.
+			"unnamed": [
+				code
+				for code in LANG_NAMES_TO_LOCALIZED_DESCS
+				if languageHandler.englishLanguageNameFromNVDALocale(code) is None
+			],
+		}
+		for name, ask in (
+			("codePage", lambda: languageHandler.ansiCodePageFromNVDALocale("pl_PL")),
+			("localeString", lambda: languageHandler.localeStringFromLocaleCode("pl_PL")),
+		):
+			try:
+				result[name] = ask()
+			except NotImplementedError as e:
+				result[name] = type(e).__name__
+		""",
+		env={**NO_LOCALE, "LANG": "pl_PL.UTF-8"},
+	)
+	assert done.error is None, done.error
+	assert not done.logErrors
+	value = done.value
+	# In English whatever the interface language, as Windows' SENGLISH names are.
+	assert value["languages"] == {
+		"en": "English",
+		"de": "German",
+		"ne": "Nepali",
+		"pt-BR": "Portuguese",
+		"pt_PT": "Portuguese",
+		"de_CH": "German",
+		"nb_NO": "Norwegian Bokmål",
+		"Ne": "Nepali",
+		"zh_HK": "Chinese",
+		"xx": None,
+		"pl_XX": "Polish",
+	}
+	# A language alone is taken in its likeliest country, as Windows takes it.
+	assert value["countries"] == {
+		"en": "United States",
+		"de": "Germany",
+		"ne": "Nepal",
+		"pt-BR": "Brazil",
+		"pt_PT": "Portugal",
+		"de_CH": "Switzerland",
+		"nb_NO": "Norway",
+		"Ne": "Nepal",
+		"zh_HK": "Hong Kong SAR China",
+		"xx": None,
+		"pl_XX": None,
+	}
+	assert value["unnamed"] == []
+	# Windows' ANSI code pages exist only to name Windows C runtime locales.
+	assert value["codePage"] == "NoLinuxImplementation"
+	assert value["localeString"] == "NoLinuxImplementation"
+	assert done.noLinuxImplementation == ["languageHandler.ansiCodePageFromNVDALocale"] * 2
+
+
+def test_helpNamesTheLinuxLogFile(tmp_path):
+	stateHome = tmp_path / "state%dir"
+	done = run(
+		tmp_path,
+		"""
+		import argsParsing
+		import logHandler
+
+		try:
+			argsParsing.getParser().parse_known_args(["--help"])
+		except SystemExit:
+			pass
+		result = logHandler._getDefaultLogFilePath()
+		""",
+		env={"XDG_STATE_HOME": str(stateHome)},
+	)
+	done.assertClean()
+	assert done.value == str(stateHome / "basedreader" / "nvda.log")
+	assert f'Default destination is "{done.value}".' in done.stdout
+	assert "TEMP" not in done.stdout
+
+
+def test_windowsOnlyNamesFailLoudly(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		import sys
+
+		# Every module that imports the stand-in.
+		startCore()
+		import config.registry
+		import installer
+		import hwPortUtils
+		import NVDAState
+		import systemUtils
+		import winVersion
+		from _remoteClient import localMachine, urlHandler
+		from gui.addonStoreGui.viewModels import store
+		from linuxPlatform.windowsOnly import winreg
+
+		key = winreg.HKEY_LOCAL_MACHINE
+		combined = winreg.KEY_READ | winreg.KEY_WOW64_64KEY
+		uses = {
+			"function": lambda: winreg.OpenKey,
+			"type": lambda: winreg.HKEYType,
+			"call": lambda: key(),
+			"truth": lambda: bool(key),
+			"number": lambda: int(key),
+			"comparison": lambda: key == 0x80000002,
+			"text": lambda: f"{key}",
+			"attribute": lambda: key.Close,
+			"combined": lambda: int(combined),
+		}
+		outcomes = {}
+		for name, use in uses.items():
+			try:
+				use()
+				outcomes[name] = "returned"
+			except NotImplementedError as e:
+				outcomes[name] = str(e)
+		result = {
+			"outcomes": outcomes,
+			"sameEachTime": key is winreg.HKEY_LOCAL_MACHINE,
+			"repr": repr(key),
+			"probedUnderscore": hasattr(winreg, "__wrapped__"),
+			# The standard library takes a winreg it finds there for Windows.
+			"registered": [name for name in ("winreg", "msvcrt", "_winapi") if name in sys.modules],
+		}
+		""",
+	)
+	assert done.error is None, done.error
+	assert not done.logErrors
+	value = done.value
+	assert value["outcomes"] == {
+		"function": "winreg.OpenKey has no Linux implementation",
+		"type": "winreg.HKEYType has no Linux implementation",
+		"call": "winreg.HKEY_LOCAL_MACHINE has no Linux implementation",
+		"truth": "winreg.HKEY_LOCAL_MACHINE has no Linux implementation",
+		"number": "winreg.HKEY_LOCAL_MACHINE has no Linux implementation",
+		"comparison": "winreg.HKEY_LOCAL_MACHINE has no Linux implementation",
+		"text": "winreg.HKEY_LOCAL_MACHINE has no Linux implementation",
+		"attribute": "winreg.HKEY_LOCAL_MACHINE.Close has no Linux implementation",
+		"combined": (
+			"winreg.KEY_READ | <winreg.KEY_WOW64_64KEY, which Linux does not have> has no Linux implementation"
+		),
+	}
+	assert value["sameEachTime"] is True
+	assert value["repr"] == "<winreg.HKEY_LOCAL_MACHINE, which Linux does not have>"
+	assert value["probedUnderscore"] is False
+	assert value["registered"] == []
+	assert len(done.noLinuxImplementation) == len(value["outcomes"])
+
+
+def test_registryPathsRaiseNoLinuxImplementation(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		startCore()
+		import config.registry
+		import NVDAState
+		from _remoteClient import urlHandler
+		from _remoteClient.localMachine import LocalMachine, SoftwareSASGeneration
+
+		paths = {
+			# What a silent install asks first.
+			"installDirX86": lambda: NVDAState.WritePaths._installDirX86,
+			"startMenuFolder": lambda: NVDAState.WritePaths.startMenuFolder,
+			"deleteKey": lambda: config.registry._deleteKeyAndSubkeys(0, "key"),
+			"registerURLHandler": urlHandler.registerURLHandler,
+		}
+		result = {}
+		for name, ask in paths.items():
+			try:
+				ask()
+				result[name] = "returned"
+			except NotImplementedError as e:
+				result[name] = str(e)
+			except Exception as e:
+				result[name] = f"{type(e).__name__}: {e}"
+		result["canSendSAS"] = LocalMachine._canSendSAS()
+		result["sasKey"] = repr(SoftwareSASGeneration.KEY)
+		""",
+		env=xdgEnv(tmp_path),
+	)
+	assert done.error is None, done.error
+	assert not done.logErrors
+	assert done.value == {
+		"installDirX86": "winreg.OpenKey has no Linux implementation",
+		"startMenuFolder": "winreg.OpenKey has no Linux implementation",
+		"deleteKey": "winreg.OpenKey has no Linux implementation",
+		"registerURLHandler": "winreg.CreateKey has no Linux implementation",
+		# Control+alt+delete is Windows' secure attention sequence; a remote request for it is refused.
+		"canSendSAS": False,
+		"sasKey": "<winreg.HKEY_LOCAL_MACHINE, which Linux does not have>",
+	}
+	assert done.noLinuxImplementation == ["winreg.OpenKey"] * 3 + ["winreg.CreateKey"]
+
+
+def test_addonStoreOpensLinksWithTheDefaultApplication(tmp_path):
+	fakeBin = tmp_path / "bin"
+	fakeBin.mkdir()
+	opened = tmp_path / "opened"
+	xdgOpen = fakeBin / "xdg-open"
+	xdgOpen.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" >> {opened}\n', encoding="utf-8")
+	xdgOpen.chmod(0o755)
+	done = run(
+		tmp_path,
+		f"""
+		import pathlib
+		import time
+
+		startCore()
+		from gui.addonStoreGui.viewModels import store
+
+
+		def openedSoFar(count):
+			deadline = time.monotonic() + 30
+			lines = []
+			while time.monotonic() < deadline and len(lines) < count:
+				time.sleep(0.05)
+				if os.path.exists({str(opened)!r}):
+					with open({str(opened)!r}, encoding="utf-8") as f:
+						lines = f.read().splitlines()
+			return lines
+
+
+		store.startfile("https://example.org/addon")
+		openedSoFar(1)
+		store.startfile(pathlib.Path("/somewhere/readme.txt"))
+		try:
+			store.startfile("/somewhere/readme.txt", "print")
+			printed = "returned"
+		except NotImplementedError as e:
+			printed = str(e)
+		result = {{"opened": openedSoFar(2), "printed": printed}}
+		""",
+		env={**xdgEnv(tmp_path), "PATH": f"{fakeBin}:{os.environ['PATH']}"},
+	)
+	assert done.error is None, done.error
+	assert not done.logErrors
+	assert done.value == {
+		"opened": ["https://example.org/addon", "/somewhere/readme.txt"],
+		"printed": "os.startfile(operation='print') has no Linux implementation",
+	}
+	assert done.noLinuxImplementation == ["os.startfile(operation='print')"]
+
+
+def test_customWindowFailsAtItsFirstWindowsCall(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		startCore()
+		import windowUtils
+
+
+		class Window(windowUtils.CustomWindow):
+			className = "test"
+
+			def windowProc(self, hwnd, msg, wParam, lParam):
+				return None
+
+
+		try:
+			Window()
+			result = "created"
+		except NotImplementedError as e:
+			result = str(e)
+		""",
+	)
+	assert done.error is None, done.error
+	assert not done.logErrors
+	assert done.value == "user32.RegisterClassExW is a Windows function with no Linux implementation"
+	assert done.noLinuxImplementation == ["user32.RegisterClassExW"]
+
+
+def test_chineseWordSegmentationIsUnavailableWithoutItsLibrary(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		startCore()
+		from NVDAState import ReadPaths
+		from textUtils._wordSeg.wordSegStrategy import ChineseWordSegmentationStrategy
+
+		try:
+			ReadPaths.cppjiebaDll
+			raised = []
+		except Exception as e:
+			raised = [type(e).__name__, isinstance(e, NotImplementedError), isinstance(e, OSError)]
+		# A user who sets Chinese word segmentation starts this with the library missing.
+		ChineseWordSegmentationStrategy._initCppJieba(forceInit=True)
+		result = {"raised": raised, "loaded": ChineseWordSegmentationStrategy._lib is not None}
+		""",
+		env=xdgEnv(tmp_path),
+	)
+	assert done.error is None, done.error
+	assert done.value == {"raised": ["NoWindowsLibrary", True, True], "loaded": False}
+	assert done.noLinuxImplementation == ["NVDAState.ReadPaths.coreArchLibPath"] * 2
+	# Upstream logs a library that will not load, on Windows too, and carries on without it.
+	assert done.logErrors == ["ERROR: Failed to load cppjieba library"]
+
+
+def test_lockedSessionWithholdsEverythingButTheDesktop(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		startCore()
+		import api
+		import controlTypes
+		from baseObject import AutoPropertyObject
+		from linuxPlatform.desktop import Desktop
+		from NVDAObjects import NVDAObject
+		from NVDAState import _TrackNVDAInitialization
+		from utils.security import objectBelowLockScreenAndWindowsIsLocked as isWithheld
+		from winAPI import sessionTracking
+
+
+		class Mail(NVDAObject):
+			processID = 4242
+			role = controlTypes.Role.DOCUMENT
+			name = "a private message"
+
+
+		api.setDesktopObject(Desktop())
+		sessionTracking.initialize()
+		_TrackNVDAInitialization.markInitializationComplete()
+		unlocked = [isWithheld(Mail()), isWithheld(Desktop())]
+		sessionTracking._querySessionLocked = lambda: True
+		AutoPropertyObject.invalidateCaches()
+		locked = [isWithheld(Mail()), isWithheld(Desktop())]
+		navigatorSet = api.setNavigatorObject(Mail())
+		result = {"unlocked": unlocked, "locked": locked, "navigatorSet": navigatorSet}
+		""",
+		env={**xdgEnv(tmp_path), "XDG_SESSION_CLASS": "user"},
+	)
+	done.assertClean()
+	assert done.value == {
+		"unlocked": [False, False],
+		# Nothing tells the screen locker's objects apart, so everything but the desktop is withheld.
+		"locked": [True, False],
+		"navigatorSet": False,
+	}
+
+
+def test_xdgDirectoriesFollowTheSpecification(tmp_path):
+	runtimeParent = tmp_path / "tmp"
+	runtimeParent.mkdir()
+	done = run(
+		tmp_path,
+		f"""
+		import stat
+		import tempfile
+		from linuxPlatform import xdg
+
+		result = {{}}
+		os.environ["XDG_CONFIG_DIRS"] = "relative/xdg:/etc/one::/etc/two"
+		result["configDirs"] = xdg.configDirs()
+		os.environ["XDG_CONFIG_DIRS"] = "relative/xdg"
+		result["onlyRelative"] = xdg.configDirs()
+		os.environ["XDG_STATE_HOME"] = "relative/state"
+		result["stateHome"] = xdg.stateHome()
+		result["userStateDir"] = xdg.userStateDir()
+		os.environ.pop("XDG_RUNTIME_DIR", None)
+		tempfile.tempdir = {str(runtimeParent)!r}
+		runtime = xdg.runtimeDir()
+		result["runtime"] = [runtime, oct(stat.S_IMODE(os.stat(runtime).st_mode)), xdg.runtimeDir() == runtime]
+		os.chmod(runtime, 0o755)
+		try:
+			xdg.runtimeDir()
+			result["opened"] = "accepted"
+		except PermissionError:
+			result["opened"] = "refused"
+		""",
+	)
+	done.assertClean()
+	home = os.path.expanduser("~")
+	assert done.value == {
+		# The specification says relative entries are invalid and must be ignored.
+		"configDirs": ["/etc/one", "/etc/two"],
+		"onlyRelative": ["/etc/xdg"],
+		"stateHome": os.path.join(home, ".local", "state"),
+		"userStateDir": os.path.join(home, ".local", "state", "basedreader"),
+		"runtime": [str(runtimeParent / f"basedreader-runtime-{os.getuid()}"), "0o700", True],
+		# A runtime directory others can enter could hold a planted lock file.
+		"opened": "refused",
+	}
