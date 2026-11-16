@@ -6,9 +6,6 @@ under the rig:
 
 	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_espeak.py
 
-A run that loads eSpeak maps a library whose name the harness counts among sound libraries, so those
-runs ignore the audio check and then require that what it found is that library and nothing else.
-
 The tests of cancelling each hold the driver's thread where a cancel can slip past the driver's
 checks for one: between the callback's check and its feed of the player, and in the wait for the
 player at the end of an utterance.
@@ -26,15 +23,6 @@ import rununittests
 
 LIBRARY_VARIABLE = "BASEDREADER_ESPEAK_LIB"
 DATA_DIR_VARIABLE = "BASEDREADER_ESPEAK_DATA_DIR"
-
-
-def assertOnlyEspeakReached(done: harness.ChildResult) -> None:
-	"""What the audio check found, in a run that loaded eSpeak and so ignored that check, is eSpeak NG's
-	library and nothing else: the file BASEDREADER_ESPEAK_LIB names, built without audio output."""
-	library = os.path.realpath(os.environ[LIBRARY_VARIABLE])
-	# Each finding is "loaded PATH" or "mapped PATH".
-	reached = {os.path.realpath(what.split(" ", 1)[1]) for what in done.audio}
-	assert reached == {library}, done.audio
 
 
 #: Brings speech up as core.main does with eSpeak configured, into the capture sink, and records when
@@ -216,8 +204,7 @@ def runEspeak(tmpPath: Path, code: str, language: str = "en") -> harness.ChildRe
 		env={"BASEDREADER_AUDIO_CAPTURE_DIR": str(capture)},
 		timeout=600,
 	)
-	done.assertClean(ignoring={"audio"})
-	assertOnlyEspeakReached(done)
+	done.assertClean()
 	return done
 
 

@@ -8,7 +8,6 @@ the rig:
 """
 
 import importlib.util
-import os
 import textwrap
 from pathlib import Path
 
@@ -16,15 +15,6 @@ import harness
 
 HERE = Path(__file__).resolve().parent
 WINDOWS_ONLY_DRIVERS = {"mssp", "oneCore", "sapi4_32", "sapi5", "sapi5_32"}
-
-
-def assertOnlyEspeakReached(done: harness.ChildResult) -> None:
-	"""What the audio check found, in a run that loaded eSpeak and so ignored that check, is eSpeak NG's
-	library and nothing else: the file BASEDREADER_ESPEAK_LIB names, built without audio output."""
-	library = os.path.realpath(os.environ["BASEDREADER_ESPEAK_LIB"])
-	# Each finding is "loaded PATH" or "mapped PATH".
-	reached = {os.path.realpath(what.split(" ", 1)[1]) for what in done.audio}
-	assert reached == {library}, done.audio
 
 
 _spec = importlib.util.spec_from_file_location(
@@ -865,8 +855,7 @@ def test_synthListOnLinuxHasNoWindowsDriver(tmp_path: Path):
 		""",
 	)
 	# Everything offered loads, with nothing logged at ERROR on the way.
-	done.assertClean(ignoring={"audio"})
-	assertOnlyEspeakReached(done)
+	done.assertClean()
 	assert done.value["names"] == ["espeak", "transcript", "silence"]
 	assert done.value["loaded"] == {
 		"espeak": [True, "espeak"],
@@ -937,8 +926,7 @@ synthDriverHandler.setSynth(None)
 
 def test_autoChoosesEspeakAndSavesIt(tmp_path: Path):
 	done = harness.runChild(tmp_path, AUTO)
-	done.assertClean(ignoring={"audio"})
-	assertOnlyEspeakReached(done)
+	done.assertClean()
 	# As upstream does with its first choice: a synth that auto loads, other than as a fallback,
 	# becomes the configured one.
 	assert done.value["configuredBefore"] == "auto"

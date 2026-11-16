@@ -491,6 +491,42 @@ def test_audioLibraryMappedAtExitIsReported(tmp_path: Path, names: list[str], re
 	assert problemsBesides(done) == (["audio"] if reported else [])
 
 
+def test_onlyTheEspeakLibraryTheEnvironmentNamesIsAllowed(tmp_path: Path):
+	# Reached through a link, as BASEDREADER_ESPEAK_LIB names the soname's link in the dev shell; a file
+	# of the same name anywhere else is still counted, loaded and mapped.
+	work = tmp_path.resolve()
+	named = work / "named" / "libespeak-ng.so.1.1.51"
+	link = work / "link" / "libespeak-ng.so.1"
+	other = work / "other" / "libespeak-ng.so.1"
+	for path in (named, link, other):
+		path.parent.mkdir()
+	named.write_bytes(bytes(4096))
+	other.write_bytes(bytes(4096))
+	link.symlink_to(named)
+	done = harness.runChild(
+		tmp_path,
+		f"""
+		import ctypes
+		import mmap
+
+		kept = []
+		for path in ({str(link)!r}, {str(other)!r}):
+			try:
+				ctypes.CDLL(path)
+			except OSError:
+				pass
+			with open(path, "rb") as f:
+				kept.append(mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ))
+		result = harness.soundReached(allowLinked=False)
+		""",
+		prepare="none",
+		env={harness.ESPEAK_LIBRARY_VARIABLE: str(link)},
+	)
+	assert done.audio == [f"loaded {other}", f"mapped {other}"]
+	assert done.value == [f"mapped {other}"]
+	assert problemsBesides(done) == ["audio"]
+
+
 def test_codeCanSeeWhatTheLinkedAllowanceHides(tmp_path: Path):
 	# A test that plays compares the maps before and after, and must see a linked library that playing
 	# loads.

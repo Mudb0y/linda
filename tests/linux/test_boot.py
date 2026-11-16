@@ -508,11 +508,14 @@ def test_greeterCopyTakesNoTestHooks(start: Start):
 	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
 	assert not nvda.spoken()
 	assert not nvda.text("nvda.log")
-	# Without the test hooks it speaks through NVDA's default synthesizer, eSpeak, whose library is
-	# all it reaches for that could sound; the rig has no sound device for it to reach.
-	audio = nvda.result().audio
-	assert audio and all("espeak" in what for what in audio), audio
-	nvda.assertClean(ignoring={"audio"})
+	# Without the test hooks it speaks through NVDA's default synthesizer, eSpeak, and reaches for
+	# nothing that could sound; the rig has no sound device for it to reach.
+	reached = nvda.result().reached
+	assert any(
+		what.startswith("ctypes.dlopen ") and harness.isNamedEspeakLibrary(what.split(" ", 1)[1])
+		for what in reached
+	), reached
+	nvda.assertClean()
 
 
 def test_recordSeesNoLinuxImplementationThatUpstreamCaught(tmp_path: Path):

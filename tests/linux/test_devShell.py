@@ -255,9 +255,7 @@ def test_synthesizerLibraryNeedsNoSoundLibrary(tmp_path: Path, variable: str, re
 	library it needs: synthesizers hand their audio to NVDA's player and play nothing themselves."""
 	env = {"SYNTH_LIBRARY": os.path.join(os.environ[variable], relative)}
 	done = harness.runChild(tmp_path, LOAD_LIBRARY, prepare="none", env=env)
-	# Loading a library whose name says espeak is what the audio check counts; what it maps is
-	# examined below.
-	done.assertClean(ignoring={"audio"})
+	done.assertClean()
 	assert done.value["sound"] == [], "\n".join(done.value["mapped"])
 
 

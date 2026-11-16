@@ -134,6 +134,11 @@ LINKED_WITHOUT_SOUND = {
 		r"|pulse|pulse-simple|pulsecommon-[\d.]+)\.so(?:\.[\d.]+)?",
 	),
 }
+#: Names the eSpeak NG library that NVDA's default synthesizer loads. That build has no audio output
+#: and links no sound library, which tests/linux/test_devShell.py checks, so that file alone of the
+#: libraries AUDIO_LIBRARIES matches is never counted; any other eSpeak, such as a stock one that links
+#: pcaudiolib, still is.
+ESPEAK_LIBRARY_VARIABLE = "BASEDREADER_ESPEAK_LIB"
 SOUND_DEVICES = "/dev/snd"
 #: Words in the path of a Unix socket that belongs to a sound server.
 SOUND_SERVER_SOCKETS = ("pulse", "pipewire")
@@ -373,8 +378,15 @@ def isAudioLibrary(path: str | bytes) -> bool:
 	return name.removeprefix("lib").startswith(AUDIO_LIBRARIES)
 
 
+def isNamedEspeakLibrary(path: str | bytes) -> bool:
+	"""Whether path is, through any links, the file ESPEAK_LIBRARY_VARIABLE names."""
+	named = os.environ.get(ESPEAK_LIBRARY_VARIABLE)
+	return bool(named) and os.path.realpath(os.fsdecode(path)) == os.path.realpath(named)
+
+
 def soundReached(*, allowLinked: bool = True) -> list[str]:
-	"""Audio libraries mapped into this process and sound devices it holds open, now.
+	"""Audio libraries mapped into this process, but for the eSpeak NG library ESPEAK_LIBRARY_VARIABLE
+	names, and sound devices it holds open, now.
 
 	:param allowLinked: Leave out what LINKED_WITHOUT_SOUND allows. Code that compares what is mapped
 		before and after it plays passes False, so that one of those libraries loaded by playing shows.
@@ -394,6 +406,7 @@ def soundReached(*, allowLinked: bool = True) -> list[str]:
 			path.startswith("/")
 			and isAudioLibrary(name)
 			and not any(allowed.fullmatch(name) for allowed in linked)
+			and not isNamedEspeakLibrary(path)
 		):
 			found.append(f"mapped {path}")
 	for fd in os.listdir("/proc/self/fd"):
@@ -473,7 +486,11 @@ class Checks:
 				stack=traceback.format_stack(limit=14)[:-2],
 			)
 		elif event == "ctypes.dlopen":
-			if isinstance(args[0], (str, bytes)) and isAudioLibrary(args[0]):
+			if (
+				isinstance(args[0], (str, bytes))
+				and isAudioLibrary(args[0])
+				and not isNamedEspeakLibrary(args[0])
+			):
 				self.record("audio", what=f"loaded {os.fsdecode(args[0])}")
 		elif event == "socket.connect":
 			address = args[1]
