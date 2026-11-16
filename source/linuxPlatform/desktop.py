@@ -1,16 +1,16 @@
-"""The object NVDA holds as the desktop until the AT-SPI backend provides the real one."""
+"""The desktop NVDA holds when no accessibility tree is read: a root with nothing under it."""
 
 import controlTypes
 from NVDAObjects import NVDAObject
 
 
 class Desktop(NVDAObject):
-	"""The root of NVDA's object hierarchy, standing in for the AT-SPI desktop.
+	"""The root of NVDA's object hierarchy, with no application under it.
 
 	core.main makes it the desktop, foreground, focus, navigator and mouse object, as it does the
-	desktop window on Windows. Nothing can be asked of the applications on screen yet, so it has no
-	parent, children or text, and the object with focus, in the foreground or under a point is not
-	known: each of those answers None, which NVDA takes as nothing found.
+	desktop window on Windows. It reaches no application, so it has no parent, children or text, and
+	the object with focus, in the foreground or under a point is not known: each of those answers None,
+	which NVDA takes as nothing found.
 	"""
 
 	#: It belongs to no application, as upstream's placeholder objects belong to none.

@@ -6,7 +6,6 @@ or left out where Linux has none, and then runs core.main.
 """
 
 import os
-import signal
 import sys
 from typing import NoReturn
 
@@ -17,7 +16,7 @@ if appDir not in sys.path:
 
 #: Names a file that receives a JSON line for every NoLinuxImplementation raised in this process,
 #: including those upstream catches and treats as a feature being absent.
-noLinuxImplementationFileVariable = "BASEDREADER_NO_LINUX_IMPLEMENTATION_FILE"
+NO_LINUX_IMPLEMENTATION_FILE_VARIABLE = "BASEDREADER_NO_LINUX_IMPLEMENTATION_FILE"
 
 
 def _recordNoLinuxImplementation(path: str) -> None:
@@ -44,77 +43,19 @@ def _recordNoLinuxImplementation(path: str) -> None:
 	sys.addaudithook(onAudit)
 
 
-#: Milliseconds between attempts to exit while message boxes are closing.
-_EXIT_RETRY_INTERVAL = 50
-_isExitPending = False
-
-
-def _exitOnceMessageBoxesClose() -> bool:
-	"""Exit through core.triggerNVDAExit, once every open message box has been cancelled.
-
-	triggerNVDAExit refuses to exit while a message box waits for an answer. On Windows the session's
-	end posts WM_QUIT, which ends every nested message loop and so every message box, and NVDA then
-	exits through its catch-all after the main loop. A signal ends no loop, so the modal dialogs are
-	cancelled instead, one each time this runs, and the exit waits until each call that showed a
-	message box has returned.
-	"""
-	global _isExitPending
-	import core
-	import wx
-	from gi.repository import GLib
-	from gui.message import isModalMessageBoxActive
-
-	if not isModalMessageBoxActive():
-		_isExitPending = False
-		core.triggerNVDAExit()
-		return GLib.SOURCE_REMOVE
-	modalDialogs = [w for w in wx.GetTopLevelWindows() if isinstance(w, wx.Dialog) and w.IsModal()]
-	if modalDialogs:
-		# Only the innermost, which is the last opened: a dialog further out cannot end its modal loop
-		# while another runs inside it. Cancelled, the answer gui.message.messageBox gives once shutdown
-		# has begun. Closing it instead would end a message box with no return code, which messageBox
-		# cannot translate, or be vetoed by a question with no answer to fall back on.
-		modalDialogs[-1].EndModal(wx.ID_CANCEL)
-	if not _isExitPending:
-		_isExitPending = True
-		GLib.timeout_add(_EXIT_RETRY_INTERVAL, _exitOnceMessageBoxesClose)
-	return GLib.SOURCE_CONTINUE
-
-
-def _onQuitSignal(signalNumber: int) -> bool:
-	from gi.repository import GLib
-	from logHandler import log
-
-	log.info(f"Exiting on {signal.Signals(signalNumber).name}")
-	if not _isExitPending:
-		_exitOnceMessageBoxesClose()
-	# Kept rather than removed, so that a repeated signal reaches this handler again instead of the
-	# default action, which ends the process without saving anything.
-	return GLib.SOURCE_CONTINUE
-
-
-def _exitOnQuitSignals() -> None:
-	"""Exit through core.triggerNVDAExit on SIGTERM, which a new copy and the end of the session send,
-	SIGHUP and SIGINT.
-
-	CPython runs a signal.signal handler only when the main thread next runs Python code, and an idle
-	wx main loop waits in C, so NVDA would not notice the signal until something else woke it. GLib
-	runs these handlers from the main loop itself, which wxGTK's loop is.
-	"""
-	from gi.repository import GLib, GLibUnix
-
-	for signalNumber in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-		GLibUnix.signal_add(GLib.PRIORITY_HIGH, signalNumber, _onQuitSignal, signalNumber)
+def _tell(message: str) -> None:
+	# On Linux the caller reads standard error. logHandler.initialize sends sys.stderr to the log.
+	if sys.__stderr__ is not None:
+		print(f"basedreader: {message}", file=sys.__stderr__, flush=True)
 
 
 def _fail(message: str) -> NoReturn:
-	# Before logHandler.initialize there is no log, and on Linux the caller reads standard error.
-	print(f"basedreader: {message}", file=sys.stderr)
+	_tell(message)
 	sys.exit(1)
 
 
 def main() -> NoReturn:
-	recordPath = os.environ.get(noLinuxImplementationFileVariable)
+	recordPath = os.environ.get(NO_LINUX_IMPLEMENTATION_FILE_VARIABLE)
 	if recordPath:
 		_recordNoLinuxImplementation(recordPath)
 	from linuxPlatform import bootstrap
@@ -124,7 +65,7 @@ def main() -> NoReturn:
 	import globalVars
 	import NVDAState
 	from argsParsing import getParser
-	from linuxPlatform import singleInstance, testHooks
+	from linuxPlatform import quitSignals, singleInstance, testHooks
 
 	# nvda.pyw also checks for its virtual environment here. The Nix development shell provides
 	# NVDA's dependencies instead, and bootstrap.install() has checked the one it cannot start without.
@@ -149,6 +90,9 @@ def main() -> NoReturn:
 		if isinstance(value, str):
 			setattr(globalVars.appArgs, name, os.path.abspath(value))
 	appArgs = globalVars.appArgs
+	if appArgs.launcher:
+		# The dialog it shows offers to install NVDA or make a portable copy, both through Windows' installer.
+		_fail("--launcher is how NVDA's Windows installer starts it, and Linux has no such installer")
 
 	try:
 		instanceLock = singleInstance.InstanceLock(singleInstance.lockFilePath())
@@ -162,15 +106,17 @@ def main() -> NoReturn:
 			singleInstance.terminateRunning(instanceLock)
 		except OSError as e:
 			# nvda.pyw goes on after this too, and gives up when the lock does not come free.
-			print(f"basedreader: could not stop the NVDA already running: {e}", file=sys.stderr)
+			_tell(f"could not stop the NVDA already running: {e}")
 	if appArgs.quit or (isAlreadyRunning and appArgs.easeOfAccess):
 		sys.exit(0)
 	elif appArgs.check_running:
 		sys.exit(1)
-	# Before the lock is taken: from then on a copy replacing this one may send SIGTERM, which would
-	# otherwise end this one without letting go of anything it had started.
-	_exitOnQuitSignals()
-	if not instanceLock.acquire():
+	quitSignals.install()
+	try:
+		isLockTaken = instanceLock.acquire()
+	except OSError as e:
+		_fail(f"cannot take {instanceLock.path}: {e}")
+	if not isLockTaken:
 		_fail(f"another NVDA still holds {instanceLock.path}")
 
 	from utils.security import isRunningOnSecureDesktop
@@ -182,8 +128,9 @@ def main() -> NoReturn:
 			appArgs.secure = True
 		appArgs.changeScreenReaderFlag = False
 		appArgs.minimal = True
-		# nvda.pyw uses the systemConfig directory of the installed copy here. Linux has none, so the
-		# login screen's own user's configuration serves, unwritten, as secure mode writes nothing.
+		# nvda.pyw gives the installed copy's systemConfig directory here, which holds the settings
+		# copied for the sign-in screen. Linux has nothing of the kind, so the copy on the login screen
+		# uses, and creates, its own user's configuration directory, and starts from upstream's defaults.
 	# After the secure mode decision, which turns the test hooks off.
 	testHooks.install()
 
@@ -203,21 +150,28 @@ def main() -> NoReturn:
 	# there is no Ease of Access Center to tell that NVDA is starting or stopping.
 	# nvda.pyw applies its comtypes monkey patches first of all. comtypes does nothing on Linux, and
 	# its stand-in has none of the internals those patches replace.
+	failure: BaseException | None = None
 	try:
 		import core
 
+		# From then on this copy acts on SIGTERM at once, so a copy replacing it need wait no longer.
+		core.postNvdaStartup.register(instanceLock.markReady)
 		core.main()
-	except BaseException:
+	except BaseException as e:
 		# As nvda.pyw does, SystemExit included: wx raises it when there is no display to open.
 		log.critical("core failure", exc_info=True)
-		sys.exit(1)
-	# The lock is never released by hand: the kernel drops it as the process ends, so a new copy waits
-	# for this one to be entirely gone, as it waits on the mutex on Windows.
-	log.info("NVDA exit")
+		failure = e
+	else:
+		# The lock is never released by hand: the kernel drops it as the process ends, so a new copy waits
+		# for this one to be entirely gone, as it waits on the mutex on Windows.
+		log.info("NVDA exit")
 	# logHandler's hook writes to the log, which the interpreter takes apart before the objects whose
 	# finalisers fail as it exits, so its own hook failed instead and hid what went wrong. Python's
 	# hook writes to standard error, which on Linux is where the caller looks.
 	sys.unraisablehook = sys.__unraisablehook__
+	if failure is not None:
+		logged = f"; the log is {appArgs.logFileName}" if appArgs.logFileName else ""
+		_fail(f"core failure, {type(failure).__name__}: {failure}{logged}")
 	sys.exit(NVDAState._getExitCode())
 
 

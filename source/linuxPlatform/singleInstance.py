@@ -7,6 +7,11 @@ process lives and records its process ID in it, and a new copy asks that process
 SIGTERM. The kernel drops the lock only when the process is gone, so the lock is held until the very
 last thing the old copy does, as the mutex is on Windows.
 
+The running copy takes the lock as it starts, long before it can act on SIGTERM, which it does only
+once its main loop runs. On Windows a copy that is still starting has no message window yet and is
+never asked to quit. Here it is asked at once, and it marks itself ready in the file once it can act
+on the request; the time it has to exit counts from then.
+
 The kernel, not the file, says which process holds the lock: a record lock, unlike flock, can be
 asked for its holder. The file alone could name a process that exited long ago, whose ID may since
 belong to any other program.
@@ -23,11 +28,12 @@ import signal
 import struct
 import subprocess
 import sys
-import tempfile
 import time
 
-#: Seconds the running copy has to exit once asked, before it is killed; nvda.pyw's wait.
+#: Seconds the running copy has to exit once asked and ready, before it is killed; nvda.pyw's wait.
 QUIT_TIMEOUT = 4.0
+#: Seconds a copy that is still starting has to become ready, before QUIT_TIMEOUT starts anyway.
+START_TIMEOUT = 30.0
 #: Seconds a killed copy has to be gone; nvda.pyw's wait after TerminateProcess.
 KILL_TIMEOUT = 2.0
 #: Seconds to wait for the lock, as nvda.pyw waits for the prior copy's mutex.
@@ -37,8 +43,14 @@ _POLL_INTERVAL = 0.05
 #: struct flock on 64-bit Linux: type, whence, start, length, process ID, with the C padding.
 _FLOCK = "hhqqi4x"
 
-#: Host parts of a DISPLAY that all reach the X server on this machine.
-_LOCAL_HOSTS = ("", "unix", "localhost", "127.0.0.1", "::1")
+#: What a copy writes in the file: its process ID once it holds the lock, and the second line once
+#: it acts on SIGTERM. Anything else, stale bytes left by an earlier copy among them, is no record.
+_RECORD = re.compile(rb"(?P<processID>[1-9][0-9]*)\n(?P<ready>ready\n)?")
+_READY = b"ready\n"
+
+#: Host parts of a DISPLAY that name the X server on this machine by its socket. A TCP host part,
+#: localhost included, is another server: what ssh forwards a display to is a proxy for a remote one.
+_LOCAL_HOSTS = ("", "unix")
 
 
 def _checkPrivateDirectory(path: str) -> None:
@@ -51,25 +63,27 @@ def _runtimeDir() -> str:
 	path = os.environ.get("XDG_RUNTIME_DIR", "")
 	if os.path.isabs(path):
 		return path
-	# The base directory specification asks for a stand-in with the same guarantees when the session
-	# sets none: owned by the user and closed to everyone else.
-	path = os.path.join(tempfile.gettempdir(), f"basedreader-runtime-{os.getuid()}")
-	try:
-		os.mkdir(path, 0o700)
-	except FileExistsError:
-		pass
-	_checkPrivateDirectory(path)
+	# Where GLib's g_get_user_runtime_dir() falls back to when the session sets none, as under su or
+	# sudo. A name of its own in the shared /tmp would let any other user claim it first.
+	path = os.environ.get("XDG_CACHE_HOME", "")
+	if not os.path.isabs(path):
+		path = os.path.join(os.path.expanduser("~"), ".cache")
+	os.makedirs(path, 0o700, exist_ok=True)
 	return path
 
 
 def displayName() -> str:
 	"""The display this process would run on, in one spelling for each display.
 
-	:0, :0.0, unix:0 and localhost:0 all reach the same X server, so they must give one lock.
+	:0, :0.0 and unix:0 all reach the same X server through its socket, so they must give one lock.
 	"""
 	display = os.environ.get("DISPLAY")
 	if not display:
-		return (os.environ.get("WAYLAND_DISPLAY") or "none").replace("/", "_")
+		wayland = os.environ.get("WAYLAND_DISPLAY") or "none"
+		# The socket may be named by its path or, under XDG_RUNTIME_DIR, by its name alone.
+		if os.path.dirname(wayland) == os.environ.get("XDG_RUNTIME_DIR", "").rstrip("/"):
+			wayland = os.path.basename(wayland)
+		return wayland.replace("/", "_")
 	host, separator, number = display.rpartition(":")
 	if not separator:
 		return display.replace("/", "_")
@@ -126,8 +140,16 @@ class InstanceLock:
 				return False
 			time.sleep(_POLL_INTERVAL)
 		os.ftruncate(self._fd, 0)
-		os.pwrite(self._fd, f"{os.getpid()}\n".encode(), 0)
+		os.pwrite(self._fd, self._processLine(), 0)
 		return True
+
+	@staticmethod
+	def _processLine() -> bytes:
+		return f"{os.getpid()}\n".encode()
+
+	def markReady(self) -> None:
+		"""Record that this process, which holds the lock, now acts on SIGTERM at once."""
+		os.pwrite(self._fd, _READY, len(self._processLine()))
 
 	def close(self) -> None:
 		"""Close the file, which gives up the lock if this process holds it."""
@@ -136,7 +158,7 @@ class InstanceLock:
 	def holder(self) -> int | None:
 		"""The process holding the lock, as the kernel reports it, or None if no other process does.
 
-		@raise OSError: If the holder is in another PID namespace, where its ID means nothing here.
+		:raises OSError: If the holder is in another PID namespace, where its ID means nothing here.
 		"""
 		request = struct.pack(_FLOCK, fcntl.F_WRLCK, os.SEEK_SET, 0, 0, 0)
 		lockType, _whence, _start, _length, processID = struct.unpack(
@@ -151,12 +173,17 @@ class InstanceLock:
 
 	def recorded(self) -> int | None:
 		"""The process ID written in the file by the copy that last took the lock."""
-		data = os.pread(self._fd, 32, 0)
-		try:
-			processID = int(data.decode("ascii").strip())
-		except (UnicodeDecodeError, ValueError):
-			return None
-		return processID if processID > 0 else None
+		record = self._record()
+		return int(record["processID"]) if record else None
+
+	def recordedReady(self) -> int | None:
+		"""The process ID in the file, if that copy has also marked itself ready."""
+		record = self._record()
+		return int(record["processID"]) if record and record["ready"] else None
+
+	def _record(self) -> re.Match[bytes] | None:
+		# More than the longest record, so that a longer file cannot pass for one.
+		return _RECORD.fullmatch(os.pread(self._fd, 32, 0))
 
 
 def _waitForExit(pidfd: int, timeout: float) -> bool:
@@ -185,8 +212,9 @@ def terminateRunning(lock: InstanceLock) -> None:
 	Only the process that the kernel reports as holding the lock, and that recorded itself in the
 	file, is ever signalled. The signals go through a pidfd, and the holder is asked for again once
 	the pidfd is open, so a process ID that has since been reused cannot carry them to another
-	process.
-	@raise OSError: If the copy cannot be identified, or is still there after being killed.
+	process. A copy that is still starting is given up to START_TIMEOUT to become ready first.
+
+	:raises OSError: If the copy cannot be identified, or is still there after being killed.
 	"""
 	processID = _waitForHolder(lock)
 	if processID is None:
@@ -203,6 +231,10 @@ def terminateRunning(lock: InstanceLock) -> None:
 			signal.pidfd_send_signal(pidfd, signal.SIGTERM)
 		except ProcessLookupError:
 			return
+		readyDeadline = time.monotonic() + START_TIMEOUT
+		while lock.recordedReady() != processID and time.monotonic() < readyDeadline:
+			if _waitForExit(pidfd, _POLL_INTERVAL):
+				return
 		if _waitForExit(pidfd, QUIT_TIMEOUT):
 			return
 		try:
@@ -262,8 +294,8 @@ def splitWindowsCommandLine(commandLine: str) -> list[str]:
 def interpreterOptions(origArgv: list[str], scriptPath: str) -> list[str]:
 	"""The options this interpreter was started with, such as -I and -B, which sys.argv leaves out.
 
-	@param origArgv: sys.orig_argv, the whole command line.
-	@param scriptPath: sys.argv[0], the script as the command line named it.
+	:param origArgv: sys.orig_argv, the whole command line.
+	:param scriptPath: sys.argv[0], the script as the command line named it.
 	"""
 	try:
 		return origArgv[1 : origArgv.index(scriptPath, 1)]

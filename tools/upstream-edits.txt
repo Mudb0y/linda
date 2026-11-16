@@ -107,14 +107,25 @@ source/config/registry.py
   every platform: winreg comes from linuxPlatform.windowsOnly, so
   _deleteKeyAndSubkeys raises NoLinuxImplementation on Linux
 source/core.py
-  Linux runtime: the desktop object is linuxPlatform.desktop's placeholder,
-  which belongs to no process and finds no object with focus, in the
-  foreground or under a point, until the AT-SPI backend provides the real
-  desktop; and wx.App leaves SIGINT alone, which wxPython otherwise puts
-  back to its default action over the launcher's GLib handler, so that
-  Ctrl+C would end NVDA without shutting it down. A restart starts the new
-  copy through linuxPlatform.singleInstance, as a child process, instead of
-  through ShellExecute.
+  Linux runtime: the desktop object is linuxPlatform.desktop's, which
+  belongs to no process and finds no object with focus, in the foreground
+  or under a point; and wx.App is made with clearSigInt=False, as wxPython
+  otherwise puts SIGINT back to its default action, so that Ctrl+C would end
+  NVDA without shutting it down: linuxPlatform.quitSignals, which the
+  launcher installs first, has given SIGINT to GLib, or left it ignored when
+  NVDA was started with it ignored, as nohup starts a program. A restart
+  starts the new copy through linuxPlatform.singleInstance, as a child
+  process, instead of through ShellExecute. On exit, _closeAllWindows first
+  ends, through linuxPlatform.modalDialogs, every modal dialog inside the
+  outermost one, innermost first, and GTK's own dialogs, and runs again once
+  they are gone, or saves the configuration and ends NVDA when they cannot
+  be ended; on wxGTK EndModal on an outer dialog leaves its loop running,
+  and wx.GetTopLevelWindows does not list the dialogs wx.MessageBox and
+  wx.FileDialog show, so NVDA never exited. Once main() is out of the main
+  loop it tells linuxPlatform.quitSignals, so that a further quit signal
+  ends a shutdown that hangs, even in C code. The Java Access Bridge
+  failing to load is logged at debug level on Linux instead of as a warning
+  on every start, as Java applications are reached there through AT-SPI.
   every platform: doStartupDialogs() shows nothing once shutdown has been
   triggered: wx.CallAfter runs it after the core
   pump's first cycles on GTK, so a quick exit ran it inside the wx.Yield of
@@ -133,11 +144,12 @@ source/fileUtils.py
   the target is followed and stays a link
 source/gui/__init__.py
   Linux runtime: MainFrame.prePopup and postPopup skip their foreground
-  window steps. Which application is in the foreground is known only through
-  the AT-SPI backend, which does not exist yet, and on GTK raising the hidden
-  main frame would show it; the window manager returns focus after a popup
-  by itself. Every dialog NVDA opens goes through these, the welcome dialog
-  at a first start and the exit dialog among them
+  window steps. Windows' foreground window has no counterpart for NVDA to
+  ask about or take, as only AT-SPI can tell which application is in the
+  foreground, and on GTK raising the hidden main frame would show it; the
+  window manager returns focus after a popup by itself. Every dialog NVDA
+  opens goes through these, the welcome dialog at a first start and the
+  exit dialog among them
 source/gui/addonStoreGui/viewModels/store.py
   every platform: startfile comes from linuxPlatform.windowsOnly, which is
   os.startfile on Windows and on Linux opens an add-on's home page, licence,
@@ -145,10 +157,18 @@ source/gui/addonStoreGui/viewModels/store.py
   application through xdg-open
 source/gui/message.py
   Linux runtime: MessageDialog._playSound plays nothing, as the sounds are
-  Windows' system sounds through winsound.MessageBeep and Linux has no
-  sound set NVDA plays yet; raising there would also stop the dialog's show
-  handler before it focuses the default button. Every error and warning
-  message box, the configuration error at start-up among them, plays one
+  Windows' system sounds through winsound.MessageBeep, which have no Linux
+  counterpart. For a dialog that has a sound it makes a
+  NoLinuxImplementation without raising it, which records the gap through
+  the audit event; raising would stop the dialog's show handler before it
+  focuses the default button. Every error and warning message box, the
+  configuration error at start-up among them, has one.
+  every platform: wx.html2 is imported in
+  HtmlMessageDialog._createMessageControl rather than with the module, and
+  _webViewBackend holds wx.html2.WebViewBackendIE's value written out, with
+  the two annotations naming wx.html2 quoted: on GTK the extension links
+  WebKitGTK, GStreamer and PulseAudio, which every start loaded although
+  nothing makes a WebView until an HTML message is shown
 source/hwIo/__init__.py
   Linux runtime: the background I/O thread is linuxPlatform.ioThread's
   subclass of upstream's, which waits on a condition rather than in an
@@ -277,11 +297,23 @@ source/textUtils/uniscribe.py
 source/touchHandler.py
   Linux runtime: touchSupported() is False, as nothing reads touch input on
   Linux yet
+source/utils/_deprecate.py
+  every platform: _getCallerModule takes the caller's
+  frame from sys._getframe instead of inspect.stack(), which read the source
+  of every frame on the stack and searched sys.modules for each frame's
+  module; with the deep import stacks of start-up that cost over a second
+  of every start. The frame it returns is the same. Worth offering upstream
 source/utils/mmdevice.py
   Linux runtime: on Linux getOutputDevices lists the
   devices of the audio sink in linuxPlatform.audioOutput instead of
   enumerating Windows endpoints through pycaw. The null and capture sinks
   have none, so the default device is the only choice
+source/utils/schedule.py
+  every platform: ScheduleThread waits on its KILL event
+  between runs instead of sleeping, so terminate() joins it at once rather
+  than holding up every exit and restart for the rest of a half-second
+  sleep. Jobs run as before, missed ones still not caught up. Worth offering
+  upstream
 source/utils/security.py
   Linux runtime: isRunningOnSecureDesktop() is True only in a display manager's
   login screen session, the counterpart of the secure desktop, as

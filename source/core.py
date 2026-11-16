@@ -522,6 +522,20 @@ def _closeAllWindows():
 	Ensures the wx mainloop is exited by all the top windows being destroyed.
 	wx objects that don't inherit from wx.Window (eg sysTrayIcon, Menu) need to be manually destroyed.
 	"""
+	if sys.platform != "win32":
+		import wx
+		from linuxPlatform import modalDialogs
+
+		if not modalDialogs.isOneWxDialogAtMost():
+			# wxGTK cannot end a modal dialog while another runs inside it, nor see those it shows with GTK's
+			# own widgets. So those inside the outermost are ended first, innermost first, and this runs
+			# again once they are.
+			modalDialogs.endModalDialogs(
+				wx.ID_CLOSE_ALL,
+				then=_closeAllWindows,
+				until=modalDialogs.isOneWxDialogAtMost,
+			)
+			return
 	import gui  # noqa: I001
 	from gui.settingsDialogs import SettingsDialog
 	import wx
@@ -667,7 +681,8 @@ def _setUpWxApp() -> "wx.App":
 			"""
 
 	# wxPython puts SIGINT back to its default action, which ends the process at once, unless told not to.
-	# On Linux the launcher has already given it to GLib to exit NVDA properly.
+	# On Linux linuxPlatform.quitSignals has already given it to GLib to exit NVDA properly, or left it
+	# ignored where NVDA was started with it ignored.
 	app = App(redirect=False, clearSigInt=sys.platform == "win32")
 
 	# We support queryEndSession events, but in general don't do anything for them.
@@ -900,10 +915,15 @@ def main():
 
 	import JABHandler
 
+	# Linux has no Access Bridge to miss: Java applications are reached there through AT-SPI, so its
+	# absence is no warning. Empty, and so catching nothing, on Windows.
+	bridgeAbsentOnLinux = (NotImplementedError,) if sys.platform != "win32" else ()
 	log.debug("initializing Java Access Bridge support")
 	try:
 		JABHandler.initialize()
 		log.info("Java Access Bridge support initialized")
+	except bridgeAbsentOnLinux:
+		log.debug("No Java Access Bridge on Linux; Java applications are reached through AT-SPI")
 	except NotImplementedError:
 		log.warning("Java Access Bridge not available")
 	except:  # noqa: E722
@@ -1109,6 +1129,10 @@ def main():
 
 	log.debug("entering wx application main loop")
 	app.MainLoop()
+	if sys.platform != "win32":
+		from linuxPlatform import quitSignals
+
+		quitSignals.mainLoopReturned()
 
 	log.info("Exiting")
 	# If MainLoop is terminated through WM_QUIT, such as starting an NVDA instance older than 2021.1,
