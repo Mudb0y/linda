@@ -8,9 +8,10 @@
 //!   `kick_ns`, and raises `skip_to`;
 //! - the real-time callback writes `read_pos`, `in_cycle`, the position snapshot and the cycle
 //!   counters;
-//! - the loop thread writes what it knows of the pw_stream: `attached_ns`, `active`, `streaming`,
-//!   `running`, `broken`, `retry_ns` and `pw`. It also clears the cycle counters, but only in
-//!   `prepare_attach`, before there is a pw_stream whose callback could run.
+//! - the loop thread writes what it knows of the connection and the pw_stream: `attached_ns`,
+//!   `active`, `connected`, `streaming`, `running`, `broken`, `retry_ns` and `pw`. It also clears
+//!   the cycle counters, but only in `prepare_attach`, before there is a pw_stream whose callback
+//!   could run.
 //!
 //! Nothing here takes a lock or waits. These are the orderings that matter:
 //! - `stop` is one store of `paused`, which the callback loads at the start of its next cycle, so
@@ -42,12 +43,15 @@ pub const NS: u64 = 1_000_000_000;
 /// How far the producer may run ahead of the graph. NVDA's player keeps at most 400 ms queued,
 /// so a second leaves room for what the graph holds besides.
 const RING_SECONDS: u64 = 1;
-/// How long a scheduled stream may go without a process call before it keeps time by the clock,
-/// unless two cycles are longer.
+/// How long a stream that the graph has been consuming may go without a cycle before it keeps
+/// time by the clock, unless two cycles are longer.
 const SCHEDULED_BOUND_NS: u64 = 50_000_000;
-/// The same for a stream not scheduled since it connected, which WirePlumber may still be
-/// linking: long enough that a new stream does not lose its first syllable.
-const UNSCHEDULED_BOUND_NS: u64 = 500_000_000;
+/// How long a stream waits for the graph to start consuming it, once after it is given a
+/// pw_stream and once after each time it asks to be woken, before it keeps time by the clock. A new
+/// stream waits for WirePlumber to link it and a woken one for the daemon to schedule it again,
+/// which under load takes tens of milliseconds; waiting this long means neither loses its start,
+/// and it is a wait paid once, not on every sound, when nothing is going to consume it.
+const START_BOUND_NS: u64 = 500_000_000;
 /// The longest gap between process calls taken as one cycle rather than as a pause in scheduling.
 const MAX_CYCLE_NS: u64 = 200_000_000;
 /// The least silence handed over after the last frames, more than PipeWire's resampler holds at
@@ -61,6 +65,9 @@ pub struct Stream {
     capacity: u64,
     ring: NonNull<u8>,
     ring_len: usize,
+    /// When the stream was made, from which a stream still waiting for its pw_stream waits for the
+    /// graph.
+    opened_ns: u64,
 
     write_pos: AtomicU64,
     /// Where the current stretch began, set by reset; positions are reported from here.
@@ -90,13 +97,15 @@ pub struct Stream {
     seen_calls: AtomicU64,
     /// When the producer last saw process_calls move.
     progress_ns: AtomicU64,
-    /// When the producer last started the stream or asked for it to be woken.
+    /// When the producer last asked the loop thread to wake the stream.
     kick_ns: AtomicU64,
     played_high: AtomicU64,
 
     /// When the loop thread last gave the stream a pw_stream, or 0 while it has none.
     attached_ns: AtomicU64,
     active: AtomicBool,
+    /// Whether the library had a connection when the loop thread last looked.
+    connected: AtomicBool,
     /// The pw_stream is in its streaming state, which PipeWire enters once its links are set up.
     streaming: AtomicBool,
     /// The daemon reports the stream's node running, which it does only once the node is in the
@@ -125,7 +134,7 @@ impl Drop for Stream {
 }
 
 impl Stream {
-    pub fn new(format: Format, target: Option<CString>) -> Stream {
+    pub fn new(format: Format, target: Option<CString>, now: u64, connected: bool) -> Stream {
         let stride = format.stride();
         let capacity = format.rate as u64 * RING_SECONDS;
         let ring_len = capacity as usize * stride;
@@ -138,6 +147,7 @@ impl Stream {
             // SAFETY: Box::into_raw never returns null.
             ring: unsafe { NonNull::new_unchecked(ring as *mut u8) },
             ring_len,
+            opened_ns: now,
             write_pos: AtomicU64::new(0),
             base: AtomicU64::new(0),
             read_pos: AtomicU64::new(0),
@@ -162,6 +172,7 @@ impl Stream {
             played_high: AtomicU64::new(0),
             attached_ns: AtomicU64::new(0),
             active: AtomicBool::new(false),
+            connected: AtomicBool::new(connected),
             streaming: AtomicBool::new(false),
             running: AtomicBool::new(false),
             broken: AtomicBool::new(false),
@@ -219,7 +230,6 @@ impl Stream {
     /// wake the stream.
     pub fn start(&self, now: u64) -> bool {
         if self.paused.swap(false, SeqCst) {
-            self.kick_ns.store(now, Relaxed);
             self.restart_clock(now);
         }
         self.write_pos.load(Relaxed) > self.consumed() && self.needs_kick(now)
@@ -297,22 +307,28 @@ impl Stream {
         }
     }
 
+    /// Whether the graph has had long enough to consume the stream and has not.
     fn stalled(&self, now: u64, calls: u64) -> bool {
         let attached = self.attached_ns.load(Acquire);
-        if attached == 0 {
-            // No graph to wait for: keep time from the first write, as the null sink does.
-            return true;
-        }
-        let bound = if calls > 0 {
-            SCHEDULED_BOUND_NS.max(2 * self.cycle_ns.load(Relaxed))
+        let (since, bound) = if attached == 0 {
+            if !self.connected.load(Acquire) {
+                // No daemon: keep time from the first write, as the null sink does.
+                return true;
+            }
+            // The loop thread has yet to give it a pw_stream.
+            (self.opened_ns, START_BOUND_NS)
+        } else if calls == 0 {
+            (attached, START_BOUND_NS)
         } else {
-            UNSCHEDULED_BOUND_NS
+            let progress = self.progress_ns.load(Relaxed).max(attached);
+            let kick = self.kick_ns.load(Relaxed);
+            if kick > progress {
+                (kick, START_BOUND_NS)
+            } else {
+                let cycles = 2 * self.cycle_ns.load(Relaxed);
+                (progress, SCHEDULED_BOUND_NS.max(cycles))
+            }
         };
-        let since = self
-            .progress_ns
-            .load(Relaxed)
-            .max(attached)
-            .max(self.kick_ns.load(Relaxed));
         now > since + bound
     }
 
@@ -453,6 +469,10 @@ impl Stream {
         self.streaming.store(false, Release);
         self.running.store(false, Release);
         self.pw.store(ptr::null_mut(), Release);
+    }
+
+    pub fn set_connected(&self, connected: bool) {
+        self.connected.store(connected, Release);
     }
 
     pub fn set_streaming(&self, streaming: bool) {
@@ -618,7 +638,7 @@ mod tests {
     const MS: u64 = 1_000_000;
 
     fn mono16(rate: u32) -> Stream {
-        Stream::new(Format::from_wave(1, 1, rate, 16).unwrap(), None)
+        Stream::new(Format::from_wave(1, 1, rate, 16).unwrap(), None, 1, false)
     }
 
     fn frames(n: usize, value: i16) -> Vec<u8> {
@@ -643,6 +663,7 @@ mod tests {
 
     /// What the loop thread does when it gives a stream a pw_stream that is linked and running.
     fn attach(s: &Stream, now: u64) {
+        s.set_connected(true);
         s.prepare_attach();
         s.mark_attached(now);
         s.set_streaming(true);
@@ -708,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn a_detached_stream_keeps_time_from_its_first_write() {
+    fn with_no_connection_a_stream_keeps_time_from_its_first_write() {
         let s = mono16(8000);
         let t0 = 1000 * MS;
         s.write(&frames(3200, 1), t0);
@@ -726,6 +747,21 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_waiting_for_its_pw_stream_waits_while_connected() {
+        let t0 = 1000 * MS;
+        let s = Stream::new(Format::from_wave(1, 1, 8000, 16).unwrap(), None, t0, true);
+        s.write(&frames(3200, 1), t0);
+        s.start(t0);
+        assert_eq!(
+            s.played(t0 + 80 * MS),
+            0,
+            "the loop thread is busy, not gone"
+        );
+        assert_eq!(s.played(t0 + 450 * MS), 0);
+        assert!(s.played(t0 + 600 * MS) > 0);
+    }
+
+    #[test]
     fn a_stopped_stream_does_not_move() {
         let s = mono16(8000);
         let t0 = 1000 * MS;
@@ -739,17 +775,27 @@ mod tests {
     }
 
     #[test]
-    fn a_new_stream_waits_for_linking_before_the_clock_takes_over() {
+    fn a_new_stream_waits_for_linking_once() {
         let s = mono16(8000);
         let t0 = 1000 * MS;
         attach(&s, t0);
+        s.set_running(false);
         s.write(&frames(3200, 1), t0);
         s.start(t0);
         assert_eq!(s.played(t0 + 300 * MS), 0);
         assert_eq!(s.played(t0 + 500 * MS), 0);
-        // Past the unscheduled bound, time counts from the last look that found it within bounds.
+        // Past the bound, time counts from the last look that found it within bounds.
         assert_eq!(s.played(t0 + 600 * MS), 800);
         assert_eq!(s.played(t0 + 700 * MS), 1600);
+        // Stopped, reset and started again, as nvwave does between utterances: still never
+        // scheduled, the stream keeps time at once rather than waiting again.
+        let t1 = t0 + 2000 * MS;
+        s.stop();
+        s.reset(t1);
+        s.write(&frames(800, 1), t1);
+        s.start(t1);
+        assert_eq!(s.played(t1 + 50 * MS), 400);
+        assert_eq!(s.played(t1 + 100 * MS), 800);
     }
 
     #[test]
@@ -774,6 +820,30 @@ mod tests {
         let rp = s.begin_cycle();
         assert_eq!(rp, 2400);
         s.end_cycle(rp);
+    }
+
+    #[test]
+    fn a_woken_stream_waits_for_the_graph_once_per_wake() {
+        let s = mono16(8000);
+        let t0 = 1000 * MS;
+        attach(&s, t0);
+        s.write(&frames(80, 1), t0);
+        s.start(t0);
+        cycle(&s, 80, t0);
+        s.played(t0);
+        // Deactivated by the loop thread while dry, then written to.
+        assert!(s.deactivate_if_still_empty());
+        let t1 = t0 + 1000 * MS;
+        assert!(s.write(&frames(3200, 1), t1).1, "asks to be woken");
+        // The loop thread and the daemon are slow to bring it back: nothing is discarded meanwhile.
+        assert_eq!(s.buffered(t1 + 100 * MS), 3200);
+        assert_eq!(s.buffered(t1 + 450 * MS), 3200);
+        s.reactivate();
+        // Never brought back: the clock takes over once the wait is over, and does not wait again
+        // for writes that need no wake.
+        assert!(s.buffered(t1 + 600 * MS) < 3200);
+        assert!(!s.write(&frames(10, 1), t1 + 600 * MS).1);
+        assert_eq!(s.buffered(t1 + 1100 * MS), 0);
     }
 
     #[test]
@@ -860,6 +930,7 @@ mod tests {
     #[test]
     fn nothing_is_handed_over_until_the_graph_mixes_it() {
         let s = mono16(8000);
+        s.set_connected(true);
         s.prepare_attach();
         s.mark_attached(1);
         assert!(!s.ready());
@@ -886,7 +957,7 @@ mod tests {
         s.note_handed(0, 40);
         assert!(!s.draining() && s.is_drained());
         assert_eq!(s.silence_byte(), 0);
-        let u8 = Stream::new(Format::from_wave(1, 1, 8000, 8).unwrap(), None);
+        let u8 = Stream::new(Format::from_wave(1, 1, 8000, 8).unwrap(), None, 1, false);
         assert_eq!(u8.silence_byte(), 0x80);
     }
 

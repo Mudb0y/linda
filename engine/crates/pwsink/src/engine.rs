@@ -275,8 +275,8 @@ impl Engine {
 
     // The loop thread.
 
-    /// Brings everything up to date: reconnects, attaches, detaches, expires the pool, and
-    /// activates or deactivates streams, then arms the timer for the next thing that falls due.
+    /// Brings everything up to date: reconnects, wakes and deactivates streams, detaches,
+    /// attaches, expires the pool, then arms the timer for the next thing that falls due.
     ///
     /// # Safety
     /// Runs only on the loop thread, inside one of its callbacks.
@@ -292,6 +292,8 @@ impl Engine {
             unsafe { self.disconnect(lp) };
             lp.next_connect_ns = now + RECONNECT_NS;
         }
+        // First, since a stream asked to wake is waiting on it and the rest is not.
+        let activity_due = unsafe { self.update_activity(lp, now) };
         let (streams, doomed, pool_due) = {
             let mut shared = self.shared();
             let idle = self.pool_idle_ns.load(Relaxed);
@@ -322,27 +324,29 @@ impl Engine {
             }
         }
         let mut retry_due = None::<u64>;
-        if !lp.core.is_null() {
-            for s in &streams {
-                if s.take_broken() {
-                    unsafe { self.detach(lp, s) };
-                    s.set_retry_ns(now + RECONNECT_NS);
+        let connected = !lp.core.is_null();
+        for s in &streams {
+            s.set_connected(connected);
+            if !connected {
+                continue;
+            }
+            if s.take_broken() {
+                unsafe { self.detach(lp, s) };
+                s.set_retry_ns(now + RECONNECT_NS);
+            }
+            if !s.is_attached() {
+                if s.retry_ns() <= now {
+                    unsafe { self.attach(lp, s, now) };
                 }
                 if !s.is_attached() {
-                    if s.retry_ns() <= now {
-                        unsafe { self.attach(lp, s, now) };
-                    }
-                    if !s.is_attached() {
-                        let retry = s.retry_ns();
-                        retry_due = Some(retry_due.map_or(retry, |d| d.min(retry)));
-                    }
+                    let retry = s.retry_ns();
+                    retry_due = Some(retry_due.map_or(retry, |d| d.min(retry)));
                 }
             }
         }
         for link in lp.links.iter_mut() {
             unsafe { watch_node(lp.registry, link) };
         }
-        let activity_due = unsafe { self.update_activity(lp, now) };
         let connect_due = lp.core.is_null().then_some(lp.next_connect_ns);
         let next = [pool_due, retry_due, activity_due, connect_due]
             .into_iter()

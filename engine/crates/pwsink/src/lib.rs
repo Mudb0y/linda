@@ -88,7 +88,7 @@ pub unsafe extern "C" fn pwsink_open(
         stream.reuse(now);
         return Arc::into_raw(stream);
     }
-    let stream = Arc::new(Stream::new(format, target));
+    let stream = Arc::new(Stream::new(format, target, now, engine.connected()));
     engine.register(stream.clone());
     Arc::into_raw(stream)
 }

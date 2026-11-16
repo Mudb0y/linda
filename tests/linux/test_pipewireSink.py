@@ -882,6 +882,41 @@ def test_withNoDaemonAStreamOpensKeepsTimeAndIsHeardOnceOneStarts(tmp_path: Path
 	assert value["deliveredAfter"] > 0
 
 
+def test_aStreamNobodyLinksWaitsForLinkingOnlyOnce(tmp_path: Path):
+	"""With no session manager, a new stream waits once, for as long as linking may take, before the
+	clock takes over; every utterance after that, started anew after a stop as nvwave does between
+	utterances, takes its own length and no more."""
+	fixture = PipewireFixture(tmp_path / "pipewire")
+	try:
+		fixture.startDaemon()
+		value = runPipewireChild(
+			tmp_path,
+			"""
+			player = speechPlayer()
+			chunk = tone(SPEECH, 0.3)
+			took = []
+			for i in range(5):
+				start = mono()
+				player.feed(chunk)
+				player.idle()
+				took.append((mono() - start) / 1e6)
+				player.stop()
+				time.sleep(0.1)
+			handle = wasapi._players[player._player]._stream.handle
+			result = dict(took=took, calls=lib.pwsink_process_calls(handle))
+			""",
+			fixture.childEnv(),
+			timeout=40,
+		)
+	finally:
+		fixture.stop()
+	report("300 ms utterances on a stream nobody links, ms", [round(ms, 1) for ms in value["took"]])
+	assert value["calls"] == 0, "the stream was consumed, so this showed nothing"
+	first, *rest = value["took"]
+	assert first < 500 + 300 + 150, first
+	assert all(ms < 300 + 60 for ms in rest), rest
+
+
 def test_aPooledStreamOpensAtOnceAndIsHeardInTheNextCycle(pipewire: PipewireFixture, tmp_path: Path):
 	"""A closed stream is kept, so the next player of its format opens in under 1 ms and is heard
 	within one quantum and 5 ms of its first feed; the pool keeps at most 8 and lets them expire."""
@@ -1041,6 +1076,135 @@ def test_aStreamDeactivatedBetweenSoundsWakesForEachOne(pipewire: PipewireFixtur
 	report("sound after each write to a stream deactivated or deactivating, ms", summary(heard))
 	assert value["inactiveBefore"] > 10, "the stream was rarely inactive, so this showed little"
 	assert max(heard) < quantumMs(512) + 5, heard
+
+
+def test_theStartOfASoundIsNeverLost(pipewire: PipewireFixture, tmp_path: Path):
+	"""Every sound is heard from its first frame, on a stream just made and on one just woken, while
+	another thread keeps the library's thread and the daemon busy making and destroying streams.
+
+	A pw_stream is called to process as soon as the daemon starts its node, but the sink waits for
+	it, and so mixes what it hands over, only from when the daemon has put the node into the graph,
+	a round trip later; a cycle handed over in between is lost. And a stream the library's thread
+	has yet to give a pw_stream, or to wake, must wait for it rather than let the clock discard its
+	start."""
+	pipewire.setQuantum(256)
+	monitor = pipewire.monitor()
+	value = runPipewireChild(
+		tmp_path,
+		"""
+		running = [True]
+
+		def churn():
+			rates = (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 96000)
+			formats = [StreamFormat(1, 1, rate, 16) for rate in rates]
+			while running[0]:
+				for fmt in formats:
+					other = sink.openStream("", fmt, lambda: None)
+					other.write(bytes(fmt.blockAlign * 64))
+					other.start()
+					other.close()
+
+		churner = threading.Thread(target=churn, name="churn")
+		churner.start()
+		time.sleep(0.3)
+		sink.stopKeepingAwake()
+		sounds = []
+		for i in range(20):
+			fmt = StreamFormat(1, 1, 17000 + i * 499, 16)
+			data = tone(fmt, 0.12)
+			stream = sink.openStream("", fmt, lambda: None)
+			start = mono()
+			stream.write(data)
+			stream.start()
+			waitPlayed(stream, len(data) // fmt.blockAlign)
+			stream.stop()
+			stream.close()
+			sounds.append(dict(kind="new", start=start))
+			time.sleep(0.15)
+		# Kept open between sounds, as nvwave's speech player is, so that the churn cannot take it
+		# from the pool: it sleeps once it has drained, and each sound wakes it.
+		fmt = StreamFormat(1, 1, 16001, 16)
+		data = tone(fmt, 0.12)
+		stream = sink.openStream("", fmt, lambda: None)
+		woken = 0
+		for i in range(21):
+			woken += not lib.pwsink_is_active(stream.handle)
+			start = mono()
+			stream.write(data)
+			stream.start()
+			waitPlayed(stream, len(data) // fmt.blockAlign)
+			stream.stop()
+			stream.reset()
+			if i:
+				sounds.append(dict(kind="woken", start=start))
+			time.sleep(0.4)
+		stream.close()
+		running[0] = False
+		churner.join()
+		result = dict(sounds=sounds, woken=woken)
+		""",
+		pipewire.childEnv(),
+	)
+	lengths = {"new": [], "woken": []}
+	for sound in value["sounds"]:
+		start = monitor.soundAfter(sound["start"])
+		lengths[sound["kind"]].append(round((monitor.silenceAfter(start) - start) / MS, 2))
+	report("heard length of 120 ms sounds, ms", {kind: summary(ms) for kind, ms in lengths.items()})
+	assert value["woken"] >= 15, "the reused stream was rarely asleep, so this showed little"
+	for kind, heard in lengths.items():
+		short = [ms for ms in heard if ms < 120 - 1]
+		assert not short, (kind, heard)
+
+
+def test_aWokenStreamWaitsForASlowDaemonRatherThanLoseItsStart(pipewire: PipewireFixture, tmp_path: Path):
+	"""A stream asleep after a sound is woken by the next one, which the daemon has to schedule
+	again; when the daemon takes 150 ms to answer, as a loaded desktop's can, the sound plays late
+	but whole, since the clock waits for the daemon before it discards anything."""
+	pipewire.setQuantum(256)
+	monitor = pipewire.monitor()
+	actions = {}
+	for i in range(3):
+		actions[f"freeze{i}"] = pipewire.freezeDaemon
+		actions[f"thaw{i}"] = pipewire.thawDaemon
+	with Steps(tmp_path / "steps", actions) as steps:
+		value = runPipewireChild(
+			tmp_path,
+			"""
+			sink.stopKeepingAwake()
+			data = tone(SPEECH, 0.12)
+			frames = len(data) // SPEECH.blockAlign
+			stream = sink.openStream("", SPEECH, lambda: None)
+			stream.write(data)
+			stream.start()
+			waitPlayed(stream, frames)
+			sounds = []
+			for i in range(3):
+				stream.stop()
+				stream.reset()
+				# A stream first scheduled only after the library's thread last looked at it is
+				# looked at again a second later.
+				time.sleep(1.2 if i == 0 else 0.4)
+				asleep = not lib.pwsink_is_active(stream.handle)
+				ask(f"freeze{i}")
+				start = mono()
+				stream.write(data)
+				stream.start()
+				time.sleep(0.15)
+				ask(f"thaw{i}")
+				waitPlayed(stream, frames)
+				sounds.append(dict(start=start, asleep=asleep))
+			stream.close()
+			result = sounds
+			""",
+			{**pipewire.childEnv(), **steps.env()},
+		)
+	heard = []
+	for sound in value:
+		start = monitor.soundAfter(sound["start"])
+		heard.append(round((monitor.silenceAfter(start) - start) / MS, 2))
+	report("120 ms sounds woken while the daemon was frozen for 150 ms, heard for ms", heard)
+	assert all(sound["asleep"] for sound in value), "the stream was not asleep, so this showed nothing"
+	assert all(ms > 120 - 1 for ms in heard), heard
 
 
 def test_stopNeverWaitsWhileOtherStreamsOpenAndClose(pipewire: PipewireFixture, tmp_path: Path):
