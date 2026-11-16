@@ -324,6 +324,68 @@ def test_reachingForSoundIsReported(tmp_path: Path, reach: str):
 	assert problemsBesides(done) == ["audio"]
 
 
+@pytest.mark.parametrize(
+	("names", "reported"),
+	[
+		(["libasound-harnessTest.so.2"], ["libasound-harnessTest.so.2"]),
+		(["libgstalsa.so"], ["libgstalsa.so"]),
+		(["libgstpipewire.so"], ["libgstpipewire.so"]),
+		(["libpulse-simple.so.0"], ["libpulse-simple.so.0"]),
+		# What WebKitGTK links is allowed while WebKitGTK is mapped, and only that.
+		(["libwebkit2gtk-4.1.so.0", "libpulse-simple.so.0", "libgstreamer-1.0.so.0.2808.0"], []),
+		(
+			["libwebkit2gtk-4.1.so.0", "libgstalsa.so", "libgstpulseaudio.so"],
+			["libgstalsa.so", "libgstpulseaudio.so"],
+		),
+	],
+)
+def test_audioLibraryMappedAtExitIsReported(tmp_path: Path, names: list[str], reported: list[str]):
+	# Mapped without the dynamic loader, so that only the scan of the maps at exit can see them.
+	done = harness.runChild(
+		tmp_path,
+		f"""
+		import mmap
+
+		kept = []
+		for name in {names!r}:
+			with open(name, "wb") as f:
+				f.write(bytes(mmap.PAGESIZE))
+			with open(name, "rb") as f:
+				kept.append(mmap.mmap(f.fileno(), mmap.PAGESIZE, prot=mmap.PROT_READ))
+		""",
+		prepare="none",
+	)
+	assert [Path(what.removeprefix("mapped ")).name for what in done.audio] == reported
+	assert problemsBesides(done) == (["audio"] if reported else [])
+
+
+def test_codeCanSeeWhatTheLinkedAllowanceHides(tmp_path: Path):
+	# A test that plays compares the maps before and after, and must see a linked library that playing
+	# loads.
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import mmap
+
+		before = harness.soundReached(allowLinked=False)
+		kept = []
+		for name in ("libwebkit2gtk-4.1.so.0", "libpulse-simple.so.0"):
+			with open(name, "wb") as f:
+				f.write(bytes(mmap.PAGESIZE))
+			with open(name, "rb") as f:
+				kept.append(mmap.mmap(f.fileno(), mmap.PAGESIZE, prot=mmap.PROT_READ))
+		result = {
+			"added": sorted(set(harness.soundReached(allowLinked=False)) - set(before)),
+			"allowed": harness.soundReached(),
+		}
+		""",
+		prepare="none",
+	)
+	done.assertClean()
+	assert [Path(what).name for what in done.value["added"]] == ["libpulse-simple.so.0"]
+	assert done.value["allowed"] == []
+
+
 def test_reachPastTheProcessIsRecordedButNotJudged(tmp_path: Path):
 	done = harness.runChild(
 		tmp_path,
@@ -372,7 +434,7 @@ def test_audioLibrariesAreKnownByName():
 	assert harness.isAudioLibrary("/nix/store/x-alsa-lib/lib/libasound.so.2")
 	assert harness.isAudioLibrary("libespeak-ng.so.1")
 	assert not harness.isAudioLibrary("/nix/store/x-icu/lib/libicuuc.so.76")
-	assert harness.soundReachedAtExit() == []
+	assert harness.soundReached() == []
 
 
 def test_standardErrorIsChecked(tmp_path: Path):

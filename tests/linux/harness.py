@@ -108,10 +108,17 @@ AUDIO_LIBRARIES = (
 	"espeak",
 	"gst",
 )
-#: Audio libraries that importing gui maps without anything loading them for sound: gui.message
-#: imports wx.html2, whose extension links WebKitGTK, which links GStreamer and, through it, libpulse.
-#: Loading either through ctypes is still counted.
-LINKED_WITHOUT_SOUND = ("libgst", "libpulse")
+#: Audio libraries that a library linking them maps without anything loading them for sound, each by
+#: its exact file name, keyed by the start of the linking library's: gui.message imports wx.html2,
+#: whose extension links WebKitGTK, which links GStreamer's core libraries and libpulse. They are
+#: allowed only while that library is mapped; GStreamer's plugins, its sinks among them, and anything
+#: loaded through ctypes are still counted.
+LINKED_WITHOUT_SOUND = {
+	"libwebkit2gtk-4.1.so": re.compile(
+		r"lib(?:gst(?:reamer|allocators|app|audio|base|fft|gl|pbutils|tag|video)-1\.0"
+		r"|pulse|pulse-simple|pulsecommon-[\d.]+)\.so(?:\.[\d.]+)?",
+	),
+}
 SOUND_DEVICES = "/dev/snd"
 #: Words in the path of a Unix socket that belongs to a sound server.
 SOUND_SERVER_SOCKETS = ("pulse", "pipewire")
@@ -265,14 +272,28 @@ def isAudioLibrary(path: str | bytes) -> bool:
 	return name.removeprefix("lib").startswith(AUDIO_LIBRARIES)
 
 
-def soundReachedAtExit() -> list[str]:
-	"""Audio libraries mapped into this process and sound devices it holds open, now."""
+def soundReached(*, allowLinked: bool = True) -> list[str]:
+	"""Audio libraries mapped into this process and sound devices it holds open, now.
+
+	:param allowLinked: Leave out what LINKED_WITHOUT_SOUND allows. Code that compares what is mapped
+		before and after it plays passes False, so that one of those libraries loaded by playing shows.
+	"""
 	found = []
 	with open("/proc/self/maps", encoding="utf-8") as maps:
 		mapped = {fields[5].strip() for line in maps if len(fields := line.split(None, 5)) == 6}
+	names = {os.path.basename(path) for path in mapped if path.startswith("/")}
+	linked = [
+		allowed
+		for linker, allowed in LINKED_WITHOUT_SOUND.items()
+		if allowLinked and any(name.startswith(linker) for name in names)
+	]
 	for path in sorted(mapped):
 		name = os.path.basename(path)
-		if path.startswith("/") and isAudioLibrary(name) and not name.startswith(LINKED_WITHOUT_SOUND):
+		if (
+			path.startswith("/")
+			and isAudioLibrary(name)
+			and not any(allowed.fullmatch(name) for allowed in linked)
+		):
 			found.append(f"mapped {path}")
 	for fd in os.listdir("/proc/self/fd"):
 		try:
@@ -417,7 +438,7 @@ class Checks:
 
 	def finish(self) -> None:
 		"""Record what can be seen only at the end."""
-		for what in soundReachedAtExit():
+		for what in soundReached():
 			self.record("audio", what=what)
 
 
@@ -586,7 +607,8 @@ def runChild(
 	"""Run code in a fresh interpreter, after the preparation PREPARE_LEVELS names, and report.
 
 	The code runs as a module body. Whatever it leaves in the name ``result`` comes back as
-	ChildResult.value and has to survive JSON.
+	ChildResult.value and has to survive JSON. The name ``harness`` holds this module, loaded in the
+	child, for what the code can only ask from inside, such as soundReached.
 
 	:param env: Variables to set for the child, over this process's; None unsets one.
 	:param timeout: Seconds after which the child prints every thread's stack and ends.
@@ -654,7 +676,7 @@ def _child(
 	outcome: dict = {"value": None, "error": None}
 	try:
 		prepareChild(prepare, Path(resultPath).parent)
-		namespace: dict = {"__name__": "__harness__", "result": None}
+		namespace: dict = {"__name__": "__harness__", "result": None, "harness": sys.modules[__name__]}
 		with open(codePath, encoding="utf-8") as f:
 			# The code is the test's own, written beside the call to runChild.
 			exec(compile(f.read(), codePath, "exec"), namespace)  # noqa: S102
