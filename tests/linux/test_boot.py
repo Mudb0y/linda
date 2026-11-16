@@ -518,6 +518,18 @@ def test_greeterCopyTakesNoTestHooks(start: Start):
 	nvda.assertClean()
 
 
+def test_configuredDriverFromOutsideTheTreeLoads(start: Start, tmp_path: Path):
+	# openevv's driver is built into a directory of its own, which BASEDREADER_OPENEVV_DRIVER_DIR names.
+	configDir = tmp_path / "openevvConfig"
+	configDir.mkdir()
+	text = CONFIG_FIXTURE.read_text(encoding="utf-8").replace("synth = transcript", "synth = openevv")
+	(configDir / "nvda.ini").write_text(text, encoding="utf-8")
+	nvda = start("openevv", "exit", configDir=configDir)
+	assert nvda.waitForExit(STARTUP_BOUND + SHUTDOWN_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	assert "Loaded synthDriver openevv" in nvda.text("nvda.log")
+
+
 def test_recordSeesNoLinuxImplementationThatUpstreamCaught(tmp_path: Path):
 	recordPath = tmp_path / "noLinuxImplementation.jsonl"
 	done = harness.runChild(

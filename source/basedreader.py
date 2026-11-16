@@ -65,7 +65,7 @@ def main() -> NoReturn:
 	import globalVars
 	import NVDAState
 	from argsParsing import getParser
-	from linuxPlatform import quitSignals, singleInstance, testHooks
+	from linuxPlatform import quitSignals, singleInstance, synthDriverPaths, testHooks
 
 	# nvda.pyw also checks for its virtual environment here. The Nix development shell provides
 	# NVDA's dependencies instead, and bootstrap.install() has checked the one it cannot start without.
@@ -143,6 +143,8 @@ def main() -> NoReturn:
 		# uses, and creates, its own user's configuration directory, and starts from upstream's defaults.
 	# After the secure mode decision, which turns the test hooks off.
 	testHooks.install()
+	# Before core.main loads the configured synthesizer, which may be one built outside this tree.
+	synthDriverPaths.install()
 
 	logHandler.initialize()
 	if log.getEffectiveLevel() == log.DEBUG:
