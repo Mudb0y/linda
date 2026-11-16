@@ -139,55 +139,226 @@ def _isTypeChecking(test: ast.expr) -> bool:
 	)
 
 
-def _windowsTest(test: ast.expr) -> bool | None:
-	"""True for `sys.platform == "win32"`, False for `sys.platform != "win32"`, None otherwise."""
-	if not (
-		isinstance(test, ast.Compare)
-		and len(test.ops) == 1
-		and isinstance(test.left, ast.Attribute)
-		and test.left.attr == "platform"
-		and isinstance(test.left.value, ast.Name)
-		and test.left.value.id == "sys"
-		and isinstance(test.comparators[0], ast.Constant)
-		and test.comparators[0].value == "win32"
-	):
-		return None
-	if isinstance(test.ops[0], ast.Eq):
-		return True
-	if isinstance(test.ops[0], ast.NotEq):
-		return False
+#: The platforms a guard may name, each with whether `sys.platform == platform` holds on Linux.
+GUARD_PLATFORMS = {"win32": False, "linux": True}
+
+#: Standard-library modules that exist only on Windows, apart from winsound, which has a stand-in.
+#: Kept code imports one only under a Windows guard, or takes the name from a linuxPlatform module,
+#: as in `from linuxPlatform.someModule import winreg`, which imports no winreg.
+WINDOWS_ONLY_STDLIB = frozenset(
+	{"_msi", "_overlapped", "_winapi", "_wmi", "msilib", "msvcrt", "nt", "winreg"}
+)
+
+
+def _isSysPlatform(node: ast.AST) -> bool:
+	return (
+		isinstance(node, ast.Attribute)
+		and node.attr == "platform"
+		and isinstance(node.value, ast.Name)
+		and node.value.id == "sys"
+	)
+
+
+def _isGuardComparison(node: ast.AST) -> bool:
+	"""Whether node is `sys.platform == P` or `sys.platform != P`, P one of GUARD_PLATFORMS."""
+	return (
+		isinstance(node, ast.Compare)
+		and len(node.ops) == 1
+		and isinstance(node.ops[0], (ast.Eq, ast.NotEq))
+		and _isSysPlatform(node.left)
+		and isinstance(node.comparators[0], ast.Constant)
+		and node.comparators[0].value in GUARD_PLATFORMS
+	)
+
+
+def platformTestOnLinux(test: ast.expr) -> bool | None:
+	"""What an if-test is on Linux, where the platform comparisons in it decide that alone.
+
+	:param test: The test of an if statement.
+	:return: True or False when the test's value on Linux follows from its platform comparisons, as
+		for `sys.platform == "linux" and name in drivers` being False on Windows; None otherwise.
+	"""
+	if _isGuardComparison(test):
+		holds = GUARD_PLATFORMS[test.comparators[0].value]
+		return holds if isinstance(test.ops[0], ast.Eq) else not holds
+	if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+		operand = platformTestOnLinux(test.operand)
+		return None if operand is None else not operand
+	if isinstance(test, ast.BoolOp):
+		values = [platformTestOnLinux(value) for value in test.values]
+		decisive = isinstance(test.op, ast.Or)
+		if decisive in values:
+			return decisive
+		if all(value is (not decisive) for value in values):
+			return not decisive
 	return None
 
 
-def importedModules(path: Path, module: str) -> set[str]:
-	"""Every module an import statement anywhere in the file names, at module level or inside a
-	function, and every package on the way to it. Imports only a type checker sees, and imports
-	under a test that sys.platform is Windows, are left out."""
-	tree = ast.parse(path.read_text(encoding="utf-8"))
-	package = module.split(".") if path.name == "__init__.py" else module.split(".")[:-1]
+def unreadableGuards(source: str) -> list[str]:
+	"""Every place the source reads the platform in a form other than a guard comparison, so that
+	importedModules would not know which branch Linux takes. A platform named in an f-string, as in
+	an error message, is not a test."""
+	tree = ast.parse(source)
+	inFormatting: set[int] = set()
+	allowed: set[int] = set()
+	found = []
+	for node in ast.walk(tree):
+		if isinstance(node, ast.FormattedValue):
+			inFormatting.update(id(child) for child in ast.walk(node.value))
+		elif _isGuardComparison(node):
+			allowed.add(id(node.left))
+	for node in ast.walk(tree):
+		readsPlatform = (
+			_isSysPlatform(node)
+			or (isinstance(node, ast.Attribute) and node.attr == "name" and ast.unparse(node.value) == "os")
+			or (isinstance(node, ast.Call) and ast.unparse(node.func) == "platform.system")
+		)
+		if readsPlatform and id(node) not in allowed and id(node) not in inFormatting:
+			found.append(f"line {node.lineno}: {ast.unparse(node)}")
+	return found
+
+
+def _leaves(statements: list[ast.stmt]) -> bool:
+	"""Whether a block always leaves the block that contains it before the next statement."""
+	return bool(statements) and isinstance(statements[-1], (ast.Return, ast.Raise, ast.Continue, ast.Break))
+
+
+def importedModulesInSource(source: str, package: list[str]) -> set[str]:
+	"""Every module an import statement names that Linux can reach, at module level or inside a
+	function, and every package on the way to it.
+
+	Left out are imports only a type checker sees, imports in a branch a platform guard keeps from
+	Linux, and imports after a guard on Linux returns, raises, continues or breaks.
+
+	:param source: The text of a module.
+	:param package: The dotted name, split, of the package that relative imports start from.
+	"""
 	names: set[str] = set()
 
-	def visit(nodes: list[ast.AST]) -> None:
-		for node in nodes:
-			if isinstance(node, ast.If) and _isTypeChecking(node.test):
-				visit(node.orelse)
+	def visitBlock(statements: list[ast.stmt]) -> None:
+		for statement in statements:
+			if isinstance(statement, ast.If) and _isTypeChecking(statement.test):
+				visitBlock(statement.orelse)
 				continue
-			if isinstance(node, ast.If) and (onWindows := _windowsTest(node.test)) is not None:
-				visit(node.orelse if onWindows else node.body)
+			if isinstance(statement, ast.If):
+				onLinux = platformTestOnLinux(statement.test)
+				if onLinux is not False:
+					visitBlock(statement.body)
+				if onLinux is not True:
+					visitBlock(statement.orelse)
+				if (onLinux is True and _leaves(statement.body)) or (
+					onLinux is False and _leaves(statement.orelse)
+				):
+					return
 				continue
-			if isinstance(node, ast.Import):
-				names.update(alias.name for alias in node.names)
-			elif isinstance(node, ast.ImportFrom):
-				base = node.module or ""
-				if node.level:
-					parts = package[: len(package) - node.level + 1]
+			if isinstance(statement, ast.Import):
+				names.update(alias.name for alias in statement.names)
+			elif isinstance(statement, ast.ImportFrom):
+				base = statement.module or ""
+				if statement.level:
+					parts = package[: len(package) - statement.level + 1]
 					base = ".".join([*parts, base] if base else parts)
 				names.add(base)
-				names.update(f"{base}.{alias.name}" for alias in node.names)
-			visit(list(ast.iter_child_nodes(node)))
+				names.update(f"{base}.{alias.name}" for alias in statement.names if alias.name != "*")
+			visitNode(statement)
 
-	visit(tree.body)
+	def visitNode(node: ast.AST) -> None:
+		for _, value in ast.iter_fields(node):
+			if isinstance(value, list) and value and all(isinstance(item, ast.stmt) for item in value):
+				visitBlock(value)
+			elif isinstance(value, list):
+				for item in value:
+					if isinstance(item, ast.AST):
+						visitNode(item)
+			elif isinstance(value, ast.AST):
+				visitNode(value)
+
+	visitBlock(ast.parse(source).body)
 	return {".".join(name.split(".")[:i]) for name in names for i in range(1, name.count(".") + 2)}
+
+
+def importedModules(path: Path, module: str) -> set[str]:
+	"""importedModulesInSource for the file of a module."""
+	package = module.split(".") if path.name == "__init__.py" else module.split(".")[:-1]
+	return importedModulesInSource(path.read_text(encoding="utf-8"), package)
+
+
+GUARD_CASES = {
+	"windowsBody": ('if sys.platform == "win32":\n\timport a\nelse:\n\timport b\n', {"b"}),
+	"notWindowsBody": ('if sys.platform != "win32":\n\timport a\nelse:\n\timport b\n', {"a"}),
+	"linuxBody": ('if sys.platform == "linux":\n\timport a\nelse:\n\timport b\n', {"a"}),
+	"notLinuxBody": ('if sys.platform != "linux":\n\timport a\nelse:\n\timport b\n', {"b"}),
+	"linuxAndMore": ('if sys.platform == "linux" and x:\n\timport a\nelse:\n\timport b\n', {"a", "b"}),
+	"windowsAndMore": ('if sys.platform == "win32" and x:\n\timport a\nelse:\n\timport b\n', {"b"}),
+	"windowsOrMore": ('if sys.platform == "win32" or x:\n\timport a\nelse:\n\timport b\n', {"a", "b"}),
+	"notLinuxOrNot": ('if not (sys.platform == "linux"):\n\timport a\nelse:\n\timport b\n', {"b"}),
+	"elifAfterWindows": ('if sys.platform == "win32":\n\timport a\nelif x:\n\timport b\n', {"b"}),
+	"otherTest": ("if x:\n\timport a\nelse:\n\timport b\n", {"a", "b"}),
+	"earlyReturn": (
+		'def f():\n\tif sys.platform != "win32":\n\t\treturn\n\timport a\n\ndef g():\n\timport b\n',
+		{"b"},
+	),
+	"earlyContinueInLoop": (
+		'for x in y:\n\tif sys.platform == "linux":\n\t\tcontinue\n\timport a\nimport b\n',
+		{"b"},
+	),
+	"returnOnlyOnWindows": ('def f():\n\tif sys.platform == "win32":\n\t\treturn\n\timport a\n', {"a"}),
+	"exceptAndFinallyAfterReturn": (
+		'try:\n\tif sys.platform != "win32":\n\t\traise E\n\timport a\nexcept E:\n\timport b\nfinally:\n\timport c\n',
+		{"b", "c"},
+	),
+	"typeChecking": ("if TYPE_CHECKING:\n\timport a\nelse:\n\timport b\n", {"b"}),
+	"oneLineStandIn": ("from linuxPlatform.windowsModules import winreg\n", None),
+}
+
+
+@pytest.mark.parametrize("case", GUARD_CASES)
+def test_importCheckerReadsGuards(case: str):
+	"""The import check follows each guard form the tree uses to the branches Linux runs."""
+	source, expected = GUARD_CASES[case]
+	found = importedModulesInSource(source, [])
+	if expected is None:
+		assert "winreg" not in found
+		assert "linuxPlatform.windowsModules.winreg" in found
+	else:
+		assert found == expected
+
+
+@pytest.mark.parametrize(
+	"source",
+	[
+		'if sys.platform.startswith("win"):\n\timport a\n',
+		'if sys.platform == "darwin":\n\timport a\n',
+		'if "win32" == sys.platform:\n\timport a\n',
+		'if sys.platform in ("win32",):\n\timport a\n',
+		'if os.name == "nt":\n\timport a\n',
+		'if platform.system() == "Windows":\n\timport a\n',
+		'onWindows = sys.platform == "cygwin"\n',
+	],
+)
+def test_unreadableGuardsFound(source: str):
+	assert unreadableGuards(source)
+
+
+def test_readableGuardsAccepted():
+	source = "\n".join(case for case, _ in GUARD_CASES.values())
+	source += '\nraise RuntimeError(f"not for {sys.platform}")\n'
+	assert unreadableGuards(source) == []
+
+
+def test_platformGuardsAreReadable():
+	"""Every platform test in source/ and tests/unit/ is one importedModules understands; any other
+	form would make it report imports Linux never reaches, or miss ones it does."""
+	unreadable = []
+	for top in PROTECTED:
+		for path in sorted(top.rglob("*.py")):
+			unreadable.extend(
+				f"{path.relative_to(ROOT)} {place}"
+				for place in unreadableGuards(path.read_text(encoding="utf-8"))
+			)
+	assert not unreadable, (
+		'test the platform only as sys.platform == or != "win32" or "linux":\n' + "\n".join(unreadable)
+	)
 
 
 @pytest.fixture(scope="module")
@@ -264,6 +435,19 @@ def test_keptCodeReachesAllowedFailuresOnlyWhereListed(sweep: dict):
 	if stale:
 		report.append("listed as reaching a module allowed to fail, but no longer do:\n" + "\n".join(stale))
 	assert not report, "\n\n".join(report)
+
+
+def test_keptCodeImportsWindowsOnlyModulesOnlyUnderAGuard(sweep: dict):
+	"""A Windows-only standard-library module imported where Linux can reach it fails there with
+	ModuleNotFoundError, which NVDA does not read as a feature being absent. Kept code imports one
+	only under a Windows guard, or takes its name from a linuxPlatform module."""
+	reached = []
+	for module, r in sorted(sweep["results"].items()):
+		if r["status"] != "ok" or not r.get("file"):
+			continue
+		if found := sorted(importedModules(Path(r["file"]), module) & WINDOWS_ONLY_STDLIB):
+			reached.append(f"{module} imports {', '.join(found)}")
+	assert not reached, "\n".join(reached)
 
 
 @pytest.mark.parametrize("module", ["winreg", "msvcrt", "_winapi"])
