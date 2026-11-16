@@ -193,6 +193,33 @@ def test_testHooksDoNothingInSecureMode(tmp_path: Path):
 	assert done.value == {"added": [], "unchanged": True}
 
 
+def test_testHooksDoNothingOutsideACheckout(tmp_path: Path):
+	installed = tmp_path / "installed" / "source"
+	installed.mkdir(parents=True)
+	done = harness.runChild(
+		tmp_path,
+		f"""
+		import globalPlugins
+		import synthDrivers
+		before = (list(synthDrivers.__path__), list(globalPlugins.__path__))
+		from linuxPlatform import testHooks
+		fromCheckout = testHooks._isRunningFromCheckout()
+		# Where an installed copy keeps source/, with no tests beside it.
+		testHooks._sourceDir = {str(installed)!r}
+		added = testHooks.install()
+		result = {{
+			"fromCheckout": fromCheckout,
+			"added": added,
+			"unchanged": before == (synthDrivers.__path__, globalPlugins.__path__),
+		}}
+		""",
+		prepare="bootstrap",
+		env={"BASEDREADER_TEST_HOOKS_DIR": str(HERE)},
+	)
+	done.assertClean()
+	assert done.value == {"fromCheckout": True, "added": [], "unchanged": True}
+
+
 def test_testHooksSurviveReloadingPlugins(tmp_path: Path):
 	plugins = tmp_path / "hooks" / "globalPlugins"
 	plugins.mkdir(parents=True)

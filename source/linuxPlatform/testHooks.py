@@ -3,11 +3,11 @@
 NVDA finds synth drivers and global plugins by searching the __path__ of the synthDrivers and
 globalPlugins packages. Add-ons and the scratchpad directory are the upstream ways in, but
 --disable-addons, which is how tests run, turns both off, so this adds the directories named by an
-environment variable directly. Nothing here acts unless that variable is set, and nothing acts in
-secure mode or in a built copy, which must never run code that the environment names.
+environment variable directly. Nothing here acts unless that variable is set, nothing acts in secure
+mode, and nothing acts unless NVDA runs from a checkout, with tests/linux beside source/: an
+installed copy carries only source/, and must never run code that the environment names.
 
-Call install() only on a test launch, after the command line has been parsed, so that --secure is
-known.
+Call install() after the command line has been parsed, so that --secure is known.
 """
 
 import importlib.abc
@@ -23,6 +23,13 @@ environmentVariable = "BASEDREADER_TEST_HOOKS_DIR"
 
 #: The packages whose search paths get the subdirectory of the same name.
 packageNames = ("synthDrivers", "globalPlugins")
+
+#: NVDA's source directory, the one that holds linuxPlatform.
+_sourceDir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _isRunningFromCheckout() -> bool:
+	return os.path.isdir(os.path.join(os.path.dirname(_sourceDir), "tests", "linux"))
 
 
 def _addDirectory(searchPath: list[str], root: str, packageName: str) -> str | None:
@@ -60,16 +67,17 @@ class _HookFinder(importlib.abc.MetaPathFinder):
 def install() -> list[str]:
 	"""Add the test directories to the packages' search paths, and return the directories added.
 
-	Safe to call more than once. The directories go at the end of each search path, so a test
-	driver or plugin can never take the place of a built-in or an add-on of the same name.
+	Does nothing, and returns an empty list, when the variable is unset, in secure mode, or when NVDA
+	does not run from a checkout. Safe to call more than once. The directories go at the end of each
+	search path, so a test driver or plugin can never take the place of a built-in or an add-on of
+	the same name.
 	"""
 	root = os.environ.get(environmentVariable)
 	if not root:
 		return []
 	import globalVars
-	import NVDAState
 
-	if globalVars.appArgs.secure or not NVDAState.isRunningAsSource():
+	if globalVars.appArgs.secure or not _isRunningFromCheckout():
 		return []
 	if not os.path.isdir(root):
 		# A test that set the variable expects its drivers; carrying on without them would make it
