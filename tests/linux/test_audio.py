@@ -199,9 +199,21 @@ def test_feedPacesFeederAndCallsBackOnItsThread(tmp_path: Path):
 		player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
 		chunk = bytes(1600)  # 100 ms
 		order = []
+		waitedDuringFeed = []
+		waitUntilNeeded = wasapi._Player._waitUntilNeeded
+
+		def recordingWait(self, maxWait):
+			# The number of feeds returned so far is the number of the feed now waiting.
+			waitedDuringFeed.append(sum(1 for kind, _i, _at in order if kind == "returned"))
+			waitUntilNeeded(self, maxWait)
+
+		wasapi._Player._waitUntilNeeded = recordingWait
 		start = time.monotonic()
+		firstFed = None
 
 		def feedAll():
+			global firstFed
+			firstFed = time.monotonic() - start
 			for i in range(10):
 				player.feed(chunk, onDone=done(i))
 				order.append(("returned", i, time.monotonic() - start))
@@ -213,7 +225,13 @@ def test_feedPacesFeederAndCallsBackOnItsThread(tmp_path: Path):
 		feeder.join()
 		calls = [(tag, thread, at - start) for tag, thread, at in events]
 		merged = sorted(order + [("done", tag, at) for tag, _thread, at in calls], key=lambda e: e[2])
-		result = {"order": order, "calls": calls, "merged": [e[:2] for e in merged]}
+		result = {
+			"order": order,
+			"calls": calls,
+			"merged": [e[:2] for e in merged],
+			"firstFed": firstFed,
+			"waitedDuringFeed": sorted(set(waitedDuringFeed)),
+		}
 		""",
 	)
 	calls = value["calls"]
@@ -223,9 +241,11 @@ def test_feedPacesFeederAndCallsBackOnItsThread(tmp_path: Path):
 		assert (tag + 1) * 0.1 - 0.005 <= at <= (tag + 1) * 0.1 + 0.4, (tag, at)
 	returned = {i: at for kind, i, at in value["order"] if kind == "returned"}
 	# Three chunks fit before the queue passes half of 400 ms; after that each feed waits 100 ms.
-	assert returned[2] < 0.15
-	assert returned[3] - returned[2] >= 0.05
-	assert 0.08 <= returned[3] <= 0.4
+	# Being slowed down only lets more be played, so no load makes an earlier feed wait, and the
+	# fourth cannot return before 100 ms have played from the first write.
+	assert min(value["waitedDuringFeed"]) >= 3
+	assert returned[3] - value["firstFed"] >= 0.08
+	assert returned[3] <= 0.4
 	assert 0.6 <= returned[9] <= 1.2
 	for i, at in returned.items():
 		# Playing began after the clock was read, so this overstates what was still queued, which a
