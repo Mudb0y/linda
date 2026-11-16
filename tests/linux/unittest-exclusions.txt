@@ -112,8 +112,8 @@ tests.unit.test_mathPres.test_mathCatNavNodeMapping
   Import raises: ModuleNotFoundError: libmathcat_py
 tests.unit.test_l10nUtil
   Until crowdin-api-client, l2m4m, markdown-link-attr-modifier and mdx-gh-links are packaged:
-  l10nUtil is translators' tooling and imports crowdin_api at module level. Packaging them is a
-  choice for the user, as crowdin-api-client brings a large dependency tree. The 14 tests of
+  l10nUtil is translators' tooling and imports crowdin_api at module level. Packaging them would
+  bring crowdin-api-client's large dependency tree into the dev shell. The 14 tests of
   TestGetInterpolations pass on Linux once the module imports.
   Import raises: ModuleNotFoundError: crowdin_api
 
