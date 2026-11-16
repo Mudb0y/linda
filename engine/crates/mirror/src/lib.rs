@@ -13,6 +13,9 @@ pub mod maintain;
 pub mod time;
 pub mod tree;
 
+#[cfg(test)]
+mod testing;
+
 use client::CallFailure;
 
 #[derive(Debug)]

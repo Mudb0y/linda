@@ -100,8 +100,9 @@ pub struct Limits {
     pub max_signal_kinds: usize,
     /// Repairs handed back for another try at each batch.
     pub max_retries_per_batch: usize,
-    /// How often one repair is tried again before the mirror gives up on it
-    /// until something else changes the object.
+    /// How often one repair is tried again before the mirror gives up on it.
+    /// The next event from its object, which shows the object is there and
+    /// changing, has it tried afresh.
     pub max_tries: u32,
 }
 
@@ -159,6 +160,8 @@ pub struct MaintenanceStats {
     pub fields_kept_after_failed_call: usize,
     pub retries_scheduled: usize,
     pub retries_given_up: usize,
+    /// Repairs given up on and asked for again by an event from the object.
+    pub retries_revived: usize,
     pub states_applied: usize,
     pub names_applied: usize,
     pub descriptions_applied: usize,
@@ -176,9 +179,9 @@ struct Pooled {
 }
 
 /// Cache items for objects the mirror does not hold yet, and for objects
-/// admitted in the current batch whose walk has not run. A held object's data
-/// never comes from here again: signals applied since the item was made may
-/// have changed it.
+/// admitted in the current batch whose walk has not run. An item goes once
+/// any event has come from its object, held or not: a walk that took the
+/// object's data from it would undo what that event changed.
 #[derive(Debug, Default)]
 pub struct Pool(HashMap<String, Pooled>);
 
@@ -217,7 +220,11 @@ pub struct Mirror {
     batch: u64,
     /// Repairs whose calls got no answer, to try again in a later batch.
     retry: BTreeSet<Repair>,
-    tries: HashMap<Repair, u32>,
+    /// For each object, how often each kind of repair of it has failed since
+    /// it last worked or the object last sent an event.
+    tries: HashMap<String, BTreeMap<&'static str, u32>>,
+    /// Repairs tried too often, for each object, until it sends an event.
+    given_up: HashMap<String, BTreeSet<Repair>>,
 }
 
 impl Mirror {
@@ -244,6 +251,7 @@ impl Mirror {
             batch: 0,
             retry: BTreeSet::new(),
             tries: HashMap::new(),
+            given_up: HashMap::new(),
         }
     }
 
@@ -284,10 +292,17 @@ impl Mirror {
         if matches!(r, Repair::Locate(_)) || !self.tree.nodes.contains_key(r.path()) {
             return;
         }
-        let n = self.tries.entry(r.clone()).or_default();
+        let path = r.path().to_owned();
+        let n = self
+            .tries
+            .entry(path.clone())
+            .or_default()
+            .entry(r.kind())
+            .or_default();
         *n += 1;
         if *n > self.limits.max_tries {
             self.stats.retries_given_up += 1;
+            self.given_up.entry(path).or_default().insert(r);
             return;
         }
         self.stats.retries_scheduled += 1;
@@ -312,8 +327,30 @@ impl Mirror {
     }
 
     fn succeeded(&mut self, r: &Repair) {
-        self.tries.remove(r);
+        let path = r.path();
+        if let Some(t) = self.tries.get_mut(path) {
+            t.remove(r.kind());
+            if t.is_empty() {
+                self.tries.remove(path);
+            }
+        }
+        if let Some(g) = self.given_up.get_mut(path) {
+            g.remove(r);
+            if g.is_empty() {
+                self.given_up.remove(path);
+            }
+        }
         self.retry.remove(r);
+    }
+
+    /// After an event from `path`: its repairs count their tries afresh, and
+    /// those given up on are asked for again.
+    fn revive(&mut self, path: &str, out: &mut Vec<Repair>) {
+        self.tries.remove(path);
+        for r in self.given_up.remove(path).unwrap_or_default() {
+            self.stats.retries_revived += 1;
+            self.request(out, r);
+        }
     }
 
     fn count_signal(&mut self, key: String) {
@@ -387,11 +424,12 @@ impl Mirror {
             self.pool.0.remove(p);
             self.text_fetched.remove(p);
             self.text_fetched_before.remove(p);
+            self.tries.remove(p);
+            self.given_up.remove(p);
         }
-        if !self.retry.is_empty() || !self.tries.is_empty() {
+        if !self.retry.is_empty() {
             let gone: HashSet<&str> = removed.iter().map(String::as_str).collect();
             self.retry.retain(|r| !gone.contains(r.path()));
-            self.tries.retain(|r, _| !gone.contains(r.path()));
         }
     }
 
@@ -417,6 +455,7 @@ impl Mirror {
             path.to_owned(),
             Node {
                 parent: Some(parent.to_owned()),
+                children_unknown: true,
                 ..node
             },
         );
@@ -430,18 +469,22 @@ impl Mirror {
             return out;
         }
         self.count_signal(format!("{}.{}:{}", e.class, e.member, e.minor_kind()));
+        // The object changed after any item made for it, so a walk that took
+        // its data from the item would undo the change, whether the object is
+        // still to be admitted or was admitted in this batch. A new parent
+        // changes nothing the item gives the mirror, and comes with every
+        // insertion.
+        let changes = !(e.member == "PropertyChange" && e.minor == "accessible-parent");
+        if changes && self.pool.0.remove(&e.path).is_some() {
+            self.stats.pooled_items_superseded += 1;
+        }
         if !self.tree.nodes.contains_key(&e.path) {
             self.stats.events_for_unknown_objects += 1;
-            // The object changed after its item was made, so a walk that
-            // took its data from the item would undo the change. A new
-            // parent changes nothing the item gives the mirror, and comes
-            // with every insertion.
-            let changes_item = !(e.member == "PropertyChange" && e.minor == "accessible-parent");
-            if changes_item && self.pool.0.remove(&e.path).is_some() {
-                self.stats.pooled_items_superseded += 1;
-            }
             self.request(&mut out, Repair::Locate(e.path.clone()));
             return out;
+        }
+        if changes {
+            self.revive(&e.path, &mut out);
         }
         match (e.class.as_str(), e.member.as_str()) {
             ("Object", "ChildrenChanged") => self.children_changed(e, &mut out),
@@ -530,11 +573,14 @@ impl Mirror {
                 }
                 self.stats.children_added_at_index += 1;
                 if !self.admit(&child, &parent, out) {
+                    if let Some(p) = self.tree.nodes.get_mut(&parent) {
+                        p.children_unknown = true;
+                    }
                     return;
                 }
                 let p = self.tree.nodes.get_mut(&parent).expect("checked");
                 p.children.insert(at, child);
-                p.child_count = p.children.len() as i32;
+                counted(p, 1);
                 self.tree.renumber(&parent);
                 self.refresh_positions(&parent, out);
             }
@@ -543,7 +589,7 @@ impl Mirror {
                     Some(Some(p)) if p == parent => {
                         self.stats.children_removed += 1;
                         self.drop_subtree(&child);
-                        self.unlisted(&parent, out);
+                        self.unlisted(&parent, -1, out);
                     }
                     // The mirror already has the child where it went, from
                     // a walk or a child list fetched since it moved; only a
@@ -554,7 +600,7 @@ impl Mirror {
                             && p.children.contains(&child)
                         {
                             p.children.retain(|c| *c != child);
-                            self.unlisted(&parent, out);
+                            self.unlisted(&parent, 0, out);
                         }
                     }
                     None => self.stats.children_remove_for_unknown_child += 1,
@@ -566,10 +612,11 @@ impl Mirror {
     }
 
     /// After a child left `parent`'s list: its count, its children's
-    /// places, and the attributes derived from them.
-    fn unlisted(&mut self, parent: &str, out: &mut Vec<Repair>) {
+    /// places, and the attributes derived from them. `by` is how the
+    /// application's own count changed.
+    fn unlisted(&mut self, parent: &str, by: i32, out: &mut Vec<Repair>) {
         if let Some(p) = self.tree.nodes.get_mut(parent) {
-            p.child_count = p.children.len() as i32;
+            counted(p, by);
             self.tree.renumber(parent);
             self.refresh_positions(parent, out);
         }
@@ -656,7 +703,7 @@ impl Mirror {
                         && let Some(op) = self.tree.nodes.get_mut(&old_parent)
                     {
                         op.children.retain(|x| x != c);
-                        op.child_count = op.children.len() as i32;
+                        counted(op, -1);
                         self.tree.renumber(&old_parent);
                         left.insert(old_parent);
                     }
@@ -695,7 +742,12 @@ impl Mirror {
         let changed = old != kept;
         let p = self.tree.nodes.get_mut(parent).expect("checked");
         p.children = kept;
-        p.child_count = p.children.len() as i32;
+        p.children_unknown = !refused.is_empty() || !cycles.is_empty();
+        p.child_count = if p.children_unknown {
+            live.len() as i32
+        } else {
+            p.children.len() as i32
+        };
         self.tree.renumber(parent);
         if changed {
             self.refresh_positions(parent, &mut out);
@@ -883,6 +935,9 @@ impl Mirror {
             .count();
         if self.tree.len() - gone.len() + arriving > self.limits.max_objects {
             self.stats.objects_refused_mirror_full += arriving;
+            if let Some(n) = self.tree.nodes.get_mut(&root) {
+                n.children_unknown = true;
+            }
             return out;
         }
         let mut left = BTreeSet::new();
@@ -893,7 +948,7 @@ impl Mirror {
                 && let Some(n) = self.tree.nodes.get_mut(&op)
             {
                 n.children.retain(|x| x != c);
-                n.child_count = n.children.len() as i32;
+                counted(n, -1);
                 self.tree.renumber(&op);
                 left.insert(op);
             }
@@ -907,9 +962,15 @@ impl Mirror {
                 .nodes
                 .get(p)
                 .filter(|_| *p == root || walked.contains_key(p));
+            // A list the walk did not get is the mirror's where it had one,
+            // and unknown for an object it did not hold; then the count the
+            // application gave, if any, says more than the empty list.
+            let listed = listed_by_walk(p);
+            let held = self.tree.nodes.get(p);
+            let unknown = !listed && held.is_none_or(|o| o.children_unknown);
             let recount =
-                listed_by_walk(p) || self.tree.nodes.get(p).is_none_or(|o| o.children != *list);
-            let mut node = match (self.tree.nodes.get(p), in_walk) {
+                listed || held.is_some_and(|o| !o.children_unknown && o.children != *list);
+            let mut node = match (held, in_walk) {
                 (Some(old), Some(w)) => {
                     let (n, kept) = merge(old, w, failed.get(p), fields);
                     self.stats.fields_kept_after_failed_call += kept;
@@ -923,6 +984,7 @@ impl Mirror {
                 node.child_count = list.len() as i32;
             }
             node.children = list.clone();
+            node.children_unknown = unknown;
             if *p == root {
                 node.parent = old_root.parent.clone();
                 node.index_in_parent = old_root.index_in_parent;
@@ -949,6 +1011,9 @@ impl Mirror {
         }
         for (p, c) in refused {
             if reached.contains(&p) {
+                if let Some(n) = self.tree.nodes.get_mut(&p) {
+                    n.children_unknown = true;
+                }
                 self.refuse_cycle(&p, &c, &mut out);
             }
         }
@@ -1010,6 +1075,16 @@ impl Mirror {
             self.succeeded(&Repair::RefetchAttributes(path.to_owned()));
         }
     }
+}
+
+/// After a child joined or left `n`'s list, by `by`. A list the mirror does
+/// not know keeps the count the application gave, changed by as much.
+fn counted(n: &mut Node, by: i32) {
+    n.child_count = if n.children_unknown {
+        (n.child_count + by).max(0)
+    } else {
+        n.children.len() as i32
+    };
 }
 
 /// The mirror's node with what a walk got for it. A field the walk asked for
@@ -1151,10 +1226,9 @@ impl NaiveMirror {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
     use crate::consts::ROOT_PATH;
+    use crate::testing::returns;
 
     const APP: &str = ":1.7";
 
@@ -1526,17 +1600,6 @@ mod tests {
         assert!(lost.is_empty(), "held but unreachable: {lost:?}");
     }
 
-    /// Runs `f` on a thread of its own and fails the test if it has not
-    /// returned in five seconds, which is how a cycle shows.
-    fn returns<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(f());
-        });
-        rx.recv_timeout(Duration::from_secs(5))
-            .expect("returned within five seconds")
-    }
-
     fn sub(root: &str, nodes: &[(&str, Option<&str>, &[&str])]) -> Tree {
         let mut t = Tree::new(APP, root);
         for (p, parent, children) in nodes {
@@ -1699,6 +1762,7 @@ mod tests {
     #[test]
     fn a_child_whose_children_timed_out_keeps_its_subtree() {
         let mut m = mirror();
+        m.tree.nodes.get_mut("/a").unwrap().child_count = 1;
         let mut w = walked(sub(
             "/doc",
             &[
@@ -1712,6 +1776,8 @@ mod tests {
             .insert("/a".into(), [(Field::Children, timeout())].into());
         m.admit_subtree(w);
         assert_eq!(m.tree.nodes["/a"].children, vec!["/a1"]);
+        assert_eq!(m.tree.nodes["/a"].child_count, 1);
+        assert!(!m.tree.nodes["/a"].children_unknown);
         assert_eq!(m.tree.nodes["/a"].name.as_deref(), Some("fresh"));
         assert_eq!(m.tree.len(), 5);
         assert_consistent(&m);
@@ -2191,6 +2257,256 @@ mod tests {
         let mut m = mirror();
         m.reconcile_children("/doc", &[r("/a"), r("/b"), r("/a")]);
         assert_eq!(m.tree.nodes["/doc"].children, vec!["/a", "/b"]);
+        assert_consistent(&m);
+    }
+
+    fn named(path: &str, name: &str) -> Event {
+        ev(
+            "PropertyChange",
+            "accessible-name",
+            path,
+            0,
+            0,
+            AnyData::Str(name.into()),
+        )
+    }
+
+    fn added(parent: &str, at: i32, child: &str) -> Event {
+        ev(
+            "ChildrenChanged",
+            "add",
+            parent,
+            at,
+            0,
+            AnyData::Ref(r(child)),
+        )
+    }
+
+    #[test]
+    fn a_change_after_admission_is_not_undone_by_the_objects_item() {
+        let mut m = mirror();
+        let mut it = item("/x", "/b", 0, 0);
+        it.name = "old".into();
+        m.apply_add_accessible(it);
+        m.apply_event(&added("/b", 0, "/x"));
+        assert_eq!(m.tree.nodes["/x"].name.as_deref(), Some("old"));
+        assert!(m.pool().item("/x").is_some());
+        m.apply_event(&named("/x", "new"));
+        assert_eq!(m.tree.nodes["/x"].name.as_deref(), Some("new"));
+        // So the walk the admission asked for fetches the name itself.
+        assert!(m.pool().item("/x").is_none());
+        // The item's count of no children is as stale once a child is added.
+        m.apply_add_accessible(item("/y", "/b", 1, 0));
+        m.apply_event(&added("/b", 1, "/y"));
+        m.apply_event(&added("/y", 0, "/y1"));
+        assert!(m.pool().item("/y").is_none());
+        assert_eq!(m.stats.pooled_items_superseded, 2);
+    }
+
+    #[test]
+    fn a_repair_given_up_on_is_tried_afresh_after_an_event_from_its_object() {
+        let mut m = Mirror::with_limits(
+            mirror().tree,
+            Limits {
+                max_tries: 2,
+                ..Limits::default()
+            },
+        );
+        let walk = Repair::FetchSubtree("/b".into());
+        for _ in 0..3 {
+            m.retry_later(walk.clone());
+            m.start_batch();
+            m.due_retries();
+        }
+        assert_eq!(m.stats.retries_given_up, 1);
+        assert_eq!(m.retries_pending(), 0);
+        for _ in 0..5 {
+            m.start_batch();
+            assert!(m.due_retries().is_empty());
+        }
+        let parent_only = ev(
+            "PropertyChange",
+            "accessible-parent",
+            "/b",
+            0,
+            0,
+            AnyData::Ref(r("/doc")),
+        );
+        assert!(m.apply_event(&parent_only).is_empty());
+        let repairs = sorted(m.apply_event(&named("/b", "x")));
+        assert_eq!(
+            repairs,
+            vec![walk.clone(), Repair::RefetchAttributes("/b".into())]
+        );
+        assert_eq!(m.stats.retries_revived, 1);
+        // Its tries start again from none.
+        m.retry_later(walk.clone());
+        m.retry_later(walk);
+        assert_eq!(m.retries_pending(), 1);
+        assert_eq!(m.stats.retries_given_up, 1);
+    }
+
+    #[test]
+    fn a_repair_given_up_on_is_forgotten_once_it_works_or_its_object_goes() {
+        let mut m = Mirror::with_limits(
+            mirror().tree,
+            Limits {
+                max_tries: 0,
+                ..Limits::default()
+            },
+        );
+        m.retry_later(Repair::FetchSubtree("/b".into()));
+        m.retry_later(Repair::RefetchText("/a1".into()));
+        assert_eq!(m.stats.retries_given_up, 2);
+        m.admit_subtree(walked(sub("/b", &[("/b", None, &[])])));
+        assert!(
+            !m.apply_event(&named("/b", "x"))
+                .contains(&Repair::FetchSubtree("/b".into()))
+        );
+        m.apply_event(&ev(
+            "ChildrenChanged",
+            "remove",
+            "/a",
+            0,
+            0,
+            AnyData::Ref(r("/a1")),
+        ));
+        m.apply_event(&added("/b", 0, "/a1"));
+        assert!(
+            !m.apply_event(&named("/a1", "x"))
+                .contains(&Repair::RefetchText("/a1".into()))
+        );
+        assert_eq!(m.stats.retries_revived, 0);
+    }
+
+    #[test]
+    fn a_child_list_the_walk_did_not_take_leaves_the_object_marked() {
+        let mut m = mirror();
+        let mut w = walked(sub("/b", &[("/b", None, &["/x"]), ("/x", Some("/b"), &[])]));
+        // The count is from the object's cache item; its list would have
+        // taken the walk past its object limit.
+        w.tree.nodes.get_mut("/x").unwrap().child_count = 4;
+        w.failed.insert(
+            "/x".into(),
+            [(Field::Children, FailureKind::OverLimit)].into(),
+        );
+        w.truncated = true;
+        m.admit_subtree(w);
+        let x = &m.tree.nodes["/x"];
+        assert!(x.children.is_empty());
+        assert!(x.children_unknown);
+        assert_eq!(x.child_count, 4);
+        assert!(!m.tree.nodes["/b"].children_unknown);
+        assert_consistent(&m);
+        // A list fetched in full clears the mark.
+        m.admit_subtree(walked(sub(
+            "/x",
+            &[("/x", None, &["/x1"]), ("/x1", Some("/x"), &[])],
+        )));
+        assert!(!m.tree.nodes["/x"].children_unknown);
+        assert_eq!(m.tree.nodes["/x"].child_count, 1);
+    }
+
+    #[test]
+    fn a_list_not_known_keeps_the_reported_count_when_a_child_moves_out() {
+        let mut m = mirror();
+        let a = m.tree.nodes.get_mut("/a").unwrap();
+        (a.children_unknown, a.child_count) = (true, 3);
+        // A stale listing, which was never one of the application's.
+        a.children.push("/b".into());
+        let mut w = walked(sub(
+            "/doc",
+            &[
+                ("/doc", None, &["/a", "/b"]),
+                ("/a", Some("/doc"), &[]),
+                ("/b", Some("/doc"), &["/a1"]),
+                ("/a1", Some("/b"), &[]),
+            ],
+        ));
+        w.failed
+            .insert("/a".into(), [(Field::Children, timeout())].into());
+        m.admit_subtree(w);
+        let a = &m.tree.nodes["/a"];
+        assert!(a.children.is_empty());
+        assert!(a.children_unknown);
+        assert_eq!(a.child_count, 2);
+        assert_eq!(m.tree.nodes["/a1"].parent.as_deref(), Some("/b"));
+        assert_consistent(&m);
+        m.apply_event(&added("/a", 0, "/n"));
+        assert_eq!(m.tree.nodes["/a"].child_count, 3);
+        m.apply_event(&ev(
+            "ChildrenChanged",
+            "remove",
+            "/a",
+            0,
+            0,
+            AnyData::Ref(r("/n")),
+        ));
+        assert_eq!(m.tree.nodes["/a"].child_count, 2);
+        assert!(m.tree.nodes["/a"].children_unknown);
+    }
+
+    #[test]
+    fn an_admitted_object_is_marked_until_its_walk_lands() {
+        let mut m = mirror();
+        m.apply_event(&added("/b", 0, "/x"));
+        assert!(m.tree.nodes["/x"].children_unknown);
+        m.admit_subtree(walked(sub("/x", &[("/x", None, &[])])));
+        assert!(!m.tree.nodes["/x"].children_unknown);
+        assert_eq!(m.tree.nodes["/x"].child_count, 0);
+        m.reconcile_children("/b", &[r("/x"), r("/z")]);
+        assert!(m.tree.nodes["/z"].children_unknown);
+        assert!(!m.tree.nodes["/b"].children_unknown);
+    }
+
+    #[test]
+    fn what_a_full_mirror_or_a_cycle_leaves_out_marks_the_list() {
+        let mut m = Mirror::with_limits(
+            mirror().tree,
+            Limits {
+                max_objects: 5,
+                ..Limits::default()
+            },
+        );
+        m.apply_event(&added("/b", 0, "/x"));
+        assert!(m.tree.nodes["/b"].children_unknown);
+        let repairs = m.reconcile_children("/a", &[r("/a1"), r("/z")]);
+        assert!(repairs.is_empty());
+        let a = &m.tree.nodes["/a"];
+        assert!(a.children_unknown);
+        assert_eq!((a.children.len(), a.child_count), (1, 2));
+        m.reconcile_children("/a", &[r("/a1")]);
+        assert!(!m.tree.nodes["/a"].children_unknown);
+        m.admit_subtree(walked(sub(
+            "/a",
+            &[
+                ("/a", None, &["/a1", "/n"]),
+                ("/a1", Some("/a"), &[]),
+                ("/n", Some("/a"), &[]),
+            ],
+        )));
+        assert!(m.tree.nodes["/a"].children_unknown);
+        let returned = returns(|| {
+            let mut m = mirror();
+            m.reconcile_children("/b", &[r("/doc")]);
+            let b = m.tree.nodes["/b"].children_unknown;
+            m.admit_subtree(walked(sub(
+                "/a1",
+                &[("/a1", None, &["/a"]), ("/a", Some("/a1"), &[])],
+            )));
+            (b, m.tree.nodes["/a1"].children_unknown)
+        });
+        assert_eq!(returned, (true, true));
+    }
+
+    #[test]
+    fn a_walk_keeps_an_object_only_listed_under_its_root_from_before_a_move() {
+        let mut m = mirror();
+        m.tree.nodes.get_mut("/b").unwrap().children = vec!["/a1".into()];
+        m.admit_subtree(walked(sub("/b", &[("/b", None, &[])])));
+        assert_eq!(m.tree.nodes["/a1"].parent.as_deref(), Some("/a"));
+        assert_eq!(m.tree.nodes["/a"].children, vec!["/a1"]);
+        assert!(m.tree.nodes["/b"].children.is_empty());
         assert_consistent(&m);
     }
 }

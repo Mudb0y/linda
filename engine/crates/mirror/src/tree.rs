@@ -13,6 +13,13 @@ use crate::decode::{CacheItem, TreeEntry};
 pub struct Node {
     pub parent: Option<String>,
     pub children: Vec<String>,
+    /// Whether `children` may fall short of the application's list: the
+    /// call for it failed, its answer was not taken because of a limit, or
+    /// the object is newly admitted and its walk has not landed. Only a list
+    /// fetched in full clears it. `child_count` then holds the count the
+    /// application last gave, where it gave one, changed by the additions and
+    /// removals seen since.
+    pub children_unknown: bool,
     pub index_in_parent: i32,
     pub child_count: i32,
     pub role: Option<u32>,
@@ -30,6 +37,7 @@ impl Node {
             parent: (it.parent.bus == app_bus && !it.parent.is_null())
                 .then(|| it.parent.path.clone()),
             children: Vec::new(),
+            children_unknown: false,
             index_in_parent: it.index_in_parent,
             child_count: it.child_count,
             role: Some(it.role),
@@ -508,6 +516,7 @@ pub fn diff(reference: &Tree, other: &Tree, fields: Compared) -> TreeDiff {
 mod tests {
     use super::*;
     use crate::decode::ObjRef;
+    use crate::testing::returns;
 
     const APP: &str = ":1.7";
 
@@ -593,15 +602,32 @@ mod tests {
         // /a is the root's child and /c's parent; make it /c's child too.
         t.nodes.get_mut("/a").unwrap().parent = Some("/c".into());
         t.nodes.get_mut("/c").unwrap().children.push("/a".into());
-        assert_eq!(t.ancestors("/c"), vec!["/a"]);
+        let (up, mut sub, len, removed) = returns(move || {
+            let up = t.ancestors("/c");
+            let sub: Vec<String> = t.subtree("/a").into_iter().collect();
+            let len = t.subtree_len("/c");
+            (up, sub, len, t.remove_subtree("/a"))
+        });
+        assert_eq!(up, vec!["/a"]);
+        sub.sort();
+        assert_eq!(sub, vec!["/a", "/b", "/c", "/t"]);
+        assert_eq!(len, 4);
+        assert_eq!(removed.len(), 4);
+        let t = Tree::from_items(APP, &sample_items());
+        assert_eq!(t.ancestors("/gone"), Vec::<String>::new());
+        assert_eq!(t.ancestors(ROOT_PATH), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_subtree_leaves_out_what_is_only_listed_there() {
+        let mut t = Tree::from_items(APP, &sample_items());
+        // /c is /a's child; /b still lists it from before a move.
+        t.nodes.get_mut("/b").unwrap().children.push("/c".into());
+        let sub: Vec<String> = t.subtree("/b").into_iter().collect();
+        assert_eq!(sub, vec!["/b"]);
         let mut sub: Vec<String> = t.subtree("/a").into_iter().collect();
         sub.sort();
         assert_eq!(sub, vec!["/a", "/b", "/c", "/t"]);
-        assert_eq!(t.subtree_len("/c"), 4);
-        let removed = t.remove_subtree("/a");
-        assert_eq!(removed.len(), 4);
-        assert_eq!(t.ancestors("/gone"), Vec::<String>::new());
-        assert_eq!(t.ancestors(ROOT_PATH), Vec::<String>::new());
     }
 
     #[test]

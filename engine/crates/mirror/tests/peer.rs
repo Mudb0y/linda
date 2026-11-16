@@ -13,6 +13,7 @@ use futures_util::future::{Either, select};
 use futures_util::stream::StreamExt;
 use mirror::client::{Client, FailureKind};
 use mirror::consts::ROOT_PATH;
+use mirror::decode::{AnyData, CacheItem, Event, ObjRef};
 use mirror::discovery::{self, Peer, Timeouts};
 use mirror::fetch::{self, Field, WalkFields, WalkLimits};
 use mirror::maintain::{Mirror, Repair};
@@ -183,6 +184,60 @@ fn a_timed_out_child_list_is_unknown_not_empty() {
     assert_eq!(m.tree.reachable().len(), m.tree.len());
     m.start_batch();
     assert_eq!(m.due_retries(), vec![Repair::FetchSubtree("/p1".into())]);
+}
+
+#[test]
+fn a_walk_after_a_change_in_the_same_batch_does_not_undo_it() {
+    rig();
+    let r = |p: &str| ObjRef {
+        bus: APP.into(),
+        path: p.into(),
+    };
+    let ev = |member: &str, minor: &str, path: &str, any: AnyData| Event {
+        sender: APP.into(),
+        path: path.into(),
+        class: "Object".into(),
+        member: member.into(),
+        minor: minor.into(),
+        detail1: 0,
+        detail2: 0,
+        any,
+    };
+    let mut m = mirror();
+    m.start_batch();
+    // As a batch is applied: its cache items first, then its events in the
+    // order they came.
+    m.apply_add_accessible(CacheItem {
+        object: r("/x"),
+        app: r(ROOT_PATH),
+        parent: r("/p2"),
+        index_in_parent: 0,
+        child_count: 0,
+        interfaces: 0,
+        name: "old".into(),
+        role: 73,
+        description: String::new(),
+        states: [0, 0],
+    });
+    let mut repairs = m.apply_event(&ev("ChildrenChanged", "add", "/p2", AnyData::Ref(r("/x"))));
+    repairs.extend(m.apply_event(&ev(
+        "PropertyChange",
+        "accessible-name",
+        "/x",
+        AnyData::Str("new".into()),
+    )));
+    assert!(repairs.contains(&Repair::FetchSubtree("/x".into())));
+    let answer: Answer = Box::new(|call| match member(call).as_str() {
+        "GetChildren" => children(call, &[]),
+        "Get" => reply(call, &Variant::new("new")),
+        _ => data(call),
+    });
+    let res = against(Duration::from_secs(5), answer, async |c| {
+        fetch::walk(c, "/x", 16, WalkFields::ALL, Some(m.pool()), LIMITS).await
+    });
+    m.admit_subtree(res);
+    assert_eq!(m.tree.nodes["/x"].name.as_deref(), Some("new"));
+    assert!(!m.tree.nodes["/x"].children_unknown);
 }
 
 #[test]
