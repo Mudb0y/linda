@@ -163,6 +163,60 @@ def test_inputHookTerminateWithoutInitializeRaises(tmp_path: Path):
 	assert value == "winInputHook not running"
 
 
+def test_deliveryFollowsTheHookState(tmp_path: Path):
+	done, value = run(
+		tmp_path,
+		"""
+		import winInputHook
+		from linuxPlatform import inputHook
+
+		KEY = (0x51, 0x10, False, False)
+		MOVE = (0x0200, 10, 20, False)
+
+
+		def attempt(deliver, *args):
+			try:
+				return deliver(*args)
+			except RuntimeError as e:
+				return str(e)
+
+
+		result = {"stopped": [attempt(inputHook.deliverKey, *KEY, False), attempt(inputHook.deliverMouse, *MOVE)]}
+		winInputHook.initialize()
+		# Until a handler registers, the hooks pass every event on, as Windows' do.
+		result["noCallbacks"] = [inputHook.deliverKey(*KEY, False), inputHook.deliverKey(*KEY, True), inputHook.deliverMouse(*MOVE)]
+		calls = []
+
+
+		def callback(name, answer):
+			def record(*args):
+				calls.append([name, *args])
+				return answer
+
+			return record
+
+
+		winInputHook.setCallbacks(keyUp=callback("up", 1), keyDown=callback("down", 0), mouse=callback("mouse", []))
+		result["answers"] = [inputHook.deliverKey(*KEY, False), inputHook.deliverKey(*KEY, True), inputHook.deliverMouse(*MOVE)]
+		result["calls"] = calls
+		winInputHook.terminate()
+		result["terminated"] = attempt(inputHook.deliverKey, *KEY, False)
+		""",
+	)
+	done.assertClean()
+	assert value == {
+		"stopped": ["winInputHook not running"] * 2,
+		"noCallbacks": [True, True, True],
+		"answers": [False, True, False],
+		"calls": [
+			["down", 0x51, 0x10, False, False],
+			["up", 0x51, 0x10, False, False],
+			["mouse", 0x0200, 10, 20, False],
+		],
+		"terminated": "winInputHook not running",
+	}
+
+
 #: Gesture names as gesture maps and scripts give them: (name, main key, modifier names).
 GESTURE_NAMES = (
 	("NVDA+t", "t", ["NVDA"]),
@@ -598,17 +652,27 @@ def test_mouseInitializesAndTerminates(tmp_path: Path):
 		app = wx.App()
 		import api
 		import mouseHandler
+		import watchdog
 		from linuxPlatform import inputHook
 
 		mouseHandler.initialize()
 		mouseObjectIsDesktop = api.getMouseObject() is api.getDesktopObject()
 		passed = inputHook.deliverMouse(mouseHandler.WM_MOUSEMOVE, 10, 20, False)
 		moved = [mouseHandler.mouseMoved, list(mouseHandler.curMousePos)]
+		# While the watchdog recovers from a freeze the hook passes mouse events on without NVDA seeing them.
+		watchdog.isAttemptingRecovery = True
+		try:
+			passedInRecovery = inputHook.deliverMouse(mouseHandler.WM_MOUSEMOVE, 30, 40, False)
+		finally:
+			watchdog.isAttemptingRecovery = False
+		movedInRecovery = list(mouseHandler.curMousePos)
 		mouseHandler.terminate()
 		result = {
 			"mouseObjectIsDesktop": mouseObjectIsDesktop,
 			"passed": passed,
 			"moved": moved,
+			"passedInRecovery": passedInRecovery,
+			"movedInRecovery": movedInRecovery,
 			"running": inputHook.isRunning(),
 			"timer": mouseHandler._shapeTimer,
 		}
@@ -621,6 +685,8 @@ def test_mouseInitializesAndTerminates(tmp_path: Path):
 		"mouseObjectIsDesktop": True,
 		"passed": True,
 		"moved": [True, [10, 20]],
+		"passedInRecovery": True,
+		"movedInRecovery": [10, 20],
 		"running": False,
 		"timer": None,
 	}
