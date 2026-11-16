@@ -177,6 +177,9 @@ def callback(wav, numsamples, event):
 				break
 		if not wav:
 			player.idle()
+			# A cancel during the wait for the player ends the wait; the utterance it cancelled is not done.
+			if not isSpeaking:
+				return CALLBACK_ABORT_SYNTHESIS
 			onIndexReached(None)
 			isSpeaking = False
 			return CALLBACK_CONTINUE_SYNTHESIS
@@ -195,8 +198,14 @@ def callback(wav, numsamples, event):
 			)
 			prevByte = indexByte
 			if not isSpeaking:
+				# Cancelled since the check at the top: a player fed after stop() plays what it was fed, so
+				# the cancelled speech would be heard unless the player is stopped again.
+				player.stop()
 				return CALLBACK_ABORT_SYNTHESIS
 		player.feed(c_void_p(wav + prevByte), size=length - prevByte)
+		if not isSpeaking:
+			player.stop()
+			return CALLBACK_ABORT_SYNTHESIS
 		_numBytesPushed += length
 		return CALLBACK_CONTINUE_SYNTHESIS
 	except:  # noqa: E722

@@ -291,7 +291,14 @@ source/synthDrivers/_espeak.py
   BASEDREADER_ESPEAK_DATA_DIR, instead of espeak.dll and espeak-ng-data
   beside the driver. espeak_Initialize sets the process's LC_CTYPE to
   C.UTF-8, which on Windows touches only the C runtime linked into
-  espeak.dll, so initialize() puts back the one NVDA set
+  espeak.dll, so initialize() puts back the one NVDA set.
+  every platform: two fixes to offer NVDA for a cancel that races the
+  callback. After each feed of the player, a cancel that came since the
+  callback's check stops the player again and aborts synthesis: a player
+  fed after stop() plays what it was fed, so up to one 300 ms buffer of
+  cancelled speech was heard after a key press, with the mark callback that
+  feed carried. After the final wait for the player, a cancel that ended
+  that wait aborts instead of reporting the cancelled utterance done
 source/synthDrivers/espeak.py
   every platform: _set_voice reduces an identifier holding a slash to its
   last component, as it already does one holding a backslash. eSpeak NG

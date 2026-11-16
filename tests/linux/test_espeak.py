@@ -8,6 +8,10 @@ under the rig:
 
 A run that loads eSpeak maps a library whose name the harness counts among sound libraries, so those
 runs ignore the audio check and then require that what it found is that library and nothing else.
+
+The tests of cancelling each hold the driver's thread where a cancel used to slip past it: between
+the callback's check for a cancel and its feed of the player, and in the wait for the player at the
+end of an utterance.
 """
 
 import itertools
@@ -383,6 +387,108 @@ def test_theCharacterLocaleIsKept(tmp_path: Path):
 	assert done.value["before"].startswith("pl_PL"), done.value
 	assert done.value["after"] == done.value["before"]
 	assert done.value["language"] == "pl"
+
+
+def test_noCancelledAudioPlaysAfterTheCancel(tmp_path: Path):
+	# The callback checks for a cancel and then feeds the player. A cancel between the two used to
+	# leave the feed to restart the stopped player with up to 300 ms of the cancelled speech, and with
+	# a mark's callback that then reported speech NVDA had silenced. Holding the driver's thread just
+	# before the feed makes the window as wide as the test needs, in every round.
+	done = runEspeak(
+		tmp_path,
+		"""
+		gate = {"armed": False, "inWindow": threading.Event(), "proceed": threading.Event()}
+		_feed = wasapi.wasPlay_feed
+
+
+		def feed(*args):
+			if gate["armed"] and threading.current_thread() is _espeak.bgThread:
+				gate["armed"] = False
+				gate["inWindow"].set()
+				gate["proceed"].wait(1.0)
+			return _feed(*args)
+
+
+		wasapi.wasPlay_feed = feed
+		random.seed(7)
+		rounds = []
+		for number in range(100):
+			if number % 2:
+				# Marks between the clauses, so that the feed held is sometimes one with a mark's callback.
+				clauses = LONG.split(" and ")
+				sequence = [part for i, clause in enumerate(clauses) for part in (clause, IndexCommand(number * 10 + i))]
+			else:
+				sequence = [LONG, IndexCommand(number * 10)]
+			cancelledMarks = {command.index for command in sequence if isinstance(command, IndexCommand)}
+			start = now()
+			synth.speak(sequence)
+			assert waitFor(lambda: any(t > start for t, _data in writes)), "the long sentence never played"
+			time.sleep(random.uniform(0, 0.4))
+			gate["inWindow"].clear()
+			gate["proceed"].clear()
+			gate["armed"] = True
+			assert gate["inWindow"].wait(2.0), "the driver never fed the player"
+			synth.cancel()
+			mark = now()
+			gate["proceed"].set()
+			pump(0.35)
+			# Stopped again, so that whatever played since is written down too.
+			synth.cancel()
+			rounds.append({
+				"heardFrames": len(heardSince(mark)),
+				"lateMarks": [index for kind, index in heard.since(mark) if index in cancelledMarks],
+				"lateDone": ("done", None) in heard.since(mark),
+			})
+			pump(0.05)
+		wasapi.wasPlay_feed = _feed
+		after = speakAndWait(["OK button", IndexCommand(9999)])
+		result = {"rounds": rounds, "after": after}
+		""",
+	)
+	rounds = done.value["rounds"]
+	oneMillisecond = 22050 // 1000
+	assert all(r["heardFrames"] <= oneMillisecond for r in rounds), [r["heardFrames"] for r in rounds]
+	assert not any(r["lateMarks"] or r["lateDone"] for r in rounds), rounds
+	assert done.value["after"] == [["index", 9999], ["done", None]]
+
+
+def test_noDoneAfterACancelInTheLastWait(tmp_path: Path):
+	# At the end of synthesis the driver waits for the player to finish the utterance and then reports
+	# it done. A cancel during that wait releases it, and used to be followed by that report all the
+	# same, for speech NVDA had cancelled.
+	done = runEspeak(
+		tmp_path,
+		"""
+		gate = {"armed": False, "inWindow": threading.Event(), "proceed": threading.Event()}
+		_idle = _espeak.player.idle
+
+
+		def idle():
+			if gate["armed"]:
+				gate["armed"] = False
+				gate["inWindow"].set()
+				gate["proceed"].wait(1.0)
+			return _idle()
+
+
+		_espeak.player.idle = idle
+		doneAfterCancel = 0
+		for number in range(20):
+			gate["inWindow"].clear()
+			gate["proceed"].clear()
+			gate["armed"] = True
+			synth.speak(["Documents folder, 3 of 12", IndexCommand(number)])
+			assert gate["inWindow"].wait(10.0), "the utterance never ended"
+			synth.cancel()
+			cancelled = now()
+			gate["proceed"].set()
+			pump(0.3)
+			doneAfterCancel += ("done", None) in heard.since(cancelled)
+		after = speakAndWait(["OK button", IndexCommand(99)])
+		result = {"doneAfterCancel": doneAfterCancel, "after": after}
+		""",
+	)
+	assert done.value == {"doneAfterCancel": 0, "after": [["index", 99], ["done", None]]}
 
 
 def runUnitTestRunner(tmpPath: Path, test: str, env: dict[str, str]) -> subprocess.CompletedProcess:
