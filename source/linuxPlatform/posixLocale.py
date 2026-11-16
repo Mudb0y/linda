@@ -7,9 +7,11 @@ import ctypes
 import functools
 import locale
 import os
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 
 from logHandler import log
+
+from linuxPlatform import NoLinuxImplementation, utf16
 
 #: glibc's number for the LC_MEASUREMENT category, which Python's locale module does not name.
 _LC_MEASUREMENT = 11
@@ -19,6 +21,8 @@ _IMPERIAL = 2
 
 #: ICU's UDISPCTX_CAPITALIZATION_FOR_UI_LIST_OR_MENU and UDISPCTX_NO_SUBSTITUTE.
 _ICU_DISPLAY_CONTEXTS = (0x103, 0x301)
+#: ICU's ULOC_FULLNAME_CAPACITY, the longest locale ID it writes, with room for the NUL.
+_ICU_LOCALE_ID_CAPACITY = 157
 
 
 def _nvdaName(posixName: str) -> str | None:
@@ -151,46 +155,56 @@ def usesImperialMeasurements() -> bool:
 
 
 class _Icu:
-	"""The few ICU functions that name languages, from the library the dev shell or package names."""
+	"""The ICU functions that name languages and regions, from the library winBindings.icu loaded."""
 
-	def __init__(self, libDir: str, version: str) -> None:
-		lib = ctypes.CDLL(os.path.join(libDir, f"libicuuc.so.{version}"))
-		# ICU suffixes every exported name with its major version.
-		self.openForContext = getattr(lib, f"uldn_openForContext_{version}")
-		self.openForContext.restype = ctypes.c_void_p
-		self.openForContext.argtypes = (
-			ctypes.c_char_p,
-			ctypes.POINTER(ctypes.c_int),
-			ctypes.c_int32,
-			ctypes.POINTER(ctypes.c_int),
-		)
-		self.localeDisplayName = getattr(lib, f"uldn_localeDisplayName_{version}")
-		self.localeDisplayName.restype = ctypes.c_int32
-		self.localeDisplayName.argtypes = (
+	def __init__(self, library: ctypes.CDLL, version: str) -> None:
+		def bind(name: str, restype: type, *argtypes: type) -> Callable[..., int]:
+			# ICU suffixes every exported name with its major version.
+			function = library[f"{name}_{version}"]
+			function.restype = restype
+			function.argtypes = argtypes
+			return function
+
+		status = ctypes.POINTER(ctypes.c_int)
+		self.openForContext = bind(
+			"uldn_openForContext",
 			ctypes.c_void_p,
 			ctypes.c_char_p,
-			ctypes.POINTER(ctypes.c_uint16),
-			ctypes.c_int32,
 			ctypes.POINTER(ctypes.c_int),
+			ctypes.c_int32,
+			status,
 		)
+		# Each writes a UTF-16 name for a code: (names, code, buffer, capacity, status) -> length.
+		nameArgs = (ctypes.c_void_p, ctypes.c_char_p, utf16.Utf16Pointer, ctypes.c_int32, status)
+		self.localeDisplayName = bind("uldn_localeDisplayName", ctypes.c_int32, *nameArgs)
+		self.languageDisplayName = bind("uldn_languageDisplayName", ctypes.c_int32, *nameArgs)
+		self.regionDisplayName = bind("uldn_regionDisplayName", ctypes.c_int32, *nameArgs)
+		# Each writes a locale ID or part of one: (locale, buffer, capacity, status) -> length.
+		idArgs = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int32, status)
+		self.addLikelySubtags = bind("uloc_addLikelySubtags", ctypes.c_int32, *idArgs)
+		self.getCountry = bind("uloc_getCountry", ctypes.c_int32, *idArgs)
 
 
 @functools.cache
 def _icu() -> _Icu | None:
-	"""ICU, or None when it cannot be loaded, which is said once.
+	"""ICU, or None when it is not available, which is said once.
 
 	Language names are a convenience; without them the language list shows bare codes, as
 	getLanguageDescription's callers expect for a language nothing can name.
 	"""
-	libDir = os.environ.get("BASEDREADER_ICU_LIB_DIR")
-	version = os.environ.get("BASEDREADER_ICU_VERSION_MAJOR")
-	if not libDir or not version:
-		log.warning("BASEDREADER_ICU_LIB_DIR and BASEDREADER_ICU_VERSION_MAJOR do not name ICU")
+	# Imported here, as winBindings.icu loads ICU when it is first imported.
+	from winBindings import icu
+
+	if not icu.ICU_AVAILABLE:
+		log.warning(
+			f"ICU is not available, so languages are not named; {icu.LIB_DIR_VARIABLE}"
+			f" and {icu.VERSION_MAJOR_VARIABLE} name the library",
+		)
 		return None
 	try:
-		return _Icu(libDir, version)
-	except (OSError, AttributeError):
-		log.warning("ICU cannot be loaded, so languages are not named", exc_info=True)
+		return _Icu(icu.dll, icu._versionMajor)
+	except AttributeError:
+		log.warning("ICU cannot name languages, so languages are not named", exc_info=True)
 		return None
 
 
@@ -207,25 +221,64 @@ def _displayNames(icu: _Icu, displayLocale: str) -> int | None:
 	return handle
 
 
-def _icuDisplayName(code: str, displayLocale: str) -> str | None:
+def _icuName(nameFunction: str, code: str, displayLocale: str) -> str | None:
+	"""What ICU's uldn function nameFunction calls code in displayLocale, or None when it has no name."""
 	icu = _icu()
 	if icu is None:
 		return None
 	handle = _displayNames(icu, displayLocale)
 	if handle is None:
 		return None
+	function = getattr(icu, nameFunction)
 	size = 128
 	while True:
 		buffer = (ctypes.c_uint16 * size)()
 		status = ctypes.c_int(0)
-		length = icu.localeDisplayName(handle, code.encode(), buffer, size, ctypes.byref(status))
+		length = function(handle, code.encode(), buffer, size, ctypes.byref(status))
 		if length <= size or status.value <= 0:
 			break
 		size = length
-	if status.value > 0:
-		# Asked not to substitute, ICU fails rather than return the code for a language it cannot name.
+	if status.value > 0 or length <= 0:
+		# Asked not to substitute, ICU fails rather than return the code for a name it does not know.
 		return None
-	return bytes(buffer)[: 2 * length].decode("utf-16-le")
+	return memoryview(buffer)[:length].tobytes().decode(utf16.ENCODING)
+
+
+def _icuLocaleId(function: Callable[..., int], localeId: str) -> str:
+	"""What one of ICU's uloc functions makes of localeId, or "" when it cannot."""
+	buffer = ctypes.create_string_buffer(_ICU_LOCALE_ID_CAPACITY)
+	status = ctypes.c_int(0)
+	function(localeId.encode(), buffer, len(buffer), ctypes.byref(status))
+	return "" if status.value > 0 else buffer.value.decode()
+
+
+def englishLanguageName(code: str) -> str | None:
+	"""The English name of the language of an NVDA language such as "pt_BR" or "pt-BR": "Portuguese".
+	None for a language ICU does not know."""
+	name = _nvdaName(code)
+	if name is None:
+		return None
+	return _icuName("languageDisplayName", name.partition("_")[0], "en")
+
+
+def englishCountryName(code: str) -> str | None:
+	"""The English name of the country of an NVDA language such as "pt_BR": "Brazil". A language
+	given alone, such as "de", is taken in the country it is most likely to be used in, as Windows
+	takes it. None when ICU knows of no such country."""
+	name = _nvdaName(code)
+	icu = _icu()
+	if name is None or icu is None:
+		return None
+	region = _icuLocaleId(icu.getCountry, _icuLocaleId(icu.addLikelySubtags, name))
+	if not region:
+		return None
+	return _icuName("regionDisplayName", region, "en")
+
+
+def ansiCodePage(code: str) -> str:
+	"""Windows' ANSI code page for an NVDA language. Linux has none: text is UTF-8 throughout, and
+	the code page is wanted only to name a Windows C runtime locale, which nothing does on Linux."""
+	raise NoLinuxImplementation("languageHandler.ansiCodePageFromNVDALocale")
 
 
 def languageDescription(code: str) -> str | None:
@@ -239,4 +292,4 @@ def languageDescription(code: str) -> str | None:
 	if description:
 		return description
 	displayLocale = next(iter(messagesLanguages()), "en")
-	return _icuDisplayName(code, displayLocale)
+	return _icuName("localeDisplayName", code, displayLocale)

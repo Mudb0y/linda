@@ -187,6 +187,8 @@ def getLanguageDescription(language: str) -> str | None:
 def englishLanguageNameFromNVDALocale(localeName: str) -> str | None:
 	"""Returns either English name of the given language  using `GetLocaleInfoEx` or None
 	if the given locale is not known to Windows."""
+	if sys.platform != "win32":
+		return posixLocale.englishLanguageName(localeName)
 	localeName = normalizeLocaleForWin32(localeName)
 	buffLength = winBindings.kernel32.GetLocaleInfoEx(localeName, LOCALE.SENGLISHLANGUAGENAME, None, 0)
 	if buffLength:
@@ -220,6 +222,8 @@ def englishLanguageNameFromNVDALocale(localeName: str) -> str | None:
 def englishCountryNameFromNVDALocale(localeName: str) -> str | None:
 	"""Returns either English name of the given country using GetLocaleInfoEx or None
 	if the given locale is not known to Windows."""
+	if sys.platform != "win32":
+		return posixLocale.englishCountryName(localeName)
 	localeName = normalizeLocaleForWin32(localeName)
 	buffLength = winBindings.kernel32.GetLocaleInfoEx(localeName, LOCALE.SENGLISHCOUNTRYNAME, None, 0)
 	if buffLength:
@@ -239,6 +243,8 @@ def englishCountryNameFromNVDALocale(localeName: str) -> str | None:
 def ansiCodePageFromNVDALocale(localeName: str) -> str | None:
 	"""Returns either ANSI code page for a given locale using GetLocaleInfoEx or None
 	if the given locale is not known to Windows."""
+	if sys.platform != "win32":
+		return posixLocale.ansiCodePage(localeName)
 	localeName = normalizeLocaleForWin32(localeName)
 	# Windows 10 returns English code page (1252) for locales not known to Windows
 	# even though documentation states that in case of an unknown locale 0 is returned.
@@ -331,11 +337,7 @@ def _createGettextTranslation(
 	if localeName in LANGS_WITHOUT_TRANSLATIONS:
 		return gettext.translation("nvda", fallback=True), localeName
 	try:
-		trans = gettext.translation(
-			"nvda",
-			localedir=os.path.join(globalVars.appDir, "locale"),
-			languages=[localeName],
-		)
+		trans = gettext.translation("nvda", localedir="locale", languages=[localeName])
 		return trans, localeName
 	except OSError:
 		log.debugWarning(f"couldn't set the translation service locale to {localeName}")
