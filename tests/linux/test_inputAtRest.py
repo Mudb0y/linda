@@ -44,27 +44,25 @@ sys.addaudithook(_watch)
 import NVDAHelper  # noqa: F401
 import languageHandler
 
-# STUB, owned by workstream A2: languageHandler.setLanguage needs Windows locale identifiers, which
-# have no Linux body yet. inputCore reads the language to find the locale's gesture map.
-languageHandler._language = "en"
+# core.main sets the language before inputCore, which reads it to find the locale's gesture map.
+languageHandler.setLanguage("en")
 """
 
 EPILOGUE = """
 result = {"value": result, "touched": _touched}
 """
 
-#: A placeholder focus and desktop, as upstream's unit tests use, and a watchdog observer that is
-#: not recovering, which is what keyboardHandler.initialize receives from core.main.
+#: A placeholder focus and desktop, as upstream's unit tests use, and the watchdog observer that
+#: keyboardHandler.initialize receives from core.main.
 OBJECTS = """
 import globalVars
+import watchdog
 from NVDAObjects import NVDAObject
 
 
 class Placeholder(NVDAObject):
 	processID = None
 	windowThreadID = 0
-	# Finding an object's app module reads /proc on Linux, which is workstream B3's and not built yet.
-	appModule = None
 
 	def _isEqual(self, other):
 		return False
@@ -74,8 +72,7 @@ class Placeholder(NVDAObject):
 		return None
 
 
-class Observer:
-	isAttemptingRecovery = False
+Observer = watchdog.WatchdogObserver
 
 
 globalVars.focusObject = globalVars.desktopObject = Placeholder()
