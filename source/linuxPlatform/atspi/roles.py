@@ -83,7 +83,8 @@ ROLES: dict[str, Role] = {
 	"page tab": Role.TAB,
 	"page tab list": Role.TABCONTROL,
 	"paragraph": Role.PARAGRAPH,
-	"password text": Role.PASSWORDEDIT,
+	# Windows presents a password field as an edit field with the protected state.
+	"password text": Role.EDITABLETEXT,
 	"popup menu": Role.POPUPMENU,
 	"progress bar": Role.PROGRESSBAR,
 	"push button": Role.BUTTON,
@@ -164,7 +165,8 @@ _HASPOPUP_KINDS = {
 def mapStates(raw: frozenset[str], role: Role, attributes: dict[str, str]) -> set[State]:
 	"""NVDA's states for an object, with the derived and inverted ones IAccessible2 also derives."""
 	states = {STATES[s] for s in raw if s in STATES}
-	if "sensitive" not in raw and "enabled" not in raw:
+	# Either state means usable, as GTK 4 never sets enabled; Caja's icons carry neither and are usable.
+	if "sensitive" not in raw and "enabled" not in raw and role != Role.ICON:
 		states.add(State.UNAVAILABLE)
 	if "visible" not in raw:
 		states.add(State.INVISIBLE)

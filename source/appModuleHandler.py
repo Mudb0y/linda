@@ -926,9 +926,8 @@ class AppModule(baseObject.ScriptableObject):
 		"""
 		if sys.platform != "win32":
 			# AT-SPI finds it by role, where a lookup by position finds whatever lies at the corner.
-			from linuxPlatform.atspi import handler
-
-			return handler.findStatusBar(api.getForegroundObject())
+			findStatusBar = getattr(api.getForegroundObject(), "findStatusBar", None)
+			return findStatusBar() if findStatusBar is not None else None
 		raise NotImplementedError()
 
 	def getStatusBarText(self, obj: NVDAObjects.NVDAObject) -> str:
