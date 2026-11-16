@@ -15,6 +15,8 @@ use mirror::client::{Client, FailureKind};
 use mirror::consts::ROOT_PATH;
 use mirror::discovery::{self, Peer, Timeouts};
 use mirror::fetch::{self, Field, WalkFields, WalkLimits};
+use mirror::maintain::{Mirror, Repair};
+use mirror::tree::{Node, Tree};
 use mirror::{Error, app, time};
 use zbus::message::Type;
 use zbus::{Connection, Message, MessageStream, ObjectPath, Variant};
@@ -111,6 +113,32 @@ fn against<T>(method_timeout: Duration, answer: Answer, test: impl AsyncFnOnce(&
     })
 }
 
+fn node(parent: Option<&str>, children: &[&str]) -> Node {
+    Node {
+        parent: parent.map(str::to_owned),
+        children: children.iter().map(|c| (*c).to_owned()).collect(),
+        role: Some(1),
+        name: Some("held".into()),
+        states: Some([0, 0]),
+        interfaces: Some(1),
+        attributes: Some(Vec::new()),
+        ..Node::default()
+    }
+}
+
+/// root, then /doc, which has /p1 and /p2, and /p1 has /p1a.
+fn mirror() -> Mirror {
+    let mut t = Tree::new(APP, ROOT_PATH);
+    t.nodes.insert(ROOT_PATH.into(), node(None, &["/doc"]));
+    t.nodes
+        .insert("/doc".into(), node(Some(ROOT_PATH), &["/p1", "/p2"]));
+    t.nodes.insert("/p1".into(), node(Some("/doc"), &["/p1a"]));
+    t.nodes.insert("/p1a".into(), node(Some("/p1"), &[]));
+    t.nodes.insert("/p2".into(), node(Some("/doc"), &[]));
+    t.renumber_all();
+    Mirror::new(t)
+}
+
 #[test]
 #[ignore = "speaks D-Bus, so runs only inside tests/linux/rig"]
 fn a_timed_out_child_list_is_unknown_not_empty() {
@@ -135,6 +163,25 @@ fn a_timed_out_child_list_is_unknown_not_empty() {
         (APP, "/p1", "GetChildren")
     );
     assert!(!res.truncated);
+    let mut m = mirror();
+    m.admit_subtree(res);
+    assert_eq!(m.tree.nodes["/p1"].children, vec!["/p1a"]);
+    assert_eq!(m.tree.nodes["/p1"].name.as_deref(), Some("name"));
+    assert_eq!(m.tree.reachable().len(), m.tree.len());
+    m.start_batch();
+    assert_eq!(m.due_retries(), vec![Repair::FetchSubtree("/p1".into())]);
+}
+
+#[test]
+#[ignore = "speaks D-Bus, so runs only inside tests/linux/rig"]
+fn a_walk_of_an_application_that_never_answers_changes_nothing() {
+    let res = against(Duration::from_millis(300), Box::new(|_| None), async |c| {
+        fetch::walk(c, "/doc", 16, WalkFields::ALL, None, LIMITS).await
+    });
+    let mut m = mirror();
+    let before = m.tree.clone();
+    m.admit_subtree(res);
+    assert_eq!(m.tree.nodes, before.nodes);
 }
 
 #[test]

@@ -72,8 +72,12 @@ struct LoopStats {
     repair_undecodable_replies: usize,
     /// The first failed calls, with the object and the error.
     repair_failures: Vec<String>,
+    /// Subtree walks whose root's children went unanswered, so that the
+    /// mirror kept what it had.
+    subtree_roots_not_answered: usize,
     walks_truncated: usize,
-    repairs_dropped_over_budget: usize,
+    retries_run: usize,
+    repairs_deferred_over_budget: usize,
     locate_chains_cut: usize,
     /// Every signal, one line each, kept only when the run dumps its trees.
     #[serde(skip)]
@@ -166,7 +170,8 @@ async fn run_repairs(
             continue;
         }
         if run == MAX_REPAIRS_PER_BATCH {
-            stats.repairs_dropped_over_budget += 1;
+            stats.repairs_deferred_over_budget += 1;
+            mirror.retry_later(r);
             continue;
         }
         run += 1;
@@ -174,12 +179,16 @@ async fn run_repairs(
         if let Some(log) = stats.signal_log.as_mut() {
             log.push(format!("repair {r:?}"));
         }
-        // Only the application saying the object does not exist makes the
-        // mirror drop it.
-        let failed = |stats: &mut LoopStats, field: Field, e: &zbus::Error| {
+        // A call that got no answer says nothing about the object, so the
+        // repair is tried again later; only the application saying the
+        // object does not exist makes the mirror drop it.
+        let failed = |stats: &mut LoopStats, mirror: &mut Mirror, field: Field, e: &zbus::Error| {
             let (iface, member) = field.method();
             let f = client.failure(path, iface, member, FailureKind::of(e));
             stats.call_failed(field.label(), &f);
+            if f.kind.worth_retrying() {
+                mirror.retry_later(r.clone());
+            }
         };
         match &r {
             Repair::RefetchChildren(p) => {
@@ -203,7 +212,7 @@ async fn run_repairs(
                         );
                         mirror.forget(p);
                     }
-                    Err(e) => failed(stats, Field::Children, &e),
+                    Err(e) => failed(stats, mirror, Field::Children, &e),
                 }
             }
             Repair::FetchSubtree(p) => {
@@ -235,8 +244,10 @@ async fn run_repairs(
                     stats.subtree_roots_gone += 1;
                     mirror.forget(p);
                 } else {
+                    stats.subtree_roots_not_answered += usize::from(root.is_some());
                     stats.objects_fetched_by_repairs += res.tree.len();
-                    mirror.admit_subtree(res.tree);
+                    let more = mirror.admit_subtree(res);
+                    enqueue(&mut queue, &mut seen, more);
                 }
             }
             Repair::RefetchText(p) => {
@@ -245,7 +256,7 @@ async fn run_repairs(
                         Ok(text) => mirror.set_text(p, text),
                         Err(_) => stats.undecodable("Text.GetText"),
                     },
-                    Err(e) => failed(stats, Field::Text, &e),
+                    Err(e) => failed(stats, mirror, Field::Text, &e),
                 }
             }
             Repair::Locate(p) => {
@@ -284,7 +295,7 @@ async fn run_repairs(
                         Ok(a) => mirror.set_attributes(p, a),
                         Err(_) => stats.undecodable("GetAttributes"),
                     },
-                    Err(e) => failed(stats, Field::Attributes, &e),
+                    Err(e) => failed(stats, mirror, Field::Attributes, &e),
                 }
             }
         }
@@ -393,6 +404,8 @@ fn apply_batch(
     stats: &mut LoopStats,
 ) -> Vec<Repair> {
     mirror.start_batch();
+    let mut repairs = mirror.due_retries();
+    stats.retries_run += repairs.len();
     stats.batches += 1;
     stats.largest_batch = stats.largest_batch.max(batch.len());
     stats.signals += batch.len();
@@ -440,7 +453,6 @@ fn apply_batch(
             Err(_) => stats.undecodable_signals += 1,
         }
     }
-    let mut repairs = Vec::new();
     for m in batch {
         if is_cache(m, "AddAccessible") {
             continue;
@@ -568,6 +580,11 @@ pub async fn run(args: &Args) -> Result<(), String> {
         let repairs = apply_batch(&batch, &mut mirror, &mut naive, &mut stats);
         run_repairs(client, &mut mirror, repairs, &mut stats).await;
     }
+    // No batch follows to give unanswered repairs their next try.
+    let final_retries = mirror.due_retries();
+    let final_retries_run = final_retries.len();
+    stats.retries_run += final_retries_run;
+    run_repairs(client, &mut mirror, final_retries, &mut stats).await;
 
     sleep(Duration::from_millis(300)).await?;
     let meter = Meter::start(target.pid, client.counters());
@@ -638,6 +655,8 @@ pub async fn run(args: &Args) -> Result<(), String> {
                 "late_signals": late_signals,
                 "rules": mirror.stats,
                 "pooled_items_never_admitted": mirror.pool_len(),
+                "final_retries_run": final_retries_run,
+                "retries_still_pending": mirror.retries_pending(),
             },
             "reference_walk": {
                 "cost": reference_cost,
