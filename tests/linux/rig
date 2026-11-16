@@ -1,17 +1,38 @@
 #!/usr/bin/env bash
 # Runs a command in a sandbox with its own X display, session bus,
 # accessibility bus, HOME and runtime directory. The sandbox has its own
-# process, network and IPC namespaces, no sound or input devices, and none of
-# the live session's sockets or files, so nothing started here can reach the
-# live desktop, its screen reader, its sound server or the keyboard, whatever
-# it tries. That is what makes it safe to crash a screen reader under test.
+# process, network and IPC namespaces, no sound or input devices, none of the
+# live session's sockets or files, and no environment but what the dev shell
+# itself provides. So nothing started here can reach the live desktop, its
+# screen reader, its sound server or the keyboard, and nothing here depends
+# on the host's desktop. That is what makes it safe to crash a screen reader
+# under test.
 #
 # Inside, the checkout and the system are read-only and /tmp is empty.
 # --bind DIR makes DIR visible and writable, for results that should outlive
-# the run or scripts kept outside the checkout.
+# the run or scripts kept outside the checkout. The locale is C.UTF-8 and the
+# time zone UTC, and of the caller's variables only BASEDREADER_ and BENCH_
+# ones get in; anything else goes through env, as in
+# rig env LANG=pl_PL.UTF-8 command.
+#
+# The exit status is the command's, or 125 when the rig itself failed.
 set -euo pipefail
 
+fail() {
+	echo "rig: $*" >&2
+	exit 125
+}
+
+self=$(realpath -e -- "$0")
+
 if [ "${1:-}" = --inside ]; then
+	# This half sets itself up against whatever session it finds, so it must
+	# only ever run as the sandbox's own command. The variable alone could be
+	# copied into another shell; the other two hold nowhere but in there.
+	if [ "${BASEDREADER_RIG:-}" != 1 ] || [ -e /run/user ] ||
+		[ "$(cat /proc/1/comm 2>/dev/null)" != bwrap ]; then
+		fail "--inside is the rig's own second half and runs only in its sandbox"
+	fi
 	shift
 	# -noreset, because the server otherwise resets when its first client
 	# leaves and drops the root window property the accessibility bus is
@@ -26,18 +47,17 @@ if [ "${1:-}" = --inside ]; then
 		sleep 0.05
 	done
 	if [ ! -s "$XDG_RUNTIME_DIR/display" ]; then
-		echo "rig: the X server did not start" >&2
 		cat "$XDG_RUNTIME_DIR/xvfb.log" >&2
-		exit 1
+		fail "the X server did not start"
 	fi
 	export DISPLAY=:99
 
 	"$AT_SPI_BUS_LAUNCHER" --launch-immediately &
 	up=
 	for _ in $(seq 100); do
-		# Asking the bus who owns the name, rather than calling the launcher,
-		# because a call would make the bus activate a second launcher if
-		# ours has not claimed the name yet.
+		# Asking the bus who owns the name, rather than calling the launcher:
+		# the session bus here can start nothing by itself, so a launcher
+		# that died shows as a failure instead of being quietly replaced.
 		if dbus-send --session --print-reply --dest=org.freedesktop.DBus \
 			/org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner \
 			string:org.a11y.Bus 2>/dev/null | grep -q 'boolean true'; then
@@ -46,10 +66,7 @@ if [ "${1:-}" = --inside ]; then
 		fi
 		sleep 0.05
 	done
-	if [ -z "$up" ]; then
-		echo "rig: the accessibility bus did not start" >&2
-		exit 1
-	fi
+	[ -n "$up" ] || fail "the accessibility bus did not start"
 	# Toolkits and browsers build their accessibility trees only once
 	# something claims to be an assistive technology.
 	set_status() {
@@ -57,7 +74,7 @@ if [ "${1:-}" = --inside ]; then
 			org.freedesktop.DBus.Properties.Set \
 			string:org.a11y.Status string:"$1" variant:boolean:true >/dev/null
 	}
-	set_status IsEnabled
+	set_status IsEnabled || fail "could not switch accessibility on"
 	# Only some at-spi2-core builds have this one.
 	set_status ScreenReaderEnabled 2>/dev/null || true
 	# The sandbox is a background job of a shell without job control, and such
@@ -68,23 +85,70 @@ fi
 
 usage() {
 	echo "usage: rig [--bind DIR]... command [argument...]" >&2
-	exit 2
+	exit 125
 }
+
+# Whether $1 is $2 or lies inside it.
+within() {
+	case "$1/" in "$2"/*) return 0 ;; esac
+	return 1
+}
+
+if [ -z "${AT_SPI_BUS_LAUNCHER:-}" ] || [ -z "${BASEDREADER_RIG_PATH:-}" ]; then
+	fail "run inside the dev shell, nix develop"
+fi
+
+checkout=$(dirname "$(dirname "$(dirname "$self")")")
+# A worktree keeps its history in the main checkout, and git needs to read it.
+history=$(git -C "$checkout" rev-parse --path-format=absolute --git-common-dir) ||
+	fail "$checkout is not a git checkout"
+history=$(realpath -e -- "$history")
+liveHome=$(realpath -e -- "$HOME")
+
 binds=()
+bound=()
 while [ "${1:-}" = --bind ]; do
 	[ $# -ge 2 ] || usage
-	dir=$(realpath -e -- "$2")
+	dir=$(realpath -e -- "$2" 2>/dev/null) || fail "--bind: no such directory: $2"
+	[ -d "$dir" ] || fail "--bind takes a directory: $2"
+	[ "$dir" != / ] || fail "--bind: / would put the whole live system in the sandbox"
+	# A bind is mounted over everything set up before it. These hold the
+	# live session's sockets and devices, or must stay read-only, so nothing
+	# in them, and nothing that contains them, may be bound.
+	for kept in /run /dev /proc /sys /tmp/.X11-unix /tmp/.ICE-unix "$checkout" "$history"; do
+		if within "$dir" "$kept" || within "$kept" "$dir"; then
+			fail "--bind: $dir would expose $kept"
+		fi
+	done
+	# These may have single directories bound out of them, but not the whole.
+	for kept in /tmp /home "$liveHome" /nix /etc /usr /bin /var; do
+		if within "$kept" "$dir"; then
+			fail "--bind: $dir would expose all of $kept"
+		fi
+	done
+	# Settings of the live session's programs, the screen reader's among them.
+	case "$dir/" in "$liveHome"/.* | "$liveHome"/nixos/*)
+		fail "--bind: $dir holds the live session's own settings"
+		;;
+	esac
 	binds+=(--bind "$dir" "$dir")
+	bound+=("$dir")
 	shift 2
 done
 [ $# -gt 0 ] || usage
-: "${AT_SPI_BUS_LAUNCHER:?rig: run inside the dev shell, nix develop}"
 
-checkout=$(cd "$(dirname "$0")/../.." && pwd -P)
-# A worktree keeps its history in the main checkout, and git needs to read it.
-history=$(git -C "$checkout" rev-parse --path-format=absolute --git-common-dir)
+# The caller's directory if the sandbox has it, so that relative paths mean
+# what the caller meant; otherwise the checkout, where a relative path that
+# meant somewhere else fails instead of naming the wrong file.
+start=$checkout
+here=$(pwd -P)
+for visible in "$checkout" "${bound[@]}"; do
+	if within "$here" "$visible"; then
+		start=$here
+	fi
+done
 
-root=$(mktemp -d "${TMPDIR:-/tmp}/basedreader-rig.XXXXXX")
+root=$(mktemp -d "${TMPDIR:-/tmp}/basedreader-rig.XXXXXX") || fail "cannot make a working directory"
 mkdir -m 700 "$root/home" "$root/run"
 
 sandbox=
@@ -95,55 +159,83 @@ cleanup() {
 		kill -KILL "$sandbox" 2>/dev/null || true
 		wait "$sandbox" 2>/dev/null || true
 	fi
-	rm -rf "$root"
+	# A command may leave directories it made unwritable. Nothing here may
+	# fail: under set -e that would replace the command's exit status.
+	chmod -R u+rwx "$root" 2>/dev/null || true
+	rm -rf "$root" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# The sandbox already hides what these name. Clearing them as well makes a
-# client fail at once with a plain error instead of probing for a fallback.
-unset DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS \
-	AT_SPI_BUS_ADDRESS PIPEWIRE_REMOTE PIPEWIRE_RUNTIME_DIR \
-	PULSE_RUNTIME_PATH SPEECHD_ADDRESS GTK_MODULES NO_AT_BRIDGE \
-	LD_LIBRARY_PATH SSH_AUTH_SOCK
-export HOME="$root/home"
-export XDG_RUNTIME_DIR="$root/run"
-export XDG_CONFIG_HOME="$HOME/.config"
-export XDG_CACHE_HOME="$HOME/.cache"
-export XDG_DATA_HOME="$HOME/.local/share"
-export XDG_STATE_HOME="$HOME/.local/state"
-export PULSE_SERVER="unix:$root/run/no-sound-server"
-export DBUS_SYSTEM_BUS_ADDRESS="unix:path=$root/run/no-system-bus"
-# nix develop points these at a directory of its own under the real /tmp.
-export TMPDIR=/tmp TMP=/tmp TEMP=/tmp TEMPDIR=/tmp
-export GSETTINGS_BACKEND=memory
-export GNOME_ACCESSIBILITY=1
-export QT_ACCESSIBILITY=1
-export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
-# Several runs share the checkout; bytecode caches written into it by one
-# would be read by the others.
-export PYTHONDONTWRITEBYTECODE=1
-export PYTEST_ADDOPTS="-p no:cacheprovider"
-export BASEDREADER_RIG=1
+# The /nix/store entries of a colon-separated list.
+storeOnly() {
+	local IFS=: entries entry kept=()
+	read -ra entries <<<"$1"
+	for entry in "${entries[@]}"; do
+		if [[ $entry == /nix/store/* ]]; then
+			kept+=("$entry")
+		fi
+	done
+	echo "${kept[*]}"
+}
 
-# The system's locales and its GL drivers are reached through these two
-# links; the rest of /run is the live session's and stays out.
-links=()
-for link in /run/current-system /run/opengl-driver; do
-	if [ -L "$link" ]; then
-		links+=(--symlink "$(readlink "$link")" "$link")
+# The sandbox's whole environment. Starting from nothing rather than from
+# the caller's: a desktop session exports dozens of variables that make
+# programs load its modules, start its services and read its settings.
+variables=()
+for name in "${!BASEDREADER_@}" "${!BENCH_@}" AT_SPI_BUS_LAUNCHER GI_TYPELIB_PATH \
+	GDK_PIXBUF_MODULE_FILE LOCALE_ARCHIVE; do
+	if [ -n "${!name:-}" ]; then
+		variables+=("$name=${!name}")
 	fi
 done
+variables+=(
+	"PATH=$(storeOnly "$BASEDREADER_RIG_PATH")"
+	"XDG_DATA_DIRS=$(storeOnly "${BASEDREADER_RIG_XDG_DATA_DIRS:-}")"
+	"HOME=$root/home"
+	"USER=$(id -un)"
+	"LOGNAME=$(id -un)"
+	"TERM=${TERM:-dumb}"
+	LANG=C.UTF-8
+	TZ=UTC
+	TMPDIR=/tmp
+	"XDG_RUNTIME_DIR=$root/run"
+	"XDG_CONFIG_HOME=$root/home/.config"
+	"XDG_CACHE_HOME=$root/home/.cache"
+	"XDG_DATA_HOME=$root/home/.local/share"
+	"XDG_STATE_HOME=$root/home/.local/state"
+	# Sockets that do not exist, so that a client which goes looking fails
+	# at once with a plain error instead of probing for a fallback.
+	"PULSE_SERVER=unix:$root/run/no-sound-server"
+	"DBUS_SYSTEM_BUS_ADDRESS=unix:path=$root/run/no-system-bus"
+	GSETTINGS_BACKEND=memory
+	GNOME_ACCESSIBILITY=1
+	QT_ACCESSIBILITY=1
+	QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
+	# Several runs share the checkout; bytecode caches written into it by
+	# one would be read by the others.
+	PYTHONDONTWRITEBYTECODE=1
+	"PYTEST_ADDOPTS=-p no:cacheprovider"
+	BASEDREADER_RIG=1
+)
 
-bwrap --unshare-all --die-with-parent --new-session \
+# Python only to close every descriptor the caller left open, which could
+# be a socket to something live, before bwrap takes this process's place.
+# Standard input is named because a background job otherwise gets
+# /dev/null, and a script piped to the command would silently not run.
+env -i "${variables[@]}" python3 -I -S -c '
+import os, sys
+os.closerange(3, 1 << 20)
+os.execvp(sys.argv[1], sys.argv[1:])
+' bwrap --unshare-all --die-with-parent --new-session \
 	--ro-bind /nix /nix --ro-bind /etc /etc --ro-bind /sys /sys \
 	--ro-bind /bin /bin --ro-bind /usr /usr \
-	--dev /dev --proc /proc --tmpfs /tmp --dir /tmp/.X11-unix \
-	--tmpfs /run "${links[@]}" \
+	--dev /dev --proc /proc --tmpfs /tmp --dir /tmp/.X11-unix --tmpfs /run \
 	--ro-bind "$checkout" "$checkout" --ro-bind "$history" "$history" \
-	--bind "$root" "$root" "${binds[@]}" \
-	-- dbus-run-session -- "$0" --inside "$@" &
+	--bind "$root" "$root" "${binds[@]}" --chdir "$start" \
+	-- dbus-run-session --config-file="$(dirname "$self")/rig-session.conf" \
+	-- "$self" --inside "$@" 0<&0 &
 sandbox=$!
 status=0
 wait "$sandbox" || status=$?

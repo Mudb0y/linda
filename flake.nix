@@ -91,6 +91,8 @@
         buildInputs = with pkgs; [
           at-spi2-core
           gtk3
+          # Its gdk-pixbuf loader is how GTK draws its own symbolic icons.
+          librsvg
         ];
 
         # Not on PATH in any package; tests/linux/rig starts it by hand so the
@@ -107,12 +109,22 @@
         BASEDREADER_LOUIS_TABLES_DIR = "${louisTables}";
         BASEDREADER_NVDA_CLDR_DIR = "${nvdaCldr}";
 
+        # Every locale, so that which ones the tests can set does not depend
+        # on the ones the host happens to have built.
+        LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
+
         # The host session exports one pointing at its own alsa-lib and
         # PipeWire's libjack. Inherited, it would put host audio libraries
         # ahead of the pinned ones in every process started from here,
         # including those under the rig.
         shellHook = ''
           unset LD_LIBRARY_PATH
+          # What this shell itself provides, without what nix develop
+          # appended from the calling session. tests/linux/rig gives its
+          # sandbox only these, so that nothing under test depends on the
+          # host's desktop.
+          export BASEDREADER_RIG_PATH=''${PATH%"''${nix_saved_PATH:+:$nix_saved_PATH}"}
+          export BASEDREADER_RIG_XDG_DATA_DIRS=''${XDG_DATA_DIRS%"''${nix_saved_XDG_DATA_DIRS:+:$nix_saved_XDG_DATA_DIRS}"}
         '';
       };
     };
