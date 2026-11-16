@@ -6,13 +6,12 @@ over unchanged is the diagnosis: the core reports alive and asleep, and a watche
 thread's stack, with upstream's messages and thresholds, once the core stops reporting.
 
 Recovery is reduced to its signal, and only cancellableExecute acts on it, by refusing new calls
-from the main thread. While recovery runs,
-isCancellingCalls() is True and the descriptor from cancelCallFd() is readable, until the core next
-reports alive or asleep. Upstream's cancel event is a kernel handle that native code waits on beside
-its call; a descriptor is the Linux equivalent, which a GLib source, tokio's AsyncFd or an asyncio
-reader can wait on beside a D-Bus socket. A call already blocked on the main thread is not
-abandoned, so until the AT-SPI backend and the engine wait on it, a call into a hung application
-freezes the core for as long as the call takes, and the watchdog only logs where it is stuck.
+from the main thread. While recovery runs, isCancellingCalls() is True and the descriptor from
+cancelCallFd() is readable, until the core next reports alive or asleep. Upstream's cancel event is
+a kernel handle that native code waits on beside its call; a descriptor is the Linux equivalent,
+which a GLib source, tokio's AsyncFd or an asyncio reader can wait on beside a D-Bus socket. A call
+already blocked on the main thread is not abandoned: one that does not wait on the descriptor
+freezes the core for as long as it takes, and the watchdog only logs where it is stuck.
 """
 
 import os
@@ -138,8 +137,8 @@ def _isAlive() -> bool:
 
 def _waitUntilNormalCoreAliveTimeout(waitedSince: float) -> None:
 	# Upstream cuts this wait short when the foreground window or thread has changed, which it reads
-	# from Win32. Until the AT-SPI backend can say that focus has moved to another application, the
-	# full timeout always applies, as upstream's does for its safe window classes.
+	# from Win32. Nothing here learns that focus has moved to another application, so the full
+	# timeout always applies, as upstream's does for its safe window classes.
 	logged = False
 	while _timer() - waitedSince < NORMAL_CORE_ALIVE_TIMEOUT and not _isAlive():
 		if not logged:
