@@ -5,9 +5,8 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# A test binary of this crate would load libpipewire, and outside tests/linux/rig that reaches the
-# live sound server, so plain cargo test builds none: the logic is tested in core, and the library
-# by tests/linux/test_pipewireSink.py and tests/rig.rs, which run inside the rig.
+# The logic is tested in core, whose tests need no libpipewire; the library itself by tests/rig.rs
+# and tests/linux/test_pipewireSink.py.
 [lib]
 name = "pwsink"
 crate-type = ["cdylib", "rlib"]
@@ -18,15 +17,6 @@ doctest = false
 name = "pwmon"
 path = "src/bin/pwmon.rs"
 test = false
-
-[[test]]
-name = "rig"
-path = "tests/rig.rs"
-required-features = ["rig"]
-
-[features]
-# Builds tests/rig.rs: cargo test --no-run --features rig outside the rig, then its binary inside.
-rig = []
 
 [dependencies]
 pipewire = "=0.10.1"

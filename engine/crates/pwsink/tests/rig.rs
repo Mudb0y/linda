@@ -1,9 +1,6 @@
-//! libpwsink with no daemon, inside tests/linux/rig only, where initialising PipeWire cannot reach
-//! the live sound server. Outside, in ROOT/engine:
-//!
-//!     nix develop ROOT -c cargo test --release -p basedreader-pwsink --features rig --no-run
-//!
-//! then the test binary it names, inside: ROOT/tests/linux/rig ROOT/engine/target/release/deps/rig-...
+//! libpwsink with no daemon. Initialising PipeWire anywhere but inside tests/linux/rig would reach
+//! the live sound server; cargo test starts this binary there through engine/run-in-rig, and the
+//! binary refuses to go on when started any other way.
 
 use pwsink::{
     pwsink_close, pwsink_connected, pwsink_delivered, pwsink_init, pwsink_open, pwsink_played,
