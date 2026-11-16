@@ -88,7 +88,7 @@ def writeFinder(r: Repo, *modules: str) -> None:
 
 
 def writeEdits(r: Repo, *paths: str) -> None:
-	r.write("tools/upstream-edits.txt", EDITS_HEADER + "".join(f"{p}\n  a reason\n" for p in paths))
+	r.write("tools/upstream-edits.txt", EDITS_HEADER + "".join(f"{p}\n  Linux runtime: why\n" for p in paths))
 
 
 @pytest.fixture
@@ -187,6 +187,16 @@ def test_unlistedDeletionFails(repo: Repo):
 def test_entryForAnUntouchedFileFails(repo: Repo):
 	repo.write("source/edited.py", "value = 1\n")
 	assertFails(repo, "listed but identical to upstream:\nsource/edited.py")
+
+
+def test_reasonWithoutAKindFails(repo: Repo):
+	repo.write("tools/upstream-edits.txt", EDITS_HEADER + "source/edited.py\n  Linux: why\n")
+	assertFails(repo, "reason not starting with one of import safety:, Linux runtime:")
+
+
+def test_entryWithoutAReasonFails(repo: Repo):
+	repo.write("tools/upstream-edits.txt", EDITS_HEADER + "source/edited.py\n")
+	assertFails(repo, "no reason given for source/edited.py")
 
 
 def test_fileTurnedIntoALinkFails(repo: Repo):

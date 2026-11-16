@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 TOOLS = Path(__file__).resolve().parent
 EDITS = "tools/upstream-edits.txt"
@@ -39,6 +40,8 @@ OURS = ("source/linuxPlatform/", "source/basedreader.py")
 UPSTREAM_DIRS = ("source", "tests/unit")
 #: Forks the finder does not know about, and the file of ours that carries each.
 MIRRORED = {"source/nvda.pyw": "source/basedreader.py"}
+#: How each reason in the edits list starts, as that list's header explains.
+EDIT_KINDS = ("import safety:", "Linux runtime:", "every platform:", "repository:")
 
 
 class Failure(Exception):
@@ -71,16 +74,30 @@ def objectAt(base: str, path: str) -> str | None:
 	return entry.split("\t", 1)[0].split()[2]
 
 
-def readLedger(path: str) -> dict[str, list[str]]:
-	"""Each entry's first line, split into words, keyed by the path that starts it."""
-	entries: dict[str, list[str]] = {}
+class Entry(NamedTuple):
+	#: The entry's first line, split into words, the path first.
+	words: list[str]
+	#: The indented lines beneath it.
+	reason: list[str]
+
+
+def readLedger(path: str) -> dict[str, Entry]:
+	entries: dict[str, Entry] = {}
+	entry = None
 	for line in Path(path).read_text(encoding="utf-8").splitlines():
-		if line[:1] in ("", "#", " ", "\t"):
+		if line[:1] in ("", "#"):
 			continue
-		words = line.split()
-		if words[0] in entries:
-			raise Failure(f"{path}: {words[0]} is listed twice")
-		entries[words[0]] = words
+		if line[:1] in (" ", "\t"):
+			if entry is None:
+				raise Failure(f"{path}: a reason comes before any path: {line.strip()}")
+			entry.reason.append(line.strip())
+			continue
+		entry = Entry(line.split(), [])
+		if entry.words[0] in entries:
+			raise Failure(f"{path}: {entry.words[0]} is listed twice")
+		entries[entry.words[0]] = entry
+	if unexplained := [p for p, e in entries.items() if not e.reason]:
+		raise Failure(f"{path}: no reason given for {', '.join(unexplained)}")
 	return entries
 
 
@@ -100,8 +117,12 @@ def checkEdits(base: str) -> tuple[list[str], int]:
 	added = paths("diff", "--no-renames", "--name-only", "--diff-filter=A", base, "--", *UPSTREAM_DIRS)
 	added |= paths("ls-files", "--others", "--exclude-standard", "--", *UPSTREAM_DIRS)
 	added = {p for p in added if not p.startswith(OURS)}
-	listed = set(readLedger(EDITS))
+	ledger = readLedger(EDITS)
+	listed = set(ledger)
 	errors = []
+	if unlabelled := sorted(p for p, e in ledger.items() if not e.reason[0].startswith(EDIT_KINDS)):
+		errors.append(f"reason not starting with one of {', '.join(EDIT_KINDS)}:")
+		errors += unlabelled
 	if unlisted := sorted(changed - listed):
 		errors.append("edited, deleted or changed in type but not listed:")
 		errors += unlisted
@@ -126,7 +147,7 @@ def checkForks(base: str) -> tuple[list[str], int]:
 	forked = {moduleFile(base, m) for m in replacedModules()} | set(MIRRORED)
 	listed = readLedger(FORKS)
 	louis = listed.pop(LOUIS_LINK, None)
-	if louis is None or len(louis) != 3:
+	if louis is None or len(louis.words) != 3:
 		raise Failure(f"{FORKS}: {LOUIS_LINK} needs the commit upstream pins and its release")
 	errors = []
 	if unlisted := sorted(forked - set(listed)):
@@ -136,7 +157,8 @@ def checkForks(base: str) -> tuple[list[str], int]:
 		errors.append(f"in {FORKS} but no longer forked:")
 		errors += stale
 	for path in sorted(forked & set(listed)):
-		recorded = listed[path][1] if len(listed[path]) == 2 else None
+		words = listed[path].words
+		recorded = words[1] if len(words) == 2 else None
 		if recorded is None:
 			errors.append(f"{FORKS}: {path} needs the upstream object the fork matches")
 			continue
@@ -160,7 +182,7 @@ def checkCldrPin(base: str) -> list[str]:
 
 
 def reportLiblouis(base: str) -> None:
-	_path, recordedPin, release = readLedger(FORKS)[LOUIS_LINK]
+	_path, recordedPin, release = readLedger(FORKS)[LOUIS_LINK].words
 	pin = objectAt(base, LOUIS_LINK)
 	if pin != recordedPin:
 		print(f"liblouis: upstream now pins {pin}, not {recordedPin}; record its release in {FORKS}")

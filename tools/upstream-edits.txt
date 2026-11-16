@@ -3,9 +3,14 @@
 # source/linuxPlatform and source/basedreader.py.
 # A path at the start of a line, the reason indented beneath it.
 # tools/check-upstream-edits compares this list with the tree.
+# Each reason starts with the kind of edit, which says what a merge risks:
+#   import safety: Windows-only work done at import is done only on Windows
+#   Linux runtime: what the code does differently when it runs on Linux
+#   every platform: a change Windows sees too
+#   repository: a file that is not NVDA's code
 
 .gitignore
-  ignores for the dev shell output and the Rust build directory
+  repository: ignores for the dev shell output and the Rust build directory
 source/NVDAObjects/window/winword.py
   import safety: RegisterWindowMessage at module level runs only on Windows;
   documentNavigation.paragraphHelper, which kept code uses, imports winword.
@@ -40,7 +45,7 @@ source/_remoteClient/urlHandler.py
   evaluated at import. On Linux winreg is absent, so registering the URL
   handler raises NameError
 source/appModuleHandler.py
-  process identity: on Linux the application name, executable path,
+  Linux runtime: on Linux the application name, executable path,
   architecture, user and liveness of a process come from /proc and a pidfd
   through linuxPlatform.processes, not from Toolhelp, a process handle,
   IsWow64Process2 or the logon session. processHandle is None, so
@@ -52,18 +57,18 @@ source/appModuleHandler.py
   up is reported by fetchAppModule instead; terminate returns before the RPC
   teardown, which Linux has none of
 source/argsParsing.py
-  Linux: help goes to standard output and a command-line error to standard
+  Linux runtime: help goes to standard output and a command-line error to standard
   error with exit status 2, as argparse does, instead of a Windows message
   box
 source/audio/soundSplit.py
-  sound split, workstream A5: Linux has no counterpart yet of Windows' audio
+  Linux runtime: Linux has no counterpart yet of Windows' audio
   session manager, through which sound split sets other applications'
   volumes. On Linux initialize() leaves it unset instead of calling pycaw,
   which core.main would not survive; the toggle script says "Sound split
   not supported"; setting the state to off has nothing to restore, and any
   other state raises NoLinuxImplementation
 source/audioDucking.py
-  audio ducking, workstream A5: isAudioDuckingSupported() is False on
+  Linux runtime: isAudioDuckingSupported() is False on
   Linux, which would need a ducking policy in the sound server's session
   manager. It answers before the Windows checks, which on Linux would ask
   isInstalledCopy and hasUiAccess, neither of which knows the sound server
@@ -75,11 +80,11 @@ source/braille/display/driver.py
   Linux runtime: an acknowledgement from the display cancels the Linux
   timer object rather than calling CancelWaitableTimer
 source/brailleTables/__init__.py
-  Linux: TABLES_DIR is the directory BASEDREADER_LOUIS_TABLES_DIR names when
+  Linux runtime: TABLES_DIR is the directory BASEDREADER_LOUIS_TABLES_DIR names when
   it is set, and otherwise upstream's appDir/louis/tables, which
   tools/build-artifacts links to the same tables
 source/browseMode.py
-  import safety when running: _extractStyles imports the UI Automation Word
+  Linux runtime: _extractStyles imports the UI Automation Word
   document class only on Windows; Linux has no UI Automation and uses an
   empty tuple, which no isinstance test matches
 source/config/__init__.py
@@ -93,7 +98,7 @@ source/config/registry.py
   import safety: winreg imported only on Windows, after the module's other
   imports; on Linux winreg is absent, so its registry helpers raise NameError
 source/core.py
-  boot on Linux: the desktop object is linuxPlatform.desktop's placeholder,
+  Linux runtime: the desktop object is linuxPlatform.desktop's placeholder,
   which belongs to no process and finds no object with focus, in the
   foreground or under a point, until the AT-SPI backend provides the real
   desktop; and wx.App leaves SIGINT alone, which wxPython otherwise puts
@@ -107,16 +112,16 @@ source/core.py
   pump that ends it was the caller; messageBox refuses after shutdown for
   the same reason
 source/documentNavigation/paragraphHelper.py
-  import safety when running: after moving the caret, both paragraph moves
+  Linux runtime: after moving the caret, both paragraph moves
   import the UI Automation text class only on Windows; Linux has no UI
   Automation and uses an empty tuple, which no isinstance test matches
 source/fileUtils.py
-  Linux: FaultTolerantFile puts the synced temporary file in place with
+  Linux runtime: FaultTolerantFile puts the synced temporary file in place with
   os.replace and then syncs the directory, where Windows calls MoveFileEx,
   so that a save replaces nvda.ini whole or not at all. A symbolic link at
   the target is followed and stays a link
 source/gui/__init__.py
-  boot on Linux: MainFrame.prePopup and postPopup skip their foreground
+  Linux runtime: MainFrame.prePopup and postPopup skip their foreground
   window steps. Which application is in the foreground is known only through
   the AT-SPI backend, which does not exist yet, and on GTK raising the hidden
   main frame would show it; the window manager returns focus after a popup
@@ -127,7 +132,7 @@ source/gui/addonStoreGui/viewModels/store.py
   other imports; on Linux startfile is absent, so opening an add-on's home
   page, source, scan results or downloaded file raises NameError
 source/gui/message.py
-  boot on Linux: MessageDialog._playSound plays nothing, as the sounds are
+  Linux runtime: MessageDialog._playSound plays nothing, as the sounds are
   Windows' system sounds through winsound.MessageBeep and Linux has no
   sound set NVDA plays yet; raising there would also stop the dialog's show
   handler before it focuses the default button. Every error and warning
@@ -163,7 +168,7 @@ source/keyboardHandler.py
   without the layout. Until a capture layer exists the rest raise
   NoLinuxImplementation
 source/languageHandler.py
-  Linux: the interface language, the C locale, language names and the
+  Linux runtime: the interface language, the C locale, language names and the
   measurement system come from linuxPlatform.posixLocale, which reads the
   POSIX environment, instead of from Windows locale calls. getWindowsLanguage
   reports the first language LANGUAGE lists that NVDA has a translation for,
@@ -173,7 +178,7 @@ source/languageHandler.py
   Python's table. The catalogue directory is absolute under appDir on every
   platform, so translations no longer depend on the working directory
 source/logHandler.py
-  running on Linux: the time comes from logging's own formatTime, not Win32
+  Linux runtime: the time comes from logging's own formatTime, not Win32
   time conversion; log.exception reads comtypes only on Windows; NVDA's own
   modules are told from external code with the platform's path separator,
   which on Windows is the backslash upstream wrote; a record that cannot be
@@ -190,7 +195,7 @@ source/louisHelper.py
   import safety: os.add_dll_directory around the louis import only on
   Windows
 source/mathPres/__init__.py
-  import safety when running: initialize() imports MathCAT inside the try
+  Linux runtime: initialize() imports MathCAT inside the try
   that already turns a MathCAT that cannot start into the warning "MathCAT
   not available.". On Linux that import fails, as libmathcat_py is not
   packaged, and core.main calls initialize() at every start. On Windows a
@@ -211,7 +216,7 @@ source/oleacc.py
   comInterfaces.Accessibility stand-in, since comtypes.client.GetModule
   cannot run
 source/synthDriverHandler.py
-  synthesizer selection on Linux: getSynthList skips NVDA's own copies of
+  Linux runtime: getSynthList skips NVDA's own copies of
   the Windows-only driver modules (mssp, oneCore, sapi4_32, sapi5,
   sapi5_32), which cannot import and would each log an error, but not an
   add-on driver of the same name. The default priority list, which "auto"
@@ -220,7 +225,7 @@ source/synthDriverHandler.py
   on Linux, auto logs its failure once per start. test_transcriptSynth.py
   checks that the skipped set is exactly the set that fails to import
 source/synthDrivers/espeak.py
-  synthesizer selection on Linux: check() answers False on Linux, because
+  Linux runtime: check() answers False on Linux, because
   the driver loads espeak.dll, so the synthesizer list does not offer a
   voice that fails to load. The eSpeak port replaces this
 source/systemUtils.py
@@ -242,35 +247,35 @@ source/systemUtils.py
   messages. The process token, logon session, elevation and desktop name
   functions still fail on Linux through the Windows stand-ins
 source/textUtils/__init__.py
-  UTF-16 offsets: WideStringOffsetConverter counts two bytes per code unit,
+  every platform: WideStringOffsetConverter counts two bytes per code unit,
   the size of c_uint16, instead of the size of c_wchar, which is four on
   Linux and made every length and offset wrong there. Same value on Windows
 source/textUtils/icu.py
-  UTF-16 offsets: on Linux the text buffer handed to ICU and sliced with its
+  Linux runtime: on Linux the text buffer handed to ICU and sliced with its
   offsets is a linuxPlatform.utf16.Utf16Buffer, because a c_wchar buffer is
   UTF-32 there; Windows keeps create_unicode_buffer
 source/textUtils/uniscribe.py
-  UTF-16 offsets: on Linux the buffer splitAtCharacterBoundaries passes to
+  Linux runtime: on Linux the buffer splitAtCharacterBoundaries passes to
   calculateCharacterBoundaries and slices with its offsets is a
   linuxPlatform.utf16.Utf16Buffer, for the same reason as textUtils/icu.py
 source/touchHandler.py
   Linux runtime: touchSupported() is False, as nothing reads touch input on
   Linux yet
 source/utils/mmdevice.py
-  output devices, workstream A5: on Linux getOutputDevices lists the
+  Linux runtime: on Linux getOutputDevices lists the
   devices of the audio sink in linuxPlatform.audioOutput instead of
   enumerating Windows endpoints through pycaw. The null and capture sinks
   have none, so the default device is the only choice
 source/utils/security.py
-  Linux: isRunningOnSecureDesktop() is True only in a display manager's
+  Linux runtime: isRunningOnSecureDesktop() is True only in a display manager's
   login screen session, the counterpart of the secure desktop, as
   XDG_SESSION_CLASS says. NVDASettingsDialog's class body calls it at import
 source/winAPI/dpiAwareness.py
-  boot on Linux: setDPIAwareness() returns at once, as GTK scales for the
+  Linux runtime: setDPIAwareness() returns at once, as GTK scales for the
   display by itself and a process has no DPI awareness to declare; core.main
   calls it on every run from source
 source/winAPI/messageWindow.py
-  Linux: _MessageWindow creates no window and its destroy() does nothing, as
+  Linux runtime: _MessageWindow creates no window and its destroy() does nothing, as
   no other process sends NVDA window messages there; core.main still creates
   and destroys it
 source/winInputHook.py
@@ -291,11 +296,11 @@ source/windowUtils.py
   panel asks for it, and the dialogs that scale their sizes through
   gui.dpiScalingHelper would otherwise fail on GetDC
 tests/unit/__init__.py
-  unit tests on Linux: linuxPlatform.bootstrap.install() runs first; the
+  Linux runtime: linuxPlatform.bootstrap.install() runs first; the
   comtypes monkey patches and the load of nvdaHelperLocal.dll run only on
   Windows, and on Linux NVDAHelper.localLib stays the Linux replacement; the
   configuration directory is a temporary one, holding a copy of the test
   braille tables, so that nothing is written under tests/unit; while speech
   is initialised, the automatic synth choice offers only silence, so that it
-  never loads eSpeak, whose library links audio libraries, before anyone has
-  ruled on that
+  never loads eSpeak, whose library links audio libraries, while the tests
+  run with no sound devices
