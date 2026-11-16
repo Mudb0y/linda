@@ -246,14 +246,18 @@ def test_timersFireInDueOrder(tmp_path: Path):
 				both.set()
 
 		late, early = WaitableTimer(), WaitableTimer()
-		# Far enough apart that arming the second, however slowly, cannot make it due after the first.
+		# Due 900 ms apart, so the early timer falls due first unless arming the two takes that long.
+		armingStarted = time.monotonic()
 		hwIo.bgThread.setWaitableTimer(late, 1000, onTimer, 2)
 		hwIo.bgThread.setWaitableTimer(early, 100, onTimer, 1)
-		result = {"both": both.wait(WAIT), "order": order}
+		armingTook = time.monotonic() - armingStarted
+		result = {"both": both.wait(WAIT), "order": order, "armingTook": armingTook}
 		hwIo.terminate()
 		""",
 	)
 	done.assertClean()
+	armingTook = done.value.pop("armingTook")
+	assert armingTook < 0.9, f"arming the timers took {armingTook:.2f} s, so neither is sure to be due first"
 	assert done.value == {"both": True, "order": [1, 2]}
 
 
