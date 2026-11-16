@@ -1088,6 +1088,12 @@ def test_lockHolderThatRecordedNothingIsNeverSignalled(launcher):
 		quitter = launcher("quit", None, "--quit")
 		assert quitter.waitForExit() == 0, quitter.describe()
 		assert "has not recorded itself" in quitter.log("stderr.txt")
+		# A copy that would start waits its while for the lock, as nvda.pyw waits for the mutex, and
+		# gives up.
+		starter = launcher("start", None)
+		assert starter.waitForExit() == 1, starter.describe()
+		assert "has not recorded itself" in starter.log("stderr.txt")
+		assert f"basedreader: another NVDA still holds {lockPath}\n" in starter.log("stderr.txt")
 		assert bystander.poll() is None
 		assert holder.poll() is None
 	finally:
