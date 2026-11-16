@@ -81,8 +81,8 @@ source/audio/soundSplit.py
 source/audioDucking.py
   audio ducking, workstream A5: isAudioDuckingSupported() is False on
   Linux, which would need a ducking policy in the sound server's session
-  manager. It answers before the Windows checks, as hasUiAccess has no
-  Linux body
+  manager. It answers before the Windows checks, which on Linux would ask
+  isInstalledCopy and hasUiAccess, neither of which knows the sound server
 source/braille/brailleHandler.py
   Linux runtime: the display acknowledgement timer is a
   linuxPlatform.ioThread.WaitableTimer, since Linux has no waitable timer
@@ -214,7 +214,7 @@ source/systemUtils.py
   another; Wayland sessions are not handled. Its consumers then do this:
   gui's MainFrame skips the Show and Hide trick, which is wanted; the
   full-screen magnifier believes input transforms are supported; touch and
-  audio ducking still answer unsupported, through isInstalledCopy(); the
+  audio ducking answer unsupported through their own Linux guards; the
   remote client's _canSendSAS goes on to winreg, which is absent, so a
   remote control+alt+delete raises NameError; and _isObjectBelowLockScreen
   goes on to Win32 z-order calls, which fail through the stand-ins once lock
@@ -265,5 +265,5 @@ source/winVersion.py
   and winAPI.constants call it at import
 source/windowUtils.py
   import safety: GetModuleHandle at module level runs only on Windows; on
-  Linux appInstance is absent, so creating a CustomWindow, such as
-  winAPI.messageWindow's, raises NameError
+  Linux appInstance is absent, so creating a CustomWindow raises NameError;
+  winAPI.messageWindow's _MessageWindow creates no window on Linux
