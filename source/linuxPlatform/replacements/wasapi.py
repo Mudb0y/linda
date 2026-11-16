@@ -135,6 +135,8 @@ class _Player:
 		self._volumes = [1.0] * fmt.channels
 		# Set when _volumes changed while another thread held _lock, which then gives them to the stream.
 		self._areVolumesPending = False
+		# What the stream was last given, when it is known to hold it.
+		self._givenVolumes: list[float] | None = None
 
 	@contextlib.contextmanager
 	def _locked(self) -> Iterator[None]:
@@ -171,11 +173,15 @@ class _Player:
 		if stream is None or self._isLost():
 			# A stream is given every volume as it opens.
 			return
+		levels = list(self._volumes)
+		self._givenVolumes = None
 		try:
-			for channel, level in enumerate(self._volumes):
+			for channel, level in enumerate(levels):
 				stream.setChannelVolume(channel, level)
 		except StreamLost:
 			self._noteLost(stream)
+			return
+		self._givenVolumes = levels
 
 	def _wake(self) -> None:
 		with self._wakeCondition:
@@ -191,9 +197,11 @@ class _Player:
 			)
 		stream = audioOutput.getSink().openStream(self.deviceId, self.format, self._wake)
 		isLost = False
+		levels = list(self._volumes)
 		try:
-			for channel, level in enumerate(self._volumes):
+			for channel, level in enumerate(levels):
 				stream.setChannelVolume(channel, level)
+			self._givenVolumes = levels
 		except StreamLost:
 			# Kept, for a feed to replace as it replaces any lost stream.
 			isLost = True
@@ -214,6 +222,7 @@ class _Player:
 			stream, self._stream = self._stream, None
 			self._lostStream = None
 			self._state = _PlayState.stopped
+		self._givenVolumes = None
 		return stream
 
 	def _reopenAfterLoss(self) -> None:
@@ -506,6 +515,15 @@ class _Player:
 		if not 0 <= channel < self.format.channels or not 0.0 <= level <= 1.0:
 			# As IAudioStreamVolume::SetChannelVolume; nvwave relies on it for mono streams.
 			raise WindowsError(errno.EINVAL, "The parameter is incorrect", None, E_INVALIDARG)
+		given = self._givenVolumes
+		if (
+			not self._areVolumesPending
+			and given is not None
+			and given[channel] == level == self._volumes[channel]
+		):
+			# nvwave sets a sounds player's volume as it opens and on every stop, nearly always
+			# unchanged, and a call into a native sink costs the caller a wait for the GIL as it returns.
+			return
 		self._volumes[channel] = level
 		self._areVolumesPending = True
 		self._applyVolumesWhenFree(raising=True)

@@ -498,6 +498,43 @@ def test_volumeIsAppliedToWhatIsHeard(tmp_path: Path):
 	assert got["frames"] == frame * 800
 
 
+def test_anUnchangedVolumeIsNotGivenToTheStreamAgain(tmp_path: Path):
+	"""nvwave puts the configured volume back on a sounds player as it opens and on every stop, which
+	on a native sink is a call into C that the stopping thread, usually NVDA's main thread, must win
+	the GIL back from. The stream is given a level only when it does not already hold it."""
+	value = runAudio(
+		tmp_path,
+		"""
+		from linuxPlatform import audioOutput
+		from linuxPlatform.audioOutput.nullSink import NullSink, NullStream
+
+		given = []
+
+		class CountingStream(NullStream):
+			def setChannelVolume(self, channel, level):
+				given.append((channel, level))
+				super().setChannelVolume(channel, level)
+
+		class CountingSink(NullSink):
+			def openStream(self, deviceId, fmt, wake):
+				return CountingStream(fmt)
+
+		audioOutput._sink = CountingSink()
+		player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+		player.feed(bytes(160))
+		player.stop()
+		player.feed(bytes(160))
+		player.stop()
+		player.setVolume(all=0.5)
+		player.feed(bytes(160))
+		player.stop()
+		result = given
+		""",
+	)
+	# Once as the stream opens, then the change, then the configured volume put back by the stop.
+	assert value == [[0, 1.0], [0, 0.5], [0, 1.0]]
+
+
 def test_lostStreamIsReopenedAndStrandsNoCallback(tmp_path: Path):
 	"""What a sink that can lose its device, as PipeWire's will, gets from the player."""
 	value = runAudio(
