@@ -132,7 +132,14 @@ source/core.py
   pump's first cycles on GTK, so a quick exit ran it inside the wx.Yield of
   _closeAllWindows, where the welcome dialog waited for ever because the
   pump that ends it was the caller; messageBox refuses after shutdown for
-  the same reason
+  the same reason. Exit on Linux: _closeAllWindows first ends, through
+  linuxPlatform.modalDialogs, every modal dialog inside the outermost one,
+  innermost first, and GTK's own dialogs, and runs again once they are
+  gone; on wxGTK EndModal on an outer dialog leaves its loop running, and
+  wx.GetTopLevelWindows does not list the dialogs wx.MessageBox and
+  wx.FileDialog show, so NVDA never exited. Once main() is out of the main
+  loop it tells linuxPlatform.quitSignals, so that a further quit signal
+  ends a shutdown that hangs
 source/documentNavigation/paragraphHelper.py
   import safety when running: after moving the caret, both paragraph moves
   import the UI Automation text class only on Windows; Linux has no UI
@@ -144,21 +151,24 @@ source/fileUtils.py
   the target is followed and stays a link
 source/gui/__init__.py
   boot on Linux: MainFrame.prePopup and postPopup skip their foreground
-  window steps. Which application is in the foreground is known only through
-  the AT-SPI backend, which does not exist yet, and on GTK raising the hidden
-  main frame would show it; the window manager returns focus after a popup
-  by itself. Every dialog NVDA opens goes through these, the welcome dialog
-  at a first start and the exit dialog among them
+  window steps. Windows' foreground window has no counterpart for NVDA to
+  ask about or take, as only AT-SPI can tell which application is in the
+  foreground, and on GTK raising the hidden main frame would show it; the
+  window manager returns focus after a popup by itself. Every dialog NVDA
+  opens goes through these, the welcome dialog at a first start and the
+  exit dialog among them
 source/gui/addonStoreGui/viewModels/store.py
   import safety: os.startfile imported only on Windows, after the module's
   other imports; on Linux startfile is absent, so opening an add-on's home
   page, source, scan results or downloaded file raises NameError
 source/gui/message.py
   boot on Linux: MessageDialog._playSound plays nothing, as the sounds are
-  Windows' system sounds through winsound.MessageBeep and Linux has no
-  sound set NVDA plays yet; raising there would also stop the dialog's show
-  handler before it focuses the default button. Every error and warning
-  message box, the configuration error at start-up among them, plays one.
+  Windows' system sounds through winsound.MessageBeep, which have no Linux
+  counterpart. For a dialog that has a sound it makes a
+  NoLinuxImplementation without raising it, which records the gap through
+  the audit event; raising would stop the dialog's show handler before it
+  focuses the default button. Every error and warning message box, the
+  configuration error at start-up among them, has one.
   On every platform, wx.html2 is imported in
   HtmlMessageDialog._createMessageControl rather than with the module, and
   _webViewBackend holds wx.html2.WebViewBackendIE's value written out, with

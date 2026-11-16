@@ -1105,8 +1105,13 @@ class MessageDialog(DpiScalingHelperMixinWithoutInit, ContextHelpMixin, wx.Dialo
 	def _playSound(self) -> None:
 		"""Play the sound set for this dialog."""
 		if sys.platform != "win32":
-			# These are Windows' system sounds. Linux has no sound set NVDA plays yet, and failing here would
-			# also leave the dialog's default button without focus.
+			if self._soundID is not None:
+				from linuxPlatform import NoLinuxImplementation
+
+				# Windows' system sound for this kind of dialog has no Linux counterpart. Made rather than
+				# raised, which records the gap without stopping the show handler before it focuses the
+				# default button.
+				NoLinuxImplementation("winsound.MessageBeep")
 			return
 		if self._soundID is not None:
 			winsound.MessageBeep(self._soundID)
