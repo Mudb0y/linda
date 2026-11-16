@@ -191,7 +191,9 @@ async fn fetch_by(
         Method::ItemsSupplemented(w) => {
             let items = fetch::get_items(client).await.map_err(|e| e.to_string())?;
             let mut t = Tree::from_items(&client.app_bus, &items);
-            call_errors = fetch::supplement(client, &mut t, w, WalkFields::ALL).await;
+            let s = fetch::supplement(client, &mut t, w, WalkFields::ALL).await;
+            call_errors = s.errors;
+            details.insert("failures", json!(s.failures));
             t
         }
         Method::GetTree => {

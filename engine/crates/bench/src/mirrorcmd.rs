@@ -30,15 +30,23 @@ const STATUS_PREFIX: &str = "Mutations ";
 /// already keep Firefox's main thread busy.
 const REPAIR_WINDOW: usize = 16;
 
-/// The most repairs one batch runs. The rest wait for the next batch, so
-/// that an application which keeps inventing objects cannot hold the signal
-/// loop for ever.
-const MAX_REPAIRS_PER_BATCH: usize = 10_000;
+/// Bounds on the work of one batch's repairs.
+#[derive(Debug, Clone, Copy)]
+struct RepairLimits {
+    /// The most repairs one batch runs. The rest wait for the next batch, so
+    /// that an application which keeps inventing objects cannot hold the
+    /// signal loop for ever.
+    per_batch: usize,
+    /// How far Locate follows parents the mirror does not hold. A newly
+    /// shown subtree is a few levels deep; a chain longer than this is an
+    /// application inventing parents.
+    locate_depth: usize,
+}
 
-/// How far Locate follows parents the mirror does not hold. A newly shown
-/// subtree is a few levels deep; a chain longer than this is an application
-/// inventing parents.
-const MAX_LOCATE_DEPTH: usize = 64;
+const REPAIR_LIMITS: RepairLimits = RepairLimits {
+    per_batch: 10_000,
+    locate_depth: 64,
+};
 
 /// Failed calls kept in full for the result; the rest are counted.
 const FAILURES_KEPT: usize = 32;
@@ -131,12 +139,10 @@ impl LoopStats {
         self.keep(failure.to_string());
     }
 
-    fn undecodable(&mut self, method: &str) {
-        *self
-            .repair_call_errors
-            .entry(method.to_owned())
-            .or_default() += 1;
+    fn undecodable(&mut self, label: &str, failure: &CallFailure) {
+        *self.repair_call_errors.entry(label.to_owned()).or_default() += 1;
         self.repair_undecodable_replies += 1;
+        self.keep(failure.to_string());
     }
 }
 
@@ -149,6 +155,7 @@ async fn run_repairs(
     mirror: &mut Mirror,
     repairs: Vec<Repair>,
     stats: &mut LoopStats,
+    limits: RepairLimits,
 ) {
     let mut seen = HashSet::new();
     let mut queue = VecDeque::new();
@@ -169,7 +176,7 @@ async fn run_repairs(
             stats.repairs_skipped_object_gone += usize::from(!held);
             continue;
         }
-        if run == MAX_REPAIRS_PER_BATCH {
+        if run == limits.per_batch {
             stats.repairs_deferred_over_budget += 1;
             mirror.retry_later(r);
             continue;
@@ -190,6 +197,13 @@ async fn run_repairs(
                 mirror.retry_later(r.clone());
             }
         };
+        // A reply of the wrong shape is the application's answer, so it is
+        // not asked again; what the mirror had stays.
+        let undecodable = |stats: &mut LoopStats, field: Field, msg: &Message| {
+            let (iface, member) = field.method();
+            let kind = FailureKind::undecodable(msg, field.reply_signature());
+            stats.undecodable(field.label(), &client.failure(path, iface, member, kind));
+        };
         match &r {
             Repair::RefetchChildren(p) => {
                 match client.call(p, IFACE_ACCESSIBLE, "GetChildren", &()).await {
@@ -198,7 +212,7 @@ async fn run_repairs(
                             let more = mirror.reconcile_children(p, &live);
                             enqueue(&mut queue, &mut seen, more);
                         }
-                        Err(_) => stats.undecodable("GetChildren"),
+                        Err(_) => undecodable(stats, Field::Children, &msg),
                     },
                     Err(e) if mirror::client::is_gone(&e) => {
                         stats.call_failed(
@@ -254,22 +268,31 @@ async fn run_repairs(
                 match client.call(p, IFACE_TEXT, "GetText", &(0i32, -1i32)).await {
                     Ok(msg) => match decode::string(&msg) {
                         Ok(text) => mirror.set_text(p, text),
-                        Err(_) => stats.undecodable("Text.GetText"),
+                        Err(_) => undecodable(stats, Field::Text, &msg),
                     },
                     Err(e) => failed(stats, mirror, Field::Text, &e),
                 }
             }
             Repair::Locate(p) => {
-                let parent = client
+                let reply = client
                     .call(p, IFACE_PROPERTIES, "Get", &(IFACE_ACCESSIBLE, "Parent"))
                     .await;
-                match parent.map(|m| decode::ref_property(&m)) {
-                    Ok(Ok(parent)) if parent.bus == client.app_bus && !parent.is_null() => {
+                let msg = match reply {
+                    Ok(msg) => msg,
+                    // The object is gone, which is why the mirror lacks it.
+                    Err(e) => {
+                        let f = client.failure(p, IFACE_PROPERTIES, "Get", FailureKind::of(&e));
+                        stats.call_failed("Get(Parent)", &f);
+                        continue;
+                    }
+                };
+                match decode::ref_property(&msg) {
+                    Ok(parent) if parent.bus == client.app_bus && !parent.is_null() => {
                         let up = climbed.get(p).copied().unwrap_or(0) + 1;
                         let next = match mirror.tree.nodes.get(&parent.path) {
                             Some(n) if n.children.contains(p) => None,
                             Some(_) => Some(Repair::RefetchChildren(parent.path)),
-                            None if up > MAX_LOCATE_DEPTH => {
+                            None if up > limits.locate_depth => {
                                 stats.locate_chains_cut += 1;
                                 None
                             }
@@ -280,20 +303,19 @@ async fn run_repairs(
                         };
                         enqueue(&mut queue, &mut seen, next.into_iter().collect());
                     }
-                    Ok(Ok(_)) => {}
-                    Ok(Err(_)) => stats.undecodable("Get(Parent)"),
-                    // The object is gone, which is why the mirror lacks it.
-                    Err(e) => stats.call_failed(
-                        "Get(Parent)",
-                        &client.failure(p, IFACE_PROPERTIES, "Get", FailureKind::of(&e)),
-                    ),
+                    Ok(_) => {}
+                    Err(_) => {
+                        let kind = FailureKind::undecodable(&msg, "v holding (so)");
+                        let f = client.failure(p, IFACE_PROPERTIES, "Get", kind);
+                        stats.undecodable("Get(Parent)", &f);
+                    }
                 }
             }
             Repair::RefetchAttributes(p) => {
                 match client.call(p, IFACE_ACCESSIBLE, "GetAttributes", &()).await {
                     Ok(msg) => match decode::attributes(&msg) {
                         Ok(a) => mirror.set_attributes(p, a),
-                        Err(_) => stats.undecodable("GetAttributes"),
+                        Err(_) => undecodable(stats, Field::Attributes, &msg),
                     },
                     Err(e) => failed(stats, mirror, Field::Attributes, &e),
                 }
@@ -525,7 +547,7 @@ pub async fn run(args: &Args) -> Result<(), String> {
     let mut tree = Tree::from_items(&target.app_bus, &items);
     let naive_tree = tree.clone();
     let pruned_at_build = tree.prune_unreachable();
-    let build_errors = fetch::supplement(client, &mut tree, REPAIR_WINDOW, MIRROR_FIELDS).await;
+    let supplemented = fetch::supplement(client, &mut tree, REPAIR_WINDOW, MIRROR_FIELDS).await;
     let build_cost = meter.stop(client.counters());
     let empty_attributes: Vec<&String> = tree
         .nodes
@@ -567,7 +589,7 @@ pub async fn run(args: &Args) -> Result<(), String> {
             }
         }
         let repairs = apply_batch(&batch, &mut mirror, &mut naive, &mut stats);
-        run_repairs(client, &mut mirror, repairs, &mut stats).await;
+        run_repairs(client, &mut mirror, repairs, &mut stats, REPAIR_LIMITS).await;
     }
     let maintenance_cost = meter.stop(client.counters());
     // Whatever arrived in the last moments is applied before comparing.
@@ -578,13 +600,20 @@ pub async fn run(args: &Args) -> Result<(), String> {
     let late_signals = batch.len();
     if !batch.is_empty() {
         let repairs = apply_batch(&batch, &mut mirror, &mut naive, &mut stats);
-        run_repairs(client, &mut mirror, repairs, &mut stats).await;
+        run_repairs(client, &mut mirror, repairs, &mut stats, REPAIR_LIMITS).await;
     }
     // No batch follows to give unanswered repairs their next try.
     let final_retries = mirror.due_retries();
     let final_retries_run = final_retries.len();
     stats.retries_run += final_retries_run;
-    run_repairs(client, &mut mirror, final_retries, &mut stats).await;
+    run_repairs(
+        client,
+        &mut mirror,
+        final_retries,
+        &mut stats,
+        REPAIR_LIMITS,
+    )
+    .await;
 
     sleep(Duration::from_millis(300)).await?;
     let meter = Meter::start(target.pid, client.counters());
@@ -641,7 +670,8 @@ pub async fn run(args: &Args) -> Result<(), String> {
                 "objects": build_objects,
                 "getitems_items": items.len(),
                 "pruned_unreachable": pruned_at_build,
-                "call_errors": build_errors,
+                "call_errors": supplemented.errors,
+                "failures": supplemented.failures,
                 "attribute_priming_calls": attribute_priming_calls,
                 "objects_with_empty_attributes": empty_attributes,
                 "status": status_at_build,
@@ -675,4 +705,233 @@ pub async fn run(args: &Args) -> Result<(), String> {
             "fresh_getitems_pruned_count": fresh_pruned_count,
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::os::unix::net::UnixStream;
+    use std::pin::pin;
+    use std::rc::Rc;
+
+    use mirror::tree::Node;
+    use zbus::{ObjectPath, Variant};
+
+    use super::*;
+
+    const APP: &str = ":1.7";
+
+    /// Fails the test anywhere but inside the rig, as the fake application
+    /// speaks D-Bus.
+    fn rig() {
+        assert!(
+            crate::inside_rig(),
+            "speaks D-Bus, so runs only inside tests/linux/rig, as cargo test does"
+        );
+    }
+
+    /// What the fake application does with one call: answer it, or let it go
+    /// unanswered.
+    type Answer = Box<dyn Fn(&Message) -> Option<Message>>;
+
+    fn reply<B: Serialize + zbus::DynamicType>(call: &Message, body: &B) -> Option<Message> {
+        Some(Message::method_return(&call.header()).build(body).unwrap())
+    }
+
+    fn error(call: &Message, name: &str) -> Option<Message> {
+        Some(
+            Message::error(&call.header(), name)
+                .build(&("no",))
+                .unwrap(),
+        )
+    }
+
+    fn on(call: &Message) -> (String, String) {
+        let h = call.header();
+        (
+            h.path().map(|p| p.to_string()).unwrap_or_default(),
+            h.member().map(|m| m.to_string()).unwrap_or_default(),
+        )
+    }
+
+    /// Runs `repairs` against a fake application that answers as `answer`
+    /// says, with a call given up after `method_timeout`.
+    fn repaired(
+        mirror: &mut Mirror,
+        repairs: Vec<Repair>,
+        limits: RepairLimits,
+        method_timeout: Duration,
+        answer: Answer,
+    ) -> LoopStats {
+        zbus::block_on(async move {
+            let (ours, theirs) = UnixStream::pair().unwrap();
+            let server = zbus::connection::Builder::unix_stream(theirs)
+                .server(zbus::Guid::generate())
+                .p2p()
+                .build();
+            let client = zbus::connection::Builder::unix_stream(ours)
+                .p2p()
+                .method_timeout(method_timeout)
+                .build();
+            let (server, client) = futures_util::future::join(server, client).await;
+            let (server, client) = (server.unwrap(), Client::p2p(client.unwrap(), APP));
+            let serving = async {
+                let mut calls = MessageStream::from(&server);
+                while let Some(Ok(call)) = calls.next().await {
+                    if call.message_type() == Type::MethodCall
+                        && let Some(r) = answer(&call)
+                    {
+                        let _ = server.send(&r).await;
+                    }
+                }
+            };
+            let mut stats = LoopStats::default();
+            {
+                let repairing = pin!(run_repairs(&client, mirror, repairs, &mut stats, limits));
+                if let Either::Right(_) = select(repairing, pin!(serving)).await {
+                    panic!("the fake application stopped");
+                }
+            }
+            stats
+        })
+    }
+
+    /// root, then /doc, which has /a and /b, and /a has /a1.
+    fn mirror() -> Mirror {
+        let node = |parent: Option<&str>, children: &[&str]| Node {
+            parent: parent.map(str::to_owned),
+            children: children.iter().map(|c| (*c).to_owned()).collect(),
+            child_count: children.len() as i32,
+            role: Some(1),
+            name: Some("held".into()),
+            ..Node::default()
+        };
+        let mut t = Tree::new(APP, ROOT_PATH);
+        t.nodes.insert(ROOT_PATH.into(), node(None, &["/doc"]));
+        t.nodes
+            .insert("/doc".into(), node(Some(ROOT_PATH), &["/a", "/b"]));
+        t.nodes.insert("/a".into(), node(Some("/doc"), &["/a1"]));
+        t.nodes.insert("/a1".into(), node(Some("/a"), &[]));
+        t.nodes.insert("/b".into(), node(Some("/doc"), &[]));
+        t.renumber_all();
+        Mirror::new(t)
+    }
+
+    #[test]
+    fn only_the_application_saying_an_object_is_gone_drops_it() {
+        rig();
+        const GONE: &str = "org.freedesktop.DBus.Error.UnknownObject";
+        let answer: Answer = Box::new(|call| match on(call) {
+            (p, m) if p == "/a" && m == "GetChildren" => {
+                error(call, "org.freedesktop.DBus.Error.Failed")
+            }
+            (p, m) if (p == "/b" || p == "/a1") && m == "GetChildren" => error(call, GONE),
+            _ => None,
+        });
+        let mut m = mirror();
+        let repairs = vec![
+            Repair::RefetchChildren("/a".into()),
+            Repair::RefetchChildren("/b".into()),
+            Repair::RefetchChildren("/doc".into()),
+            Repair::FetchSubtree("/a1".into()),
+            Repair::FetchSubtree("/a".into()),
+        ];
+        let stats = repaired(
+            &mut m,
+            repairs,
+            REPAIR_LIMITS,
+            Duration::from_millis(300),
+            answer,
+        );
+        // An error reply other than UnknownObject, and no reply at all, say
+        // nothing about whether the object is there.
+        assert!(m.tree.nodes.contains_key("/a"));
+        assert_eq!(m.tree.nodes["/doc"].children, vec!["/a"]);
+        assert!(!m.tree.nodes.contains_key("/b"));
+        assert!(!m.tree.nodes.contains_key("/a1"));
+        assert_eq!(stats.subtree_roots_gone, 1);
+        assert_eq!(stats.subtree_roots_not_answered, 1);
+        // Only the call that got no answer is asked again: GetChildren on
+        // /doc, and FetchSubtree on /a, whose data calls got none.
+        assert_eq!(m.retries_pending(), 2);
+    }
+
+    #[test]
+    fn a_locate_chain_of_invented_parents_is_cut() {
+        rig();
+        let asked = Rc::new(Cell::new(0));
+        let counted = asked.clone();
+        let answer: Answer = Box::new(move |call| {
+            let (p, m) = on(call);
+            let n: u32 = p.strip_prefix("/o")?.parse().ok()?;
+            if m != "Get" {
+                return None;
+            }
+            counted.set(counted.get() + 1);
+            let parent = ObjectPath::try_from(format!("/o{}", n + 1)).unwrap();
+            reply(call, &Variant::from((APP, parent)))
+        });
+        let mut m = mirror();
+        let limits = RepairLimits {
+            locate_depth: 5,
+            ..REPAIR_LIMITS
+        };
+        let stats = repaired(
+            &mut m,
+            vec![Repair::Locate("/o0".into())],
+            limits,
+            Duration::from_secs(5),
+            answer,
+        );
+        assert_eq!(stats.locate_chains_cut, 1);
+        assert_eq!(asked.get(), 6);
+    }
+
+    #[test]
+    fn a_batch_runs_so_many_repairs_and_leaves_the_rest_for_later() {
+        rig();
+        let asked = Rc::new(Cell::new(0));
+        let counted = asked.clone();
+        let answer: Answer = Box::new(move |call| {
+            counted.set(counted.get() + 1);
+            reply(call, &HashMap::<&str, &str>::new())
+        });
+        let mut m = mirror();
+        let repairs = [ROOT_PATH, "/doc", "/a", "/a1", "/b"]
+            .map(|p| Repair::RefetchAttributes(p.into()))
+            .into();
+        let limits = RepairLimits {
+            per_batch: 3,
+            ..REPAIR_LIMITS
+        };
+        let stats = repaired(&mut m, repairs, limits, Duration::from_secs(5), answer);
+        assert_eq!(stats.repairs_run, 3);
+        assert_eq!(stats.repairs_deferred_over_budget, 2);
+        assert_eq!(asked.get(), 3);
+        assert_eq!(m.retries_pending(), 2);
+    }
+
+    #[test]
+    fn a_reply_of_the_wrong_shape_names_the_object_and_what_came() {
+        rig();
+        let answer: Answer = Box::new(|call| reply(call, &7u32));
+        let mut m = mirror();
+        let stats = repaired(
+            &mut m,
+            vec![Repair::RefetchChildren("/a".into())],
+            REPAIR_LIMITS,
+            Duration::from_secs(5),
+            answer,
+        );
+        assert_eq!(stats.repair_undecodable_replies, 1);
+        assert_eq!(
+            stats.repair_failures,
+            vec![
+                "org.a11y.atspi.Accessible.GetChildren on /a of :1.7: \
+                 reply of signature u, expected a(so)"
+            ]
+        );
+        assert_eq!(m.tree.nodes["/a"].children, vec!["/a1"]);
+        assert_eq!(m.retries_pending(), 0);
+    }
 }

@@ -485,6 +485,18 @@ fn node<'t>(tree: &'t mut Tree, path: &str) -> &'t mut Node {
     tree.nodes.entry(path.to_owned()).or_default()
 }
 
+/// What [`supplement`] did not get.
+#[derive(Debug, Default)]
+pub struct SupplementResult {
+    /// Failed calls by method.
+    pub errors: BTreeMap<&'static str, usize>,
+    /// The first failed calls, in full.
+    pub failures: Vec<CallFailure>,
+    pub failures_not_kept: usize,
+    /// For each object, the fields not got, and why.
+    pub failed: HashMap<String, BTreeMap<Field, FailureKind>>,
+}
+
 /// Fetches attributes and text for every object of a tree built from
 /// `GetItems`, which carries neither.
 pub async fn supplement(
@@ -492,7 +504,7 @@ pub async fn supplement(
     tree: &mut Tree,
     window: usize,
     fields: WalkFields,
-) -> BTreeMap<&'static str, usize> {
+) -> SupplementResult {
     let mut calls = Vec::new();
     let mut paths: Vec<&String> = tree.nodes.keys().collect();
     paths.sort();
@@ -508,22 +520,37 @@ pub async fn supplement(
             calls.push((p.clone(), Field::Text));
         }
     }
-    let mut errors = BTreeMap::new();
+    let mut res = SupplementResult::default();
+    let mut fails = Failures {
+        client,
+        errors: &mut res.errors,
+        failures: &mut res.failures,
+        not_kept: &mut res.failures_not_kept,
+        failed: &mut res.failed,
+    };
     pipeline(client, window, calls, None, |path, field, r, _| {
-        let ok = r.and_then(|msg| {
+        let msg = match r {
+            Ok(m) => m,
+            Err(e) => return fails.record(&path, field, FailureKind::of(&e)),
+        };
+        let decoded = (|| {
             match field {
                 Field::Attributes => node(tree, &path).attributes = Some(decode::attributes(&msg)?),
                 Field::Text => node(tree, &path).text = Some(decode::string(&msg)?),
                 _ => {}
             }
-            Ok(())
-        });
-        if ok.is_err() {
-            *errors.entry(field.label()).or_default() += 1;
+            Ok::<_, zbus::Error>(())
+        })();
+        if decoded.is_err() {
+            fails.record(
+                &path,
+                field,
+                FailureKind::undecodable(&msg, field.reply_signature()),
+            );
         }
     })
     .await;
-    errors
+    res
 }
 
 pub async fn get_items(client: &Client) -> Result<Vec<CacheItem>, Error> {

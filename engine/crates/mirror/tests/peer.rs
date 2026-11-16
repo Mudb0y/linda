@@ -241,6 +241,40 @@ fn a_walk_after_a_change_in_the_same_batch_does_not_undo_it() {
 }
 
 #[test]
+fn what_a_supplement_did_not_get_is_named() {
+    rig();
+    let answer: Answer = Box::new(|call| match path(call).as_str() {
+        "/p1" => reply(call, &7u32),
+        "/p2" => error(call, "org.freedesktop.DBus.Error.Failed"),
+        _ => data(call),
+    });
+    let mut t = mirror().tree;
+    let res = against(Duration::from_secs(5), answer, async |c| {
+        let fields = WalkFields {
+            attributes: true,
+            ..WalkFields::ITEM
+        };
+        fetch::supplement(c, &mut t, 16, fields).await
+    });
+    assert_eq!(res.errors.get("GetAttributes"), Some(&2));
+    assert_eq!(
+        res.failed["/p1"][&Field::Attributes],
+        FailureKind::Undecodable {
+            expected: "a{ss}".into(),
+            received: "u".into()
+        }
+    );
+    assert!(matches!(
+        res.failed["/p2"][&Field::Attributes],
+        FailureKind::ErrorReply { .. }
+    ));
+    let mut named: Vec<&str> = res.failures.iter().map(|f| f.path.as_str()).collect();
+    named.sort();
+    assert_eq!(named, ["/p1", "/p2"]);
+    assert_eq!(t.nodes["/doc"].attributes, Some(Vec::new()));
+}
+
+#[test]
 fn a_walk_of_an_application_that_never_answers_changes_nothing() {
     rig();
     let res = against(Duration::from_millis(300), Box::new(|_| None), async |c| {
