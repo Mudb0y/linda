@@ -82,10 +82,10 @@
         libeci = openevvLibeci;
       };
 
-      # The BASEDREADER_ variables the program reads, the same in the dev shell
-      # and in the package's wrappers. Linux code finds native libraries and
-      # data through these rather than through the loader's search path, so
-      # that what it loads is exactly what the flake pins.
+      # The BASEDREADER_ variables naming the native libraries and data Linux
+      # code loads, the same in the dev shell and in the package's wrappers.
+      # The code finds them through these rather than through the loader's
+      # search path, so that what it loads is exactly what the flake pins.
       runtimeEnv = {
         BASEDREADER_ICU_LIB_DIR = "${lib.getLib pkgs.icu}/lib";
         # ICU exports every C symbol with this suffix, as in ubrk_open_78.
@@ -169,17 +169,19 @@
           # tests/linux/rig builds its sandbox with this.
           bubblewrap
           git
-          # libclang for the bindings engine/crates/pwsink generates.
+          # libclang, for crates whose bindings bindgen generates.
           rustPlatform.bindgenHook
         ];
 
-        # PipeWire's headers and pkg-config file, for building
-        # engine/crates/pwsink. Named here rather than listed as an input,
-        # because stdenv puts every input's bin directory on PATH, and a
-        # pw-play or wpctl run from this shell outside the rig would reach the
-        # live sound server.
+        # PipeWire's headers and pkg-config file, for crates that link
+        # libpipewire. Named here rather than listed as an input, because
+        # stdenv puts every input's bin directory on PATH, and so on the rig's
+        # PATH, which is this shell's own. Tests reach PipeWire's programs
+        # only through the two variables below, and a host without them gets
+        # none from this shell.
         PKG_CONFIG_PATH = "${lib.getDev pkgs.pipewire}/lib/pkgconfig";
-        # Only the PipeWire test fixture starts these, inside the rig.
+        # For tests that start a private daemon and session manager inside the
+        # rig.
         BASEDREADER_PIPEWIRE_BIN = "${lib.getBin pkgs.pipewire}/bin";
         BASEDREADER_WIREPLUMBER_BIN = "${lib.getBin pkgs.wireplumber}/bin";
 

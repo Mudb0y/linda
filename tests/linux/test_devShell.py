@@ -3,10 +3,9 @@ names.
 
 Linux code loads its native libraries and data by the absolute paths in BASEDREADER_ variables, so a
 variable that names nothing, or the wrong build, is a fault the code itself would report only as a
-feature missing. PipeWire's daemon and session manager are named for the test fixture rather than put
-on PATH, where a pw-play or wpctl run from the shell outside the rig would reach the live sound server.
-Run under the rig, which passes the shell's BASEDREADER_ variables in and gives its command the PATH
-the shell itself made:
+feature missing. PipeWire's daemon and session manager are named in variables rather than put on PATH,
+so that tests start them only where they mean to. Run under the rig, which passes the shell's
+BASEDREADER_ variables in and gives its command the PATH the shell itself made:
 
 	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_devShell.py
 """
@@ -26,23 +25,50 @@ import pytest
 
 ELF_MAGIC = b"\x7fELF"
 STORE = "/nix/store/"
-#: Sound clients and speech programs that must not be on the shell's PATH either, by name: each can
-#: reach the live sound server or the live screen reader.
+#: Sound and speech programs that must not be on the shell's PATH either, by name: each can reach a
+#: sound server, a sound card or a screen reader.
 OTHER_SOUND_PROGRAMS = (
 	"pactl",
 	"pacat",
 	"paplay",
 	"parec",
+	"parecord",
+	"pamon",
+	"padsp",
 	"pacmd",
 	"aplay",
 	"arecord",
 	"amixer",
+	"alsamixer",
+	"alsaloop",
+	"aplaymidi",
 	"speaker-test",
+	"play",
+	"rec",
+	"sox",
+	"ffplay",
+	"mpv",
+	"mplayer",
+	"vlc",
+	"cvlc",
+	"mpg123",
+	"ogg123",
+	"gst-launch-1.0",
+	"gst-play-1.0",
+	"canberra-gtk-play",
 	"espeak",
 	"espeak-ng",
 	"spd-say",
+	"spdsend",
 	"speech-dispatcher",
 	"orca",
+)
+#: Store names of packages whose programs play, record or route sound or speak, so that a program of
+#: theirs on PATH is caught whatever it is called.
+SOUND_PACKAGE = re.compile(
+	r"[0-9a-z]{32}-(?:pipewire|wireplumber|pulseaudio|alsa-utils|alsa-tools|sox|ffmpeg|mpv|mplayer|vlc"
+	r"|gstreamer|gst-plugins|jack|jack2|libcanberra|mpg123|vorbis-tools|sndio|portaudio|speechd"
+	r"|speech-dispatcher|espeak|espeak-ng|flite|festival|orca)(?:-[a-z][a-z0-9]*)*-\d"
 )
 #: The three modules of openevv's NVDA driver, which the driver directory holds beside openevv_engine/.
 OPENEVV_DRIVER_FILES = ("openevv.py", "_openevv.py", "_openevv_dictionaries.py")
@@ -179,10 +205,21 @@ def test_liblouisVersionIsTheLibraryNvdaLoads(tmp_path: Path):
 
 @pytest.mark.parametrize("searchPath", ["PATH", "BASEDREADER_RIG_PATH"])
 def test_noPipewireOrWireplumberProgramIsOnPath(searchPath: str):
-	"""Not one of the programs PipeWire's and WirePlumber's packages install, nor another sound client.
+	"""Not one of the programs PipeWire's and WirePlumber's packages install, nothing from a directory of
+	a package that plays, records or routes sound or speaks, and none of OTHER_SOUND_PROGRAMS.
 
-	Inside the rig PATH is the store part of BASEDREADER_RIG_PATH, which is the shell's PATH without
-	what nix develop appended from the caller's, so this is what the shell itself put there."""
+	So the tests reach PipeWire only through BASEDREADER_PIPEWIRE_BIN, and a host without PipeWire's
+	tools gets none from the shell. Firefox is on PATH for the browser tests and can play sound; the rig
+	gives it no sound server. Inside the rig PATH is the store part of BASEDREADER_RIG_PATH, which is the
+	shell's PATH without what nix develop appended from the caller's, so this is what the shell itself
+	put there."""
+	directories = [entry for entry in os.environ[searchPath].split(":") if entry]
+	fromSoundPackages = [
+		entry
+		for entry in directories
+		if entry.startswith(STORE) and SOUND_PACKAGE.match(entry.removeprefix(STORE).split("/")[0])
+	]
+	assert not fromSoundPackages, f"on {searchPath}: {fromSoundPackages}"
 	programs = set(OTHER_SOUND_PROGRAMS)
 	for variable in ("BASEDREADER_PIPEWIRE_BIN", "BASEDREADER_WIREPLUMBER_BIN"):
 		programs.update(os.listdir(os.environ[variable]))
