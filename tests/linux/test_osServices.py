@@ -10,9 +10,10 @@ import textwrap
 from pathlib import Path
 
 import harness
+import pytest
 
 #: What nvda.pyw establishes before core.main, short of a configuration: translations installed as
-#: builtins, appDir, and a record of every error logged. The working directory stays the child's own,
+#: builtins, appDir, and a record of every warning and error logged. The working directory stays the child's own,
 #: so that nothing found relative to it can pass for something found under appDir.
 PRELUDE = f"""
 import gettext
@@ -27,14 +28,16 @@ globalVars.appPid = os.getpid()
 from logHandler import log
 
 logErrors = []
+warnings = []
 
 
 class Collector(logging.Handler):
 	def emit(self, record):
-		logErrors.append(f"{{record.levelname}}: {{record.getMessage()}}")
+		message = f"{{record.levelname}}: {{record.getMessage()}}"
+		(logErrors if record.levelno >= logging.ERROR else warnings).append(message)
 
 
-log.addHandler(Collector(level=logging.ERROR))
+log.addHandler(Collector(level=logging.WARNING))
 
 
 def startConfig():
@@ -205,6 +208,107 @@ def test_faultTolerantFileReplacesWholeOrNotAtAll(tmp_path):
 	assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
 
+def test_savingThroughALinkKeepsTheLink(tmp_path):
+	configDir = tmp_path / "config"
+	dotfiles = tmp_path / "dotfiles"
+	readOnly = tmp_path / "readOnly"
+	for directory in (configDir, dotfiles, readOnly):
+		directory.mkdir()
+	(dotfiles / "nvda.ini").write_text("original\n", encoding="utf-8")
+	(configDir / "nvda.ini").symlink_to(dotfiles / "nvda.ini")
+	(readOnly / "profile.ini").write_text("original\n", encoding="utf-8")
+	(configDir / "profile.ini").symlink_to(readOnly / "profile.ini")
+	readOnly.chmod(0o555)
+	try:
+		done = run(
+			tmp_path,
+			f"""
+			from fileUtils import FaultTolerantFile
+
+			with FaultTolerantFile({str(configDir / "nvda.ini")!r}) as f:
+				f.write(b"replacement\\n")
+			try:
+				with FaultTolerantFile({str(configDir / "profile.ini")!r}) as f:
+					f.write(b"replacement\\n")
+				intoReadOnly = "saved"
+			except PermissionError:
+				intoReadOnly = "PermissionError"
+			result = {{"intoReadOnly": intoReadOnly, "left": sorted(os.listdir({str(configDir)!r}))}}
+			""",
+		)
+	finally:
+		readOnly.chmod(0o755)
+	done.assertClean()
+	assert (configDir / "nvda.ini").is_symlink()
+	assert (dotfiles / "nvda.ini").read_text(encoding="utf-8") == "replacement\n"
+	# A link into a directory NVDA may not write fails as a read-only file does, and leaves no debris.
+	assert done.value == {"intoReadOnly": "PermissionError", "left": ["nvda.ini", "profile.ini"]}
+	assert (configDir / "profile.ini").is_symlink()
+	assert (readOnly / "profile.ini").read_text(encoding="utf-8") == "original\n"
+
+
+def test_saveSurvivesAFileSystemThatCannotSyncDirectories(tmp_path):
+	target = tmp_path / "nvda.ini"
+	target.write_text("original\n", encoding="utf-8")
+	done = run(
+		tmp_path,
+		f"""
+		import errno
+		import stat
+		from fileUtils import FaultTolerantFile
+
+		realFsync = os.fsync
+
+
+		def fsync(fd):
+			fd = fd if isinstance(fd, int) else fd.fileno()
+			if stat.S_ISDIR(os.fstat(fd).st_mode):
+				raise OSError(errno.EINVAL, "Invalid argument")
+			realFsync(fd)
+
+
+		os.fsync = fsync
+		with FaultTolerantFile({str(target)!r}) as f:
+			f.write(b"replacement\\n")
+		""",
+	)
+	done.assertClean()
+	assert target.read_text(encoding="utf-8") == "replacement\n"
+
+
+# Upgrading a schema 13 configuration looks the old speech output device up among the audio devices,
+# which A5's Linux utils.mmdevice provides. Until then the upgrade fails and the configuration is reset.
+@pytest.mark.xfail(strict=True, reason="needs a Linux utils.mmdevice.getOutputDevices, from A5")
+def test_olderWindowsConfigurationUpgrades(tmp_path):
+	configDir = tmp_path / "xdgConfig" / "basedreader"
+	configDir.mkdir(parents=True)
+	(configDir / "nvda.ini").write_text(
+		"schemaVersion = 13\n[speech]\n\toutputDevice = Speakers (Realtek High Definition Audio)\n"
+		"\tsymbolLevel = 300\n",
+		encoding="utf-8",
+	)
+	done = run(
+		tmp_path,
+		"""
+		config = startConfig()
+		result = {
+			"baseConfigError": config.conf.baseConfigError,
+			"entries": sorted(os.listdir(config.conf.profiles[0].filename.rpartition("/")[0])),
+			"symbolLevel": config.conf["speech"]["symbolLevel"],
+			"outputDevice": config.conf["audio"]["outputDevice"],
+		}
+		""",
+		env=xdgEnv(tmp_path),
+	)
+	done.assertClean()
+	assert done.value == {
+		"baseConfigError": False,
+		"entries": ["addons", "nvda.ini", "profiles", "speechDicts"],
+		"symbolLevel": 300,
+		"outputDevice": "default",
+	}
+
+
 def test_profileIsCreatedActivatedAndSaved(tmp_path):
 	env = xdgEnv(tmp_path)
 	created = run(
@@ -265,7 +369,8 @@ def test_polishCatalogueLoadsFromLang(tmp_path):
 		env={**NO_LOCALE, "LANG": "pl_PL.UTF-8"},
 	)
 	done.assertClean()
-	assert done.value["language"] == "pl"
+	# Named with its region, as NVDA on a Polish Windows names it; the catalogue is the plain "pl" one.
+	assert done.value["language"] == "pl_PL"
 	assert done.value["off"] == "Wyłączone"
 	assert done.value["withContext"] == "Aragoński"
 	assert done.value["cLocale"] == ("pl_PL.UTF-8" if isLocaleInstalled("pl_PL.UTF-8") else "C.UTF-8")
@@ -274,19 +379,35 @@ def test_polishCatalogueLoadsFromLang(tmp_path):
 
 
 def test_interfaceLanguageFollowsPosixPrecedence(tmp_path):
+	# Each case: the environment, what getWindowsLanguage reports, and the interface language that
+	# setLanguage("Windows") then settles on.
 	cases = [
-		({"LANG": "de_AT.UTF-8"}, "de"),
-		({"LANG": "pt_BR.UTF-8"}, "pt_BR"),
-		({"LANG": "en_GB.UTF-8"}, "en"),
-		({"LANG": "sr_RS.UTF-8@latin"}, "sr"),
-		({"LANG": "en_GB.UTF-8", "LC_MESSAGES": "pl_PL.UTF-8"}, "pl"),
-		({"LANG": "de_DE.UTF-8", "LC_ALL": "fr_FR.UTF-8", "LC_MESSAGES": "pl_PL.UTF-8"}, "fr"),
+		# A language is reported with its region, as Windows reports it, and its catalogue is found.
+		({"LANG": "de_AT.UTF-8"}, "de_AT", "de_AT"),
+		({"LANG": "pt_BR.UTF-8"}, "pt_BR", "pt_BR"),
+		({"LANG": "en_GB.UTF-8"}, "en_GB", "en"),
+		({"LANG": "sr_RS.UTF-8@latin"}, "sr_RS", "sr_RS"),
+		({"LANG": "pl"}, "pl", "pl"),
+		({"LANG": "en_GB.UTF-8", "LC_MESSAGES": "pl_PL.UTF-8"}, "pl_PL", "pl_PL"),
+		({"LANG": "de_DE.UTF-8", "LC_ALL": "fr_FR.UTF-8", "LC_MESSAGES": "pl_PL.UTF-8"}, "fr_FR", "fr_FR"),
+		({"LANG": "pl_PL.UTF-8", "LC_MESSAGES": "C"}, "en", "en"),
 		# LANGUAGE is a list; an entry with no catalogue gives way to the next.
-		({"LANG": "en_GB.UTF-8", "LANGUAGE": "eo:pt_BR:pl"}, "pt_BR"),
+		({"LANG": "en_GB.UTF-8", "LANGUAGE": "eo:pt_BR:pl"}, "pt_BR", "pt_BR"),
+		# A language listed alone finds a catalogue NVDA has only for a region: the language's usual
+		# region where glibc's aliases name one, or the first by name.
+		({"LANG": "en_US.UTF-8", "LANGUAGE": "nb"}, "nb_NO", "nb_NO"),
+		({"LANG": "en_US.UTF-8", "LANGUAGE": "pt:pl"}, "pt_PT", "pt_PT"),
+		({"LANG": "en_US.UTF-8", "LANGUAGE": "zh:pl"}, "zh_CN", "zh_CN"),
+		({"LANG": "polish"}, "pl_PL", "pl_PL"),
 		# glibc ignores LANGUAGE under the C locale, and so does NVDA.
-		({"LANG": "C.UTF-8", "LANGUAGE": "pl"}, "en"),
-		({}, "en"),
-		({"LANG": "xx_YY.UTF-8"}, "en"),
+		({"LANG": "C.UTF-8", "LANGUAGE": "pl"}, "en", "en"),
+		({"LANG": "pl_PL.UTF-8", "LC_ALL": "C", "LANGUAGE": "de"}, "en", "en"),
+		({}, "en", "en"),
+		# A language NVDA has no translation for is still the user's language, as on Windows, and only the
+		# interface falls back: to English, or to the language's usual region where gettext's own aliases
+		# find one, as they do on Windows.
+		({"LANG": "zh_SG.UTF-8"}, "zh_SG", "zh"),
+		({"LANG": "xx_YY.UTF-8"}, "xx_YY", "en"),
 	]
 	done = run(
 		tmp_path,
@@ -294,15 +415,17 @@ def test_interfaceLanguageFollowsPosixPrecedence(tmp_path):
 		import languageHandler
 
 		result = []
-		for env, _expected in {cases!r}:
+		for env, _reported, _interface in {cases!r}:
 			for name in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
 				os.environ.pop(name, None)
 			os.environ.update(env)
-			result.append(languageHandler.getWindowsLanguage())
+			reported = languageHandler.getWindowsLanguage()
+			languageHandler.setLanguage("Windows")
+			result.append([env, reported, languageHandler.getLanguage()])
 		""",
 	)
 	done.assertClean()
-	assert done.value == [expected for _env, expected in cases]
+	assert done.value == [[env, reported, interface] for env, reported, interface in cases]
 
 
 def test_localeFallsBackToCUtf8(tmp_path):
@@ -370,6 +493,38 @@ def test_everyListedLanguageIsDescribed(tmp_path):
 	assert done.value["lcidName"] == "pl_PL"
 	assert done.value["centralKurdish"] == "ckb"
 	assert done.value["lcid"] == 0
+
+
+def test_languagesWithoutIcuAreListedByCode(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		import languageHandler
+
+		languageHandler.setLanguage("en")
+		languages = dict(languageHandler.getAvailableLanguages(presentational=True))
+		result = {
+			"german": languageHandler.getLanguageDescription("de"),
+			"germanListed": languages["de"],
+			"northernKurdish": languageHandler.getLanguageDescription("kmr"),
+			"warnings": [w for w in warnings if "ICU" in w],
+		}
+		""",
+		env={
+			**NO_LOCALE,
+			"LANG": "en_GB.UTF-8",
+			"BASEDREADER_ICU_LIB_DIR": "",
+			"BASEDREADER_ICU_VERSION_MAJOR": "",
+		},
+	)
+	done.assertClean()
+	value = done.value
+	# As upstream's getLanguageDescription does for a language nothing can name.
+	assert value["german"] is None
+	assert value["germanListed"] == "de"
+	# NVDA's translators' own names need no ICU.
+	assert value["northernKurdish"] == "Northern Kurdish"
+	assert len(value["warnings"]) == 1, value
 
 
 def test_badOptionIsReportedOnStandardError(tmp_path):
@@ -522,32 +677,193 @@ def test_unbuiltServicesFailLoudly(tmp_path):
 		tmp_path,
 		"""
 		import easeOfAccess
-		import NVDAState
-		import systemUtils
 
-		result = []
-		for attempt in (
-			lambda: NVDAState.ReadPaths.coreArchLibPath,
-			lambda: systemUtils.preventSystemIdle(),
-			lambda: systemUtils.preventSystemIdle(persistent=True),
-			lambda: easeOfAccess.setAutoStart(easeOfAccess.AutoStartContext.AFTER_LOGON, True),
-		):
-			try:
-				attempt()
-				result.append("returned")
-			except NotImplementedError as e:
-				result.append(type(e).__name__)
+		try:
+			easeOfAccess.setAutoStart(easeOfAccess.AutoStartContext.AFTER_LOGON, True)
+			result = "returned"
+		except NotImplementedError as e:
+			result = type(e).__name__
 		""",
 	)
 	assert done.error is None, done.error
-	assert done.value == ["NoLinuxImplementation"] * 4
-	assert done.noLinuxImplementation == [
-		"NVDAState.ReadPaths.coreArchLibPath",
-		"systemUtils.preventSystemIdle",
-		"systemUtils.preventSystemIdle",
-		"easeOfAccess.setAutoStart(AFTER_LOGON)",
-	]
+	assert done.value == "NoLinuxImplementation"
+	assert done.noLinuxImplementation == ["easeOfAccess.setAutoStart(AFTER_LOGON)"]
 	assert not done.logErrors
+
+
+def test_sayAllStartsReadingFromTheCaret(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		startCore()
+		import api
+		from speech import sayAll
+		from speech.speech import SpeakTextInfoState
+		from textInfos.offsets import OffsetsTextInfo
+
+
+		class Info(OffsetsTextInfo):
+			def _getStoryText(self):
+				return "Say all reads on from the caret.\\n"
+
+			def _getStoryLength(self):
+				return len(self._getStoryText())
+
+			def _getCaretOffset(self):
+				return 4
+
+
+		class Document:
+			def makeTextInfo(self, position):
+				return Info(self, position)
+
+
+		document = Document()
+		api.getCaretObject = lambda: document
+		started = []
+		# Reading a line is speech's part; the reader has started once it is asked for the first line.
+		sayAll._CaretTextReader.next = lambda reader: started.append(reader)
+		handler = sayAll.SayAllHandler = sayAll._SayAllHandler(None, None, None, SpeakTextInfoState)
+		handler.readText(sayAll.CURSOR.CARET)
+		handler.readText(sayAll.CURSOR.CARET)
+		running = handler.isRunning()
+		result = {
+			"readers": [type(reader).__name__ for reader in started],
+			"startOffset": started[0].reader._startOffset,
+			"running": running,
+			"idleWarnings": [w for w in warnings if "idle" in w],
+		}
+		for reader in started:
+			reader.stop()
+		""",
+		env=xdgEnv(tmp_path),
+	)
+	done.assertClean()
+	value = done.value
+	assert value["readers"] == ["_CaretTextReader", "_CaretTextReader"]
+	assert value["startOffset"] == 4
+	assert value["running"] is True
+	# Missing idle inhibition is said once in a run, not once for each say all.
+	assert len(value["idleWarnings"]) == 1, value
+
+
+def test_brailleKeyRunsItsScript(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		startCore()
+		import api
+		import inputCore
+		import queueHandler
+		import scriptHandler
+		from braille.display.gesture import BrailleDisplayGesture
+		from speech import sayAll
+
+
+		class Focus:
+			sleepMode = False
+			SLEEP_FULL = "full"
+
+
+		class NotReading:
+			def isRunning(self):
+				return False
+
+
+		api.getFocusObject = lambda: Focus()
+		sayAll.SayAllHandler = NotReading()
+		queued = []
+		queueHandler.queueFunction = lambda queue, func, *args, **kwargs: queued.append(func.__name__)
+		scriptHandler.queueScript = lambda script, gesture: queued.append(script.__name__)
+
+
+		def script_testDisplayKey(gesture):
+			pass
+
+
+		class Key(BrailleDisplayGesture):
+			source = "testDisplay"
+			model = ""
+			id = "d1"
+
+			def _get_script(self):
+				return script_testDisplayKey
+
+
+		manager = inputCore.InputManager.__new__(inputCore.InputManager)
+		manager._captureFunc = None
+		manager.lastModifierWasInSayAll = False
+		manager.executeGesture(Key())
+		manager.executeGesture(Key())
+		idleWarnings = [w for w in warnings if "idle" in w]
+		result = {"preventsIdle": Key.shouldPreventSystemIdle, "queued": queued, "idleWarnings": len(idleWarnings)}
+		""",
+		env=xdgEnv(tmp_path),
+	)
+	done.assertClean()
+	assert done.value == {
+		"preventsIdle": True,
+		"queued": ["cancelSpeech", "script_testDisplayKey"] * 2,
+		"idleWarnings": 1,
+	}
+
+
+def test_execAndPumpWaitsForItsWork(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		import threading
+		import time
+		import systemUtils
+
+		finished = threading.Event()
+
+
+		def work(a, b=0):
+			time.sleep(0.3)
+			finished.set()
+			return a + b
+
+
+		pump = systemUtils.ExecAndPump(work, 40, b=2)
+		finishedOnReturn = finished.is_set()
+
+
+		def fail():
+			time.sleep(0.1)
+			raise ValueError("the work failed")
+
+
+		try:
+			systemUtils.ExecAndPump(fail)
+			raised = None
+		except ValueError as e:
+			raised = str(e)
+		result = {"funcRes": pump.funcRes, "finishedOnReturn": finishedOnReturn, "raised": raised}
+		""",
+	)
+	done.assertClean()
+	assert done.value == {"funcRes": 42, "finishedOnReturn": True, "raised": "the work failed"}
+
+
+def test_execAndPumpKeepsTheGuiResponsive(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		import threading
+		import wx
+		import systemUtils
+
+		app = wx.App()
+		handledWhileWaiting = threading.Event()
+		wx.CallAfter(handledWhileWaiting.set)
+		# The work only finishes promptly if wx handled the event while ExecAndPump waited for it.
+		pump = systemUtils.ExecAndPump(lambda: handledWhileWaiting.wait(10))
+		result = pump.funcRes
+		""",
+	)
+	done.assertClean()
+	assert done.value is True
 
 
 def test_sessionTrackingAnnouncesLockChanges(tmp_path):
@@ -570,15 +886,6 @@ def test_sessionTrackingAnnouncesLockChanges(tmp_path):
 
 
 		post_sessionLockStateChanged.register(onLockStateChanged)
-		warnings = []
-
-
-		class WarningCollector(logging.Handler):
-			def emit(self, record):
-				warnings.append(record.getMessage())
-
-
-		log.addHandler(WarningCollector(level=logging.WARNING))
 		sessionTracking.initialize()
 		sessionTracking.pumpAll()
 		beforeStartUpEnds = sessionTracking.isLockScreenModeActive()
@@ -601,7 +908,7 @@ def test_sessionTrackingAnnouncesLockChanges(tmp_path):
 			"announced": announced,
 			"beforeStartUpEnds": beforeStartUpEnds,
 			"whileLocked": whileLocked,
-			"warnings": len(warnings),
+			"warnings": len([w for w in warnings if "locked" in w]),
 			"perCallMicroseconds": perCall * 1e6,
 		}
 		""",
@@ -645,6 +952,18 @@ def test_autostartFollowsXdgAutostartEntries(tmp_path):
 		result["hiddenByUser"] = easeOfAccess.willAutoStart(context.AFTER_LOGON)
 		write(user, {entry!r} + "X-MATE-Autostart-enabled=false\\n")
 		result["disabledForMate"] = easeOfAccess.willAutoStart(context.AFTER_LOGON)
+		write(user, {entry!r} + "X-GNOME-Autostart-enabled=false\\n")
+		result["disabledForGnome"] = easeOfAccess.willAutoStart(context.AFTER_LOGON)
+		write(user, {entry!r} + "OnlyShowIn=GNOME;KDE;\\n")
+		result["onlyForOthers"] = easeOfAccess.willAutoStart(context.AFTER_LOGON)
+		write(user, {entry!r} + "OnlyShowIn=GNOME;MATE;\\n")
+		result["onlyForMate"] = easeOfAccess.willAutoStart(context.AFTER_LOGON)
+		write(user, {entry!r} + "NotShowIn=MATE;\\n")
+		result["notForMate"] = easeOfAccess.willAutoStart(context.AFTER_LOGON)
+		write(user, {entry!r} + "TryExec=/nonexistent/basedreader\\n")
+		result["notInstalled"] = easeOfAccess.willAutoStart(context.AFTER_LOGON)
+		write(user, {entry!r} + "TryExec=sh\\n")
+		result["installed"] = easeOfAccess.willAutoStart(context.AFTER_LOGON)
 		write(user, {entry!r})
 		result["user"] = easeOfAccess.willAutoStart(context.AFTER_LOGON)
 		result["logonScreen"] = easeOfAccess.willAutoStart(context.ON_LOGON_SCREEN)
@@ -654,7 +973,7 @@ def test_autostartFollowsXdgAutostartEntries(tmp_path):
 
 		result["startAfterLogon"] = config.getStartAfterLogon()
 		""",
-		env=xdgEnv(tmp_path),
+		env={**xdgEnv(tmp_path), "XDG_CURRENT_DESKTOP": "MATE"},
 	)
 	done.assertClean()
 	assert done.value == {
@@ -662,6 +981,12 @@ def test_autostartFollowsXdgAutostartEntries(tmp_path):
 		"system": True,
 		"hiddenByUser": False,
 		"disabledForMate": False,
+		"disabledForGnome": True,
+		"onlyForOthers": False,
+		"onlyForMate": True,
+		"notForMate": False,
+		"notInstalled": False,
+		"installed": True,
 		"user": True,
 		"logonScreen": False,
 		"registered": False,
