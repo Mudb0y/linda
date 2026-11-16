@@ -3,12 +3,16 @@
 The driver is not part of this tree. It lives in openevv's source, and a build lays it out in a
 directory of its own with the engine library beside it, which BASEDREADER_OPENEVV_DRIVER_DIR names:
 openevv.py, _openevv.py and _openevv_dictionaries.py from openevv's nvda/addon/synthDrivers with the
-series in nix/patches/openevv applied, and openevv_engine/libeci.so.1. Every test but the first
-needs that directory and is skipped without it. Run under the rig, which sees a directory outside the
-checkout and the Nix store only when it is passed with --bind:
+series in nix/patches/openevv applied, and openevv_engine/libeci.so.1. The dev shell names the
+directory nix/openevv-driver.nix builds. Every test but the first needs it, and fails without it. Run
+under the rig:
 
-	export BASEDREADER_OPENEVV_DRIVER_DIR=DIR
-	nix develop -c tests/linux/rig --bind DIR python3 -m pytest tests/linux/test_openevv.py
+	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_openevv.py
+
+A directory built some other way is named with env, and passed with --bind when it is outside the Nix
+store, which the rig sees, and outside the checkout:
+
+	nix develop . -c tests/linux/rig --bind DIR env BASEDREADER_OPENEVV_DRIVER_DIR=DIR python3 -m pytest ...
 
 The tests of cancelling, marks and settings each drive the case a driver of this shape gets wrong:
 a cancel landing in the last wait for the player, a cancel landing between the engine callback's
@@ -25,15 +29,22 @@ import pytest
 
 DRIVER_DIR_VARIABLE = "BASEDREADER_OPENEVV_DRIVER_DIR"
 
-needsDriver = pytest.mark.skipif(
-	not os.environ.get(DRIVER_DIR_VARIABLE),
-	reason=(
-		f"{DRIVER_DIR_VARIABLE} is unset. Set it to a directory holding openevv's three driver files with "
-		"nix/patches/openevv applied, beside openevv_engine/libeci.so.1, and pass it to the rig: "
-		f"nix develop -c env {DRIVER_DIR_VARIABLE}=DIR tests/linux/rig --bind DIR "
-		"python3 -m pytest tests/linux/test_openevv.py"
-	),
-)
+
+def requireDriverDirectory() -> None:
+	"""Fail the test, rather than skip it, when there is no driver directory: the dev shell always names
+	one, so a run without it has lost the voice the tests are for."""
+	directory = os.environ.get(DRIVER_DIR_VARIABLE)
+	if not directory:
+		pytest.fail(
+			f"{DRIVER_DIR_VARIABLE} is unset. Run the tests in the dev shell, which sets it to the directory "
+			"nix/openevv-driver.nix builds, or set it to a directory holding openevv's three driver files "
+			"with nix/patches/openevv applied, beside openevv_engine/libeci.so.1.",
+			pytrace=False,
+		)
+	for name in ("openevv.py", "openevv_engine/libeci.so.1"):
+		if not os.path.isfile(os.path.join(directory, name)):
+			pytest.fail(f"{DRIVER_DIR_VARIABLE} is {directory}, which holds no {name}.", pytrace=False)
+
 
 #: Brings speech up as core.main does with openevv configured, into the capture sink, and records
 #: when the sink is written to and when the driver reports indexes and the end of an utterance.
@@ -167,6 +178,7 @@ synthDriverHandler.setSynth(None)
 
 
 def runOpenevv(tmpPath: Path, code: str) -> harness.ChildResult:
+	requireDriverDirectory()
 	capture = tmpPath / "capture"
 	capture.mkdir()
 	return harness.runChild(
@@ -242,7 +254,6 @@ def test_installAddsTheDriverDirectoryOnceAtTheEnd(tmp_path: Path):
 	assert value["after"] == value["before"] + [os.path.realpath(withDriver)]
 
 
-@needsDriver
 def test_speaksEnglishAndPolishWithEveryIndexInOrder(tmp_path: Path):
 	done = runOpenevv(
 		tmp_path,
@@ -281,7 +292,6 @@ def test_speaksEnglishAndPolishWithEveryIndexInOrder(tmp_path: Path):
 	assert value["polishPeak"] > 5000 and value["polishSeconds"] > 1.0
 
 
-@needsDriver
 def test_cancelIsReadyAgainQuicklyAtAnySampleRate(tmp_path: Path):
 	# Ready is when the engine's thread clears the cancel, which it can do only once the engine has
 	# let go of the cancelled utterance. Answering eciDataAbort lets it go without making the rest of
@@ -338,7 +348,6 @@ def test_cancelIsReadyAgainQuicklyAtAnySampleRate(tmp_path: Path):
 	assert all(median < 150 for medians in done.value.values() for median in medians.values()), done.value
 
 
-@needsDriver
 def test_noDoneAfterACancelInTheLastWait(tmp_path: Path):
 	done = runOpenevv(
 		tmp_path,
@@ -378,7 +387,6 @@ def test_noDoneAfterACancelInTheLastWait(tmp_path: Path):
 	assert value["after"] == [["index", 99], ["done", None]]
 
 
-@needsDriver
 def test_noCancelledAudioPlaysAfterTheCancel(tmp_path: Path):
 	# The engine's callback checks for a cancel and then feeds the player. A cancel between the two
 	# used to leave the feed to restart the stopped player with a buffer of the cancelled speech.
@@ -426,7 +434,6 @@ def test_noCancelledAudioPlaysAfterTheCancel(tmp_path: Path):
 	assert all(frames <= oneMillisecond for frames in done.value["heardAfterCancel"]), done.value
 
 
-@needsDriver
 def test_noMarkOfACancelledUtteranceIsReported(tmp_path: Path):
 	# The same window at a mark with no audio in hand in front of it, which the callback either hangs
 	# on the audio already fed, when there is some, or reports at once. A mark reported after the
@@ -483,7 +490,6 @@ def test_noMarkOfACancelledUtteranceIsReported(tmp_path: Path):
 		assert value["following"] == [["index", 900 + value["number"]], ["done", None]], done.value
 
 
-@needsDriver
 def test_indexesArriveInOrder(tmp_path: Path):
 	done = runOpenevv(
 		tmp_path,
@@ -524,7 +530,6 @@ def test_indexesArriveInOrder(tmp_path: Path):
 	assert value["alone"] == [["index", 6], ["done", None]]
 
 
-@needsDriver
 def test_settingsReachTheConfiguration(tmp_path: Path):
 	done = runOpenevv(
 		tmp_path,
@@ -563,7 +568,6 @@ def test_settingsReachTheConfiguration(tmp_path: Path):
 	assert done.value == {"fromRing": 60, "onSave": 70, "duringSpeech": 40, "onSwitch": 30}
 
 
-@needsDriver
 def test_anUnknownCommandIsNoError(tmp_path: Path):
 	# An error record plays NVDA's error sound in source builds, for a command the driver can skip.
 	done = runOpenevv(
