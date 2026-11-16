@@ -45,6 +45,8 @@ from .connectionInfo import ConnectionInfo
 from .protocol import PROTOCOL_VERSION, RemoteMessageType, hostPortToAddress
 from .serializer import Serializer
 
+import sys
+
 
 @dataclass
 class RemoteExtensionPoint:
@@ -455,7 +457,13 @@ class TCPTransport(Transport):
 		if self.timeout:
 			serverSock.settimeout(self.timeout)
 		serverSock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-		serverSock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 60000, 2000))
+		if sys.platform == "win32":
+			serverSock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 60000, 2000))
+		else:
+			# The same keep-alive as on Windows: on, first probe after 60 s idle, then every 2 s.
+			serverSock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+			serverSock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+			serverSock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 2)
 		ctx = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
 		if insecure:
 			ctx.verify_mode = ssl.CERT_NONE

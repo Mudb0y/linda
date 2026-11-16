@@ -211,7 +211,8 @@ def getWindowScalingFactor(window: int) -> int:
 	@param window: a native Windows window handle (hWnd)
 	@returns the logical scaling factor. EG. 1.0 if the window DPI level is 96, 1.5 if the window DPI level is 144"""
 	if sys.platform != "win32":
-		# wxGTK sizes are logical pixels, which GTK scales for the display itself.
+		# wxGTK sizes windows in logical pixels and GTK scales them for the screen itself, which is why
+		# wx's own FromDIP changes nothing there; scaling here as well would scale twice.
 		return 1
 	try:
 		winDpi: int = user32.GetDpiForWindow(window)

@@ -57,6 +57,11 @@ source/_remoteClient/localMachine.py
   imports; the SAS policy's registry key class attribute is defined only
   there, so on Linux SoftwareSASGeneration.KEY is absent and reading the SAS
   policy raises AttributeError
+source/_remoteClient/transport.py
+  Linux runtime: an outbound connection gets the same TCP keep-alive as on
+  Windows, on with the first probe after 60 s idle and then every 2 s,
+  through setsockopt, as socket.ioctl and SIO_KEEPALIVE_VALS exist only on
+  Windows
 source/_remoteClient/urlHandler.py
   import safety: winreg imported only on Windows, after the module's other
   imports; the one annotation that names it is quoted so it is not
@@ -311,4 +316,5 @@ source/windowUtils.py
   winAPI.messageWindow's _MessageWindow creates no window on Linux. Linux
   runtime: getWindowScalingFactor() is 1, as wxGTK sizes are logical pixels
   that GTK scales for the display itself; every message box and settings
-  panel asks for it
+  panel asks for it, and the dialogs that scale their sizes through
+  gui.dpiScalingHelper would otherwise fail on GetDC
