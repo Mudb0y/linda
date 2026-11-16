@@ -185,6 +185,12 @@
         BASEDREADER_PIPEWIRE_BIN = "${lib.getBin pkgs.pipewire}/bin";
         BASEDREADER_WIREPLUMBER_BIN = "${lib.getBin pkgs.wireplumber}/bin";
 
+        # setup.sh would put $out/lib first in every RUNPATH the linker
+        # writes, and in a shell $out is outputs/out under the working
+        # directory: a library built here would load whatever was dropped
+        # there ahead of the store's copies.
+        NIX_NO_SELF_RPATH = true;
+
         # Listed as build inputs so the gobject-introspection hook puts their
         # typelibs on GI_TYPELIB_PATH.
         buildInputs = with pkgs; [
