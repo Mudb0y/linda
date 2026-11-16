@@ -107,6 +107,13 @@ def _createNVDAArgParser() -> NoConsoleOptionParser:
 		'Default destination is "%%TEMP%%\\nvda.log".\n'
 		"Logging is always disabled if secure mode is enabled.\n",
 	)
+	if sys.platform != "win32":
+		# logHandler puts the default log in the XDG state directory on Linux, which has no %TEMP%.
+		from linuxPlatform import xdg
+
+		logFileOption = parser._option_string_actions["--log-file"]
+		defaultLog = f"{xdg.userStateDir()}/nvda.log".replace("%", "%%")
+		logFileOption.help = logFileOption.help.replace("%%TEMP%%\\nvda.log", defaultLog)
 	parser.add_argument(
 		"-l",
 		"--log-level",

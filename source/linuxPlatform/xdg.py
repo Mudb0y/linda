@@ -3,7 +3,9 @@
 import configparser
 import os
 import shutil
+import stat
 import subprocess
+import tempfile
 
 #: The name of the directory Basedreader keeps under each XDG base directory.
 appDirName = "basedreader"
@@ -21,6 +23,31 @@ def configHome() -> str:
 	return _baseDir("XDG_CONFIG_HOME", ".config")
 
 
+def stateHome() -> str:
+	return _baseDir("XDG_STATE_HOME", os.path.join(".local", "state"))
+
+
+def runtimeDir() -> str:
+	"""The user's runtime directory, for sockets and locks that last as long as the login.
+
+	When the session sets none, the specification asks for a stand-in with the same guarantees: owned
+	by the user and closed to everyone else. That is made under the system's temporary directory, and
+	PermissionError is raised when what is there is not such a directory.
+	"""
+	path = os.environ.get("XDG_RUNTIME_DIR", "")
+	if os.path.isabs(path):
+		return path
+	path = os.path.join(tempfile.gettempdir(), f"{appDirName}-runtime-{os.getuid()}")
+	try:
+		os.mkdir(path, 0o700)
+	except FileExistsError:
+		pass
+	info = os.lstat(path)
+	if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+		raise PermissionError(f"{path} is not a private directory of this user")
+	return path
+
+
 def configDirs() -> list[str]:
 	"""The system configuration directories, most important first."""
 	dirs = [d for d in os.environ.get("XDG_CONFIG_DIRS", "").split(":") if os.path.isabs(d)]
@@ -30,6 +57,11 @@ def configDirs() -> list[str]:
 def userConfigDir() -> str:
 	"""The directory that holds the user's NVDA configuration: nvda.ini, profiles, add-ons."""
 	return os.path.join(configHome(), appDirName)
+
+
+def userStateDir() -> str:
+	"""The directory that holds what NVDA keeps between runs but is not configuration: the log."""
+	return os.path.join(stateHome(), appDirName)
 
 
 #: The desktop entry that would start Basedreader at login.
