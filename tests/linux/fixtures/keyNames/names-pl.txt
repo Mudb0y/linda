@@ -1,0 +1,179 @@
+evdev=1 xkeysym=Escape numlock=off hook=(vk=0x1b, scan=0x01, ext=False) -> kb:escape character=False command=True speech=cancel
+evdev=2 xkeysym=1 numlock=off hook=(vk=0x31, scan=0x02, ext=False) -> kb:1 character=True command=False speech=cancel
+evdev=3 xkeysym=2 numlock=off hook=(vk=0x32, scan=0x03, ext=False) -> kb:2 character=True command=False speech=cancel
+evdev=4 xkeysym=3 numlock=off hook=(vk=0x33, scan=0x04, ext=False) -> kb:3 character=True command=False speech=cancel
+evdev=5 xkeysym=4 numlock=off hook=(vk=0x34, scan=0x05, ext=False) -> kb:4 character=True command=False speech=cancel
+evdev=6 xkeysym=5 numlock=off hook=(vk=0x35, scan=0x06, ext=False) -> kb:5 character=True command=False speech=cancel
+evdev=7 xkeysym=6 numlock=off hook=(vk=0x36, scan=0x07, ext=False) -> kb:6 character=True command=False speech=cancel
+evdev=8 xkeysym=7 numlock=off hook=(vk=0x37, scan=0x08, ext=False) -> kb:7 character=True command=False speech=cancel
+evdev=9 xkeysym=8 numlock=off hook=(vk=0x38, scan=0x09, ext=False) -> kb:8 character=True command=False speech=cancel
+evdev=10 xkeysym=9 numlock=off hook=(vk=0x39, scan=0x0a, ext=False) -> kb:9 character=True command=False speech=cancel
+evdev=11 xkeysym=0 numlock=off hook=(vk=0x30, scan=0x0b, ext=False) -> kb:0 character=True command=False speech=cancel
+evdev=12 xkeysym=minus numlock=off hook=(vk=0xbd, scan=0x0c, ext=False) -> kb:- character=True command=False speech=cancel
+evdev=13 xkeysym=equal numlock=off hook=(vk=0xbb, scan=0x0d, ext=False) -> kb:= character=True command=False speech=cancel
+evdev=14 xkeysym=BackSpace numlock=off hook=(vk=0x08, scan=0x0e, ext=False) -> kb:backspace character=False command=True speech=cancel
+evdev=15 xkeysym=Tab numlock=off hook=(vk=0x09, scan=0x0f, ext=False) -> kb:tab character=False command=True speech=cancel
+evdev=16 xkeysym=q numlock=off hook=(vk=0x51, scan=0x10, ext=False) -> kb:q character=True command=False speech=cancel
+evdev=17 xkeysym=w numlock=off hook=(vk=0x57, scan=0x11, ext=False) -> kb:w character=True command=False speech=cancel
+evdev=18 xkeysym=e numlock=off hook=(vk=0x45, scan=0x12, ext=False) -> kb:e character=True command=False speech=cancel
+evdev=19 xkeysym=r numlock=off hook=(vk=0x52, scan=0x13, ext=False) -> kb:r character=True command=False speech=cancel
+evdev=20 xkeysym=t numlock=off hook=(vk=0x54, scan=0x14, ext=False) -> kb:t character=True command=False speech=cancel
+evdev=21 xkeysym=y numlock=off hook=(vk=0x59, scan=0x15, ext=False) -> kb:y character=True command=False speech=cancel
+evdev=22 xkeysym=u numlock=off hook=(vk=0x55, scan=0x16, ext=False) -> kb:u character=True command=False speech=cancel
+evdev=23 xkeysym=i numlock=off hook=(vk=0x49, scan=0x17, ext=False) -> kb:i character=True command=False speech=cancel
+evdev=24 xkeysym=o numlock=off hook=(vk=0x4f, scan=0x18, ext=False) -> kb:o character=True command=False speech=cancel
+evdev=25 xkeysym=p numlock=off hook=(vk=0x50, scan=0x19, ext=False) -> kb:p character=True command=False speech=cancel
+evdev=26 xkeysym=bracketleft numlock=off hook=(vk=0xdb, scan=0x1a, ext=False) -> kb:[ character=True command=False speech=cancel
+evdev=27 xkeysym=bracketright numlock=off hook=(vk=0xdd, scan=0x1b, ext=False) -> kb:] character=True command=False speech=cancel
+evdev=28 xkeysym=Return numlock=off hook=(vk=0x0d, scan=0x1c, ext=False) -> kb:enter character=False command=True speech=cancel
+evdev=29 xkeysym=Control_L numlock=off hook=(vk=0xa2, scan=0x1d, ext=False) -> kb:leftControl character=False command=True speech=cancel
+evdev=30 xkeysym=a numlock=off hook=(vk=0x41, scan=0x1e, ext=False) -> kb:a character=True command=False speech=cancel
+evdev=31 xkeysym=s numlock=off hook=(vk=0x53, scan=0x1f, ext=False) -> kb:s character=True command=False speech=cancel
+evdev=32 xkeysym=d numlock=off hook=(vk=0x44, scan=0x20, ext=False) -> kb:d character=True command=False speech=cancel
+evdev=33 xkeysym=f numlock=off hook=(vk=0x46, scan=0x21, ext=False) -> kb:f character=True command=False speech=cancel
+evdev=34 xkeysym=g numlock=off hook=(vk=0x47, scan=0x22, ext=False) -> kb:g character=True command=False speech=cancel
+evdev=35 xkeysym=h numlock=off hook=(vk=0x48, scan=0x23, ext=False) -> kb:h character=True command=False speech=cancel
+evdev=36 xkeysym=j numlock=off hook=(vk=0x4a, scan=0x24, ext=False) -> kb:j character=True command=False speech=cancel
+evdev=37 xkeysym=k numlock=off hook=(vk=0x4b, scan=0x25, ext=False) -> kb:k character=True command=False speech=cancel
+evdev=38 xkeysym=l numlock=off hook=(vk=0x4c, scan=0x26, ext=False) -> kb:l character=True command=False speech=cancel
+evdev=39 xkeysym=semicolon numlock=off hook=(vk=0xba, scan=0x27, ext=False) -> kb:; character=True command=False speech=cancel
+evdev=40 xkeysym=apostrophe numlock=off hook=(vk=0xde, scan=0x28, ext=False) -> kb:' character=True command=False speech=cancel
+evdev=41 xkeysym=grave numlock=off hook=(vk=0xc0, scan=0x29, ext=False) -> kb:` character=True command=False speech=cancel
+evdev=42 xkeysym=Shift_L numlock=off hook=(vk=0xa0, scan=0x2a, ext=False) -> kb:leftShift character=False command=True speech=pause
+evdev=43 xkeysym=backslash numlock=off hook=(vk=0xdc, scan=0x2b, ext=False) -> kb:\ character=True command=False speech=cancel
+evdev=44 xkeysym=z numlock=off hook=(vk=0x5a, scan=0x2c, ext=False) -> kb:z character=True command=False speech=cancel
+evdev=45 xkeysym=x numlock=off hook=(vk=0x58, scan=0x2d, ext=False) -> kb:x character=True command=False speech=cancel
+evdev=46 xkeysym=c numlock=off hook=(vk=0x43, scan=0x2e, ext=False) -> kb:c character=True command=False speech=cancel
+evdev=47 xkeysym=v numlock=off hook=(vk=0x56, scan=0x2f, ext=False) -> kb:v character=True command=False speech=cancel
+evdev=48 xkeysym=b numlock=off hook=(vk=0x42, scan=0x30, ext=False) -> kb:b character=True command=False speech=cancel
+evdev=49 xkeysym=n numlock=off hook=(vk=0x4e, scan=0x31, ext=False) -> kb:n character=True command=False speech=cancel
+evdev=50 xkeysym=m numlock=off hook=(vk=0x4d, scan=0x32, ext=False) -> kb:m character=True command=False speech=cancel
+evdev=51 xkeysym=comma numlock=off hook=(vk=0xbc, scan=0x33, ext=False) -> kb:, character=True command=False speech=cancel
+evdev=52 xkeysym=period numlock=off hook=(vk=0xbe, scan=0x34, ext=False) -> kb:. character=True command=False speech=cancel
+evdev=53 xkeysym=slash numlock=off hook=(vk=0xbf, scan=0x35, ext=False) -> kb:/ character=True command=False speech=cancel
+evdev=54 xkeysym=Shift_R numlock=off hook=(vk=0xa1, scan=0x36, ext=False) -> kb:rightShift character=False command=True speech=pause
+evdev=55 xkeysym=KP_Multiply numlock=off hook=(vk=0x6a, scan=0x37, ext=False) -> kb:numpadMultiply character=False command=True speech=cancel
+evdev=56 xkeysym=Alt_L numlock=off hook=(vk=0xa4, scan=0x38, ext=False) -> kb:leftAlt character=False command=True speech=cancel
+evdev=57 xkeysym=space numlock=off hook=(vk=0x20, scan=0x39, ext=False) -> kb:space character=True command=False speech=cancel
+evdev=58 xkeysym=Caps_Lock numlock=off hook=(vk=0x14, scan=0x3a, ext=False) -> kb:capsLock character=False command=False speech=cancel
+evdev=59 xkeysym=F1 numlock=off hook=(vk=0x70, scan=0x3b, ext=False) -> kb:f1 character=False command=True speech=cancel
+evdev=60 xkeysym=F2 numlock=off hook=(vk=0x71, scan=0x3c, ext=False) -> kb:f2 character=False command=True speech=cancel
+evdev=61 xkeysym=F3 numlock=off hook=(vk=0x72, scan=0x3d, ext=False) -> kb:f3 character=False command=True speech=cancel
+evdev=62 xkeysym=F4 numlock=off hook=(vk=0x73, scan=0x3e, ext=False) -> kb:f4 character=False command=True speech=cancel
+evdev=63 xkeysym=F5 numlock=off hook=(vk=0x74, scan=0x3f, ext=False) -> kb:f5 character=False command=True speech=cancel
+evdev=64 xkeysym=F6 numlock=off hook=(vk=0x75, scan=0x40, ext=False) -> kb:f6 character=False command=True speech=cancel
+evdev=65 xkeysym=F7 numlock=off hook=(vk=0x76, scan=0x41, ext=False) -> kb:f7 character=False command=True speech=cancel
+evdev=66 xkeysym=F8 numlock=off hook=(vk=0x77, scan=0x42, ext=False) -> kb:f8 character=False command=True speech=cancel
+evdev=67 xkeysym=F9 numlock=off hook=(vk=0x78, scan=0x43, ext=False) -> kb:f9 character=False command=True speech=cancel
+evdev=68 xkeysym=F10 numlock=off hook=(vk=0x79, scan=0x44, ext=False) -> kb:f10 character=False command=True speech=cancel
+evdev=69 xkeysym=Num_Lock numlock=off hook=(vk=0x90, scan=0x45, ext=True) -> kb:numLock character=False command=False speech=cancel
+evdev=70 xkeysym=Scroll_Lock numlock=off hook=(vk=0x91, scan=0x46, ext=False) -> kb:scrollLock character=False command=False speech=cancel
+evdev=71 xkeysym=KP_Home numlock=off hook=(vk=0x24, scan=0x47, ext=False) -> kb:numpad7 character=False command=True speech=cancel
+evdev=72 xkeysym=KP_Up numlock=off hook=(vk=0x26, scan=0x48, ext=False) -> kb:numpad8 character=False command=True speech=cancel
+evdev=73 xkeysym=KP_Prior numlock=off hook=(vk=0x21, scan=0x49, ext=False) -> kb:numpad9 character=False command=True speech=cancel
+evdev=74 xkeysym=KP_Subtract numlock=off hook=(vk=0x6d, scan=0x4a, ext=False) -> kb:numpadMinus character=False command=True speech=cancel
+evdev=75 xkeysym=KP_Left numlock=off hook=(vk=0x25, scan=0x4b, ext=False) -> kb:numpad4 character=False command=True speech=cancel
+evdev=76 xkeysym=KP_Begin numlock=off hook=(vk=0x0c, scan=0x4c, ext=False) -> kb:numpad5 character=False command=True speech=cancel
+evdev=77 xkeysym=KP_Right numlock=off hook=(vk=0x27, scan=0x4d, ext=False) -> kb:numpad6 character=False command=True speech=cancel
+evdev=78 xkeysym=KP_Add numlock=off hook=(vk=0x6b, scan=0x4e, ext=False) -> kb:numpadPlus character=False command=True speech=cancel
+evdev=79 xkeysym=KP_End numlock=off hook=(vk=0x23, scan=0x4f, ext=False) -> kb:numpad1 character=False command=True speech=cancel
+evdev=80 xkeysym=KP_Down numlock=off hook=(vk=0x28, scan=0x50, ext=False) -> kb:numpad2 character=False command=True speech=cancel
+evdev=81 xkeysym=KP_Next numlock=off hook=(vk=0x22, scan=0x51, ext=False) -> kb:numpad3 character=False command=True speech=cancel
+evdev=82 xkeysym=KP_Insert numlock=off hook=(vk=0x2d, scan=0x52, ext=False) -> kb:NVDA character=False command=True speech=cancel
+evdev=83 xkeysym=KP_Delete numlock=off hook=(vk=0x2e, scan=0x53, ext=False) -> kb:numpadDelete character=False command=True speech=cancel
+evdev=85 xkeysym=F24 numlock=off hook=(vk=0xff, scan=0x55, ext=False) -> kb:unknown_55 character=False command=False speech=None
+evdev=86 xkeysym=less numlock=off hook=(vk=0xe2, scan=0x56, ext=False) -> kb:< character=True command=False speech=cancel
+evdev=87 xkeysym=F11 numlock=off hook=(vk=0x7a, scan=0x57, ext=False) -> kb:f11 character=False command=True speech=cancel
+evdev=88 xkeysym=F12 numlock=off hook=(vk=0x7b, scan=0x58, ext=False) -> kb:f12 character=False command=True speech=cancel
+evdev=89 xkeysym=NoSymbol numlock=off hook=(vk=0xc1, scan=0x73, ext=False) -> kb:keyNameText_73 character=False command=True speech=cancel
+evdev=96 xkeysym=KP_Enter numlock=off hook=(vk=0x0d, scan=0x1c, ext=True) -> kb:numpadEnter character=False command=True speech=cancel
+evdev=97 xkeysym=Control_R numlock=off hook=(vk=0xa3, scan=0x1d, ext=True) -> kb:rightControl character=False command=True speech=cancel
+evdev=98 xkeysym=KP_Divide numlock=off hook=(vk=0x6f, scan=0x35, ext=True) -> kb:numpadDivide character=False command=True speech=cancel
+evdev=99 xkeysym=Print numlock=off hook=(vk=0x2c, scan=0x37, ext=True) -> kb:printScreen character=False command=True speech=cancel
+evdev=100 xkeysym=ISO_Level3_Shift numlock=off hook=(vk=0xa5, scan=0x38, ext=True) -> kb:rightAlt character=False command=True speech=cancel
+evdev=102 xkeysym=Home numlock=off hook=(vk=0x24, scan=0x47, ext=True) -> kb:home character=False command=True speech=cancel
+evdev=103 xkeysym=Up numlock=off hook=(vk=0x26, scan=0x48, ext=True) -> kb:upArrow character=False command=True speech=cancel
+evdev=104 xkeysym=Prior numlock=off hook=(vk=0x21, scan=0x49, ext=True) -> kb:pageUp character=False command=True speech=cancel
+evdev=105 xkeysym=Left numlock=off hook=(vk=0x25, scan=0x4b, ext=True) -> kb:leftArrow character=False command=True speech=cancel
+evdev=106 xkeysym=Right numlock=off hook=(vk=0x27, scan=0x4d, ext=True) -> kb:rightArrow character=False command=True speech=cancel
+evdev=107 xkeysym=End numlock=off hook=(vk=0x23, scan=0x4f, ext=True) -> kb:end character=False command=True speech=cancel
+evdev=108 xkeysym=Down numlock=off hook=(vk=0x28, scan=0x50, ext=True) -> kb:downArrow character=False command=True speech=cancel
+evdev=109 xkeysym=Next numlock=off hook=(vk=0x22, scan=0x51, ext=True) -> kb:pageDown character=False command=True speech=cancel
+evdev=110 xkeysym=Insert numlock=off hook=(vk=0x2d, scan=0x52, ext=True) -> kb:NVDA character=False command=True speech=cancel
+evdev=111 xkeysym=Delete numlock=off hook=(vk=0x2e, scan=0x53, ext=True) -> kb:delete character=False command=True speech=cancel
+evdev=113 xkeysym=XF86AudioMute numlock=off hook=(vk=0xad, scan=0x20, ext=True) -> kb:volumeMute character=False command=False speech=None
+evdev=114 xkeysym=XF86AudioLowerVolume numlock=off hook=(vk=0xae, scan=0x2e, ext=True) -> kb:volumeDown character=False command=False speech=None
+evdev=115 xkeysym=XF86AudioRaiseVolume numlock=off hook=(vk=0xaf, scan=0x30, ext=True) -> kb:volumeUp character=False command=False speech=None
+evdev=117 xkeysym=KP_Equal numlock=off hook=(vk=0xff, scan=0x75, ext=False) -> kb:unknown_75 character=False command=False speech=None
+evdev=119 xkeysym=Pause numlock=off hook=(vk=0x13, scan=0x45, ext=False) -> kb:pause character=False command=True speech=cancel
+evdev=121 xkeysym=KP_Decimal numlock=off hook=(vk=0x6c, scan=0x7e, ext=False) -> kb:numpadSeparator character=False command=True speech=cancel
+evdev=125 xkeysym=Super_L numlock=off hook=(vk=0x5b, scan=0x5b, ext=True) -> kb:leftWindows character=False command=True speech=cancel
+evdev=126 xkeysym=Super_R numlock=off hook=(vk=0x5c, scan=0x5c, ext=True) -> kb:rightWindows character=False command=True speech=cancel
+evdev=127 xkeysym=Menu numlock=off hook=(vk=0x5d, scan=0x5d, ext=True) -> kb:applications character=False command=True speech=cancel
+evdev=128 xkeysym=Cancel numlock=off hook=(vk=0xa9, scan=0x68, ext=True) -> kb:browserStop character=False command=True speech=cancel
+evdev=140 xkeysym=XF86Calculator numlock=off hook=(vk=0xb7, scan=0x21, ext=True) -> kb:launchApp2 character=False command=True speech=cancel
+evdev=142 xkeysym=XF86Sleep numlock=off hook=(vk=0x5f, scan=0x5f, ext=True) -> kb:sleep character=False command=True speech=cancel
+evdev=155 xkeysym=XF86Mail numlock=off hook=(vk=0xb4, scan=0x6c, ext=True) -> kb:launchMail character=False command=True speech=cancel
+evdev=156 xkeysym=XF86Favorites numlock=off hook=(vk=0xab, scan=0x66, ext=True) -> kb:browserFavorites character=False command=True speech=cancel
+evdev=157 xkeysym=XF86MyComputer numlock=off hook=(vk=0xb6, scan=0x6b, ext=True) -> kb:launchApp1 character=False command=True speech=cancel
+evdev=158 xkeysym=XF86Back numlock=off hook=(vk=0xa6, scan=0x6a, ext=True) -> kb:browserBack character=False command=True speech=cancel
+evdev=159 xkeysym=XF86Forward numlock=off hook=(vk=0xa7, scan=0x69, ext=True) -> kb:browserForward character=False command=True speech=cancel
+evdev=163 xkeysym=XF86AudioNext numlock=off hook=(vk=0xb0, scan=0x19, ext=True) -> kb:mediaNextTrack character=False command=True speech=cancel
+evdev=164 xkeysym=XF86AudioPlay numlock=off hook=(vk=0xb3, scan=0x22, ext=True) -> kb:mediaPlayPause character=False command=True speech=cancel
+evdev=165 xkeysym=XF86AudioPrev numlock=off hook=(vk=0xb1, scan=0x10, ext=True) -> kb:mediaPrevTrack character=False command=True speech=cancel
+evdev=166 xkeysym=XF86AudioStop numlock=off hook=(vk=0xb2, scan=0x24, ext=True) -> kb:mediaStop character=False command=True speech=cancel
+evdev=172 xkeysym=XF86HomePage numlock=off hook=(vk=0xac, scan=0x32, ext=True) -> kb:browserHome character=False command=True speech=cancel
+evdev=173 xkeysym=XF86Reload numlock=off hook=(vk=0xa8, scan=0x67, ext=True) -> kb:browserRefresh character=False command=True speech=cancel
+evdev=183 xkeysym=XF86Tools numlock=off hook=(vk=0x7c, scan=0x64, ext=False) -> kb:f13 character=False command=True speech=cancel
+evdev=184 xkeysym=XF86Launch5 numlock=off hook=(vk=0x7d, scan=0x65, ext=False) -> kb:f14 character=False command=True speech=cancel
+evdev=185 xkeysym=XF86Launch6 numlock=off hook=(vk=0x7e, scan=0x66, ext=False) -> kb:f15 character=False command=True speech=cancel
+evdev=186 xkeysym=XF86Launch7 numlock=off hook=(vk=0x7f, scan=0x67, ext=False) -> kb:f16 character=False command=True speech=cancel
+evdev=187 xkeysym=XF86Launch8 numlock=off hook=(vk=0x80, scan=0x68, ext=False) -> kb:f17 character=False command=True speech=cancel
+evdev=188 xkeysym=XF86Launch9 numlock=off hook=(vk=0x81, scan=0x69, ext=False) -> kb:f18 character=False command=True speech=cancel
+evdev=189 xkeysym=F19 numlock=off hook=(vk=0x82, scan=0x6a, ext=False) -> kb:f19 character=False command=True speech=cancel
+evdev=190 xkeysym=XF86AudioMicMute numlock=off hook=(vk=0x83, scan=0x6b, ext=False) -> kb:f20 character=False command=True speech=cancel
+evdev=191 xkeysym=XF86TouchpadToggle numlock=off hook=(vk=0x84, scan=0x6c, ext=False) -> kb:f21 character=False command=True speech=cancel
+evdev=192 xkeysym=XF86TouchpadOn numlock=off hook=(vk=0x85, scan=0x6d, ext=False) -> kb:f22 character=False command=True speech=cancel
+evdev=193 xkeysym=XF86TouchpadOff numlock=off hook=(vk=0x86, scan=0x6e, ext=False) -> kb:f23 character=False command=True speech=cancel
+evdev=194 xkeysym=F24 numlock=off hook=(vk=0x87, scan=0x76, ext=False) -> kb:f24 character=False command=True speech=cancel
+evdev=200 xkeysym=XF86AudioPlay numlock=off hook=(vk=0xb3, scan=0x22, ext=True) -> kb:mediaPlayPause character=False command=True speech=cancel
+evdev=201 xkeysym=XF86AudioPause numlock=off hook=(vk=0xb3, scan=0x22, ext=True) -> kb:mediaPlayPause character=False command=True speech=cancel
+evdev=217 xkeysym=XF86Search numlock=off hook=(vk=0xaa, scan=0x65, ext=True) -> kb:browserSearch character=False command=True speech=cancel
+evdev=224 xkeysym=XF86MonBrightnessDown numlock=off hook=(vk=0xff, scan=0xe0, ext=False) -> kb:unknown_e0 character=False command=False speech=None
+evdev=225 xkeysym=XF86MonBrightnessUp numlock=off hook=(vk=0xff, scan=0xe1, ext=False) -> kb:unknown_e1 character=False command=False speech=None
+evdev=226 xkeysym=XF86AudioMedia numlock=off hook=(vk=0xb5, scan=0x6d, ext=True) -> kb:launchMediaPlayer character=False command=True speech=cancel
+evdev=237 xkeysym=XF86Bluetooth numlock=off hook=(vk=0xff, scan=0xed, ext=False) -> kb:unknown_ed character=False command=False speech=None
+evdev=238 xkeysym=XF86WLAN numlock=off hook=(vk=0xff, scan=0xee, ext=False) -> kb:unknown_ee character=False command=False speech=None
+evdev=55 xkeysym=KP_Multiply numlock=on hook=(vk=0x6a, scan=0x37, ext=False) -> kb:numLock+numpadMultiply character=False command=True speech=cancel
+evdev=71 xkeysym=KP_7 numlock=on hook=(vk=0x67, scan=0x47, ext=False) -> kb:numLockNumpad7 character=False command=True speech=cancel
+evdev=72 xkeysym=KP_8 numlock=on hook=(vk=0x68, scan=0x48, ext=False) -> kb:numLockNumpad8 character=False command=True speech=cancel
+evdev=73 xkeysym=KP_9 numlock=on hook=(vk=0x69, scan=0x49, ext=False) -> kb:numLockNumpad9 character=False command=True speech=cancel
+evdev=74 xkeysym=KP_Subtract numlock=on hook=(vk=0x6d, scan=0x4a, ext=False) -> kb:numLock+numpadMinus character=False command=True speech=cancel
+evdev=75 xkeysym=KP_4 numlock=on hook=(vk=0x64, scan=0x4b, ext=False) -> kb:numLockNumpad4 character=False command=True speech=cancel
+evdev=76 xkeysym=KP_5 numlock=on hook=(vk=0x65, scan=0x4c, ext=False) -> kb:numLockNumpad5 character=False command=True speech=cancel
+evdev=77 xkeysym=KP_6 numlock=on hook=(vk=0x66, scan=0x4d, ext=False) -> kb:numLockNumpad6 character=False command=True speech=cancel
+evdev=78 xkeysym=KP_Add numlock=on hook=(vk=0x6b, scan=0x4e, ext=False) -> kb:numLock+numpadPlus character=False command=True speech=cancel
+evdev=79 xkeysym=KP_1 numlock=on hook=(vk=0x61, scan=0x4f, ext=False) -> kb:numLockNumpad1 character=False command=True speech=cancel
+evdev=80 xkeysym=KP_2 numlock=on hook=(vk=0x62, scan=0x50, ext=False) -> kb:numLockNumpad2 character=False command=True speech=cancel
+evdev=81 xkeysym=KP_3 numlock=on hook=(vk=0x63, scan=0x51, ext=False) -> kb:numLockNumpad3 character=False command=True speech=cancel
+evdev=82 xkeysym=KP_0 numlock=on hook=(vk=0x60, scan=0x52, ext=False) -> kb:numLockNumpad0 character=False command=True speech=cancel
+evdev=83 xkeysym=KP_Separator numlock=on hook=(vk=0x6e, scan=0x53, ext=False) -> kb:numpadDecimal character=False command=True speech=cancel
+evdev=98 xkeysym=KP_Divide numlock=on hook=(vk=0x6f, scan=0x35, ext=True) -> kb:numLock+numpadDivide character=False command=True speech=cancel
+combo insert+t (NVDA+t): -> kb:NVDA+t display='NVDA+t' character=False speech=cancel
+combo control+alt+n: -> kb:control+alt+n display='ctrl+alt+n' character=False speech=cancel
+combo altgr+a as Windows reports it (fake left control and right alt): -> kb:control+alt+a display='ctrl+alt+a' character=False speech=cancel
+combo right alt+a without the fake control: -> kb:alt+a display='alt+a' character=False speech=cancel
+combo shift+a: -> kb:shift+a display='shift+a' character=True speech=cancel
+combo numpad insert+downArrow (NVDA+downArrow): -> kb:NVDA+downArrow display='NVDA+down arrow' character=False speech=cancel
+combo capsLock+t: -> kb:capsLock+t display='caps lock+t' character=False speech=cancel
+combo windows+d: -> kb:windows+d display='windows+d' character=False speech=cancel
+fromName 'a': kb:a
+fromName 'A': kb:shift+a
+fromName '1': kb:1
+fromName '!': kb:shift+1
+fromName 'ą': kb:control+alt+a
+fromName 'Ą': kb:control+alt+shift+a
+fromName 'ł': kb:control+alt+l
+fromName ';': kb:;
+fromName "'": kb:'
+fromName '[': kb:[
