@@ -1023,6 +1023,215 @@ def test_aPlayerStillPlayingAtExitIsClosedBeforeTheInterpreterGoes(tmp_path: Pat
 	assert calls[-1] == "close" and calls.count("close") == 1, calls
 
 
+def test_lostStreamFoundByPlayedFramesCountsAsHeard(tmp_path: Path):
+	"""A stream that reports its loss from playedFrames: what was written counts as played, so the
+	waiting sync returns and its callback runs rather than waiting on a clock that has stopped."""
+	value = runAudio(
+		tmp_path,
+		"""
+		from linuxPlatform import audioOutput
+		from linuxPlatform.audioOutput.nullSink import NullSink, NullStream
+
+		class LosingStream(NullStream):
+			lose = False
+
+			def playedFrames(self):
+				if LosingStream.lose:
+					raise audioOutput.StreamLost("device went away")
+				return super().playedFrames()
+
+		class LosingSink(NullSink):
+			def openStream(self, deviceId, fmt, wake):
+				return LosingStream(fmt)
+
+		audioOutput._sink = LosingSink()
+		player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+		player.feed(bytes(16000), onDone=done("lost"))  # 1 s
+		LosingStream.lose = True
+		start = time.monotonic()
+		player.sync()
+		result = {"syncTook": time.monotonic() - start, "calls": [tag for tag, _thread, _at in events]}
+		""",
+	)
+	assert value["calls"] == ["lost"]
+	# The second of audio was not waited for.
+	assert value["syncTook"] < 0.5
+
+
+def test_unsupportedFormatFailsToOpenAsWasapiDoes(tmp_path: Path):
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import ctypes
+
+		import wasapi
+		from linuxPlatform import audioOutput
+		from linuxPlatform.audioOutput.nullSink import NullSink
+		from winBindings.mmeapi import WAVEFORMATEX
+
+		class CountingSink(NullSink):
+			opened = 0
+
+			def openStream(self, deviceId, fmt, wake):
+				CountingSink.opened += 1
+				return super().openStream(deviceId, fmt, wake)
+
+		audioOutput._sink = CountingSink()
+		callback = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint)(lambda h, i: None)
+		fmt = WAVEFORMATEX(wFormatTag=1, nChannels=1, nSamplesPerSec=8000, wBitsPerSample=12, nBlockAlign=2)
+		player = wasapi.wasPlay_create("", fmt, callback)
+		try:
+			wasapi.wasPlay_open(player)
+			error = None
+		except OSError as e:
+			error = [type(e).__name__, e.winerror]
+		wasapi.wasPlay_destroy(player)
+		result = {"error": error, "opened": CountingSink.opened}
+		""",
+		prepare="bootstrap",
+	)
+	done.assertClean()
+	# AUDCLNT_E_UNSUPPORTED_FORMAT, and no stream asked of the sink.
+	assert done.value == {"error": ["WindowsError", -2004287480], "opened": 0}
+
+
+def test_pcmHandlesEveryFormatThePlayerAccepts(tmp_path: Path):
+	"""Leading silence and gain for 8-, 16-, 24- and 32-bit integer and 32- and 64-bit float
+	samples, the refusal of a format with no samples to scale, and the byte swap a big-endian
+	machine needs."""
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import struct
+		import types
+
+		from linuxPlatform.audioOutput import StreamFormat, pcm
+
+		def ints24(*samples):
+			return b"".join(s.to_bytes(3, "little", signed=True) for s in samples)
+
+		def fromInts24(data):
+			return [int.from_bytes(data[i : i + 3], "little", signed=True) for i in range(0, len(data), 3)]
+
+		pcm8 = StreamFormat(1, 1, 8000, 8)
+		pcm16 = StreamFormat(1, 1, 8000, 16)
+		pcm24 = StreamFormat(1, 2, 8000, 24)
+		pcm32 = StreamFormat(1, 1, 8000, 32)
+		float32 = StreamFormat(3, 1, 8000, 32)
+		float64 = StreamFormat(3, 2, 8000, 64)
+		adpcm = StreamFormat(2, 1, 8000, 4)
+		result = {
+			"silence8": pcm.silence(pcm8, 3).hex(),
+			# 8-bit audio's threshold is 0, so only the zero point, 128, is silent.
+			"leading8": pcm.leadingSilenceSize(pcm8, bytes([128, 128, 129, 128])),
+			"leading16": pcm.leadingSilenceSize(pcm16, struct.pack("<4h", 0, 31, -31, 32)),
+			# Stereo: whole frames only, and a loud sample in either channel ends the silence.
+			"leading24": pcm.leadingSilenceSize(pcm24, ints24(0, 8191, -8191, 0, 0, 8192)),
+			"leading32": pcm.leadingSilenceSize(pcm32, struct.pack("<3i", 2097151, -2097151, 2097152)),
+			"leadingFloat32": pcm.leadingSilenceSize(float32, struct.pack("<3f", 0.0, 0.0009, -0.001)),
+			"leadingFloat64": pcm.leadingSilenceSize(float64, struct.pack("<4d", 0.0, -0.0009, 0.5, 0.0)),
+			"allSilent": pcm.leadingSilenceSize(pcm16, bytes(8)),
+			"unknownHasNone": pcm.leadingSilenceSize(adpcm, bytes(8)),
+			"gain8": list(pcm.applyGain(pcm8, bytes([0, 128, 255]), [0.5])),
+			"gain24": fromInts24(pcm.applyGain(pcm24, ints24(1000, -2000, 8388607, -8388608), [0.5, 0.25])),
+			"gainFloat32": list(struct.unpack("<2f", pcm.applyGain(float32, struct.pack("<2f", 0.5, -1.0), [0.5]))),
+			"gainFloat64": list(
+				struct.unpack("<2d", pcm.applyGain(float64, struct.pack("<2d", 0.5, -1.0), [0.5, 0.25])),
+			),
+			"unityLeavesUnknownAlone": pcm.applyGain(adpcm, b"abc", [1.0]) == b"abc",
+		}
+		try:
+			pcm.applyGain(adpcm, b"abc", [0.5])
+			result["gainUnknown"] = None
+		except ValueError as e:
+			result["gainUnknown"] = str(e)
+		# A big-endian machine reads the little-endian samples swapped and swaps them back. Pretending
+		# to be one here, the swap shows as the reverse, and writing swaps them back again.
+		pcm.sys = types.SimpleNamespace(byteorder="big")
+		data16 = struct.pack("<2h", 1, -2)
+		dataFloat = struct.pack("<f", 0.25)
+		result["swapped16"] = list(pcm._samples(pcm16, data16))
+		result["roundTrip16"] = pcm._toBytes(pcm16, pcm._samples(pcm16, data16)) == data16
+		result["roundTripFloat"] = pcm._toBytes(float32, pcm._samples(float32, dataFloat)) == dataFloat
+		""",
+		prepare="bootstrap",
+	)
+	done.assertClean()
+	assert done.value == {
+		"silence8": "808080",
+		"leading8": 2,
+		"leading16": 6,
+		"leading24": 12,
+		"leading32": 8,
+		"leadingFloat32": 8,
+		"leadingFloat64": 16,
+		"allSilent": 8,
+		"unknownHasNone": 0,
+		"gain8": [64, 128, 192],
+		"gain24": [500, -500, 4194304, -2097152],
+		"gainFloat32": [0.25, -0.5],
+		"gainFloat64": [0.25, -0.25],
+		"unityLeavesUnknownAlone": True,
+		"gainUnknown": "no gain for format StreamFormat(formatTag=2, channels=1, samplesPerSec=8000, bitsPerSample=4)",
+		"swapped16": [256, -257],
+		"roundTrip16": True,
+		"roundTripFloat": True,
+	}
+
+
+def test_soundSplitRefusesAnyStateButOff(tmp_path: Path):
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import NVDAHelper
+		import audio
+
+		refused = []
+		for state in audio.SoundSplitState:
+			if state is audio.SoundSplitState.OFF:
+				continue
+			try:
+				audio._setSoundSplitState(state)
+			except NotImplementedError as e:
+				refused.append(str(e))
+		result = refused
+		""",
+	)
+	assert done.error is None, done.error
+	assert not done.logErrors, done.logErrors
+	assert done.value == ["audio.soundSplit._setSoundSplitState has no Linux implementation"] * 7
+	assert done.noLinuxImplementation == ["audio.soundSplit._setSoundSplitState"] * 7
+
+
+def test_outputDevicesListTheSinksDevicesWhenActiveOnesAreAsked(tmp_path: Path):
+	value = runAudio(
+		tmp_path,
+		"""
+		from linuxPlatform import audioOutput
+		from linuxPlatform.audioOutput.nullSink import NullSink
+		from pycaw.constants import DEVICE_STATE
+		from utils import mmdevice
+
+		class ListingSink(NullSink):
+			def devices(self):
+				return [("alsa_output.pci-0000_00_1f.3.analog-stereo", "Built-in Audio Analog Stereo")]
+
+		audioOutput._sink = ListingSink()
+		result = {
+			"active": list(mmdevice.getOutputDevices()),
+			"withDefault": list(mmdevice.getOutputDevices(includeDefault=True)),
+			"unplugged": list(mmdevice.getOutputDevices(stateMask=DEVICE_STATE.UNPLUGGED)),
+		}
+		""",
+	)
+	device = ["alsa_output.pci-0000_00_1f.3.analog-stereo", "Built-in Audio Analog Stereo"]
+	assert value == {
+		"active": [device],
+		"withDefault": [["default", "Default output device"], device],
+		"unplugged": [],
+	}
+
+
 def test_missingCaptureDirectoryFailsAtStart(tmp_path: Path):
 	done = harness.runChild(
 		tmp_path,

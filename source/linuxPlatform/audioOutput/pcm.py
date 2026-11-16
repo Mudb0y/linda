@@ -21,18 +21,19 @@ def _zeroPoint(fmt: StreamFormat) -> int:
 def _samples(fmt: StreamFormat, data: bytes | memoryview) -> Sequence[int] | Sequence[float] | None:
 	"""Every whole sample of data, in order, or None for a format this module does not know."""
 	bits = fmt.bitsPerSample
-	bytesPerSample = bits // 8
-	data = memoryview(data)[: len(data) - len(data) % bytesPerSample]
 	if fmt.formatTag == WAVE_FORMAT_PCM:
-		if bits == 24:
-			return [int.from_bytes(data[i : i + 3], "little", signed=True) for i in range(0, len(data), 3)]
 		typecode = _intTypecodes.get(bits)
 	elif fmt.formatTag == WAVE_FORMAT_IEEE_FLOAT:
 		typecode = _floatTypecodes.get(bits)
 	else:
 		return None
-	if typecode is None:
+	isPcm24 = fmt.formatTag == WAVE_FORMAT_PCM and bits == 24
+	if typecode is None and not isPcm24:
 		return None
+	bytesPerSample = bits // 8
+	data = memoryview(data)[: len(data) - len(data) % bytesPerSample]
+	if isPcm24:
+		return [int.from_bytes(data[i : i + 3], "little", signed=True) for i in range(0, len(data), 3)]
 	samples = array.array(typecode)
 	samples.frombytes(data)
 	if sys.byteorder != "little":
