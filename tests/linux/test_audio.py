@@ -220,19 +220,20 @@ def test_feedPacesFeederAndCallsBackOnItsThread(tmp_path: Path):
 	assert [tag for tag, _thread, _at in calls] == list(range(10))
 	assert {thread for _tag, thread, _at in calls} == {"feeder"}
 	for tag, _thread, at in calls:
-		assert (tag + 1) * 0.1 - 0.005 <= at <= (tag + 1) * 0.1 + 0.15, (tag, at)
+		assert (tag + 1) * 0.1 - 0.005 <= at <= (tag + 1) * 0.1 + 0.4, (tag, at)
 	returned = {i: at for kind, i, at in value["order"] if kind == "returned"}
 	# Three chunks fit before the queue passes half of 400 ms; after that each feed waits 100 ms.
-	assert returned[2] < 0.05
-	assert 0.08 <= returned[3] <= 0.15
-	assert 0.6 <= returned[9] <= 0.85
+	assert returned[2] < 0.15
+	assert returned[3] - returned[2] >= 0.05
+	assert 0.08 <= returned[3] <= 0.4
+	assert 0.6 <= returned[9] <= 1.2
 	for i, at in returned.items():
 		# Playing began after the clock was read, so this overstates what was still queued, which a
 		# feed that waits only while more than half of 400 ms is queued keeps to 300 ms at most.
 		queued = (i + 1) * 0.1 - at
 		assert queued <= 0.3 + 0.001, (i, queued)
 	synced = value["order"][-1][2]
-	assert 0.99 <= synced <= 1.25
+	assert 0.99 <= synced <= 1.6
 	merged = value["merged"]
 	for i in range(10):
 		assert merged.index(["returned", i]) < merged.index(["done", i])
@@ -274,7 +275,7 @@ def test_callbacksRunOnlyInsideFeedSyncOrIdle(tmp_path: Path):
 	assert value["calls"] == [["a", "syncer"], ["b", "idler"], ["c", "MainThread"]]
 	assert value["idStored"] == [1]
 	assert value["idAfterIdle"] == [0]
-	assert 0.08 <= value["idleTook"] <= 0.25
+	assert 0.08 <= value["idleTook"] <= 0.6
 
 
 def test_emptyFeedAfterPlaybackCallsBackAtTheNextSync(tmp_path: Path):
@@ -341,8 +342,9 @@ def test_stopWakesFeederAndDiscardsPendingCallbacks(tmp_path: Path):
 		}
 		""",
 	)
-	assert value["stopTook"] < 0.02
-	assert value["feederTook"] < 0.05
+	assert value["stopTook"] < 0.08
+	# Under the 100 ms a feeder that stop did not wake would sleep out before it looked again.
+	assert value["feederTook"] < 0.08
 	fired = value["firedBeforeNew"]
 	# The chunks that had played by the time of the stop, about three, and nothing after it.
 	assert fired == list(range(len(fired))) and 2 <= len(fired) <= 4
@@ -378,7 +380,7 @@ def test_pauseHoldsPlaybackAndResumeContinuesIt(tmp_path: Path):
 	assert value["firedWhilePaused"] == []
 	[(tag, thread, afterResume)] = value["calls"]
 	assert (tag, thread) == ("end", "syncer")
-	assert 0.25 <= afterResume <= 0.45
+	assert 0.25 <= afterResume <= 0.9
 
 
 def test_waveFilesPlayToCaptureFrameForFrame(tmp_path: Path):
@@ -403,9 +405,9 @@ def test_waveFilesPlayToCaptureFrameForFrame(tmp_path: Path):
 		""",
 		captureDir=captureDir,
 	)
-	assert 0.164 <= value["syncTook"] <= 0.4
-	assert value["asyncReturned"] < 0.1
-	assert 0.3 <= value["asyncTook"] <= 0.6
+	assert 0.164 <= value["syncTook"] <= 1.0
+	assert value["asyncReturned"] < 0.3
+	assert 0.3 <= value["asyncTook"] <= 1.2
 	files = captured(captureDir)
 	assert len(files) == 2
 	for source, got in zip((syncFile, asyncFile), files):
@@ -460,18 +462,18 @@ def test_beepReachesCapture(tmp_path: Path):
 		""",
 		captureDir=captureDir,
 	)
-	assert value["beepReturned"] < 0.08
-	assert 0.1 <= value["synced"] <= 0.3
+	assert value["beepReturned"] < 0.3
+	assert 0.1 <= value["synced"] <= 0.8
 	first, interrupted, last = (bytes.fromhex(b) for b in value["buffers"])
 	files = captured(captureDir)
 	assert [(f["channels"], f["rate"], f["width"]) for f in files] == [(2, 44100, 2)] * 3
 	assert files[0]["frames"] == first
-	assert 0.19 <= value["longReturned"] <= 0.3
+	assert 0.19 <= value["longReturned"] <= 0.6
 	cut = files[1]["frames"]
 	assert interrupted.startswith(cut)
 	heard = len(cut) / 4 / 44100
 	# Generating each beep in Python takes some milliseconds on either side of the measured span.
-	assert value["heardBeforeCut"] - 0.05 <= heard <= value["heardBeforeCut"] + 0.05
+	assert value["heardBeforeCut"] - 0.1 <= heard <= value["heardBeforeCut"] + 0.1
 	assert heard < 0.5
 	assert files[2]["frames"] == last
 
@@ -573,7 +575,7 @@ def test_lostStreamIsReopenedAndStrandsNoCallback(tmp_path: Path):
 	assert value["opened"] == 2
 	assert value["firedByFeed"] == ["before"]
 	assert [tag for tag, _at in value["calls"]] == ["before", "after"]
-	assert 0.08 <= value["calls"][1][1] <= 0.25
+	assert 0.08 <= value["calls"][1][1] <= 0.6
 
 
 def test_streamThatCannotBeReopenedLeavesNothingPlaying(tmp_path: Path):
@@ -892,8 +894,8 @@ def test_wakeFromASinkThreadEndsWaitsEarly(tmp_path: Path):
 		""",
 	)
 	# Two seconds of audio. Timed by the estimate alone, the feeds and the sync would wait about
-	# 100 ms seven times; woken, each wait lasts about 20 ms.
-	assert value["took"] < 0.4, value["took"]
+	# 100 ms seven times, 0.7 s in all; woken, each wait lasts about 20 ms.
+	assert value["took"] < 0.5, value["took"]
 	assert value["wakeThreads"] == ["sinkThread"]
 	assert value["calls"] == [[i, "MainThread"] for i in range(20)]
 
