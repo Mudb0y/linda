@@ -220,6 +220,17 @@ def quantumMs(frames: int) -> float:
 	return frames / RATE * 1000
 
 
+def wakeBoundMs(quantum: int) -> float:
+	"""How soon a stream that was put to sleep is heard after the write that wakes it.
+
+	The callback hands a woken stream nothing until PipeWire reports its node running again, since a
+	cycle handed over before then is mixed by no one and the start of the sound would be lost. The
+	report comes a round trip after the wake, about 5 ms on a quiet machine and more on a loaded
+	one, and the sound then waits for the next cycle to begin, up to a quantum more. Only the first
+	sound after the keep-awake time pays this."""
+	return 2 * quantumMs(quantum) + 5
+
+
 def ourNodes(fixture: PipewireFixture) -> list[dict]:
 	return [n for n in fixture.nodes() if n["info"]["props"].get("application.id") == "basedreader"]
 
@@ -1075,8 +1086,8 @@ def test_aPooledStreamIsReusedOnlyForItsOwnDevice(pipewire: PipewireFixture, tmp
 
 def test_streamsStayActiveUntilTheKeepAwakeDeadlineAndWakeAtOnce(pipewire: PipewireFixture, tmp_path: Path):
 	"""A stream keeps being scheduled, which keeps the device awake, until the keep-awake deadline,
-	is deactivated once it passes with nothing to play, and is heard within a quantum and 5 ms of the
-	next feed."""
+	is deactivated once it passes with nothing to play, and is heard within wakeBoundMs of the next
+	feed."""
 	pipewire.setQuantum(512)
 	monitor = pipewire.monitor()
 	value = runPipewireChild(
@@ -1112,13 +1123,15 @@ def test_streamsStayActiveUntilTheKeepAwakeDeadlineAndWakeAtOnce(pipewire: Pipew
 	assert settled[0] == settled[-1], "process calls continued after deactivation"
 	heard = (monitor.soundAfter(value["feed"]) - value["feed"]) / MS
 	report("keep awake", {"deactivatedAfterMs": round(deactivatedMs, 1), "heardAfterWakeMs": round(heard, 2)})
-	assert heard < quantumMs(512) + 5
+	assert heard < wakeBoundMs(512)
 
 
 def test_aStreamDeactivatedBetweenSoundsWakesForEachOne(pipewire: PipewireFixture, tmp_path: Path):
 	"""With no keep-awake time, a stream is deactivated as soon as it has drained, often just as the
-	next sound is written to it. Every sound is still heard, promptly: either the library's thread
-	sees the new frames before it deactivates, or the write sees the stream inactive and wakes it.
+	next sound is written to it. Every sound is still heard within wakeBoundMs: either the library's
+	thread sees the new frames before it deactivates, or the write sees the stream inactive and wakes
+	it. A sound whose write failed to wake the stream would go unheard until the library's thread
+	happened to look at it again.
 
 	The player stays in its playing state between the sounds, as between the chunks of an
 	utterance, so only the write can wake the stream."""
@@ -1158,7 +1171,7 @@ def test_aStreamDeactivatedBetweenSoundsWakesForEachOne(pipewire: PipewireFixtur
 		monitor.silenceAfter(sound)
 	report("sound after each write to a stream deactivated or deactivating, ms", summary(heard))
 	assert value["inactiveBefore"] >= 10, "the stream was rarely inactive, so this showed little"
-	assert max(heard) < quantumMs(512) + 5, heard
+	assert max(heard) < wakeBoundMs(512), heard
 
 
 def test_theStartOfASoundIsNeverLost(pipewire: PipewireFixture, tmp_path: Path):
