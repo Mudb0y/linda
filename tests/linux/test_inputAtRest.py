@@ -800,6 +800,12 @@ def test_bdDetectReportsNoDevices(tmp_path: Path):
 		""",
 	)
 	done.assertClean()
+	# Each listing is asked for twice, by the fetcher and here, and noted as a gap once.
+	assert sorted(done.noLinuxImplementation) == [
+		"hwPortUtils.listComPorts",
+		"hwPortUtils.listHidDevices",
+		"hwPortUtils.listUsbDevices",
+	]
 	assert value == {
 		"comPorts": [],
 		"usbDevices": [],

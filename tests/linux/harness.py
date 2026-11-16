@@ -61,7 +61,8 @@ PREPARE_LEVELS = ("none", "bootstrap", "appDir", "config")
 #: it alone.
 CLEAN_CHECKS = {
 	"error": "the code returned, and the child reported",
-	"noLinuxImplementation": "nothing raised NoLinuxImplementation, even where upstream caught it",
+	"noLinuxImplementation": "nothing raised NoLinuxImplementation, even where upstream caught it, and "
+	"no gap was noted outside NOTED_GAPS",
 	"logErrors": "nothing was logged at ERROR or above, on any logger",
 	"threadExceptions": "no thread died of an exception",
 	"unraisable": "no finaliser or other unraisable call failed",
@@ -70,6 +71,17 @@ CLEAN_CHECKS = {
 	"and the run's Python code did not try to",
 	"audio": "no audio library was loaded and no sound device opened",
 	"stderr": "standard error holds nothing outside ALLOWED_STANDARD_ERROR",
+}
+
+#: Gaps that Linux bodies note through linuxPlatform.noteNoLinuxImplementation rather than raise, which
+#: a clean run may record, each with where and why.
+NOTED_GAPS = {
+	"winsound.MessageBeep": "gui.message.MessageDialog._playSound: Windows' system sound for an error, "
+	"warning or question box. Raising would stop the dialog before it focuses its default button.",
+	"hwPortUtils.listComPorts": "Linux has no SetupAPI and hwIo opens no serial, USB or HID device, so "
+	"there is nothing to list; braille display detection asks on every scan.",
+	"hwPortUtils.listUsbDevices": "As for hwPortUtils.listComPorts.",
+	"hwPortUtils.listHidDevices": "As for hwPortUtils.listComPorts.",
 }
 
 #: What standard error, or the report of an unraisable exception, may hold after a clean run, each
@@ -614,7 +626,7 @@ class ChildResult:
 		for event in self.events:
 			if event["kind"] != kind:
 				continue
-			if kind == "noLinuxImplementation":
+			if kind == "noLinuxImplementation" and event["what"] not in NOTED_GAPS:
 				parts.append(f"{event['what']}, from:\n{''.join(event['stack'])}")
 			elif kind == "log" and event["levelno"] >= LOG_ERROR:
 				parts.append(
@@ -632,7 +644,7 @@ class ChildResult:
 		assert not unknown, f"no such check: {sorted(unknown)}; the checks are {list(CLEAN_CHECKS)}"
 		found = {
 			"error": self.error,
-			"noLinuxImplementation": self.noLinuxImplementation and self._detail("noLinuxImplementation"),
+			"noLinuxImplementation": self._detail("noLinuxImplementation"),
 			"logErrors": self.logErrors and self._detail("log"),
 			"threadExceptions": "\n".join(self.threadExceptions),
 			"unraisable": "\n".join(u for u in self.unraisable if unexpectedStandardError(u)),

@@ -127,6 +127,9 @@ def listComPorts(onlyAvailable: bool = True) -> typing.Iterator[dict]:
 	if sys.platform != "win32":
 		# Linux has no SetupAPI, and hwIo refuses to open serial, HID and USB devices on Linux, so
 		# there is nothing to offer a driver; listing from udev belongs with Linux device I/O.
+		from linuxPlatform import noteNoLinuxImplementation
+
+		noteNoLinuxImplementation("hwPortUtils.listComPorts")
 		return
 	for g_hdi, _idd, devinfo, buf in _listDevices(_GUID_CLASS_COMPORT, onlyAvailable):
 		entry = {}
@@ -333,6 +336,9 @@ def listUsbDevices(onlyAvailable: bool = True) -> typing.Iterator[dict]:
 	"""
 	if sys.platform != "win32":
 		# As for listComPorts.
+		from linuxPlatform import noteNoLinuxImplementation
+
+		noteNoLinuxImplementation("hwPortUtils.listUsbDevices")
 		return
 	for g_hdi, idd, devinfo, buf in _listDevices(_GUID_DEVINTERFACE_USB_DEVICE, onlyAvailable):
 		entry = {}
@@ -474,6 +480,9 @@ def listHidDevices(onlyAvailable: bool = True) -> typing.Iterator[dict]:
 	global _hidGuid
 	if sys.platform != "win32":
 		# As for listComPorts.
+		from linuxPlatform import noteNoLinuxImplementation
+
+		noteNoLinuxImplementation("hwPortUtils.listHidDevices")
 		return
 	if not _hidGuid:
 		_hidGuid = GUID()

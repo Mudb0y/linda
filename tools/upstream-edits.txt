@@ -169,10 +169,9 @@ source/gui/contextHelp.py
 source/gui/message.py
   Linux runtime: MessageDialog._playSound plays nothing, as the sounds are
   Windows' system sounds through winsound.MessageBeep, which have no Linux
-  counterpart. For a dialog that has a sound it makes a
-  NoLinuxImplementation without raising it, which records the gap through
-  the audit event; raising would stop the dialog's show handler before it
-  focuses the default button. Every error and warning message box, the
+  counterpart. For a dialog that has a sound it notes the gap through
+  linuxPlatform.noteNoLinuxImplementation; raising would stop the dialog's
+  show handler before it focuses the default button. Every error and warning message box, the
   configuration error at start-up among them, has one.
   every platform: wx.html2 is imported in
   HtmlMessageDialog._createMessageControl rather than with the module, and
@@ -208,7 +207,8 @@ source/hwPortUtils.py
   Bluetooth port readers raise NoLinuxImplementation on Linux.
   Linux runtime: listComPorts, listUsbDevices and listHidDevices list
   nothing, as there is no SetupAPI and hwIo refuses to open serial, HID
-  and USB devices on Linux
+  and USB devices on Linux, and each notes the gap once through
+  linuxPlatform.noteNoLinuxImplementation
 source/installer.py
   every platform: winreg comes from linuxPlatform.windowsOnly, so
   installing raises NoLinuxImplementation on Linux, naming the first

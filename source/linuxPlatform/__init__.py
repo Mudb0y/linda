@@ -41,6 +41,26 @@ class NoLinuxAttribute(NoLinuxImplementation, AttributeError):
 		self.name = name
 
 
+_noted: set[str] = set()
+
+
+def noteNoLinuxImplementation(what: str) -> None:
+	"""Record a gap where a Linux body answers without the Windows feature behind it, and go on.
+
+	For a Linux body whose answer is true but has nothing in it, as a listing of serial ports with no
+	way to enumerate them, or which must not raise where it is called. The gap is announced through
+	the same audit event NoLinuxImplementation raises, and logged at debug level, once per process
+	for each what, as such bodies are called over and over.
+	"""
+	if what in _noted:
+		return
+	_noted.add(what)
+	sys.audit(noLinuxImplementationEvent, what)
+	from logHandler import log
+
+	log.debugWarning(f"{what} has no Linux implementation")
+
+
 def missingAttribute(module: str, name: str, message: str | None = None) -> NoReturn:
 	"""The body of a Linux replacement module's ``__getattr__``.
 

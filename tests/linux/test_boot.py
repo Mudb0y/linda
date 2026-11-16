@@ -81,13 +81,6 @@ _allowedStandardError = (
 		r"AttributeError: 'NoneType' object has no attribute 'unregister'\n",
 	),
 )
-#: What a clean run may record as missing on Linux, because the code records the gap rather than
-#: raising, each with where and why.
-_notedGaps = (
-	# gui.message.MessageDialog._playSound: Windows' system sound for an error, warning or question
-	# box. Raising would stop the dialog before it focuses its default button.
-	"winsound.MessageBeep",
-)
 
 
 def unexpectedStandardError(text: str, alsoAllowed: tuple[re.Pattern, ...] = ()) -> str:
@@ -214,7 +207,7 @@ class Launch:
 		recorded = self.directory / "noLinuxImplementation.jsonl"
 		assert recorded.exists(), "the launcher did not record NoLinuxImplementation as asked"
 		raised = [json.loads(line) for line in recorded.read_text(encoding="utf-8").splitlines()]
-		raised = [r for r in raised if r["what"] not in _notedGaps]
+		raised = [r for r in raised if r["what"] not in harness.NOTED_GAPS]
 		assert not raised, "NoLinuxImplementation raised:\n" + "\n".join(
 			r["what"] + "\n" + "".join(r["stack"]) for r in raised
 		)
