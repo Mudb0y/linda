@@ -1,0 +1,120 @@
+From eacc375e10a872c067759a5b6b2b337818d4f5f9 Mon Sep 17 00:00:00 2001
+From: Mudb0y <stasprzecinek@gmail.com>
+Date: Mon, 16 Nov 2026 10:29:56 +0100
+Subject: [PATCH 1/8] Load the NVDA driver's engine on Linux as well
+
+The driver reached the library only the Windows way: eci.dll or
+eci32.dll in openevv_engine, loaded with WinDLL and called back through
+WINFUNCTYPE. NVDA running on Linux, which is what Basedreader is, has
+none of those. check() found no eci.dll and the voice was never offered.
+
+Anywhere but Windows libraryName() is now libeci.so.1, the library make
+so builds with EVVPLAIN=1, still looked for in openevv_engine beside the
+driver, so a Linux build of the add-on's directory is the Windows one
+with that file in place of the DLLs. It is loaded with CDLL and calls
+back through CFUNCTYPE. The callback's third argument is declared an int,
+as include/eci.h has it. It was a long, which on sixty-four bit Linux is
+eight bytes where the engine writes four, so the upper half of what was
+read came from whatever the register held.
+
+Nothing changes on Windows. Each choice is made on os.name, as
+_pathBytes already does, and the Windows side of it is WinDLL and
+WINFUNCTYPE as before. c_int there is c_long itself: ctypes makes the
+two one type wherever they are the same size, and on Windows they are.
+
+nvda/test/engine.py stands in for CDLL as well as WinDLL, since it runs
+on Linux and the layer now asks for that one there, and checks the
+library's name and the callback's argument.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ nvda/addon/synthDrivers/_openevv.py | 15 +++++++++++----
+ nvda/test/engine.py                 | 15 ++++++++++++---
+ 2 files changed, 23 insertions(+), 7 deletions(-)
+
+diff --git a/nvda/addon/synthDrivers/_openevv.py b/nvda/addon/synthDrivers/_openevv.py
+index f355a0f..0821a2c 100644
+--- a/nvda/addon/synthDrivers/_openevv.py
++++ b/nvda/addon/synthDrivers/_openevv.py
+@@ -409,11 +409,15 @@ def textFor(language, text):
+ 		text = "".join(out)
+ 	return text.encode(code, "replace")
+ 
+-_CALLBACK = ctypes.WINFUNCTYPE(
++# The library's own calling convention on Windows and C's everywhere else.
++# The third argument is an int, as include/eci.h declares it: a long is the
++# same four bytes on Windows and eight on any other sixty-four bit machine,
++# where reading one reads the register's other half as well.
++_CALLBACK = (ctypes.WINFUNCTYPE if os.name == "nt" else ctypes.CFUNCTYPE)(
+ 	ctypes.c_int,
+ 	ctypes.c_void_p,
+ 	ctypes.c_int,
+-	ctypes.c_long,
++	ctypes.c_int,
+ 	ctypes.c_void_p,
+ )
+ 
+@@ -423,8 +427,11 @@ def libraryName():
+ 
+ 	Both are shipped. A screen reader is one bitness or the other and the
+ 	library has to match, since this loads it into the reader's own process
+-	rather than hosting it somewhere else.
++	rather than hosting it somewhere else. Anywhere but Windows it is the
++	library make so builds with EVVPLAIN=1, by its soname.
+ 	"""
++	if os.name != "nt":
++		return "libeci.so.1"
+ 	return "eci.dll" if sys.maxsize > 2**32 else "eci32.dll"
+ 
+ 
+@@ -1096,7 +1103,7 @@ class Engine:
+ 		if not os.path.isfile(path):
+ 			raise OpenEvvError("openevv: there is no library at %s" % path)
+ 
+-		dll = ctypes.WinDLL(path)
++		dll = ctypes.WinDLL(path) if os.name == "nt" else ctypes.CDLL(path)
+ 
+ 		# Every handle said out loud. A handle is a pointer, and left to
+ 		# itself ctypes narrows one to an int and hands the engine half an
+diff --git a/nvda/test/engine.py b/nvda/test/engine.py
+index 4c3c209..4573723 100644
+--- a/nvda/test/engine.py
++++ b/nvda/test/engine.py
+@@ -210,7 +210,7 @@ def engine_module(dll, player_box, library_there=True):
+ 
+     import synthDrivers._openevv as mod
+ 
+-    def WinDLL(path):
++    def load(path):
+         dll.loaded = path
+         return dll
+ 
+@@ -218,10 +218,12 @@ def engine_module(dll, player_box, library_there=True):
+         player_box.append(FakePlayer(**kwargs))
+         return player_box[-1]
+ 
+-    ctypes.WinDLL = WinDLL
++    # Both loaders, since the layer takes WinDLL on Windows and CDLL anywhere
++    # else, and this runs on either.
++    ctypes.WinDLL = load
++    ctypes.CDLL = load
+     nvwave.WavePlayer = WavePlayer
+     mod.nvwave = nvwave
+-    mod.ctypes.WinDLL = WinDLL
+     mod.os.path.isfile = (lambda p: library_there)
+     return mod
+ 
+@@ -760,6 +762,13 @@ def main():
+     # what shipped: a name error in it.
+     check("the library it loads is the one for this word size",
+           os.path.basename(dll.loaded), mod.libraryName())
++    if os.name != "nt":
++        check("which anywhere but Windows is the shared library, by its soname",
++              mod.libraryName(), "libeci.so.1")
++    import ctypes
++
++    check("the callback's third argument is an int, as eci.h declares it",
++          mod._CALLBACK._argtypes_[2], ctypes.c_int)
+     check("it asks the library how many languages it has, twice",
+           len(dll.named("eciGetAvailableLanguages")), 2)
+     check("it makes an instance", len(dll.named("eciNewEx")), 1)

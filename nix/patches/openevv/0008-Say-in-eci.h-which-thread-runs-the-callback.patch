@@ -1,0 +1,38 @@
+From 962d67d5143a26bb61e7daed580b89a05192f081 Mon Sep 17 00:00:00 2001
+From: Mudb0y <stasprzecinek@gmail.com>
+Date: Mon, 16 Nov 2026 11:00:32 +0100
+Subject: [PATCH 8/8] Say in eci.h which thread runs the callback
+
+The header said the callback runs on the engine's own synthesis thread.
+It runs on the caller's, inside eciSpeaking or eciSynchronize, which is
+what docs/api.md says and what the NVDA driver relies on: its callback
+feeds the player from the thread that called eciSynchronize, and in
+NVDA's process on Linux all 23 callbacks of a two-item utterance that
+handed on audio or a mark came on that thread. Someone
+writing a caller from the header alone would have guarded against the
+wrong thread and could have waited for callbacks that never come.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/eci.h | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/include/eci.h b/include/eci.h
+index e1fcdf9..24d2b61 100644
+--- a/include/eci.h
++++ b/include/eci.h
+@@ -112,9 +112,11 @@ typedef enum {
+  * it: reading eight bytes where four were written reads the register's other
+  * half.
+  *
+- * It runs on the engine's own synthesis thread, not the caller's. What it may
+- * do is copy the samples and return; what it may not do is call back into the
+- * same instance. */
++ * It runs on the caller's thread that is inside eciSpeaking or
++ * eciSynchronize, not on the engine's own synthesis thread, which posts each
++ * buffer and waits for the answer: a caller that synthesises and then neither
++ * asks nor waits is never called back. What it may do is copy the samples and
++ * return; what it may not do is call back into the same instance. */
+ typedef int (ECICALL *ECICallback)(ECIHand handle, ECIMessage message,
+                                    int param, void *data);
+ 

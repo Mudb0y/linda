@@ -1,0 +1,154 @@
+From ce2af0321b2286070354c3432853d2039b3b2d9a Mon Sep 17 00:00:00 2001
+From: Mudb0y <stasprzecinek@gmail.com>
+Date: Mon, 16 Nov 2026 10:54:40 +0100
+Subject: [PATCH 5/8] Report a mark with no audio before it after the audio
+ already fed
+
+A mark is reported when the audio in front of it has played: _flush
+feeds the audio with the mark on its onDone. A mark with nothing in
+hand in front of it, the second of two adjacent marks or one straight
+after a mark at the end of a stretch, was reported at once instead,
+while the audio fed before it was still to play and the mark ahead of
+it still waiting on that audio. So the marks came back out of order.
+In NVDA's process on Linux, "Hello world, this is the first part.",
+marks 1 and 2, then a second part and mark 3, reported 2 at 2410 ms
+and 1 at 2627 ms. Nothing here is particular to Linux, so the order is
+the same on Windows.
+
+Such a mark is now hung on the end of what was fed, with an empty
+feed, which is what NVDA's own SAPI 5 driver does, and both marks of
+the example arrive together when the first part has played. Only when
+this utterance has audio in the player, though. With nothing of it
+waiting to play there is nothing in front of the mark, and an empty
+feed into a player that a cancel has stopped runs its callback only
+when the player is next fed, which for an utterance of nothing but a
+mark is never: tried that way, the mark of such an utterance after a
+cancel was not reported at all, and a mark that never comes stalls
+NVDA's speech manager. So that mark is still reported at once.
+nvda/test/engine.py holds the order with a player that, like a real
+one, runs a callback only once the audio in front of it has played.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ nvda/addon/synthDrivers/_openevv.py | 30 +++++++++++++++++++++++++++--
+ nvda/test/engine.py                 | 30 +++++++++++++++++++++++++++--
+ 2 files changed, 56 insertions(+), 4 deletions(-)
+
+diff --git a/nvda/addon/synthDrivers/_openevv.py b/nvda/addon/synthDrivers/_openevv.py
+index d262d89..1630b2f 100644
+--- a/nvda/addon/synthDrivers/_openevv.py
++++ b/nvda/addon/synthDrivers/_openevv.py
+@@ -462,6 +462,10 @@ class Engine:
+ 		self._pendingIndexes = []
+ 		self._discarding = False
+ 		self._produced = 0
++		#: Whether this utterance has audio in the player that may not have
++		#: played yet, for a mark with nothing of its own in front of it to
++		#: be hung on.
++		self._fedAudio = False
+ 		#: Whether the utterance in flight has already been reported
+ 		#: finished. Nothing is in flight to begin with.
+ 		self._finished = True
+@@ -982,6 +986,7 @@ class Engine:
+ 	def _resume(self):
+ 		self._held = bytearray()
+ 		self._pendingIndexes = []
++		self._fedAudio = False
+ 		self._discarding = False
+ 
+ 	# ---- the watchdog ------------------------------------------------
+@@ -1248,6 +1253,7 @@ class Engine:
+ 					self.player.feed(audio, onDone=lambda m=marks: self._report(m))
+ 				else:
+ 					self.player.feed(audio)
++				self._fedAudio = True
+ 			except Exception:  # noqa: BLE001
+ 				log.error("openevv: a buffer would not play", exc_info=True)
+ 				self._report(marks)
+@@ -1259,9 +1265,28 @@ class Engine:
+ 			# silences that buffer.
+ 			if self._discarding:
+ 				self.player.stop()
++		elif self._pendingIndexes and self._fedAudio:
++			# A mark with no audio of its own in front of it belongs where the
++			# audio already fed ends, and is reported when that has played, as
++			# NVDA's own SAPI 5 driver does with an empty feed. Reported at
++			# once, it would come before the mark ahead of it, which waits for
++			# that audio.
++			marks = self._pendingIndexes
++			self._pendingIndexes = []
++			self._enteringPlayer("feed")
++			try:
++				self.player.feed(None, 0, onDone=lambda m=marks: self._report(m))
++			except Exception:  # noqa: BLE001
++				log.error("openevv: a mark would not go to the player", exc_info=True)
++				self._report(marks)
++			finally:
++				self._leftPlayer()
+ 		else:
+-			# A mark with no audio in front of it still has to be reported, or
+-			# whatever is waiting on it waits for ever.
++			# Nothing of this utterance is waiting to play, so nothing is in
++			# front of the mark. Hung on the player all the same it would wait
++			# for audio that may never come -- a player stopped by a cancel runs
++			# no callback until it is fed again -- and a mark not reported
++			# leaves whatever is waiting on it waiting for ever.
+ 			self._reportIndexes()
+ 
+ 		# Waiting for the end of the audio has to happen whether or not there
+@@ -1276,6 +1301,7 @@ class Engine:
+ 				log.debugWarning("openevv: the player would not go idle", exc_info=True)
+ 			finally:
+ 				self._leftPlayer()
++				self._fedAudio = False
+ 
+ 	def _reportIndexes(self):
+ 		marks = self._pendingIndexes
+diff --git a/nvda/test/engine.py b/nvda/test/engine.py
+index f2f1d46..7c4e662 100644
+--- a/nvda/test/engine.py
++++ b/nvda/test/engine.py
+@@ -177,7 +177,9 @@ class FakePlayer:
+         self.paused = []
+ 
+     def feed(self, data, size=None, onDone=None):
+-        self.fed.append((bytes(data), onDone))
++        # None with a size of nought is a place in the audio and no audio,
++        # which is how a mark is hung on what was fed before it.
++        self.fed.append((b"" if data is None else bytes(data), onDone))
+         if onDone is not None:
+             onDone()
+ 
+@@ -854,7 +856,31 @@ def main():
+     utterance([lambda: waveform(50), lambda: index(1), lambda: index(2)])
+     check("two marks in a row both report", marks, [1, 2, None])
+     check("and only the audio that existed was sent",
+-          [len(a) for a, _ in player.fed], [100])
++          [len(a) for a, _ in player.fed if a], [100])
++
++    # A player that, like a real one, runs a callback only once the audio in
++    # front of it has played, which here is at the next idle.
++    later = []
++
++    def feedLater(data, size=None, onDone=None):
++        player.fed.append((b"" if data is None else bytes(data), onDone))
++        if onDone is not None:
++            later.append(onDone)
++
++    def idleLater():
++        player.idled += 1
++        while later:
++            later.pop(0)()
++
++    player.feed, player.idle = feedLater, idleLater
++    utterance([lambda: waveform(50), lambda: index(1), lambda: index(2),
++               lambda: waveform(20), lambda: index(3)])
++    check("two marks in a row are reported in order once their audio has played",
++          marks, [1, 2, 3, None])
++    utterance([lambda: index(4), lambda: waveform(20), lambda: index(5)])
++    check("and a mark before any audio is reported at once, ahead of the rest",
++          marks, [4, 5, None])
++    del player.feed, player.idle
+ 
+     idled = utterance([lambda: waveform(30), lambda: index(9)])
+     check("an utterance ending on a mark still waits before saying done", idled, 1)

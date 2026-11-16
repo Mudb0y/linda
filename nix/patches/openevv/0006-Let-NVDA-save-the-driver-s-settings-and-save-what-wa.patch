@@ -1,0 +1,142 @@
+From ece89c5bbf8b5b31cc679af110413c36c5ff7b38 Mon Sep 17 00:00:00 2001
+From: Mudb0y <stasprzecinek@gmail.com>
+Date: Mon, 16 Nov 2026 10:58:33 +0100
+Subject: [PATCH 6/8] Let NVDA save the driver's settings, and save what was
+ asked
+
+SynthDriver.__init__ never called NVDA's own, which is where AutoSettings
+puts the driver's saveSettings on config.pre_configSave, and terminate
+never called NVDA's Driver.terminate, which saves the settings and takes
+saveSettings off again. NVDA's settings ring and the voice dialog write
+what they change into the configuration themselves, so neither lost
+anything. Any other change made on the driver was never written down:
+by an add-on, by a script or from the Python console. In NVDA's process
+on Linux, a rate of 70 set on the driver left the configuration at 60
+through a configuration save, and a rate of 30 was not saved when the
+synthesiser was switched away. The same holds on Windows.
+
+__init__ now calls NVDA's first and terminate calls it last, once the
+engine has stopped, so that what is saved is what the engine's thread
+had applied, every setting it still had queued included.
+
+Saving by reading the settings back exposed the other half. A rate,
+pitch, volume or inflection is a control step that the engine takes
+once the utterance in flight is over, and until then it read back as
+it was. With saveSettings on the list, a configuration save during a
+long sentence wrote the old value over the one the ring had just
+written: changed from 9 to 60 while a sentence was playing and saved at
+once, the configuration said 9 afterwards. The driver now puts what was
+asked into voiceParams as it queues it, so the setting reads back as
+asked at once, and the same save keeps 60. The voice dialog's own save
+during speech had the same fault and is mended with it.
+
+nvda/test/sequence.py stands in for NVDA's two halves and holds the
+driver to calling both, in that order, and to reading a setting back
+as asked.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ nvda/addon/synthDrivers/_openevv.py |  7 ++++---
+ nvda/addon/synthDrivers/openevv.py  | 16 ++++++++++++++++
+ nvda/test/sequence.py               | 24 ++++++++++++++++++++++++
+ 3 files changed, 44 insertions(+), 3 deletions(-)
+
+diff --git a/nvda/addon/synthDrivers/_openevv.py b/nvda/addon/synthDrivers/_openevv.py
+index 1630b2f..8ec4b77 100644
+--- a/nvda/addon/synthDrivers/_openevv.py
++++ b/nvda/addon/synthDrivers/_openevv.py
+@@ -495,9 +495,10 @@ class Engine:
+ 		#: The eight presets of each language, read once on the way in.
+ 		self.voiceNamesByLanguage = {}
+ 		self.version = ""
+-		#: What each of the eight settings of the voice in force is, kept here
+-		#: so that the driver can answer a settings dialog without calling
+-		#: into the library from another thread.
++		#: What each of the eight settings of the voice in force is, or has
++		#: been asked to be, kept here so that the driver can answer a
++		#: settings dialog without calling into the library from another
++		#: thread.
+ 		self.voiceParams = {}
+ 		#: Where dictionaries are read from, in the order they are read.
+ 		self._dictionaryFolders = ()
+diff --git a/nvda/addon/synthDrivers/openevv.py b/nvda/addon/synthDrivers/openevv.py
+index ac0dcc4..e3bfccb 100644
+--- a/nvda/addon/synthDrivers/openevv.py
++++ b/nvda/addon/synthDrivers/openevv.py
+@@ -185,6 +185,11 @@ class SynthDriver(SynthDriver):
+ 		return os.path.isfile(_openevv.libraryPath())
+ 
+ 	def __init__(self):
++		# First, as NVDA's drivers are made: this is where NVDA puts the
++		# driver's saveSettings on the list run whenever the configuration is
++		# saved, and a setting changed on the driver rather than through the
++		# settings ring reaches the configuration in no other way.
++		super().__init__()
+ 		self._rateBoost = False
+ 		self._abbreviations = False
+ 		self._phrasePrediction = False
+@@ -199,6 +204,10 @@ class SynthDriver(SynthDriver):
+ 
+ 	def terminate(self):
+ 		self._engine.close()
++		# Last, so that what is saved is what the engine's thread had applied
++		# when it stopped, every setting it still had queued included. This
++		# also takes saveSettings back off the configuration's list.
++		super().terminate()
+ 
+ 	# ---- speaking ----------------------------------------------------
+ 
+@@ -743,4 +752,11 @@ class SynthDriver(SynthDriver):
+ 		# being cancelled -- which every keystroke does -- would otherwise be
+ 		# thrown away with the utterances, and the reader's choice would not
+ 		# take.
++		#
++		# The engine takes it once the utterance in flight is over, but it
++		# reads back as asked from now on. NVDA saves a driver's settings by
++		# reading them, and a save during a long sentence would otherwise
++		# write back what the reader had just changed away from.
++		lo, hi = _openevv.VOICE_RANGE[which]
++		self._engine.voiceParams[which] = max(lo, min(int(value), hi))
+ 		self._engine.control([(self._engine.setVoiceParam, (which, value))])
+diff --git a/nvda/test/sequence.py b/nvda/test/sequence.py
+index 1a16af3..7b315a8 100644
+--- a/nvda/test/sequence.py
++++ b/nvda/test/sequence.py
+@@ -102,6 +102,17 @@ class _SynthDriver:
+     so it is reproduced here rather than worked around.
+     """
+ 
++    def __init__(self):
++        # Where NVDA's AutoSettings puts saveSettings on the list of what runs
++        # when the configuration is saved.
++        self._savedOnConfigSave = True
++
++    def terminate(self):
++        # Where NVDA's Driver saves the settings, and takes saveSettings off
++        # that list again. What the engine had been asked by then is kept.
++        self._callsWhenSaved = list(self._engine.calls)
++        self._savedOnConfigSave = False
++
+     def __getattr__(self, name):
+         getter = self.__class__.__dict__.get("_get_" + name)
+         if getter is None:
+@@ -1021,6 +1032,19 @@ def main():
+ 
+     dictionary_checks()
+ 
++    # ---- NVDA's own part in making and ending a driver ----------------------
++    d = driver()
++    d.rate = 70
++    check("a setting reads back as asked before the engine has taken it",
++          d.rate, 70)
++    check("making the driver lets NVDA save its settings with the configuration",
++          getattr(d, "_savedOnConfigSave", False), True)
++    d.terminate()
++    check("ending it has NVDA save them once the engine has stopped",
++          getattr(d, "_callsWhenSaved", [None])[-1:], [("close",)])
++    check("and no longer with the configuration",
++          d._savedOnConfigSave, False)
++
+     if FAILED:
+         print("\nsequence: %d of the checks failed" % len(FAILED))
+         return 1

@@ -1,0 +1,76 @@
+From ef2c66fa27aecfef2927c5c58e75180fbb467f2d Mon Sep 17 00:00:00 2001
+From: Mudb0y <stasprzecinek@gmail.com>
+Date: Mon, 16 Nov 2026 10:52:42 +0100
+Subject: [PATCH 4/8] Stop the player again after a feed a cancel overtook
+
+The callback looks at _discarding and then feeds the player. A cancel
+from NVDA's thread between the two sets _discarding and stops the
+player, and the feed that follows finds a stopped player, finishes the
+stop and starts it again with the buffer it was given, as NVDA's
+WASAPI player is written to do. Up to 4096 bytes of the cancelled
+utterance, 186 ms at 11,025 Hz, then played after the reader had asked
+for silence, and the player was left running.
+
+The window is narrow and natural timing seldom hits it. Held open in
+NVDA's process on Linux, by stopping the engine's thread between the
+look and the feed and cancelling there, every one of 10 cancels was
+followed by 136 to 186 ms of the cancelled sentence. The player is the
+same on Windows, so the window is there too.
+
+After a feed, _flush now stops the player again if a cancel came
+meanwhile. A cancel that came first has made _discarding true before
+its own stop, so whichever way the two interleave the buffer is
+silenced, and with the window held open no more than a millisecond of
+it was heard in any of the 10. nvda/test/engine.py holds it with a
+player whose feed a cancel overtakes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ nvda/addon/synthDrivers/_openevv.py |  6 ++++++
+ nvda/test/engine.py                 | 16 ++++++++++++++++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/nvda/addon/synthDrivers/_openevv.py b/nvda/addon/synthDrivers/_openevv.py
+index 145a4bc..d262d89 100644
+--- a/nvda/addon/synthDrivers/_openevv.py
++++ b/nvda/addon/synthDrivers/_openevv.py
+@@ -1253,6 +1253,12 @@ class Engine:
+ 				self._report(marks)
+ 			finally:
+ 				self._leftPlayer()
++			# A cancel that came after the callback looked at _discarding and
++			# before this feed stopped the player first, and a feed after a stop
++			# starts it again with the buffer it is given. Stopping it once more
++			# silences that buffer.
++			if self._discarding:
++				self.player.stop()
+ 		else:
+ 			# A mark with no audio in front of it still has to be reported, or
+ 			# whatever is waiting on it waits for ever.
+diff --git a/nvda/test/engine.py b/nvda/test/engine.py
+index 4122a31..f2f1d46 100644
+--- a/nvda/test/engine.py
++++ b/nvda/test/engine.py
+@@ -872,6 +872,22 @@ def main():
+     engine._discarding = False
+     check("a cancel in the last wait is not followed by a done", marks, [11])
+ 
++    # A cancel between the callback's look at _discarding and its feed: the
++    # player was stopped before the buffer went in, and the feed started it
++    # again, so the buffer has to be stopped once it is in.
++    def feedOvertaken(data, size=None, onDone=None):
++        engine._discarding = True
++        FakePlayer.feed(player, data, size, onDone)
++
++    stopped = player.stopped
++    player.feed = feedOvertaken
++    pending[:] = [lambda: waveform(mod.FRAME)]
++    engine.synthesize()
++    del player.feed
++    engine._discarding = False
++    check("a buffer a cancel overtook is stopped once it is in",
++          player.stopped - stopped, 1)
++
+     # ---- cancelling, which is what crashed NVDA when it was done properly --
+ 
+     # cancel() is the one method meant to be called from another thread, and it

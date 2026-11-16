@@ -1,0 +1,242 @@
+From 146d26b269483a2bbe4079d080468943c4bce8ef Mon Sep 17 00:00:00 2001
+From: Mudb0y <stasprzecinek@gmail.com>
+Date: Mon, 16 Nov 2026 10:40:42 +0100
+Subject: [PATCH 2/8] Answer eciDataAbort once a cancel has asked for silence
+
+A cancel stopped the player and then had the callback answer
+eciDataProcessed and drop every buffer until the utterance was over, on
+the measurement that an abort waits for what that waits for. It does
+wait for the same thing, the rules finishing the utterance, but it does
+not make the samples, and making them was most of what a cancel cost.
+
+Every buffer of the rest of the utterance was made, raised to the rate
+in force and handed to Python, and in NVDA each of those calls waits for
+the GIL whenever NVDA's own thread is busy, which after a key press it
+is. Measured in NVDA's process on Linux, cancelling a 300-character
+sentence a quarter of a second in, the median time until the engine's
+thread could start the next utterance, over 20 cancels each, was with
+the drop and then with the abort:
+
+  11,025 Hz, NVDA's thread idle: 107 ms, and 34 ms
+  11,025 Hz, NVDA's thread busy for 50 ms after the cancel: 146 ms, and 50 ms
+  48 kHz, idle: 403 ms, and 69 ms
+  48 kHz, busy: 432 ms, and 79 ms
+
+The library alone, with no Python waiting, cut at a random buffer of the
+same sentence: 110 ms against 99 at 11,025 Hz and 345 against 81 at
+48 kHz. None of this is particular to Linux, so it holds on Windows too.
+
+The engine stayed whole through it. In 150 cuts at random buffers at
+each of the two rates, each followed by a whole utterance on the same
+instance, every follow-up had exactly the length and the marks of the
+same utterance spoken after discarding, and of the same one spoken by a
+fresh instance, and nothing faulted. What is not kept is the
+discarding's byte-identity: after an abort the follow-up's samples
+differ from the discarding one's by about a tenth of the signal's
+level, where two instances discarding in lockstep agree to the byte.
+The trace that once showed an abort leaving the synthesiser rules a bad
+depth needs a bytecode build, and was not repeated.
+
+The callback answers the abort for a mark as well as for samples, the
+comments at the top of the layer and on cancel and the callback say what
+it does now, and docs/api.md, using.md, quirks.md and windows.md no
+longer say the three ways of cancelling cost the same.
+nvda/test/engine.py holds the callback to the abort.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ docs/api.md                         |  4 +-
+ docs/quirks.md                      |  2 +-
+ docs/using.md                       |  2 +-
+ docs/windows.md                     |  4 +-
+ nvda/addon/synthDrivers/_openevv.py | 74 ++++++++++++-----------------
+ nvda/test/engine.py                 |  8 ++--
+ 6 files changed, 41 insertions(+), 53 deletions(-)
+
+diff --git a/docs/api.md b/docs/api.md
+index 696a784..1d2ee83 100644
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -148,7 +148,7 @@ What it answers matters more than it looks:
+ 
+ `eciDataNotProcessed` means "my buffer is full, offer them again", and the engine waits thirty milliseconds before doing so. A program that answers this to mean "throw them away" pays that wait on every buffer. This is IBM's behaviour and nothing in the interface warns of it.
+ 
+-`eciDataAbort` stops the engine handing over any more buffers. It does not make it abandon the utterance, and nothing does -- see the stopping section below.
++`eciDataAbort` stops the engine making and handing over any more of the utterance's samples. It does not make it abandon the utterance, and nothing does -- see the stopping section below.
+ 
+ ## Waiting and stopping
+ 
+@@ -162,7 +162,7 @@ What it answers matters more than it looks:
+ 
+ `eciStop` asks the engine to stop handing samples over. **It cannot make the engine abandon the utterance**, and that is settled rather than open: the rules build a shared structure as they go and later rules assume the earlier ones finished it, so there is no safe abandonment point anywhere in the machine. All of a cancel is waiting for the synthesis thread to finish the message it is on. What that costs was measured -- about 27 milliseconds with the rules compiled, about 86 interpreted -- and `docs/status.md` has the figures.
+ 
+-Because of that, all three ways of cancelling cost the same: letting the utterance finish and discarding it, answering `eciDataAbort`, and calling `eciStop`. Choose on convenience.
++Because of that, every way of cancelling waits for the rules to finish the utterance, but they do not all cost the same. Letting the utterance finish and discarding it, and calling `eciStop`, still have the engine make the rest of the utterance's samples and offer the callback every buffer; answering `eciDataAbort` does not. At 11,025 Hz that is a little; at the higher rates it is raising the rate of everything that was left; and to a callback that has to take a lock first, as Python's does, it is a wait for that lock on every buffer. Cutting a 300-character sentence at a random buffer on Linux, the engine came back after a median of 99 milliseconds answering the abort against 110 discarding at 11,025 Hz, and 81 against 345 at 48 kHz. A caller that cancels should answer `eciDataAbort`.
+ 
+ `eciStop` from a thread other than the one driving the engine is measured clean -- twenty-four turns on Linux and twenty-four under Wine, every one stopping an engine that was still delivering. One narrow window is left in the guard behind it and `docs/status.md` says which.
+ 
+diff --git a/docs/quirks.md b/docs/quirks.md
+index c9c334f..69db472 100644
+--- a/docs/quirks.md
++++ b/docs/quirks.md
+@@ -30,7 +30,7 @@ So judge by return values: nought means refused, and `eciSetParam` answers -1.
+ 
+ ## Nothing can make the engine abandon an utterance
+ 
+-`eciStop`, `eciDataAbort` and simply letting the utterance finish all cost the same, because all three wait for the same thing: the synthesis thread finishing the message it is on. All a stop does is stop more buffers being handed over.
++`eciStop`, `eciDataAbort` and simply letting the utterance finish all wait for the same thing: the synthesis thread finishing the message it is on. Answering `eciDataAbort` also stops the engine making the rest of the samples, which neither of the others does, so it is cheaper by the cost of that audio: little at 11,025 Hz, most of a cancel at 48 kHz.
+ 
+ This is settled rather than open. The rules build a shared structure as they go and later rules assume the earlier ones finished it, so abandoning a rule part way leaves that structure half built and a later rule faults on it. Six ways of adding an abandonment point were tried and all fail, and the reason is one thing rather than six. Making the machine interruptible would mean the rules checking their own inputs, which is the language and not a patch.
+ 
+diff --git a/docs/using.md b/docs/using.md
+index 95e44cd..84532b2 100644
+--- a/docs/using.md
++++ b/docs/using.md
+@@ -138,7 +138,7 @@ Two instances in one process is fine and is checked: `test/lib/langs.py` speaks
+ 
+ ## Cancelling
+ 
+-There are three ways and they cost the same, because all three wait for the same thing: `eciStop` from any thread, answering `eciDataAbort` from the callback, and simply letting the utterance finish and throwing the samples away.
++There are three ways and all three wait for the same thing: `eciStop` from any thread, answering `eciDataAbort` from the callback, and simply letting the utterance finish and throwing the samples away. Answering `eciDataAbort` is the cheapest, because it is the only one that stops the engine making the samples nobody will hear, and above 11,025 Hz making them is most of what a cancel costs.
+ 
+ The engine cannot abandon an utterance it has been told to stop. That is settled rather than open -- the rules build a shared structure as they go and later rules assume the earlier ones finished it, so there is no safe abandonment point in the machine, and six ways of adding one were tried and all fault. A stop waits for the synthesis thread to finish the message it is on.
+ 
+diff --git a/docs/windows.md b/docs/windows.md
+index 0797bc8..badce19 100644
+--- a/docs/windows.md
++++ b/docs/windows.md
+@@ -74,9 +74,9 @@ And nothing ever interrupts the engine, which wants explaining because it is not
+ 
+ Both of the ways the interface offers for cutting an utterance short used to fault. Answering `eciDataAbort` from the callback died on a null indirect call in `vinitloc_new`, which is what crashed NVDA the first time the add-on was asked for silence; calling `eciStop` while synthesis was running died on a null read of its own. e0cb1f8 fixed that, and the fix is confirmed on three platforms: `make interrupt` faults without it and passes with it on Linux, and the same test cross-compiled faults on turn one without it and survives twelve turns with it both under Wine and on a real Windows machine. For the stop door the before-and-after is a rate rather than a certainty, because it is a race: without the guard 12 of 12 runs faulted under Wine and 11 of 12 on real Windows, and with it 0 of 12 on real Windows -- but still 8 of 12 under Wine, whose scheduling evidently exposes something the real one does not reach.
+ 
+-That is why the add-on does not interrupt, and the reason has changed twice. Once it no longer crashed, interrupting went mute: from the second interruption on, the engine accepted text, answered no error and produced nothing, because a stop put back one of the queue's two counts and not the other. 6418df2 put back both, and every follow-up is a whole utterance now: `make interrupt` on Linux, under Wine and on a real Windows machine, and `make stopthread` on Linux and under Wine. The add-on goes on stopping by throwing samples away all the same, because an interrupt waits for what that waits for and so saves nothing anyone would hear -- see below for what the traced evidence says about leaving the engine alone.
++That is why the add-on does not interrupt, and the reason has changed twice. Once it no longer crashed, interrupting went mute: from the second interruption on, the engine accepted text, answered no error and produced nothing, because a stop put back one of the queue's two counts and not the other. 6418df2 put back both, and every follow-up is a whole utterance now: `make interrupt` on Linux, under Wine and on a real Windows machine, and `make stopthread` on Linux and under Wine. An interrupt waits for what throwing samples away waits for, the rules finishing the utterance, but it spares the engine making the samples, which at the higher sample rates is most of a cancel -- see below for what the traced evidence says about leaving the engine alone.
+ 
+-So the add-on stops by throwing the samples away: the callback goes on answering `eciDataProcessed` and simply drops what it is handed, the utterance finishes synthesising into nothing, and no engine state is touched. Stopping NVDA's wave player is what actually silences it. What that costs is the synthesis time of audio nobody hears, and synthesis runs some eighty times faster than speech, so throwing away eleven seconds of a sentence measures at about a seventh of a second under Wine. The next utterance is byte-identical to one spoken with no interruption at all, which is what says the engine was left alone.
++So the add-on stops NVDA's wave player, which is what actually silences it, and answers `eciDataAbort` from the callback until the utterance is over. Nothing is called on the engine from outside it, and its rules finish the utterance as they would have. Answering `eciDataProcessed` and dropping what it is handed instead leaves the engine exactly as an uninterrupted utterance does -- the next utterance is byte-identical to one spoken with no interruption at all -- but costs the synthesis time of audio nobody hears: about a seventh of a second for eleven seconds of a sentence under Wine, and at 48 kHz on Linux about four times what the abort costs. After an abort the next utterance is not byte-identical to one after discarding: it has the same length and its marks fall on the same samples, in 300 of 300 follow-ups on Linux at 11,025 Hz and 48 kHz, and the samples differ by about a tenth of the signal's level.
+ 
+ There is a second piece of evidence for that, taken with `DELTA_RULE_TRACE` set so the interpreter reports an argument area whose depth is not what the compiled code expected. Ten interruptions on one instance produce 154,253 such remarks across 520 different rules -- that diagnostic is ordinary background noise, which is why `tools/rules/check-c.sh` filters it out -- and *none at all* on `callInternalSynthesizer`, `callSynthesizeArray`, `sendArrayParameters` or `stopSynthesizing`. All 1,085 dispatches of the synthesiser rule ended the way an uninterrupted one does. A real abort put a bad depth on exactly those rules, so their silence here is the thing worth checking if this ever has to be revisited. It is not a routine check: tracing that run writes 269 MB.
+ 
+diff --git a/nvda/addon/synthDrivers/_openevv.py b/nvda/addon/synthDrivers/_openevv.py
+index 0821a2c..e05506e 100644
+--- a/nvda/addon/synthDrivers/_openevv.py
++++ b/nvda/addon/synthDrivers/_openevv.py
+@@ -12,29 +12,21 @@
+ # written to be entered from two threads at once. So every call goes through a
+ # queue to the thread made here.
+ #
+-# Nothing ever interrupts the engine, and that is not a workaround waiting to be
+-# replaced by something better. Cancelling stops the player and throws the
+-# samples away while the utterance finishes synthesising into nothing.
++# Nothing makes the engine abandon an utterance, and that is not a workaround
++# waiting to be replaced by something better. The reason is in the machine
++# rather than the interface, and docs/status.md has it: the language's rules
++# build a shared structure as they go and later rules assume the earlier ones
++# finished it, so there is no point at which a rule can be abandoned safely.
++# Letting the unit of work finish is the only safe stop. Six attempts at making
++# the engine abandon one are recorded there, including one that gave 459 rules
++# their own give-up tail and still faulted.
+ #
+-# There is no cheaper way, and this was settled by measurement rather than
+-# argument. All three routes the interface offers -- letting the utterance
+-# finish, answering eciDataAbort from the callback, and calling eciStop from
+-# the cancelling thread -- wait for the same thing, which is the utterance in
+-# flight finishing: answering the abort stops the engine handing over buffers
+-# without stopping it doing the work. After a cancel the engine runs straight
+-# through what is left at synthesis speed, so that synthesis is the whole of
+-# the cost.
+-#
+-# The reason is in the machine rather than the interface, and docs/status.md has
+-# it: the language's rules build a shared structure as they go and later rules
+-# assume the earlier ones finished it, so there is no point at which a rule can
+-# be abandoned safely. Letting the unit of work finish is the only safe stop.
+-# Six attempts at making the engine abandon one are recorded there, including
+-# one that gave 459 rules their own give-up tail and still faulted.
+-#
+-# So the cost is the engine's and not this file's. What reduces it is making the
+-# engine faster: building the language's rules as C rather than interpreting the
+-# bytecode cuts it by about two thirds.
++# What a cancel can spare is the audio. It stops the player and answers
++# eciDataAbort to the callback from then on, which stops the engine making the
++# rest of the utterance's samples while its rules run to the end. Those rules
++# are the whole of what is left to wait for, and what reduces that is making the
++# engine faster: building the language's rules as C rather than interpreting
++# the bytecode cuts it by about two thirds.
+ #
+ # Samples are held back until an index mark arrives, and then handed to the
+ # player with a callback attached. The engine flushes a short buffer of its own
+@@ -566,23 +558,19 @@ class Engine:
+ 	def cancel(self):
+ 		"""Stop now, and throw away what has not been spoken.
+ 
+-		Nothing here tells the engine anything, and that is the whole design.
+-		Both of the ways the interface offers to interrupt an utterance --
+-		answering eciDataAbort from the callback, and calling eciStop -- once
+-		faulted this engine, which is how the add-on crashed NVDA the first
+-		time it was asked for silence. Both are fixed, and neither would save
+-		anything: each waits for what this waits for.
+-
+-		So the samples are thrown away instead. The callback goes on answering
+-		normally and simply drops what it is handed, the utterance finishes
+-		synthesising into nothing, and the engine's state is never touched.
+-		What that costs is the synthesis time of the audio nobody will hear,
+-		and synthesis runs some eighty times faster than speech: throwing away
+-		eleven seconds of a sentence measures at about a seventh of a second.
+-
+ 		Stopping the player is what actually silences it, and it also unblocks
+-		the callback if it is waiting for room. Draining the queue drops the
+-		utterances that have not started yet.
++		the callback if it is waiting for room. From then on the callback
++		answers eciDataAbort, so the engine makes none of the utterance's
++		remaining samples, and the engine's thread is free again once the
++		rules have finished the utterance, which nothing can cut short.
++		Draining the queue drops the utterances that have not started yet.
++
++		Answering eciDataProcessed and dropping the samples would have the
++		engine produce every one of them: at 48 kHz that is raising the rate
++		of the whole rest of the utterance, most of a second after a long
++		sentence, and every buffer is a call into Python that waits for the
++		GIL whenever NVDA's own thread holds it. eciStop from this thread is
++		no cheaper than dropping them.
+ 		"""
+ 		self._discarding = True
+ 		if self.player is not None:
+@@ -1223,15 +1211,13 @@ class Engine:
+ 	def _message(self, handle, message, param, data):
+ 		"""What the engine hands over, and what becomes of it.
+ 
+-		The answer is always eciDataProcessed, even when the samples are being
+-		thrown away. eciDataAbort is what the interface offers for refusing the
+-		rest of an utterance, and it saves nothing over this, so it is never
+-		used -- see cancel. Nothing here changes any engine state, which is
+-		what makes interrupting safe.
++		Once a cancel has asked for silence the answer is eciDataAbort, which
++		stops the engine making the rest of the utterance's samples and calling
++		back with them -- see cancel. Otherwise it is eciDataProcessed.
+ 		"""
+ 		try:
+ 			if self._discarding:
+-				return DATA_PROCESSED
++				return DATA_ABORT
+ 			if message == MSG_WAVEFORM:
+ 				self._produced += param
+ 				self._held.extend(bytes(self._buffer)[: param * 2])
+diff --git a/nvda/test/engine.py b/nvda/test/engine.py
+index 4573723..1e192e9 100644
+--- a/nvda/test/engine.py
++++ b/nvda/test/engine.py
+@@ -883,9 +883,11 @@ def main():
+     engine._discarding = True
+     player.fed = []
+     marks.clear()
+-    check("the callback keeps answering normally rather than aborting",
+-          waveform(100), mod.DATA_PROCESSED)
+-    check("but nothing reaches the player", player.fed, [])
++    check("the callback answers abort, so the engine makes no more of the utterance",
++          waveform(100), mod.DATA_ABORT)
++    check("and a mark it reaches all the same is answered the same way",
++          index(3), mod.DATA_ABORT)
++    check("and nothing reaches the player", player.fed, [])
+ 
+     pending[:] = [lambda: waveform(200), lambda: index(5), lambda: waveform(200)]
+     engine.synthesize()

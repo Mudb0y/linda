@@ -1,0 +1,62 @@
+From 65e5bdab579d8de2179be5d3b6693d6921f92c28 Mon Sep 17 00:00:00 2001
+From: Mudb0y <stasprzecinek@gmail.com>
+Date: Mon, 16 Nov 2026 10:59:22 +0100
+Subject: [PATCH 7/8] Note a speech command the driver does not know at debug
+ level
+
+speak() logged an error for any command it has no use for, and NVDA
+plays its error sound for every error a test build logs, so a sequence
+carrying such a command -- a PhonemeCommand, say, which the driver does
+not list as supported but a caller can still pass -- interrupted the
+reader with that sound although the driver skipped the command and
+spoke the rest as it should. It is now a debugWarning. That is the same
+on Windows, where the error sound is played in the same builds.
+
+nvda/test/sequence.py holds the driver to skipping such a command and
+saying so quietly.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ nvda/addon/synthDrivers/openevv.py |  5 ++++-
+ nvda/test/sequence.py              | 12 ++++++++++++
+ 2 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/nvda/addon/synthDrivers/openevv.py b/nvda/addon/synthDrivers/openevv.py
+index e3bfccb..f31ac72 100644
+--- a/nvda/addon/synthDrivers/openevv.py
++++ b/nvda/addon/synthDrivers/openevv.py
+@@ -344,7 +344,10 @@ class SynthDriver(SynthDriver):
+ 					speaking = language
+ 					switched = True
+ 			else:
+-				log.error("openevv: unknown speech: %s" % item)
++				# Said quietly: an error plays NVDA's error sound in test builds,
++				# and a command the driver has no use for is skipped and the
++				# rest of the sequence spoken as it should be.
++				log.debugWarning("openevv: unknown speech: %s" % item)
+ 
+ 		flush()
+ 		if spelling:
+diff --git a/nvda/test/sequence.py b/nvda/test/sequence.py
+index 7b315a8..7b640ab 100644
+--- a/nvda/test/sequence.py
++++ b/nvda/test/sequence.py
+@@ -1032,6 +1032,18 @@ def main():
+ 
+     dictionary_checks()
+ 
++    # ---- a command the driver has no use for --------------------------------
++    class Unknown(_Command):
++        pass
++
++    d = driver()
++    del LOGGED["error"][:]
++    del LOGGED["debugWarning"][:]
++    check("a command the driver does not know is skipped",
++          stretches(spoken(d, ["Hello", Unknown(), " there."])), [b"Hello there."])
++    check("and noted quietly rather than as an error",
++          (len(LOGGED["error"]), len(LOGGED["debugWarning"])), (0, 1))
++
+     # ---- NVDA's own part in making and ending a driver ----------------------
+     d = driver()
+     d.rate = 70

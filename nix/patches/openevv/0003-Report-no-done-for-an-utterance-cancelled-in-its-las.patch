@@ -1,0 +1,70 @@
+From a38f9516568dc83bdcaf7a0434e4bb63df3b3d1d Mon Sep 17 00:00:00 2001
+From: Mudb0y <stasprzecinek@gmail.com>
+Date: Mon, 16 Nov 2026 10:49:33 +0100
+Subject: [PATCH 3/8] Report no done for an utterance cancelled in its last
+ wait
+
+The last flush of an utterance waits in player.idle() for the audio to
+play out. A cancel from NVDA's thread stops the player, which lets that
+wait go at once, and _speak then said the utterance had finished. NVDA
+was told done for speech it had just silenced: the speech manager pushes
+queued speech on a done when a profile trigger is pending, and a
+synchronous SSML speak ends on any done.
+
+It happened every time a cancel landed there, and the wait is the last
+200 to 400 ms of every utterance, more than half of a short one such as
+"OK button.". In NVDA's process on Linux, 30 cancels timed into that
+wait were followed by a done 30 times. The wait and the player are the
+same on Windows, so it happens there as well.
+
+_speak now reports the end only if no cancel came. After the fix none
+of the 30 was, and the next utterance still reports its own. The
+watchdog, which reports an utterance it abandons in that wait itself,
+is unaffected. nvda/test/engine.py holds it with a player that is
+cancelled while it idles.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ nvda/addon/synthDrivers/_openevv.py |  5 ++++-
+ nvda/test/engine.py                 | 12 ++++++++++++
+ 2 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/nvda/addon/synthDrivers/_openevv.py b/nvda/addon/synthDrivers/_openevv.py
+index e05506e..145a4bc 100644
+--- a/nvda/addon/synthDrivers/_openevv.py
++++ b/nvda/addon/synthDrivers/_openevv.py
+@@ -681,7 +681,10 @@ class Engine:
+ 		# by the next one; only the last waits for the player to run dry and
+ 		# says the utterance is over.
+ 		self._flush(last=last)
+-		if last:
++		# A cancel can land while the last flush waits for the player to run
++		# dry, and stopping the player ends that wait early. The utterance did
++		# not finish then either.
++		if last and not self._discarding:
+ 			self._finish()
+ 
+ 	def setParam(self, which, value):
+diff --git a/nvda/test/engine.py b/nvda/test/engine.py
+index 1e192e9..4122a31 100644
+--- a/nvda/test/engine.py
++++ b/nvda/test/engine.py
+@@ -860,6 +860,18 @@ def main():
+     check("an utterance ending on a mark still waits before saying done", idled, 1)
+     check("and reports the mark before the done", marks, [9, None])
+ 
++    # A cancel from NVDA's thread while this one waits in that last idle: the
++    # stopped player lets the wait go early, and nothing finished.
++    def idleCancelled():
++        player.idled += 1
++        engine._discarding = True
++
++    player.idle = idleCancelled
++    utterance([lambda: waveform(30), lambda: index(11)])
++    del player.idle
++    engine._discarding = False
++    check("a cancel in the last wait is not followed by a done", marks, [11])
++
+     # ---- cancelling, which is what crashed NVDA when it was done properly --
+ 
+     # cancel() is the one method meant to be called from another thread, and it
