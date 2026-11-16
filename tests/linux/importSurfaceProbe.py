@@ -54,6 +54,11 @@ def _record(kind: str, **fields: object) -> None:
 	events.append({"kind": kind, "pid": os.getpid(), **fields})
 
 
+def auditedSince(start: int) -> list[str]:
+	"""What each NoLinuxImplementation made since events held start entries names, raised or not."""
+	return [event["what"] for event in events[start:] if event["kind"] == "noLinuxImplementation"]
+
+
 def writeViolations() -> list[str]:
 	"""Each write under source/ or tests/unit this process tried, which harness.Checks refused."""
 	return [f"{event['event']} {event['path']}" for event in events if event["kind"] == "write"]
@@ -380,16 +385,9 @@ def runHazard(name: str) -> dict:
 
 		import comtypes
 		import comtypes.client
-		import linuxPlatform
 		from pycaw.utils import AudioUtilities
 
-		audited: list[str] = []
-
-		def onAudit(event: str, args: tuple) -> None:
-			if event == linuxPlatform.noLinuxImplementationEvent:
-				audited.append(args[0])
-
-		sys.addaudithook(onAudit)
+		start = len(events)
 		calls = {
 			"ctypes.windll.kernel32.GetTickCount()": lambda: ctypes.windll.kernel32.GetTickCount(),
 			"ctypes.oledll.ole32.CoInitialize(None)": lambda: ctypes.oledll.ole32.CoInitialize(None),
@@ -413,9 +411,8 @@ def runHazard(name: str) -> dict:
 		}
 		outcomes = {label: _outcome(call) for label, call in calls.items()}
 		callback = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_int)(lambda x: x * 2)
-		return {
+		found = {
 			"outcomes": outcomes,
-			"audited": audited,
 			"callbackIsCFuncPtr": isinstance(callback, ctypes._CFuncPtr),
 			"callbackResult": callback(21),
 			"truthiness": {
@@ -425,20 +422,14 @@ def runHazard(name: str) -> dict:
 			},
 			"privateAttribute": _outcome(lambda: ctypes.windll.user32._funcptr),
 		}
+		return {**found, "audited": auditedSince(start)}
 	if name == "standInSurface":
 		return _standInSurface()
 	if name == "replacedNames":
 		import IAccessibleHandler
-		import linuxPlatform
 		import UIAHandler
 
-		audited: list[str] = []
-
-		def onAudit(event: str, args: tuple) -> None:
-			if event == linuxPlatform.noLinuxImplementationEvent:
-				audited.append(args[0])
-
-		sys.addaudithook(onAudit)
+		start = len(events)
 
 		def fromImport() -> None:
 			from UIAHandler import getUIAUnitFromNVDAUnit  # noqa: F401
@@ -466,7 +457,7 @@ def runHazard(name: str) -> dict:
 			caughtAs = [
 				base.__name__ for base in (AttributeError, NotImplementedError) if isinstance(e, base)
 			]
-		return {"outcomes": outcomes, "audited": audited, "caughtAs": caughtAs}
+		return {"outcomes": outcomes, "audited": auditedSince(start), "caughtAs": caughtAs}
 	if name == "addonAppModules":
 		# App modules outside NVDA's own, as add-ons install them, that use a name the replacements lack
 		# when they are imported.
