@@ -196,7 +196,9 @@ def test_deliveryFollowsTheHookState(tmp_path: Path):
 			return record
 
 
-		winInputHook.setCallbacks(keyUp=callback("up", 1), keyDown=callback("down", 0), mouse=callback("mouse", []))
+		# Answers that are neither equal to the booleans nor booleans themselves, so that only a conversion
+		# to bool passes.
+		winInputHook.setCallbacks(keyUp=callback("up", "x"), keyDown=callback("down", []), mouse=callback("mouse", []))
 		result["answers"] = [inputHook.deliverKey(*KEY, False), inputHook.deliverKey(*KEY, True), inputHook.deliverMouse(*MOVE)]
 		result["calls"] = calls
 		winInputHook.terminate()
