@@ -94,6 +94,9 @@ source/appModules/nvda.py
   wx.Dialog is a dialog, whose text is read as on Windows, since wxGTK shows
   every wx dialog as a frame; a settings dialog's description is empty, as
   NvdaDialogEmptyDescription makes it on Windows
+  Once NVDA's exit has begun, focus and state changes in its own windows
+  are dropped, as asking GTK about a window being torn down, through NVDA's
+  own accessibility bridge, can hang the exit
 source/argsParsing.py
   Linux runtime: help goes to standard output and a command-line error to standard
   error with exit status 2, as argparse does, instead of a Windows message

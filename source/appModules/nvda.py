@@ -56,6 +56,7 @@ class NvdaDialogEmptyDescription(IAccessible):
 
 
 if sys.platform != "win32":
+	import core
 	import wx
 	from NVDAObjects import NVDAObject
 	from NVDAObjects.behaviors import Dialog
@@ -237,6 +238,10 @@ class AppModule(appModuleHandler.AppModule):
 			obj.name = buildVersion.name
 
 	def event_gainFocus(self, obj, nextHandler):
+		if sys.platform != "win32" and core._hasShutdownBeenTriggered:
+			# NVDA's windows are being torn down, and asking GTK about them, through NVDA's own
+			# accessibility bridge, can then hang the exit.
+			return
 		if obj.role == controlTypes.Role.UNKNOWN and controlTypes.State.INVISIBLE in obj.states:
 			return
 		if sys.platform != "win32" and gui._isNvdaMenuOpen and obj.role == controlTypes.Role.WINDOW:
