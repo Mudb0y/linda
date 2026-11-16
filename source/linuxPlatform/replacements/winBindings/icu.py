@@ -80,7 +80,14 @@ def __getattr__(name: str) -> NoReturn:
 	)
 
 
-def _bind(name: str, restype: type | None, *argtypes: type) -> Callable[..., Any]:
+def bindFunction(name: str, restype: type | None, *argtypes: type) -> Callable[..., Any]:
+	"""A function of the loaded libicuuc by its C name without the version suffix, typed as given.
+
+	Other Linux code that needs ICU binds through this, so that ICU is found one way only. Call it
+	only when :data:`ICU_AVAILABLE` is True.
+
+	:raises AttributeError: If the library has no such function.
+	"""
 	function = dll[f"{name}_{_versionMajor}"]
 	function.restype = restype
 	function.argtypes = argtypes
@@ -88,7 +95,7 @@ def _bind(name: str, restype: type | None, *argtypes: type) -> Callable[..., Any
 
 
 if ICU_AVAILABLE:
-	ubrk_open = _bind(
+	ubrk_open = bindFunction(
 		"ubrk_open",
 		c_void_p,
 		c_int32,  # kind: UBreakIteratorType
@@ -99,20 +106,20 @@ if ICU_AVAILABLE:
 	)
 	"""Create a new break iterator; it must be freed with ubrk_close."""
 
-	ubrk_close = _bind("ubrk_close", None, c_void_p)
+	ubrk_close = bindFunction("ubrk_close", None, c_void_p)
 	"""Free a break iterator created by ubrk_open."""
 
-	ubrk_preceding = _bind("ubrk_preceding", c_int32, c_void_p, c_int32)
+	ubrk_preceding = bindFunction("ubrk_preceding", c_int32, c_void_p, c_int32)
 	"""Return the largest boundary position strictly less than offset, and move there."""
 
-	ubrk_following = _bind("ubrk_following", c_int32, c_void_p, c_int32)
+	ubrk_following = bindFunction("ubrk_following", c_int32, c_void_p, c_int32)
 	"""Return the smallest boundary position strictly greater than offset, and move there.
 
 	Returns UBRK_DONE if past the end.
 	"""
 
-	ubrk_first = _bind("ubrk_first", c_int32, c_void_p)
+	ubrk_first = bindFunction("ubrk_first", c_int32, c_void_p)
 	"""Move to the first boundary, which is always 0, and return it."""
 
-	ubrk_next = _bind("ubrk_next", c_int32, c_void_p)
+	ubrk_next = bindFunction("ubrk_next", c_int32, c_void_p)
 	"""Move to the next boundary and return it, or UBRK_DONE after the last."""

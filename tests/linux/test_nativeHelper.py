@@ -146,6 +146,87 @@ def test_windowsLineEndingIsTwoCharacters(tmp_path: Path):
 	]
 
 
+def test_everyFormOfTextCountsUtf16Units(tmp_path: Path):
+	"""Upstream's callers pass a str, but its argtypes also take a c_wchar buffer or pointer, which
+	on Linux hold UTF-32 and are converted."""
+	text = "a\U0001f600 b\r\nc\U0001d11e"
+	done = harness.runChild(
+		tmp_path,
+		f"""
+		import ctypes
+		import NVDAHelper
+		from NVDAHelper import localLib
+		from linuxPlatform.utf16 import Utf16Buffer
+		text = {text!r}
+		length = len(text.encode("utf_16_le")) // 2
+		forms = {{
+			"str": lambda: text,
+			"wcharBuffer": lambda: ctypes.create_unicode_buffer(text),
+			"wcharPointer": lambda: ctypes.c_wchar_p(text),
+			"utf16Buffer": lambda: Utf16Buffer(text),
+		}}
+
+		def analyse(form):
+			offsets = (ctypes.c_int * (length + 1))()
+			count = ctypes.c_int()
+			localLib.calculateCharacterBoundaries(form(), length, offsets, ctypes.byref(count))
+			words = []
+			for offset in range(length):
+				start, end = ctypes.c_int(), ctypes.c_int()
+				localLib.calculateWordOffsets(form(), length, offset, ctypes.byref(start), ctypes.byref(end))
+				words.append([start.value, end.value])
+			# A length past the end of the text reads no further than the text.
+			overlong = ctypes.c_int(), ctypes.c_int()
+			localLib.calculateCharacterOffsets(form(), length + 5, length - 1, *map(ctypes.byref, overlong))
+			return {{
+				"boundaries": offsets[: count.value],
+				"words": words,
+				"overlong": [bound.value for bound in overlong],
+			}}
+
+		result = {{name: analyse(form) for name, form in forms.items()}}
+		result["noText"] = localLib.calculateCharacterOffsets(
+			ctypes.c_wchar_p(None), 3, 0, ctypes.byref(ctypes.c_int()), ctypes.byref(ctypes.c_int())
+		)
+		result["value"] = Utf16Buffer("x\U0001f600\\0y").value
+		""",
+	)
+	done.assertClean()
+	expected = {
+		"boundaries": [0, 1, 3, 4, 5, 6, 7, 8, 10],
+		# A letter and an emoji are separate words, and whitespace belongs to the word before it.
+		"words": [[0, 1]] + [[1, 4]] * 3 + [[4, 7]] * 3 + [[7, 8]] + [[8, 10]] * 2,
+		"overlong": [8, 10],
+	}
+	assert done.value.pop("noText") is False
+	assert done.value.pop("value") == "x\U0001f600"
+	assert done.value == {form: expected for form in ("str", "wcharBuffer", "wcharPointer", "utf16Buffer")}
+
+
+def test_sentenceOffsets(tmp_path: Path):
+	text = "Ein \U0001f600 Satz. Noch einer!  Ende"
+	done = harness.runChild(
+		tmp_path,
+		f"""
+		from textUtils import icu
+		text = {text!r}
+		length = len(text.encode("utf_16_le")) // 2
+		result = [list(icu.calculateSentenceOffsets(text, offset)) for offset in range(length + 2)]
+		""",
+	)
+	done.assertClean()
+	units = [utf16Length(text[:i]) for i in range(len(text) + 1)]
+	second, third = units[text.index("Noch")], units[text.index("Ende")]
+	length = utf16Length(text)
+	assert second == 13
+	assert done.value == (
+		[[0, second]] * second
+		+ [[second, third]] * (third - second)
+		+ [[third, length]] * (length - third)
+		+ [[length, length + 1], [length + 1, length + 2]]
+	)
+
+
 def test_wordOffsets(tmp_path: Path):
 	english = "The quick brown fox."
 	polish = "\U0001f600 Zażółć gęślą jaźń, źdźbło."
@@ -221,7 +302,9 @@ def test_icuLoadsFromTheDevShellAndTakesUtf16(tmp_path: Path):
 			refused = None
 		except ctypes.ArgumentError as e:
 			refused = str(e)
+		errorName = icu.bindFunction("u_errorName", ctypes.c_char_p, icu.UErrorCode)
 		result = {
+			"errorName": errorName(7).decode(),
 			"available": icu.ICU_AVAILABLE,
 			"path": icu.dll._name,
 			"expected": os.path.join(
@@ -234,6 +317,7 @@ def test_icuLoadsFromTheDevShellAndTakesUtf16(tmp_path: Path):
 	)
 	done.assertClean()
 	assert done.value["available"] is True
+	assert done.value["errorName"] == "U_MEMORY_ALLOCATION_ERROR"
 	assert done.value["path"] == done.value["expected"]
 	assert done.value["wideRefused"] is not None
 
@@ -403,6 +487,33 @@ def test_beepBufferMatchesUpstreamByteForByte(tmp_path: Path):
 	assert done.value[1][0] == (44100 + 100) * 4
 
 
+def test_beepRefusesABufferTooSmall(tmp_path: Path):
+	"""The C++ writes past the end of a short buffer; this refuses before writing anything."""
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import ctypes
+		import NVDAHelper
+		from NVDAHelper.localLib import generateBeep
+		size = generateBeep(None, 440, 50)
+		buf = ctypes.create_string_buffer(b"\\x7f" * (size - 1), size - 1)
+		try:
+			generateBeep(buf, 440, 50)
+			refused = None
+		except ValueError as e:
+			refused = str(e)
+		result = {"size": size, "refused": refused, "untouched": buf.raw == b"\\x7f" * (size - 1)}
+		""",
+	)
+	done.assertClean()
+	size = done.value["size"]
+	assert done.value == {
+		"size": size,
+		"refused": f"generateBeep needs {size} bytes, the buffer has {size - 1}",
+		"untouched": True,
+	}
+
+
 def test_brailleTranslationThroughLouisHelper(tmp_path: Path):
 	builtTables = ROOT / "source" / "louis" / "tables"
 	assert builtTables.is_dir(), "run tools/build-artifacts first"
@@ -494,6 +605,7 @@ def test_namesUpstreamHasAndLinuxLacksRaise(tmp_path: Path):
 				outcome(lambda: NVDAHelper._setDllFuncPointer),
 				outcome(lambda: NVDAHelper.localLib.dll),
 				outcome(lambda: icu.ucol_open),
+				outcome(NVDAHelper.getHelperLocalWin10Dll),
 			],
 			"fromImport": outcome(lambda: exec("from NVDAHelper.localLib import EXCEL_CELLINFO", {})),
 			"submodule": outcome(lambda: importlib.import_module("NVDAHelper.localWin10")),
@@ -511,6 +623,7 @@ def test_namesUpstreamHasAndLinuxLacksRaise(tmp_path: Path):
 			["NoLinuxImplementation", "NVDAHelper._setDllFuncPointer"],
 			["NoLinuxImplementation", "NVDAHelper.localLib.dll"],
 			["NoLinuxImplementation", "winBindings.icu.ucol_open"],
+			["NoLinuxImplementation", "NVDAHelper.getHelperLocalWin10Dll"],
 		],
 		"fromImport": ["NoLinuxImplementation", "NVDAHelper.localLib.EXCEL_CELLINFO"],
 		"submodule": ["ModuleNotFoundError"],
@@ -521,6 +634,7 @@ def test_namesUpstreamHasAndLinuxLacksRaise(tmp_path: Path):
 		"NVDAHelper._setDllFuncPointer",
 		"NVDAHelper.localLib.dll",
 		"winBindings.icu.ucol_open",
+		"NVDAHelper.getHelperLocalWin10Dll",
 		"NVDAHelper.localLib.EXCEL_CELLINFO",
 	]
 	assert not done.logErrors
