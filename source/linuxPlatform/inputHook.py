@@ -1,13 +1,13 @@
 """The Linux side of winInputHook: where keyboard and mouse capture starts, stops and delivers events.
 
 On Windows, winInputHook installs low-level hooks on a thread of its own, and the hooks call the
-callbacks that keyboardHandler and mouseHandler register through winInputHook.setCallbacks. On Linux
-a capture layer will take the hooks' place. It is started and stopped here, and it hands each event
-to deliverKey or deliverMouse, which call those same callbacks with the same arguments and return
-their answer, whether the event goes on to the rest of the system. What keyboardHandler asks of the
-live keyboard while it turns those events into gestures, the layout and the key states, is
-answered here too, by the capture layer once one exists. Until then initialize and terminate start
-and stop nothing, only tests deliver events, and what needs the live keyboard raises.
+callbacks that keyboardHandler and mouseHandler register through winInputHook.setCallbacks. Here
+deliverKey and deliverMouse take the hooks' place: whatever captures input hands each event to them,
+and they call those same callbacks with the same arguments and return their answer, whether the event
+goes on to the rest of the system. What keyboardHandler asks of the live keyboard while it turns
+those events into gestures, the layout and the key states, is asked here too. initialize and
+terminate count their callers and open no device, and nothing here reads the keyboard, so whatever
+needs the live layout or key states raises NoLinuxImplementation.
 """
 
 import string
@@ -17,8 +17,8 @@ from linuxPlatform import NoLinuxImplementation
 _refCount = 0
 
 #: Windows' SKF_ flags for the desktop's sticky keys setting, which keyboardHandler reads on each key
-#: press to decide whether the NVDA key latches. They are the capture layer's to report. Until one
-#: exists no real key reaches NVDA, so there is nothing to latch, and sticky keys reads as off.
+#: press to decide whether the NVDA key latches. Nothing here reads the desktop's setting, so sticky
+#: keys reads as off and the NVDA key never latches.
 stickyKeysFlags: int = 0
 
 
@@ -113,5 +113,5 @@ def getKeyState(vkCode: int) -> int:
 	:return: Bit 0 set while a toggle key is on, and bit 15 set while the key is held down.
 	"""
 	raise NoLinuxImplementation(
-		"keyboard state", f"the state of virtual key {vkCode:#x} is the capture layer's"
+		"keyboard state", f"the state of virtual key {vkCode:#x} needs the live keyboard"
 	)

@@ -1,9 +1,9 @@
 """Keyboard, mouse, touch and braille initialise, idle and terminate on Linux, touching no device.
 
-There is no keyboard capture and no braille display yet. What is held here is that each of these
-starts and stops cleanly, that keyboard gestures keep working as values, that whatever needs the
-live keyboard raises NoLinuxImplementation, and that synthetic key events handed to the seam a
-capture layer will use reach a script through inputCore. Run under the rig:
+What is held here is that each of these starts and stops cleanly, that keyboard gestures keep working
+as values, that whatever needs the live keyboard raises NoLinuxImplementation, and that synthetic key
+events handed to linuxPlatform.inputHook, which takes the place of the Windows hooks, reach a script
+through inputCore. Run under the rig:
 
 	nix develop . -c tests/linux/rig python3 -m pytest -p no:cacheprovider tests/linux/test_inputAtRest.py
 """
@@ -81,7 +81,7 @@ globalVars.focusAncestors = []
 import speech
 
 # Speech's state and the say all handler, which executing a gesture consults, without loading a
-# synthesizer, which is workstream C's.
+# synthesizer.
 speech.speechInitialize()
 speech.sayAllInitialize(speech.speak, speech.speakObject, speech.getTextInfoSpeech, speech.SpeakTextInfoState)
 """
@@ -525,7 +525,7 @@ SEAM_GAPS = {
 
 
 @pytest.mark.parametrize("gesture", SEAM_GAPS)
-def test_seamGapsWaitForTheCaptureLayer(tmp_path: Path, gesture: str):
+def test_seamGapsNeedTheLiveKeyboard(tmp_path: Path, gesture: str):
 	keys, missing = SEAM_GAPS[gesture]
 	done, value = run(
 		tmp_path,
@@ -556,7 +556,7 @@ def test_captureLayerAnswersCompleteTheSeam(tmp_path: Path):
 		BRACKET = (0xDB, 0x1A, False)
 
 
-		# What a capture layer will answer from the live layout and key states.
+		# Answers from a live layout and key states, as whatever captures the keyboard would give them.
 		def mapVirtualKeyToChar(vkCode):
 			return {0xDB: ord("["), 0xBE: ord(".")}.get(vkCode, 0)
 

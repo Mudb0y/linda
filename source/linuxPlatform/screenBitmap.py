@@ -1,4 +1,4 @@
-"""Screen capture for Linux, where screenBitmap's GDI capture has no counterpart yet."""
+"""The Linux stand-in for screenBitmap.ScreenBitmap, whose capture goes through GDI."""
 
 from typing import NoReturn
 

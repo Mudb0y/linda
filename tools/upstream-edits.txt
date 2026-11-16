@@ -341,8 +341,8 @@ source/winAPI/messageWindow.py
   CustomWindow's destroy() and nothing else
 source/winInputHook.py
   Linux runtime: initialize and terminate go to linuxPlatform.inputHook,
-  which installs no hook; a capture layer will deliver events there to the
-  callbacks set here
+  which installs no hook; its deliverKey and deliverMouse hand events to
+  the callbacks set here, as the hook procedures do on Windows
 source/winVersion.py
   every platform: winreg comes from linuxPlatform.windowsOnly, which on
   Windows is the real module.
