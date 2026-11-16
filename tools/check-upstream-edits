@@ -4,11 +4,13 @@
 # This fails when that list and the tree disagree.
 set -euo pipefail
 
+tools=$(cd "$(dirname "$0")" && pwd)
 cd "$(git rev-parse --show-toplevel)"
 ledger=tools/upstream-edits.txt
+base=$("$tools/upstream-ref")
 echo "checking edits to upstream files against $ledger"
 
-actual=$(git diff --no-renames --name-only --diff-filter=MD upstream -- . | sort)
+actual=$(git diff --no-renames --name-only --diff-filter=MD "$base" -- . | sort)
 listed=$(grep -E '^[^[:space:]#]' "$ledger" | sort)
 unlisted=$(comm -23 <(printf '%s\n' "$actual") <(printf '%s\n' "$listed"))
 stale=$(comm -13 <(printf '%s\n' "$actual") <(printf '%s\n' "$listed"))

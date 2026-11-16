@@ -12,7 +12,9 @@ tag=$1
 version=${tag#release-}
 url=https://github.com/nvaccess/nvda.git
 
+tools=$(cd "$(dirname "$0")" && pwd)
 cd "$(git rev-parse --show-toplevel)"
+base=$("$tools/upstream-ref")
 echo "importing NVDA $version from $url"
 
 scratch=$(mktemp -d)
@@ -28,7 +30,7 @@ snapshot=$(git -C "$scratch/nvda" commit-tree 'HEAD^{tree}' -m snapshot)
 git -C "$scratch/nvda" update-ref refs/heads/snapshot "$snapshot"
 git fetch --quiet "$scratch/nvda" snapshot
 
-new=$(git commit-tree 'FETCH_HEAD^{tree}' -p upstream \
+new=$(git commit-tree 'FETCH_HEAD^{tree}' -p "$base" \
 	-m "Import NVDA $version" \
 	-m "Pristine tree of upstream commit $commit, tag $tag of ${url%.git}.")
 git update-ref refs/heads/upstream "$new"

@@ -8,6 +8,7 @@ upstream's files are not all clean under every ruff release.
 	nix develop . -c python3 -m pytest -p no:cacheprovider tests/linux/test_ruff.py
 """
 
+import functools
 import json
 import shutil
 import subprocess
@@ -46,9 +47,23 @@ def editedUpstreamPythonFiles() -> list[str]:
 	return [path for path in listed if path.endswith(".py") and (ROOT / path).is_file()]
 
 
+@functools.cache
+def upstreamBase() -> str:
+	found = subprocess.run(
+		[ROOT / "tools" / "upstream-ref"],
+		capture_output=True,
+		text=True,
+		cwd=ROOT,
+		check=False,
+	)
+	if found.returncode != 0:
+		pytest.fail(found.stderr.strip(), pytrace=False)
+	return found.stdout.strip()
+
+
 def upstreamVersion(path: str) -> str:
 	return subprocess.run(
-		["git", "show", f"upstream:{path}"],
+		["git", "show", f"{upstreamBase()}:{path}"],
 		capture_output=True,
 		text=True,
 		cwd=ROOT,

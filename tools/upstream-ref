@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Prints the full name of the ref holding the pristine NVDA tree that main
+# merges from. The local branch wins, because after an import that has not
+# been pushed it is the only one that is right; a fresh clone has only the
+# remote-tracking branch. Never the bare name upstream: git would resolve that
+# to the HEAD of a remote called upstream, which by common convention is
+# NVDA's own repository, and every comparison would quietly use the wrong base.
+set -euo pipefail
+
+for ref in refs/heads/upstream refs/remotes/origin/upstream; do
+	if git rev-parse --verify -q "$ref^{commit}" >/dev/null; then
+		echo "$ref"
+		exit 0
+	fi
+done
+echo "upstream-ref: no upstream branch, neither local nor origin/upstream;" \
+	"fetch it with: git fetch origin upstream:upstream" >&2
+exit 1
