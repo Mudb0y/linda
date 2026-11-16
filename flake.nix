@@ -157,6 +157,11 @@
           # host's desktop.
           export BASEDREADER_RIG_PATH=''${PATH%"''${nix_saved_PATH:+:$nix_saved_PATH}"}
           export BASEDREADER_RIG_XDG_DATA_DIRS=''${XDG_DATA_DIRS%"''${nix_saved_XDG_DATA_DIRS:+:$nix_saved_XDG_DATA_DIRS}"}
+          # GTK's file and directory choosers abort without GSettings schemas
+          # for themselves, which the outputs on XDG_DATA_DIRS lack, and warn
+          # on standard error without hicolor, the icon theme every desktop
+          # falls back on.
+          BASEDREADER_RIG_XDG_DATA_DIRS=$GSETTINGS_SCHEMAS_PATH:${pkgs.hicolor-icon-theme}/share:$BASEDREADER_RIG_XDG_DATA_DIRS
         '';
       };
     };

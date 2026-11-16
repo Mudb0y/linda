@@ -95,29 +95,6 @@ def errorRecords(log: str) -> list[str]:
 	return _errorRecord.findall(log)
 
 
-def _gsettingsSchemaEnvironment() -> dict[str, str]:
-	"""XDG_DATA_DIRS with the GSettings schemas of the GTK libraries the dev shell provides.
-
-	GTK's file chooser aborts the process when it finds no schema for itself. The rig's data
-	directories hold the development outputs of these libraries, which have none; the outputs whose
-	typelibs are on GI_TYPELIB_PATH have them.
-	"""
-	directories = []
-	for typelibs in os.environ.get("GI_TYPELIB_PATH", "").split(os.pathsep):
-		share = Path(typelibs).parent.parent / "share"
-		directories += [str(path) for path in sorted(share.glob("gsettings-schemas/*")) if path.is_dir()]
-	return {"XDG_DATA_DIRS": os.pathsep.join([*directories, os.environ.get("XDG_DATA_DIRS", "")])}
-
-
-#: GTK's file chooser, finding no icon theme at all: the rig's data directories hold none, not even
-#: hicolor, the fallback every desktop has. Nothing NVDA says or does depends on the icons.
-_noIconTheme = re.compile(
-	r"\n?\(basedreader\.py:\d+\): Gtk-WARNING \*\*: [\d:.]+: Could not find the icon '[\w-]+'\. The "
-	r"'hicolor' theme\nwas not found either, perhaps you need to install it\.\nYou can get a copy from:\n"
-	r"\thttp://icon-theme\.freedesktop\.org/releases\n",
-)
-
-
 class Launch:
 	"""One run of the launcher, with its own log, transcript and record of NoLinuxImplementation."""
 
@@ -1046,14 +1023,12 @@ def test_exitsWithModalDialogsOpen(
 	answers: dict,
 	route: str,
 ):
-	isFileDialog = probe == "fileDialog"
-	env = _gsettingsSchemaEnvironment() if isFileDialog else None
-	nvda = launcher(probe, probe if route == "signal" else f"{probe}+exit", welcome=welcome, env=env)
+	nvda = launcher(probe, probe if route == "signal" else f"{probe}+exit", welcome=welcome)
 	nvda.waitForSentence(text=DIALOG_SENTENCE)
 	if route == "signal":
 		nvda.process.send_signal(signal.SIGTERM)
 	assert nvda.waitForExit(timeout=singleInstance.QUIT_TIMEOUT) == 0, nvda.describe()
-	nvda.assertClean(alsoAllowed=(_noIconTheme,) if isFileDialog else ())
+	nvda.assertClean()
 	assert nvda.answers() == answers
 	assert nvda.savedSetting() == CHANGED_SETTING[2]
 	assert "NVDA exit" in nvda.log()
