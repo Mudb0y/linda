@@ -133,6 +133,14 @@ tests.unit.test_synthDrivers.test_espeak.TestSynthDriver_Integration
   raises, tearDown never stops the patch, which then leaks into every later module. Running it
   would also load eSpeak as soon as the port gives the driver a Linux library, and the runner
   refuses that load.
+tests.unit.test_messageDialog.Test_MessageDialog_Sounds.test_playSoundWithTypeWithSound_0
+  Until message boxes have a sound on Linux: the test patches winsound.MessageBeep and expects an
+  error box to call it, but gui.message.MessageDialog._playSound plays nothing on Linux, where
+  winsound is a stand-in that raises and raising would leave the default button without focus.
+  A Linux sound, such as the desktop's event sound, is later work for workstream B2.
+tests.unit.test_messageDialog.Test_MessageDialog_Sounds.test_playSoundWithTypeWithSound_1
+  Until message boxes have a sound on Linux, for the reason given for
+  test_playSoundWithTypeWithSound_0 above; this is the warning box.
 tests.unit.test_remote.test_remoteClient.TestRemoteClient
   Until the remote client registers its nvdaremote:// URL handler on Linux: RemoteClient()
   calls urlHandler.registerURLHandler, which writes to the Windows registry and raises NameError
