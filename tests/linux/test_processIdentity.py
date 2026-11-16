@@ -33,15 +33,24 @@ def start(executable, *args, argv0=None):
 		stderr=subprocess.DEVNULL,
 	)
 	atexit.register(stop, process)
-	# Popen returns once exec is past the point of no return, which is before the kernel has given
-	# the new program its arguments; until then /proc shows the new executable with no command line.
-	deadline = time.monotonic() + 10
-	while time.monotonic() < deadline:
-		with open(f"/proc/{process.pid}/cmdline", "rb") as f:
-			if f.read():
-				break
+	# Popen returns once exec is past the point of no return, before the kernel has given the new
+	# program its arguments, and a program can exec another before it runs: the dev shell's python is a
+	# wrapper that execs the interpreter, and /proc shows no command line again while it does. Every
+	# program started here ends up sleeping, which only the final program does.
+	deadline = time.monotonic() + 60
+	while not sleeping(process.pid):
+		if process.poll() is not None or time.monotonic() > deadline:
+			raise TimeoutError(f"{executable} did not reach its sleep: {process.poll()}")
 		time.sleep(0.001)
 	return process
+
+def sleeping(pid):
+	with open(f"/proc/{pid}/stat", "rb") as f:
+		state = f.read().rpartition(b")")[2].split()[0]
+	with open(f"/proc/{pid}/wchan", encoding="ascii") as f:
+		where = f.read()
+	# The kernel hides where an undumpable process waits, as from anyone who may not trace it.
+	return state == b"S" and ("nanosleep" in where or where == "0")
 
 def stop(process):
 	if process.poll() is None:
