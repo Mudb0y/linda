@@ -10,6 +10,8 @@ import traceback
 from time import monotonic
 from typing import TextIO
 
+from linuxPlatform import xdg
+
 #: Written by faulthandler when the process dies of a fatal signal, beside the log.
 crashDumpFileName = "nvda_crash.log"
 #: The previous crash dump, kept until another crash replaces it.
@@ -32,11 +34,7 @@ def stateDirectory() -> str:
 
 	The log records every key typed at the input log levels, so the directory is the user's alone.
 	"""
-	stateHome = os.environ.get("XDG_STATE_HOME", "")
-	# The base directory specification says a relative value is invalid and must be ignored.
-	if not os.path.isabs(stateHome):
-		stateHome = os.path.join(os.path.expanduser("~"), ".local", "state")
-	path = os.path.join(stateHome, "basedreader")
+	path = os.path.join(xdg._baseDir("XDG_STATE_HOME", os.path.join(".local", "state")), xdg.appDirName)
 	try:
 		os.makedirs(path, mode=0o700, exist_ok=True)
 		info = os.stat(path)
