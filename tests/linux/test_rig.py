@@ -120,10 +120,31 @@ def test_liveResourceIsAbsent(path: str):
 	assert not os.path.lexists(path)
 
 
+def gitHistory() -> Path:
+	"""The git directory that holds the checkout's history, which the rig binds beside it: its own
+	.git, or for a worktree the .git of the repository the worktree belongs to."""
+	dotGit = ROOT / ".git"
+	if dotGit.is_dir():
+		return dotGit
+	gitDir = Path(dotGit.read_text(encoding="utf-8").removeprefix("gitdir:").strip())
+	common = gitDir / "commondir"
+	return (gitDir / common.read_text(encoding="utf-8").strip()).resolve() if common.exists() else gitDir
+
+
 def test_realHomeIsAbsent():
-	# The checkout is the one thing bound in from under a home directory.
-	visible = {str(path) for path in Path("/home").rglob("*") if not str(path).startswith(str(ROOT))}
-	assert visible <= {str(parent) for parent in ROOT.parents}, sorted(visible)[:10]
+	# The checkout and its history are all that is bound in from under a home directory.
+	bound = (ROOT, gitHistory())
+	visible = {
+		str(path)
+		for path in Path("/home").rglob("*")
+		if not any(path == top or top in path.parents for top in bound)
+	}
+	assert visible <= {str(parent) for top in bound for parent in top.parents}, sorted(visible)[:10]
+
+
+def test_historyIsReadOnly():
+	with pytest.raises(OSError):
+		(gitHistory() / "written-by-test_rig").write_text("", encoding="ascii")
 
 
 def test_runIsEmpty():
