@@ -561,26 +561,47 @@ def test_standInSurfaceNeverAnswers(tmp_path: Path):
 
 
 def test_replacedModulesAnswerMissingNamesLoudly(tmp_path: Path):
-	"""Kept code that reads a name the IAccessibleHandler or UIAHandler replacement lacks gets
-	NoLinuxImplementation, which NVDA reads as the feature being absent and the audit hook records,
-	not an AttributeError that nothing reports; special names stay AttributeError, as Python's own
-	probes of a module expect."""
+	"""Kept code that reads a name the IAccessibleHandler or UIAHandler replacement lacks gets an
+	exception that NVDA's NotImplementedError handlers read as the feature being absent and that the
+	audit hook records, and that is still the AttributeError, or for `from ... import` the
+	ImportError, that code testing for the name expects; special names raise a plain AttributeError,
+	as Python's own probes of a module expect."""
 	hazard = runProbe(tmp_path, "hazard", "replacedNames")["hazard"]
 	raised = {name: o["raised"] for name, o in hazard["outcomes"].items()}
 	assert raised == {
-		"IAccessibleHandler.NVDARoleFromAttr": "NoLinuxImplementation",
-		"UIAHandler.UIA_NativeWindowHandlePropertyId": "NoLinuxImplementation",
-		"from UIAHandler import getUIAUnitFromNVDAUnit": "NoLinuxImplementation",
+		"IAccessibleHandler.NVDARoleFromAttr": "NoLinuxAttribute",
+		"UIAHandler.UIA_NativeWindowHandlePropertyId": "NoLinuxAttribute",
+		"from UIAHandler import getUIAUnitFromNVDAUnit": "ImportError",
 		"UIAHandler.__wrapped__": "AttributeError",
 		"from IAccessibleHandler import *": None,
 		"IAccessibleHandler.RelationType": None,
 		"UIAHandler.handler": None,
+		"hasattr(UIAHandler, 'UIA')": None,
+		"getattr(IAccessibleHandler, 'IA2', None)": None,
 	}
-	assert hazard["audited"] == [
+	assert hazard["outcomes"]["hasattr(UIAHandler, 'UIA')"]["returned"] == "False"
+	assert hazard["outcomes"]["getattr(IAccessibleHandler, 'IA2', None)"]["returned"] == "None"
+	assert hazard["caughtAs"] == ["AttributeError", "NotImplementedError"]
+	# The import system reads a name more than once for `from package import name`.
+	assert list(dict.fromkeys(hazard["audited"])) == [
 		"IAccessibleHandler.NVDARoleFromAttr",
 		"UIAHandler.UIA_NativeWindowHandlePropertyId",
 		"UIAHandler.getUIAUnitFromNVDAUnit",
+		"UIAHandler.UIA",
+		"IAccessibleHandler.IA2",
+		"IAccessibleHandler.accFocus",
 	]
+
+
+def test_addonAppModuleUsingAMissingNameKeepsItsName(tmp_path: Path):
+	"""An add-on's app module that uses a name the replacements lack fails to import; working out the
+	application's name must still give the executable's name, as for any app module that fails to
+	import, and leave the failure for fetchAppModule to report."""
+	hazard = runProbe(tmp_path, "hazard", "addonAppModules")["hazard"]
+	assert hazard == {
+		"addonfromimport": {"raised": None, "returned": "'addonfromimport'"},
+		"addonattribute": {"raised": None, "returned": "'addonattribute'"},
+	}
 
 
 def test_uiaGuardsTakeTheLinuxBranch(tmp_path: Path):

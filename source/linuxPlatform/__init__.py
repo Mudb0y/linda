@@ -22,3 +22,18 @@ class NoLinuxImplementation(NotImplementedError):
 		super().__init__(message or f"{what} has no Linux implementation")
 		self.what = what
 		sys.audit(noLinuxImplementationEvent, what)
+
+
+class NoLinuxAttribute(NoLinuxImplementation, AttributeError):
+	"""Raised when code reads a name that a Linux replacement of an upstream module lacks.
+
+	Code written against upstream's module tests whether a name exists by catching AttributeError,
+	or the ImportError that `from module import name` makes of it, and hasattr and getattr with a
+	default do the same; add-on app modules import names this way inside such handlers. Those tests
+	go the way they go on Windows when the name is absent, while the audit event still records the
+	read and NotImplementedError handlers still read it as the feature being absent.
+	"""
+
+	def __init__(self, module: str, name: str):
+		super().__init__(f"{module}.{name}")
+		self.name = name

@@ -491,8 +491,46 @@ def runHazard(name: str) -> dict:
 			),
 			"IAccessibleHandler.RelationType": _outcome(lambda: IAccessibleHandler.RelationType.__name__),
 			"UIAHandler.handler": _outcome(lambda: UIAHandler.handler),
+			"hasattr(UIAHandler, 'UIA')": _outcome(lambda: hasattr(UIAHandler, "UIA")),
+			"getattr(IAccessibleHandler, 'IA2', None)": _outcome(
+				lambda: getattr(IAccessibleHandler, "IA2", None),
+			),
 		}
-		return {"outcomes": outcomes, "audited": audited}
+		try:
+			IAccessibleHandler.accFocus  # noqa: B018
+		except BaseException as e:  # noqa: BLE001
+			caughtAs = [
+				base.__name__ for base in (AttributeError, NotImplementedError) if isinstance(e, base)
+			]
+		return {"outcomes": outcomes, "audited": audited, "caughtAs": caughtAs}
+	if name == "addonAppModules":
+		# App modules outside NVDA's own, as add-ons install them, that use a name the replacements lack
+		# when they are imported.
+		import appModuleHandler
+		import appModules
+		from linuxPlatform import processes
+
+		addonDir = tempfile.mkdtemp(prefix="nvda-addon-")
+		sources = {
+			"addonfromimport": "from UIAHandler import UIA\n",
+			"addonattribute": "import IAccessibleHandler\nIA2 = IAccessibleHandler.IA2\n",
+		}
+		for moduleName, text in sources.items():
+			with open(os.path.join(addonDir, f"{moduleName}.py"), "w", encoding="utf-8") as f:
+				f.write(
+					f"import appModuleHandler\n{text}\nclass AppModule(appModuleHandler.AppModule):\n\tpass\n"
+				)
+		appModules.__path__.append(addonDir)
+		outcomes = {}
+		try:
+			for moduleName in sources:
+				processes.getAppName = lambda processID, moduleName=moduleName: moduleName
+				outcomes[moduleName] = _outcome(
+					lambda: appModuleHandler.getAppNameFromProcessID(os.getpid() + 1)
+				)
+		finally:
+			shutil.rmtree(addonDir, ignore_errors=True)
+		return outcomes
 	if name == "uiaGuards":
 		# Code that on Windows asks whether a TextInfo or tree interceptor is a UI Automation or
 		# Word one, which Linux never makes.
