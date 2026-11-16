@@ -2,17 +2,21 @@
 
 On Windows, winInputHook installs low-level hooks on a thread of its own, and the hooks call the
 callbacks that keyboardHandler and mouseHandler register through winInputHook.setCallbacks. Here
-deliverKey and deliverMouse take the hooks' place: whatever captures input hands each event to them,
-and they call those same callbacks with the same arguments and return their answer, whether the event
-goes on to the rest of the system. What keyboardHandler asks of the live keyboard while it turns
-those events into gestures, the layout and the key states, is asked here too. initialize and
-terminate count their callers and open no device, and nothing here reads the keyboard, so whatever
-needs the live layout or key states raises NoLinuxImplementation.
+deliverKey and deliverMouse take the hooks' place: the key source of linuxPlatform.keys hands each
+key event to them on its own thread, and they call those same callbacks with the same arguments.
+What keyboardHandler asks of the live keyboard while it turns those events into gestures, the layout
+and the key states, is asked of that source too. With no source, as when there is no X display or
+BASEDREADER_KEYS is off, nothing reads the keyboard, and whatever needs the live layout or key
+states raises NoLinuxImplementation.
 """
 
+import logging
+import re
 import string
+import threading
 
-from linuxPlatform import NoLinuxImplementation
+from linuxPlatform import NoLinuxImplementation, keys
+from linuxPlatform.keys import KeyEvent, KeySource
 
 _refCount = 0
 
@@ -21,21 +25,121 @@ _refCount = 0
 #: keys reads as off and the NVDA key never latches.
 stickyKeysFlags: int = 0
 
+VK_CAPITAL = 0x14
+VK_NONE = 0xFF
+KEYEVENTF_EXTENDEDKEY = 0x1
+KEYEVENTF_KEYUP = 0x2
+#: Seconds between looks at the configuration's NVDA keys and at whether input help is on.
+WATCH_INTERVAL = 0.05
+
+_source: KeySource | None = None
+_delivering = threading.local()
+_lastKeyDown: KeyEvent | None = None
+#: Whether keyboardHandler used the Caps Lock press now held as the NVDA key, so that the lock it
+#: toggled in the X server is put back when it is released.
+_capsLockUsedAsNVDAKey = False
+_watcher: threading.Thread | None = None
+_stopWatching = threading.Event()
+
 
 def initialize() -> None:
 	global _refCount
 	_refCount += 1
+	if _refCount == 1:
+		_startSource()
 
 
 def terminate() -> None:
 	global _refCount
 	if _refCount == 0:
 		raise RuntimeError("winInputHook not running")
+	if _refCount == 1:
+		_stopSource()
 	_refCount -= 1
 
 
 def isRunning() -> bool:
 	return _refCount > 0
+
+
+def _startSource() -> None:
+	global _source, _watcher
+	_installLogMask()
+	source = keys.createSource()
+	if source is None:
+		return
+	from logHandler import log
+
+	try:
+		source.start(_onKey)
+	except Exception:
+		log.warning("NVDA cannot read the keyboard from the X display", exc_info=True)
+		return
+	_source = source
+	_stopWatching.clear()
+	_watcher = threading.Thread(target=_watch, args=(source,), name="keyboardWatch", daemon=True)
+	_watcher.start()
+
+
+def _stopSource() -> None:
+	global _source, _watcher
+	if _source is None:
+		return
+	_stopWatching.set()
+	if _watcher is not None:
+		_watcher.join(1)
+		_watcher = None
+	source, _source = _source, None
+	source.stop()
+
+
+def _watch(source: KeySource) -> None:
+	"""Keep the keys the source takes in step with the configuration, which the settings dialog, the
+	welcome dialog and profile switches all change, and hold the keyboard while input help is on, so
+	that the keys it describes do nothing.
+
+	A thread of its own, so that the keyboard is let go during watchdog recovery even when the main
+	thread is frozen."""
+	import config
+	import inputCore
+	import watchdog
+
+	nvdaKeys = None
+	held = False
+	while True:
+		wanted = config.conf["keyboard"]["NVDAModifierKeys"]
+		if wanted != nvdaKeys:
+			source.setConsumed(wanted, numpadReview=True)
+			nvdaKeys = wanted
+		manager = inputCore.manager
+		hold = bool(manager and manager.isInputHelpActive) and not watchdog.isAttemptingRecovery
+		if hold != held:
+			source.holdKeyboard(hold)
+			held = hold
+		if _stopWatching.wait(WATCH_INTERVAL):
+			break
+	if held:
+		source.holdKeyboard(False)
+
+
+def _onKey(event: KeyEvent) -> None:
+	"""Called by the key source for each key, on its thread."""
+	global _lastKeyDown, _capsLockUsedAsNVDAKey
+	if not event.isUp:
+		_lastKeyDown = event
+	_delivering.event = event
+	try:
+		passed = deliverKey(event.vkCode, event.scanCode, event.extended, event.injected, event.isUp)
+	finally:
+		_delivering.event = None
+	if event.vkCode == VK_CAPITAL and not event.reachedApplication and _source is not None:
+		if not event.isUp and not event.repeat:
+			_capsLockUsedAsNVDAKey = not passed
+		elif event.isUp and _capsLockUsedAsNVDAKey:
+			# The X server toggles the lock whatever the grab does, and the key was the NVDA key.
+			_capsLockUsedAsNVDAKey = False
+			_source.inject(VK_CAPITAL, 0x3A, False, False)
+			_source.inject(VK_CAPITAL, 0x3A, False, True)
 
 
 def deliverKey(vkCode: int, scanCode: int, extended: bool, injected: bool, isUp: bool) -> bool:
@@ -74,20 +178,55 @@ def deliverMouse(msg: int, x: int, y: int, injected: bool) -> bool:
 	return bool(winInputHook.mouseCallback(msg, x, y, injected))
 
 
+def deliveringKey() -> KeyEvent | None:
+	"""The key event being delivered on this thread, if any."""
+	return getattr(_delivering, "event", None)
+
+
+def isDeliveringToApplication() -> bool:
+	"""Whether the key being delivered on this thread also reached the application.
+
+	A gesture made from it then has nothing to send on: the application already has the key."""
+	event = deliveringKey()
+	return event is not None and event.reachedApplication
+
+
+def lastKeyDown() -> KeyEvent | None:
+	"""The last key pressed, as the key source delivered it."""
+	return _lastKeyDown
+
+
+def keybdEvent(vk: int, scan: int, flags: int, extraInfo: int) -> None:
+	"""Send a key as winUser.keybd_event does."""
+	if vk == VK_NONE:
+		# Windows sends it so that an application sees Alt or Windows was not pressed alone; no X key
+		# has this code, and X applications open no menu on Alt alone.
+		return
+	if _source is None:
+		raise NoLinuxImplementation("key injection", "sending a key needs the X display")
+	_source.inject(vk, scan, bool(flags & KEYEVENTF_EXTENDEDKEY), bool(flags & KEYEVENTF_KEYUP))
+
+
 def vkKeyScan(char: str) -> tuple[int, int]:
 	"""The modifiers and virtual-key code that type char, as winUser.VkKeyScanEx returns them.
 
 	Windows defines the virtual-key codes of the letters A to Z as their upper case ASCII codes on
 	every layout, and on Latin layouts a lower case letter takes no modifier and an upper case one
-	takes shift. Any other character, digits included, which take shift on French layouts, depends on
-	the layout in use, which nothing here reads.
+	takes shift; with no key source, that is the answer for them. Any other character depends on the
+	layout in use.
 
 	:return: The modifiers as VkKeyScanEx's high byte gives them, 1 being shift, and the virtual-key code.
 	"""
+	if _source is not None:
+		try:
+			return _source.vkForChar(char)
+		except LookupError:
+			pass
 	if len(char) == 1 and char in string.ascii_letters:
 		return int(char.isupper()), ord(char.upper())
 	raise NoLinuxImplementation(
-		"keyboard layout lookup", f"which key types {char!r} depends on the keyboard layout"
+		"keyboard layout lookup",
+		f"which key types {char!r} depends on the keyboard layout",
 	)
 
 
@@ -99,19 +238,63 @@ def mapVirtualKeyToChar(vkCode: int) -> int:
 
 	:return: The character's code, with the top bit of 32 set for a dead key, or 0 if it types none.
 	"""
+	if _source is not None:
+		return _source.charForVk(vkCode)
 	raise NoLinuxImplementation(
-		"keyboard layout lookup", f"what virtual key {vkCode:#x} types depends on the keyboard layout"
+		"keyboard layout lookup",
+		f"what virtual key {vkCode:#x} types depends on the keyboard layout",
 	)
 
 
 def getKeyState(vkCode: int) -> int:
 	"""The state of a key, as winUser.getKeyState returns it.
 
-	keyboardHandler reads whether num lock is on for every press of a numpad operator key, since
-	those keys have the same virtual-key code whether it is on or off.
-
 	:return: Bit 0 set while a toggle key is on, and bit 15 set while the key is held down.
 	"""
+	if _source is not None:
+		return _source.keyState(vkCode)
 	raise NoLinuxImplementation(
-		"keyboard state", f"the state of virtual key {vkCode:#x} needs the live keyboard"
+		"keyboard state",
+		f"the state of virtual key {vkCode:#x} needs the live keyboard",
 	)
+
+
+def getKeyNameText(scanCode: int, extended: bool) -> str:
+	"""A name for the key at this position, as winUser.getKeyNameText gives it."""
+	if _source is not None:
+		return _source.keyName(scanCode, extended)
+	raise NoLinuxImplementation("key names", "naming a key by its position needs the live keyboard")
+
+
+#: An "Input:" record of inputCore, split into what stays and the key names.
+_INPUT_RECORD = re.compile(r"^(Input: kb(?:\([^)]*\))?:)(.*)$", re.DOTALL)
+#: Modifiers that make a chord a command, which is logged by name.
+_COMMAND_MODIFIERS = frozenset(("nvda", "control", "alt", "windows"))
+
+
+class _TypedKeyMask(logging.Filter):
+	"""Hides, in inputCore's "Input:" records, keys that typed text."""
+
+	def filter(self, record: logging.LogRecord) -> bool:
+		if not keys.MASK_TYPED_KEYS_IN_LOG or not isinstance(record.msg, str):
+			return True
+		match = _INPUT_RECORD.match(record.msg)
+		event = deliveringKey()
+		if match is None or event is None or not event.typing:
+			return True
+		names = match.group(2).split("+")
+		if any(name.lower() in _COMMAND_MODIFIERS for name in names[:-1]):
+			return True
+		record.msg = f"{match.group(1)}(typing key)"
+		record.args = ()
+		return True
+
+
+_typedKeyMask = _TypedKeyMask()
+
+
+def _installLogMask() -> None:
+	from logHandler import log
+
+	if _typedKeyMask not in log.filters:
+		log.addFilter(_typedKeyMask)
