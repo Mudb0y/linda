@@ -1,15 +1,19 @@
 """openevv's NVDA driver, loaded from its own directory, speaking through NVDA into the capture sink.
 
 The driver is not part of this tree. It lives in openevv's source, and a build lays it out in a
-directory of its own with the engine library beside it, which BASEDREADER_OPENEVV_DRIVER_DIR names.
-Every test but the first needs that directory and is skipped without it. Run under the rig:
+directory of its own with the engine library beside it, which BASEDREADER_OPENEVV_DRIVER_DIR names:
+openevv.py, _openevv.py and _openevv_dictionaries.py from openevv's nvda/addon/synthDrivers with the
+series in nix/patches/openevv applied, and openevv_engine/libeci.so.1. Every test but the first
+needs that directory and is skipped without it. Run under the rig, which sees a directory outside the
+checkout and the Nix store only when it is passed with --bind:
 
-	nix develop .#voice -c tests/linux/rig python3 -m pytest tests/linux/test_openevv.py
+	export BASEDREADER_OPENEVV_DRIVER_DIR=DIR
+	nix develop -c tests/linux/rig --bind DIR python3 -m pytest tests/linux/test_openevv.py
 
 The tests of cancelling, marks and settings each drive the case a driver of this shape gets wrong:
 a cancel landing in the last wait for the player, a cancel landing between the engine callback's
-check for one and its feed, two marks with no audio between them, a mark alone after a cancel, and a
-setting made on the driver rather than through NVDA's settings ring.
+check for one and what it does with a buffer or a mark, two marks with no audio between them, a mark
+alone after a cancel, and a setting made on the driver rather than through NVDA's settings ring.
 """
 
 import os
@@ -24,8 +28,10 @@ DRIVER_DIR_VARIABLE = "BASEDREADER_OPENEVV_DRIVER_DIR"
 needsDriver = pytest.mark.skipif(
 	not os.environ.get(DRIVER_DIR_VARIABLE),
 	reason=(
-		f"{DRIVER_DIR_VARIABLE} is unset. The voice shell sets it to openevv's built driver directory: "
-		"nix develop .#voice -c tests/linux/rig python3 -m pytest tests/linux/test_openevv.py"
+		f"{DRIVER_DIR_VARIABLE} is unset. Set it to a directory holding openevv's three driver files with "
+		"nix/patches/openevv applied, beside openevv_engine/libeci.so.1, and pass it to the rig: "
+		f"nix develop -c env {DRIVER_DIR_VARIABLE}=DIR tests/linux/rig --bind DIR "
+		"python3 -m pytest tests/linux/test_openevv.py"
 	),
 )
 
