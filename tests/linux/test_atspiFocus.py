@@ -80,7 +80,8 @@ def _windowManagerIsAlive() -> bool:
 @pytest.fixture(scope="module", autouse=True)
 def windowManager(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
 	"""One marco for every test here, unless the rig started one: a DesktopSession takes the
-	properties a marco it stopped left on the root window for a running one, and starts none."""
+	properties a marco it stopped left on the root window for a running one, and starts none. This
+	one's are removed once it stops."""
 	if _windowManagerIsAlive():
 		yield
 		return
@@ -100,6 +101,9 @@ def windowManager(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
 		except subprocess.TimeoutExpired:
 			marco.kill()
 			marco.wait()
+		# So that the next DesktopSession starts a window manager of its own.
+		for name in ("_NET_SUPPORTING_WM_CHECK", "_NET_NUMBER_OF_DESKTOPS"):
+			subprocess.run(["xprop", "-root", "-remove", name], check=False)
 
 
 @pytest.fixture
