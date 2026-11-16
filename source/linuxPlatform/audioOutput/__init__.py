@@ -170,7 +170,12 @@ class SinkStream(ABC):
 
 	@abstractmethod
 	def close(self) -> None:
-		"""Stop and release the stream. Nothing else is called on it afterwards."""
+		"""Stop and release the stream. Nothing else is called on it afterwards.
+
+		The collector can call this, through nvwave.WavePlayer.__del__, on a thread that is inside a
+		method of the sink or of this stream, so it must not wait for a lock that such a call could be
+		holding.
+		"""
 
 
 class Sink(ABC):

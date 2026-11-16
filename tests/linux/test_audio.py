@@ -2221,6 +2221,80 @@ def test_deliveredFramesCountWhatReachedAnOutput(tmp_path: Path):
 	assert counts["whilePlaying"] <= counts["afterStop"] == counts["atEnd"] == keptFrames < 800 + 8000
 
 
+def test_aCollectionInsideTheCaptureSinksLocksDoesNotHang(tmp_path: Path):
+	"""A player that only the collector frees is collected at an allocation made while the capture
+	sink, or the stream itself, holds its lock, on the thread asking for the delivered frames: the
+	close that the collection runs must not wait for that thread, and what was heard still reaches
+	the files and the count."""
+	captureDir = tmp_path / "capture"
+	captureDir.mkdir()
+	value = runAudio(
+		tmp_path,
+		"""
+		from linuxPlatform import audioOutput
+
+		class CollectingLock:
+			# Sets a collection off just after the lock is taken, once armed.
+			def __init__(self, lock):
+				self.lock = lock
+				self.armed = False
+
+			def acquire(self, *args, **kwargs):
+				taken = self.lock.acquire(*args, **kwargs)
+				if taken and self.armed:
+					self.armed = False
+					gc.collect()
+				return taken
+
+			def release(self):
+				self.lock.release()
+
+			def __enter__(self):
+				self.acquire()
+				return self
+
+			def __exit__(self, *exc):
+				self.release()
+
+		sink = audioOutput.getSink()
+		outcomes = {}
+		for holder in ("sink", "stream"):
+			# Only the collection the lock sets off may free the player.
+			gc.disable()
+			player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+			player.enableTrimmingLeadingSilence(False)
+			player.feed(bytes(1600))  # 100 ms
+			time.sleep(0.05)
+			handle = player._player
+			stream = wasapi._players[handle]._stream
+			player.cycle = player
+			del player
+			owner = sink if holder == "sink" else stream
+			lock = owner._lock = CollectingLock(owner._lock)
+			lock.armed = True
+			asker = threading.Thread(target=sink.deliveredFrames, daemon=True)
+			asker.start()
+			asker.join(5)
+			outcomes[holder] = {
+				"hung": asker.is_alive(),
+				"destroyed": handle not in wasapi._players,
+				"closed": stream._closed,
+			}
+			gc.enable()
+			if asker.is_alive():
+				break
+			owner._lock = lock.lock
+		result = {"outcomes": outcomes, "delivered": sink.deliveredFrames()}
+		""",
+		captureDir=captureDir,
+	)
+	expected = {"hung": False, "destroyed": True, "closed": True}
+	assert value["outcomes"] == {"sink": expected, "stream": expected}
+	kept = sum(len(f["frames"]) // 2 for f in captured(captureDir))
+	# At least the 50 ms of each that had been heard before the collection.
+	assert value["delivered"] == kept >= 2 * 400
+
+
 def test_duckingReportsUnsupported(tmp_path: Path):
 	value = runAudio(
 		tmp_path,

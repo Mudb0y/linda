@@ -5,16 +5,18 @@ closed, goes to its own file, <stretch number>-stream<stream number>.wav, number
 stretches began. A frame goes to the file only once the clock says it has been heard, at the gain
 it was heard at, so audio discarded by stopping never appears, and a stretch stopped before any of
 it was heard leaves no file and a gap in the numbering. Whatever was heard is in the files by the
-time stop or abort returns.
+time stop or abort returns. close never waits: what was heard is in the files by the time it
+returns, or, when another call into the stream was under way, by the time that call returns.
 """
 
+import contextlib
 import errno
 import itertools
 import os
 import threading
 import wave
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 from linuxPlatform import NoLinuxImplementation
 
@@ -34,7 +36,29 @@ class CaptureStream(NullStream):
 		self._heardFrames = 0
 		self._stretchNumber: int | None = None
 		self._file: wave.Wave_write | None = None
+		# Set by close for whichever thread next has the lock to finish.
+		self._isClosing = False
 		self._closed = False
+
+	@contextlib.contextmanager
+	def _locked(self) -> Iterator[None]:
+		self._lock.acquire()
+		try:
+			yield
+		finally:
+			self._lock.release()
+			self._finishClosing()
+
+	def _finishClosing(self) -> None:
+		# close sets the flag and then tries the lock; a holder lets go and then looks at the flag. So
+		# either close gets the lock or the holder sees the flag.
+		if self._isClosing and not self._closed and self._lock.acquire(blocking=False):
+			try:
+				if not self._closed:
+					self._endStretch()
+					self._closed = True
+			finally:
+				self._lock.release()
 
 	def _keepHeard(self) -> None:
 		heard = self._taken()
@@ -54,7 +78,7 @@ class CaptureStream(NullStream):
 
 	def keepHeard(self) -> None:
 		"""Write out everything heard so far."""
-		with self._lock:
+		with self._locked():
 			if not self._closed:
 				self._keepHeard()
 
@@ -68,24 +92,24 @@ class CaptureStream(NullStream):
 			self._file = None
 
 	def write(self, data: bytes) -> None:
-		with self._lock:
+		with self._locked():
 			if self._stretchNumber is None:
 				self._stretchNumber = self._sink._nextStretchNumber()
 			super().write(data)
 			self._unheard += data
 
 	def bufferedFrames(self) -> int:
-		with self._lock:
+		with self._locked():
 			self._keepHeard()
 			return super().bufferedFrames()
 
 	def playedFrames(self) -> int:
-		with self._lock:
+		with self._locked():
 			self._keepHeard()
 			return super().playedFrames()
 
 	def start(self) -> None:
-		with self._lock:
+		with self._locked():
 			super().start()
 
 	def stop(self) -> None:
@@ -99,21 +123,21 @@ class CaptureStream(NullStream):
 		self.keepHeard()
 
 	def reset(self) -> None:
-		with self._lock:
+		with self._locked():
 			self._endStretch()
 			super().reset()
 
 	def setChannelVolume(self, channel: int, level: float) -> None:
-		with self._lock:
+		with self._locked():
 			self._keepHeard()
 			super().setChannelVolume(channel, level)
 
 	def close(self) -> None:
-		self._sink._forget(self)
-		with self._lock:
-			super().close()
-			self._endStretch()
-			self._closed = True
+		# Stops the clock now, and leaves writing out what was heard to whoever holds the lock, which
+		# can be this very thread when the collector closes the stream from inside one of its methods.
+		super().stop()
+		self._isClosing = True
+		self._finishClosing()
 
 
 class CaptureSink(NullSink):
@@ -125,7 +149,9 @@ class CaptureSink(NullSink):
 			raise NotADirectoryError(errno.ENOTDIR, "the audio capture directory does not exist", directory)
 		self.directory = directory
 		self.description = f"capture sink: audio is timed as a device would play it and kept in {directory}"
-		self._lock = threading.Lock()
+		# Reentrant, because a collection set off by an allocation made under it can close a stream,
+		# which counts what that stream delivered.
+		self._lock = threading.RLock()
 		self._streamNumbers = itertools.count(1)
 		self._stretchNumbers = itertools.count(1)
 		self._streams: weakref.WeakSet[CaptureStream] = weakref.WeakSet()
@@ -149,10 +175,6 @@ class CaptureSink(NullSink):
 	def _openStreams(self) -> list[CaptureStream]:
 		with self._lock:
 			return list(self._streams)
-
-	def _forget(self, stream: CaptureStream) -> None:
-		with self._lock:
-			self._streams.discard(stream)
 
 	def setGain(self, level: float) -> None:
 		checkGain(level)
