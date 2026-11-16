@@ -300,9 +300,6 @@ source/textUtils/uniscribe.py
   linuxPlatform.utf16.Utf16Buffer, for the same reason as textUtils/icu.py
   every platform: Windows calls create_unicode_buffer, as before, through
   the name _createUtf16Buffer
-source/touchHandler.py
-  Linux runtime: touchSupported() is False, as nothing reads touch input on
-  Linux yet
 source/utils/_deprecate.py
   every platform: _getCallerModule takes the caller's
   frame from sys._getframe instead of inspect.stack(), which read the source
