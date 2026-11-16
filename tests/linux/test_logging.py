@@ -300,6 +300,93 @@ def test_errorWhileSoundThreadStartsDoesNotHang(tmp_path: Path):
 	assert sorted(done.logErrors) == ["ERROR: first error", "ERROR: logged while the sound thread starts"]
 
 
+def test_errorSoundRequestsStopBeforeTheExitSound(tmp_path: Path):
+	done = harness.runChild(
+		tmp_path,
+		startLog(tmp_path / "nvda.log")
+		+ """
+		import threading
+		import time
+		import config
+		from linuxPlatform import logSupport
+
+		config.conf["featureFlag"]["playErrorSound"] = 1
+		plays = []
+		inPlayer = threading.Event()
+
+		def playerThatTakesAMoment():
+			inPlayer.set()
+			plays.append("error sound starting")
+			# Long enough that, without the wait, the exit sound would start in the middle.
+			time.sleep(0.3)
+			plays.append("error sound started")
+
+		logHandler.getOnErrorSoundRequested().register(playerThatTakesAMoment)
+		# Logged in the last steps of shutdown, as when a module fails to terminate.
+		log.error("late error")
+		inPlayer.wait(60)
+		logSupport.stopErrorSoundRequests(timeout=60)
+		plays.append("exit sound")
+		log.error("logged after the requests stopped")
+		result = {
+			"plays": plays,
+			"threads": [thread.name for thread in threading.enumerate()],
+		}
+		""",
+	)
+	assert done.error is None, done.error
+	assert done.logErrors == ["ERROR: late error", "ERROR: logged after the requests stopped"]
+	assert done.value["plays"] == ["error sound starting", "error sound started", "exit sound"]
+	assert "logHandler.errorSound" not in done.value["threads"]
+
+
+def test_stoppingErrorSoundRequestsDropsOneNotYetMadeAndNeverWaitsLong(tmp_path: Path):
+	done = harness.runChild(
+		tmp_path,
+		startLog(tmp_path / "nvda.log")
+		+ """
+		import threading
+		import config
+		from linuxPlatform import logSupport
+
+		config.conf["featureFlag"]["playErrorSound"] = 1
+		calls = []
+		entered = threading.Event()
+		release = threading.Event()
+
+		def stuckPlayer():
+			calls.append("stuck")
+			entered.set()
+			release.wait(60)
+
+		logHandler.getOnErrorSoundRequested().register(stuckPlayer)
+		# Stopping before any error was logged starts nothing and lets nothing start later.
+		logSupport.stopErrorSoundRequests()
+		log.error("logged after the requests stopped")
+		neverStarted = {
+			"calls": list(calls),
+			"thread": logSupport._errorSound._thread is not None,
+		}
+		logSupport._errorSound = logSupport._ErrorSoundRequester()
+		log.error("asks for the stuck player")
+		entered.wait(60)
+		logSupport.stopErrorSoundRequests(timeout=0.2)
+		# The wait is bounded: it returned while the player was still stuck.
+		stuck = {"released": release.is_set(), "thread": logSupport._errorSound._thread.is_alive()}
+		release.set()
+		logSupport._errorSound._thread.join(60)
+		result = {"neverStarted": neverStarted, "stuck": stuck, "calls": calls}
+		""",
+	)
+	assert done.error is None, done.error
+	assert done.logErrors == ["ERROR: logged after the requests stopped", "ERROR: asks for the stuck player"]
+	assert done.value == {
+		"neverStarted": {"calls": [], "thread": False},
+		"stuck": {"released": False, "thread": True},
+		"calls": ["stuck"],
+	}
+
+
 def test_noSoundThreadWhenSoundIsOff(tmp_path: Path):
 	done = harness.runChild(
 		tmp_path,

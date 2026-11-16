@@ -21,6 +21,8 @@ ERROR_SOUND_FOLLOW_WINDOW = 1.0
 ERROR_SOUND_FOLLOW_LIMIT = 3
 #: Once stopped, the sound is requested again only after this many seconds without an error.
 ERROR_SOUND_QUIET_PERIOD = 5.0
+#: The longest stopErrorSoundRequests waits for a request already under way.
+ERROR_SOUND_STOP_TIMEOUT = 1.0
 
 _crashDumpFile: TextIO | None = None
 
@@ -104,9 +106,10 @@ class _ErrorSoundRequester:
 		self._lastErrorAt = float("-inf")
 		self._following = 0
 		self._stopped = False
+		self._closed = False
 
 	def request(self) -> None:
-		if threading.current_thread() is self._thread:
+		if self._closed or threading.current_thread() is self._thread:
 			return
 		now = monotonic()
 		quietFor = now - self._lastErrorAt
@@ -146,6 +149,8 @@ class _ErrorSoundRequester:
 		while True:
 			self._pending.wait()
 			self._pending.clear()
+			if self._closed:
+				return
 			if monotonic() - self._handledAt <= ERROR_SOUND_FOLLOW_WINDOW:
 				self._following += 1
 			else:
@@ -166,6 +171,18 @@ class _ErrorSoundRequester:
 				self._handling = False
 				self._handledAt = monotonic()
 
+	def close(self, timeout: float) -> None:
+		"""Ask for nothing more, and wait up to timeout seconds for a request under way to finish.
+
+		The wait is bounded because the request may be stuck in a player.
+		"""
+		self._closed = True
+		thread = self._thread
+		if thread is None or thread is threading.current_thread():
+			return
+		self._pending.set()
+		thread.join(timeout)
+
 
 _errorSound = _ErrorSoundRequester()
 
@@ -173,6 +190,17 @@ _errorSound = _ErrorSoundRequester()
 def requestErrorSound() -> None:
 	"""Ask for the error sound without blocking the caller and without recursing."""
 	_errorSound.request()
+
+
+def stopErrorSoundRequests(timeout: float = ERROR_SOUND_STOP_TIMEOUT) -> None:
+	"""Have errors ask for no sound from now on, once a request already under way has finished.
+
+	Call it before the exit sound. nvwave plays one file at a time through a single global player,
+	and the sound for an error logged late in shutdown is asked for a moment later on the requester's
+	own thread, where it can start in the middle of the exit sound and cut it off. Upstream asks on
+	the logging thread, so there the error sound has always started first and the exit sound stops it.
+	"""
+	_errorSound.close(timeout)
 
 
 def _openCrashDump(directory: str) -> TextIO:
