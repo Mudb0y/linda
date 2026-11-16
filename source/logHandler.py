@@ -338,8 +338,7 @@ class Logger(logging.Logger):
 		Normally, it will be logged at level "ERROR".
 		However, certain exceptions which aren't considered errors (or aren't errors that we can fix) are expected and will therefore be logged at a lower level.
 		"""
-		if sys.platform == "win32":
-			import comtypes
+		import comtypes
 
 		if exc_info is True:
 			exc_info = sys.exc_info()
@@ -362,8 +361,7 @@ class Logger(logging.Logger):
 				)
 			)
 			or (
-				sys.platform == "win32"
-				and isinstance(exc, comtypes.COMError)
+				isinstance(exc, comtypes.COMError)
 				and (
 					exc.hresult
 					in (

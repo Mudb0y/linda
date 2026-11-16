@@ -218,8 +218,8 @@ source/languageHandler.py
   the code page only names a Windows C runtime locale, which Linux never sets
 source/logHandler.py
   Linux runtime: the time comes from logging's own formatTime, not Win32
-  time conversion; log.exception reads comtypes only on Windows; a record
-  that cannot be written is reported on the real standard error, since sys.stderr is
+  time conversion; a record that cannot be written is reported on the real
+  standard error, since sys.stderr is
   redirected into the log and the report would fail again without end; the
   default log is under XDG_STATE_HOME/basedreader; log files are created
   readable by the user alone, since the log can record every key typed; the

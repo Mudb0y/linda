@@ -79,18 +79,13 @@ def test_exceptionWithOSError(tmp_path: Path):
 		tmp_path,
 		startLog(tmp_path / "nvda.log")
 		+ """
-		import sys
+		import comtypes
 		import exceptions
 
-		standIn = sys.modules.pop("comtypes")
 		try:
-			try:
-				open("/nonexistent/basedreader-test")
-			except OSError:
-				log.exception("plain OSError")
-			comtypesImported = "comtypes" in sys.modules
-		finally:
-			sys.modules["comtypes"] = standIn
+			open("/nonexistent/basedreader-test")
+		except OSError:
+			log.exception("plain OSError")
 		try:
 			raise WindowsError(None, "timed out", None, 1460)
 		except OSError:
@@ -99,19 +94,27 @@ def test_exceptionWithOSError(tmp_path: Path):
 			raise exceptions.CallCancelled()
 		except exceptions.CallCancelled:
 			log.exception("cancelled call")
-		result = {"log": logText(), "comtypesImported": comtypesImported}
+		try:
+			raise comtypes.COMError(logHandler.E_ACCESSDENIED, "access denied", None)
+		except comtypes.COMError:
+			log.exception("COM access denied")
+		try:
+			raise comtypes.COMError(-2147467259, "unspecified failure", None)
+		except comtypes.COMError:
+			log.exception("COM failure")
+		result = {"log": logText()}
 		""",
 	)
 	assert done.error is None, done.error
 	assert not done.noLinuxImplementation, done.noLinuxImplementation
-	assert done.logErrors == ["ERROR: plain OSError"]
-	assert done.value["comtypesImported"] is False
+	assert done.logErrors == ["ERROR: plain OSError", "ERROR: COM failure"]
 	text = done.value["log"]
 	assert re.search(r"^ERROR - .*\nplain OSError\nTraceback", text, re.MULTILINE), text
 	assert "FileNotFoundError: [Errno 2]" in text
 	# Upstream's expected errors are logged below ERROR, as on Windows.
 	assert re.search(r"^DEBUGWARNING - .*\nWindows timeout\n", text, re.MULTILINE), text
 	assert re.search(r"^DEBUGWARNING - .*\ncancelled call\n", text, re.MULTILINE), text
+	assert re.search(r"^DEBUGWARNING - .*\nCOM access denied\n", text, re.MULTILINE), text
 
 
 def test_failingHandlerDoesNotRecurse(tmp_path: Path):
