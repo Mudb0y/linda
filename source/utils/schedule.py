@@ -6,7 +6,6 @@
 from datetime import datetime  # noqa: I001
 from enum import Enum, auto
 import threading
-import time
 from collections.abc import Callable
 
 import schedule
@@ -85,7 +84,9 @@ class ScheduleThread(threading.Thread):
 	def run(cls):
 		while not cls.KILL.is_set():
 			schedule.run_pending()
-			time.sleep(cls.SLEEP_INTERVAL_SECS)
+			# Waiting on KILL rather than sleeping lets terminate() join this thread at once, instead of
+			# holding up NVDA's exit for the rest of the interval.
+			cls.KILL.wait(cls.SLEEP_INTERVAL_SECS)
 
 	def _calculateDailyTimeOffset(self) -> str:
 		startTime = datetime.fromtimestamp(NVDAState.getStartTime())  # noqa: DTZ006

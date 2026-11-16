@@ -159,7 +159,13 @@ source/gui/message.py
   Windows' system sounds through winsound.MessageBeep and Linux has no
   sound set NVDA plays yet; raising there would also stop the dialog's show
   handler before it focuses the default button. Every error and warning
-  message box, the configuration error at start-up among them, plays one
+  message box, the configuration error at start-up among them, plays one.
+  On every platform, wx.html2 is imported in
+  HtmlMessageDialog._createMessageControl rather than with the module, and
+  _webViewBackend holds wx.html2.WebViewBackendIE's value written out, with
+  the two annotations naming wx.html2 quoted: on GTK the extension links
+  WebKitGTK, GStreamer and PulseAudio, which every start loaded although
+  nothing makes a WebView until an HTML message is shown
 source/hwIo/__init__.py
   Linux runtime: the background I/O thread is linuxPlatform.ioThread's
   subclass of upstream's, which waits on a condition rather than in an
@@ -284,11 +290,23 @@ source/textUtils/uniscribe.py
 source/touchHandler.py
   Linux runtime: touchSupported() is False, as nothing reads touch input on
   Linux yet
+source/utils/_deprecate.py
+  start-up time, on every platform: _getCallerModule takes the caller's
+  frame from sys._getframe instead of inspect.stack(), which read the source
+  of every frame on the stack and searched sys.modules for each frame's
+  module; with the deep import stacks of start-up that cost over a second
+  of every start. The frame it returns is the same. Worth offering upstream
 source/utils/mmdevice.py
   output devices, workstream A5: on Linux getOutputDevices lists the
   devices of the audio sink in linuxPlatform.audioOutput instead of
   enumerating Windows endpoints through pycaw. The null and capture sinks
   have none, so the default device is the only choice
+source/utils/schedule.py
+  exit time, on every platform: ScheduleThread waits on its KILL event
+  between runs instead of sleeping, so terminate() joins it at once rather
+  than holding up every exit and restart for the rest of a half-second
+  sleep. Jobs run as before, missed ones still not caught up. Worth offering
+  upstream
 source/utils/security.py
   Linux: isRunningOnSecureDesktop() is True only in a display manager's
   login screen session, the counterpart of the secure desktop, as

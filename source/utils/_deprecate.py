@@ -5,7 +5,6 @@
 
 """Utilities for handling deprecations in NVDA's public API."""
 
-import inspect
 import sys
 from abc import ABC, abstractmethod, abstractproperty
 from collections.abc import Callable
@@ -146,7 +145,9 @@ def _getCallerModule(level: int = 0) -> ModuleType:
 		This can be used if calling from a helper function to skip the stack frame created by the helper.
 	:return: The module from which this function was called.
 	"""
-	moduleName = inspect.stack()[level + 1].frame.f_globals["__name__"]
+	# Not inspect.stack(), which reads the source of every frame and searches sys.modules for each frame's
+	# module: during start-up, with deep import stacks, that made each call cost tens of milliseconds.
+	moduleName = sys._getframe(level + 1).f_globals["__name__"]
 	return sys.modules[moduleName]
 
 

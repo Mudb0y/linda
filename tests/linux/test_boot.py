@@ -362,6 +362,78 @@ def test_recordSeesNoLinuxImplementationThatUpstreamCaught(tmp_path: Path):
 	assert "GetForegroundWindow()" in stack[-2]
 
 
+def test_findingTheCallersModuleReadsNoSource(tmp_path: Path):
+	# Every module with deprecated names asks this as it is imported, deep in an import stack; reading
+	# the source of each frame on that stack cost more than a second of every start.
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import linecache
+		import sys
+		import types
+
+		module = types.ModuleType("deprecationProbe")
+		sys.modules[module.__name__] = module
+		linecache.clearcache()
+		code = "from utils import _deprecate\\ncaller = _deprecate._getCallerModule()\\n"
+		exec(compile(code, "<deprecationProbe>", "exec"), module.__dict__)
+		result = [module.caller.__name__, sorted(linecache.cache)]
+		""",
+		prepare="bootstrap",
+	)
+	done.assertClean()
+	assert done.value == ["deprecationProbe", []]
+
+
+def test_taskSchedulerStopsAtOnce(tmp_path: Path):
+	# NVDA's exit joins this thread, so anything it waits for delays every exit and restart.
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import time
+		from utils import schedule
+
+		schedule.initialize()
+		time.sleep(0.05)
+		started = time.monotonic()
+		schedule.terminate()
+		result = [time.monotonic() - started, schedule.ScheduleThread.SLEEP_INTERVAL_SECS]
+		""",
+		prepare="bootstrap",
+	)
+	done.assertClean()
+	took, interval = done.value
+	assert took < interval / 2
+
+
+def test_guiLeavesWebKitUnloaded(tmp_path: Path):
+	# wx.html2's extension links WebKitGTK, which brings GStreamer, PulseAudio and a speech
+	# synthesiser into the process; nothing needs it until an HTML message is shown.
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import sys
+
+		# In the order NVDA's own imports reach gui; importing it first is circular.
+		import appModuleHandler
+		import gui
+
+		def mapped() -> list[str]:
+			with open("/proc/self/maps", encoding="utf-8") as f:
+				names = {line.split()[-1].rsplit("/", 1)[-1] for line in f if "/" in line}
+			prefixes = ("libwebkit", "libjavascriptcore", "libgst", "libpulse")
+			return sorted(name for name in names if name.startswith(prefixes))
+
+		before = [mapped(), "wx.html2" in sys.modules]
+		import wx.html2
+
+		result = [*before, gui.message.HtmlMessageDialog._webViewBackend == wx.html2.WebViewBackendIE]
+		""",
+	)
+	done.assertClean()
+	assert done.value == [[], False, True]
+
+
 def test_restartKeepsInterpreterOptions():
 	script = "/nvda/source/basedreader.py"
 	origArgv = ["/bin/python3", "-I", "-B", "-X", "dev", script, "-c", script, "--debug-logging"]
