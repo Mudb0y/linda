@@ -7,8 +7,14 @@
   # brings in. Move it when upstream moves that pin; tests/linux/test_ruff.py
   # fails until the two agree.
   inputs.nixpkgs-ruff.url = "github:NixOS/nixpkgs/8b7dc2ca50dd99ca3af5af1436b06b5adb1e54c9";
+  # openevv's source, for its engine library and its NVDA driver. The local
+  # clone, because its newest commits are not published.
+  inputs.openevv = {
+    url = "git+file:///home/stas/Projects/openevv";
+    flake = false;
+  };
 
-  outputs = { self, nixpkgs, nixpkgs-ruff }:
+  outputs = { self, nixpkgs, nixpkgs-ruff, openevv }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
@@ -59,6 +65,21 @@
       louisTables = pkgs.callPackage ./nix/louis-tables.nix { };
       nvdaCldr = pkgs.callPackage ./nix/nvda-cldr.nix { };
 
+      # What git describe says of the locked revision, which a flake input
+      # does not record; evaluation stops until it is set again for a new one.
+      openevvVersion = "0.7-5-gaaebca3";
+      openevvLibeci =
+        assert lib.hasSuffix openevv.shortRev openevvVersion;
+        pkgs.callPackage ./nix/openevv-libeci.nix {
+          src = builtins.path { name = "src"; path = openevv; };
+          version = openevvVersion;
+        };
+      openevvDriver = pkgs.callPackage ./nix/openevv-driver.nix {
+        src = openevv;
+        version = openevvVersion;
+        libeci = openevvLibeci;
+      };
+
       bench = pkgs.rustPlatform.buildRustPackage {
         pname = "basedreader-bench";
         inherit ((lib.importTOML ./engine/Cargo.toml).workspace.package) version;
@@ -88,6 +109,8 @@
         louis-tables = louisTables;
         nvda-cldr = nvdaCldr;
         basedreader-bench = bench;
+        openevv-libeci = openevvLibeci;
+        openevv-driver = openevvDriver;
       };
 
       devShells.${system}.default = pkgs.mkShell {
@@ -137,6 +160,8 @@
         # include/liblouis submodule pins.
         BASEDREADER_LIBLOUIS_VERSION = pkgs.liblouis.version;
         BASEDREADER_NVDA_CLDR_DIR = "${nvdaCldr}";
+        # linuxPlatform.synthDriverPaths puts it on NVDA's driver search path.
+        BASEDREADER_OPENEVV_DRIVER_DIR = "${openevvDriver}";
 
         # Where tests/linux/bench/run finds the bench once nix build
         # .#basedreader-bench has built it. Stripped of its dependency on the

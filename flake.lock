@@ -32,10 +32,27 @@
         "type": "github"
       }
     },
+    "openevv": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794623733,
+        "narHash": "sha256-PNyagZO9dF0huYUYec/ms1s/eV53HOcWJNJpqU8yUWM=",
+        "ref": "refs/heads/main",
+        "rev": "aaebca3f6656ddee6592a4e001da6594e79a2cff",
+        "revCount": 984,
+        "type": "git",
+        "url": "file:///home/stas/Projects/openevv"
+      },
+      "original": {
+        "type": "git",
+        "url": "file:///home/stas/Projects/openevv"
+      }
+    },
     "root": {
       "inputs": {
         "nixpkgs": "nixpkgs",
-        "nixpkgs-ruff": "nixpkgs-ruff"
+        "nixpkgs-ruff": "nixpkgs-ruff",
+        "openevv": "openevv"
       }
     }
   },
