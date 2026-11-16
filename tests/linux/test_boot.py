@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -62,8 +63,12 @@ class Launch:
 	def logPath(self) -> Path:
 		return self.directory / "nvda.log"
 
-	def log(self) -> str:
-		return self.logPath.read_text(encoding="utf-8") if self.logPath.exists() else ""
+	def log(self, name: str = "nvda.log") -> str:
+		path = self.directory / name
+		return path.read_text(encoding="utf-8") if path.exists() else ""
+
+	def sentences(self) -> list[dict]:
+		return [r for r in self.spoken() if transcriptRecords.spokenText(r) == SENTENCE]
 
 	def spoken(self) -> list[dict]:
 		path = self.directory / "transcript.jsonl"
@@ -85,10 +90,9 @@ class Launch:
 		"""Seconds from starting the process to the sentence being spoken."""
 		deadline = self.started + timeout
 		while time.monotonic() < deadline:
-			for record in self.spoken():
-				if transcriptRecords.spokenText(record) == SENTENCE:
-					# The synth stamps records with the same monotonic clock, which is system wide.
-					return record["t"] - self.started
+			if sentences := self.sentences():
+				# The synth stamps records with the same monotonic clock, which is system wide.
+				return sentences[0]["t"] - self.started
 			if self.process.poll() is not None:
 				break
 			time.sleep(0.05)
@@ -100,7 +104,7 @@ class Launch:
 		except subprocess.TimeoutExpired:
 			pytest.fail(f"NVDA did not exit within {timeout} s\n{self.describe()}")
 
-	def assertClean(self) -> None:
+	def assertClean(self, logNames: tuple[str, ...] = ("nvda.log",)) -> None:
 		"""The run raised no NoLinuxImplementation, even one upstream caught, and logged no error."""
 		recorded = self.directory / "noLinuxImplementation.jsonl"
 		assert recorded.exists(), "the launcher did not record NoLinuxImplementation as asked"
@@ -108,11 +112,12 @@ class Launch:
 		assert not raised, "NoLinuxImplementation raised:\n" + "\n".join(
 			r["what"] + "\n" + "".join(r["stack"]) for r in raised
 		)
-		log = self.log()
-		levels = [m["level"] for m in _recordHeader.finditer(log)]
-		assert levels, f"the log holds no records\n{self.describe()}"
-		errors = [level for level in levels if level in ("ERROR", "CRITICAL")]
-		assert not errors, f"the log holds {len(errors)} records at ERROR or above\n{log[-8000:]}"
+		for name in logNames:
+			log = self.log(name)
+			levels = [m["level"] for m in _recordHeader.finditer(log)]
+			assert levels, f"{name} holds no records\n{self.describe()}"
+			errors = [level for level in levels if level in ("ERROR", "CRITICAL")]
+			assert not errors, f"{name} holds {len(errors)} records at ERROR or above\n{log[-8000:]}"
 
 
 @pytest.fixture
@@ -160,6 +165,14 @@ def launcher(tmp_path: Path) -> Iterator:
 		if launch.process.poll() is None:
 			launch.process.kill()
 			launch.process.wait()
+	# A copy that a launch started to restart itself is not this process's child, and is found by the
+	# lock it holds.
+	lock = singleInstance.InstanceLock(singleInstance.lockFilePath())
+	try:
+		if not lock.tryAcquire():
+			singleInstance.terminateRunning(lock)
+	finally:
+		lock.close()
 	after = harness.treeState()
 	changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
 	assert not changed, f"a launch changed the repository: {changed}"
@@ -207,6 +220,38 @@ def test_secondLaunchReplacesFirst(launcher, tmp_path: Path):
 	firstEnd = first.spoken()[-1]["t"]
 	secondStart = second.spoken()[0]["t"]
 	assert firstEnd < secondStart
+
+
+def test_restartStartsACopyThatTakesOver(launcher):
+	nvda = launcher("restart", "restart")
+	nvda.waitForSentence()
+	assert nvda.waitForExit() == 0, nvda.describe()
+	deadline = time.monotonic() + STARTUP_BOUND
+	while len(nvda.sentences()) < 2:
+		assert time.monotonic() < deadline, f"the new copy did not speak\n{nvda.describe()}"
+		time.sleep(0.05)
+	# Not this process's child, so it is waited for through the process ID it recorded in the lock.
+	lock = singleInstance.InstanceLock(singleInstance.lockFilePath())
+	try:
+		newCopy = lock.holder()
+	finally:
+		lock.close()
+	assert newCopy is not None and newCopy != nvda.process.pid
+	try:
+		pidfd = os.pidfd_open(newCopy)
+	except ProcessLookupError:
+		pass
+	else:
+		try:
+			poller = select.poll()
+			poller.register(pidfd, select.POLLIN)
+			assert poller.poll(SHUTDOWN_BOUND * 1000), f"the new copy did not exit\n{nvda.describe()}"
+		finally:
+			os.close(pidfd)
+	# The new copy moved the first copy's log aside as it started.
+	nvda.assertClean(logNames=("nvda-old.log", "nvda.log"))
+	assert "Starting new NVDA instance" in nvda.log("nvda-old.log")
+	assert "NVDA exit" in nvda.log("nvda.log")
 
 
 def test_checkRunningAndQuit(launcher):
