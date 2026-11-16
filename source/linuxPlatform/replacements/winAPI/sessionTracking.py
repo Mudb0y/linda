@@ -2,8 +2,13 @@
 
 Upstream's policy is kept as it is: the lock state is read once each core cycle and a change is
 announced through utils.security.post_sessionLockStateChanged, nothing counts as locked until NVDA
-has finished starting, and the secure desktop takes precedence over the lock screen. Only where the
-lock state comes from differs, and on Linux it is not read yet.
+has finished starting, and the secure desktop takes precedence over the lock screen. Where the lock
+state comes from differs, and Linux reads none: _querySessionLocked always answers False.
+
+Reading the lock state is not enough on its own. While the session is locked, utils.security asks
+linuxPlatform.session.isBelowLockScreen of every object NVDA would present, and that answers True
+for everything but the desktop, the screen locker's unlock prompt included. Teach it to recognise
+the locker's objects before _querySessionLocked ever answers True.
 """
 
 from baseObject import AutoPropertyObject
@@ -18,8 +23,10 @@ _wasLockedPreviousPumpAll = False
 
 def _querySessionLocked() -> bool:
 	# logind's Session.LockedHint, or the screen locker's own interface (org.mate.ScreenSaver's
-	# GetActive under MATE), will answer this. Until one is read the session is never known to be
-	# locked, so NVDA does not withhold what lies below a screen locker.
+	# GetActive under MATE), can answer this. Neither is read, so the session is never known to be
+	# locked and NVDA withholds nothing below a screen locker. Answering True here makes NVDA withhold
+	# every object but the desktop, the unlock prompt among them, unless
+	# linuxPlatform.session.isBelowLockScreen recognises the locker's objects first.
 	return False
 
 
@@ -37,7 +44,7 @@ def initialize() -> None:
 	global _lockStateTracker
 	_lockStateTracker = _SessionLockedState()
 	log.warning(
-		"NVDA cannot yet tell whether this Linux session is locked,"
+		"NVDA cannot tell whether this Linux session is locked,"
 		" so it does not withhold content below a screen locker.",
 	)
 

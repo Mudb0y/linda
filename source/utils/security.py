@@ -225,6 +225,8 @@ def _isObjectBelowLockScreen(obj: "NVDAObjects.NVDAObject") -> bool:
 	An object below the lockscreen should only be accessible when Windows is unlocked,
 	as it may contain sensitive information.
 	"""
+	if sys.platform != "win32":
+		return _linuxSession.isBelowLockScreen(obj)
 	from NVDAObjects.IAccessible import TaskListIcon  # noqa: I001
 	import systemUtils
 
