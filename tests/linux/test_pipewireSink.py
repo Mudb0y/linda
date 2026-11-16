@@ -576,9 +576,10 @@ def test_stopIsSilentAndStartIsHeardWithinTheQuantum(pipewire: PipewireFixture, 
 	"""Stopping a player is silent at the sink once the cycle in progress has played, and a new feed
 	is heard from the next cycle, at the quanta of 256 and 512.
 
-	At 48 kHz nothing is resampled and the bounds hold as they are. At 22050 Hz, eSpeak's rate,
-	PipeWire's resampler delays every frame by the few it holds, which it reports, and they play
-	after a stop as after anything else; the bounds are moved by that much."""
+	At the graph's rate nothing is resampled and STOP_BOUNDS apply unchanged. At 22050 Hz, eSpeak's
+	rate, PipeWire's resampler holds a few frames, about 1.3 ms, which it reports for the stream. They
+	play out after a stop, since dropping them would take a flush, so each stop bound there is
+	STOP_BOUNDS plus that delay. Starting has room to spare and keeps START_BOUNDS at every rate."""
 	pipewire.setQuantum(256)
 	monitor = pipewire.monitor()
 	actions = {f"quantum{q}": (lambda q=q: pipewire.setQuantum(q)) for q in (256, 512)}
@@ -639,14 +640,22 @@ def test_stopIsSilentAndStartIsHeardWithinTheQuantum(pipewire: PipewireFixture, 
 			}
 			row["stopCall"] = summary([r["stopCall"] / MS for r in mine])
 			measured[f"quantum {quantum}, {rate} Hz"] = row
-			for name, bounds in (("startToSound", START_BOUNDS), ("stopToSilence", STOP_BOUNDS)):
+			for name, bounds, allowance in (
+				("startToSound", START_BOUNDS, 0),
+				("stopToSilence", STOP_BOUNDS, delay),
+			):
 				for statistic, bound in zip(("median", "p95", "max"), bounds[quantum]):
-					if bound is not None and row[name][statistic] > bound + delay:
+					if bound is not None and row[name][statistic] > bound + allowance:
 						failures.append(
-							f"{name} {statistic} at {quantum}, {rate} Hz: {row[name][statistic]} ms"
+							f"{name} {statistic} at {quantum}, {rate} Hz: {row[name][statistic]} ms "
+							f"against {bound + allowance:.2f}"
 						)
 	report("stop and start", measured)
-	assert value["resampler"]["512 48000"] == 0
+	assert value["resampler"]["256 48000"] == value["resampler"]["512 48000"] == 0, value["resampler"]
+	# More would mean the stream is held back by something other than the resampler's filter.
+	assert all(
+		frames / 22050 * 1000 < 2 for key, frames in value["resampler"].items() if key.endswith(" 22050")
+	)
 	assert not failures, failures
 
 
@@ -916,7 +925,10 @@ def test_aStreamNobodyLinksWaitsForLinkingOnlyOnce(tmp_path: Path):
 	report("300 ms utterances on a stream nobody links, ms", [round(ms, 1) for ms in value["took"]])
 	assert value["calls"] == 0, "the stream was consumed, so this showed nothing"
 	first, *rest = value["took"]
+	# The 500 ms wait for the graph, once for this pw_stream, then the utterance's own 300 ms, with
+	# room for nvwave's polling.
 	assert first < 500 + 300 + 150, first
+	# Every later utterance is idle well within 600 ms: it takes its own length and no more.
 	assert all(ms < 300 + 60 for ms in rest), rest
 
 
