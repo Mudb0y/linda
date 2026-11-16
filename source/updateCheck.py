@@ -69,6 +69,7 @@ from logHandler import log, isPathExternalToNVDA
 import winKernel
 from utils.tempFile import _createEmptyTempFileForDeletingFile
 from dataclasses import dataclass
+from linuxPlatform.windowsOnly import startfile
 
 from utils import _deprecate
 
@@ -977,7 +978,7 @@ class DonateRequestDialog(wx.Dialog):
 		self.Show()
 
 	def onDonate(self, evt):
-		os.startfile(gui.DONATE_URL)
+		startfile(gui.DONATE_URL)
 		# Translators: The label of a button to indicate that the user is finished donating
 		# in the "Please Donate" dialog.
 		self.donateButton.Label = _("&Done")

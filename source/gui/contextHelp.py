@@ -12,6 +12,7 @@ import wx
 from gui import blockAction
 from logHandler import log
 import documentationUtils
+from linuxPlatform.windowsOnly import startfile
 
 
 def writeRedirect(helpId: str, helpFilePath: str, contextHelpPath: str):
@@ -57,7 +58,7 @@ def showHelp(helpId: str):
 		return
 
 	try:
-		os.startfile(f"file://{contextHelpRedirect}")
+		startfile(f"file://{contextHelpRedirect}")
 	except Exception:
 		log.error("Unable to launch context help.", exc_info=True)  # noqa: G201
 

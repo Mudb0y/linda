@@ -150,11 +150,19 @@ source/gui/__init__.py
   window manager returns focus after a popup by itself. Every dialog NVDA
   opens goes through these, the welcome dialog at a first start and the
   exit dialog among them
+  every platform: the help menu's web pages, the donation page and the
+  documentation open through startfile from linuxPlatform.windowsOnly,
+  which is os.startfile on Windows and on Linux opens them with the
+  desktop's default application through xdg-open
 source/gui/addonStoreGui/viewModels/store.py
   every platform: startfile comes from linuxPlatform.windowsOnly, which is
   os.startfile on Windows and on Linux opens an add-on's home page, licence,
   source, reviews, scan results or help with the desktop's default
   application through xdg-open
+source/gui/contextHelp.py
+  every platform: context help opens through startfile from
+  linuxPlatform.windowsOnly, which is os.startfile on Windows and on Linux
+  opens the file:// URL through xdg-open, where os.startfile is absent
 source/gui/message.py
   Linux runtime: MessageDialog._playSound plays nothing, as the sounds are
   Windows' system sounds through winsound.MessageBeep, which have no Linux
@@ -169,6 +177,11 @@ source/gui/message.py
   the two annotations naming wx.html2 quoted: on GTK the extension links
   WebKitGTK, GStreamer and PulseAudio, which every start loaded although
   nothing makes a WebView until an HTML message is shown
+source/gui/settingsDialogs.py
+  every platform: the scratchpad directory opens through startfile from
+  linuxPlatform.windowsOnly, which is os.startfile on Windows and on Linux
+  opens it through xdg-open, where os.startfile is absent; os, which
+  nothing else in the module uses, is no longer imported
 source/hwIo/__init__.py
   Linux runtime: the background I/O thread is linuxPlatform.ioThread's
   subclass of upstream's, which waits on a condition rather than in an
@@ -300,6 +313,10 @@ source/textUtils/uniscribe.py
   linuxPlatform.utf16.Utf16Buffer, for the same reason as textUtils/icu.py
   every platform: Windows calls create_unicode_buffer, as before, through
   the name _createUtf16Buffer
+source/updateCheck.py
+  every platform: the donate button opens the page through startfile from
+  linuxPlatform.windowsOnly, which is os.startfile on Windows and on Linux
+  opens it through xdg-open, where os.startfile is absent
 source/utils/_deprecate.py
   every platform: _getCallerModule takes the caller's
   frame from sys._getframe instead of inspect.stack(), which read the source

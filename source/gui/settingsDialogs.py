@@ -13,7 +13,6 @@
 import copy  # noqa: I001
 import logging
 import math
-import os
 import re
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable, Container
@@ -37,6 +36,7 @@ import globalVars
 import installer
 import keyboardHandler
 import languageHandler
+from linuxPlatform.windowsOnly import startfile
 import logHandler
 from _magnifier import getMagnifier
 from _magnifier.commands import toggleMagnifier
@@ -4811,7 +4811,7 @@ class AdvancedPanelControls(
 
 	def onOpenScratchpadDir(self, evt):
 		path = config.getScratchpadDir(ensureExists=True)
-		os.startfile(path)
+		startfile(path)
 
 	def _getDefaultValue(self, configPath):
 		return config.conf.getConfigValidation(configPath).default

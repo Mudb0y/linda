@@ -81,6 +81,7 @@ import api
 import NVDAState
 
 import sys
+from linuxPlatform.windowsOnly import startfile
 
 
 if NVDAState._allowDeprecatedAPI():
@@ -748,7 +749,7 @@ class SysTrayIcon(wx.adv.TaskBarIcon):
 			self.menu.AppendSeparator()
 			# Translators: The label for the menu item to open donate page.
 			item = self.menu.Append(wx.ID_ANY, _("&Donate"))
-			self.Bind(wx.EVT_MENU, lambda evt: os.startfile(DONATE_URL), item)
+			self.Bind(wx.EVT_MENU, lambda evt: startfile(DONATE_URL), item)
 
 		self._appendPendingUpdateSection(frame)
 
@@ -871,13 +872,13 @@ class SysTrayIcon(wx.adv.TaskBarIcon):
 
 			# Translators: The label for the menu item to view the NVDA website
 			item = self.helpMenu.Append(wx.ID_ANY, _("NV Access &web site"))
-			self.Bind(wx.EVT_MENU, lambda evt: os.startfile(buildVersion.url), item)
+			self.Bind(wx.EVT_MENU, lambda evt: startfile(buildVersion.url), item)
 			# Translators: The label for the menu item to view the NVDA website's get help section
 			item = self.helpMenu.Append(wx.ID_ANY, _("&Help, training and support"))
-			self.Bind(wx.EVT_MENU, lambda evt: os.startfile(f"{buildVersion.url}/get-help/"), item)
+			self.Bind(wx.EVT_MENU, lambda evt: startfile(f"{buildVersion.url}/get-help/"), item)
 			# Translators: The label for the menu item to view the NVDA website's get help section
 			item = self.helpMenu.Append(wx.ID_ANY, _("NV Access &shop"))
-			self.Bind(wx.EVT_MENU, lambda evt: os.startfile(f"{buildVersion.url}/shop/"), item)
+			self.Bind(wx.EVT_MENU, lambda evt: startfile(f"{buildVersion.url}/shop/"), item)
 
 			self.helpMenu.AppendSeparator()
 
@@ -906,7 +907,7 @@ class SysTrayIcon(wx.adv.TaskBarIcon):
 		if helpFile is None:
 			reportNoDocumentation(fileName, useMsgBox=True)
 			return
-		os.startfile(helpFile)
+		startfile(helpFile)
 
 	def _appendPendingUpdateSection(self, frame: MainFrame) -> None:
 		if not globalVars.appArgs.secure and updateCheck:
