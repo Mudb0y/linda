@@ -26,6 +26,7 @@ from speech.commands import (
 	PhonemeCommand,
 )
 from speechXml import toXmlLang
+import sys
 
 
 class SynthDriver(SynthDriver):
@@ -72,6 +73,9 @@ class SynthDriver(SynthDriver):
 
 	@classmethod
 	def check(cls):
+		if sys.platform == "linux":
+			# _espeak.initialize loads espeak.dll, which does not exist on Linux, so setSynth would fail.
+			return False
 		return True
 
 	def __init__(self):

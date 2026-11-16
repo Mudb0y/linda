@@ -25,6 +25,7 @@ from autoSettingsUtils.driverSetting import BooleanDriverSetting, DriverSetting,
 from autoSettingsUtils.utils import StringParameterInfo
 
 from abc import abstractmethod
+import os
 import sys
 
 if TYPE_CHECKING:
@@ -463,7 +464,8 @@ def getSynthList() -> list[tuple[str, str]]:
 	for loader, name, isPkg in pkgutil.iter_modules(synthDrivers.__path__):
 		if name.startswith("_"):
 			continue
-		if sys.platform == "linux" and name in _windowsOnlySynthDrivers:
+		if sys.platform == "linux" and name in _windowsOnlySynthDrivers and loader.path == _builtInDriversDir:
+			log.debugWarning(f"Skipping synthesizer {name}, which runs only on Windows")
 			continue
 		try:
 			synth = _getSynthDriver(name)
@@ -503,10 +505,13 @@ def getSynthInstance(name: str, asDefault: bool = False):
 # The first that successfully initializes will be used when config is set to auto (I.e. new installs of NVDA).
 defaultSynthPriorityList = ["oneCore", "espeak", "silence"]
 if sys.platform == "linux":
-	# eSpeak joins once its library loads on Linux; until then, trying it would log an error at every start.
-	defaultSynthPriorityList = ["silence"]
-	#: Left out of getSynthList, where each would otherwise log an error for failing to import.
+	# oneCore is Windows only. Silence must not come first: auto would save it as the user's choice, and
+	# eSpeak would never take over once it loads. As a fallback it leaves the configuration on auto.
+	defaultSynthPriorityList = ["espeak", "silence"]
+	#: Left out of getSynthList, where each would otherwise log an error for failing to import. Only NVDA's
+	#: own copies are left out: an add-on driver of the same name comes first in the search path and may work.
 	_windowsOnlySynthDrivers = frozenset({"mssp", "oneCore", "sapi4_32", "sapi5", "sapi5_32"})
+	_builtInDriversDir = os.path.abspath(os.path.dirname(synthDrivers.__file__))
 
 
 def setSynth(name: str | None, isFallback: bool = False, *, _leftToTry: list[str] | None = None) -> bool:

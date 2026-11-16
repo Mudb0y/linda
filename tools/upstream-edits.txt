@@ -152,12 +152,18 @@ source/oleacc.py
   comInterfaces.Accessibility stand-in, since comtypes.client.GetModule
   cannot run
 source/synthDriverHandler.py
-  synthesizer selection on Linux: getSynthList skips the Windows-only
-  driver modules (mssp, oneCore, sapi4_32, sapi5, sapi5_32), which cannot
-  import and would each log an error, and the default priority list, which
-  "auto" resolves through, is silence alone until eSpeak loads on Linux.
-  test_transcriptSynth.py checks that the skipped set is exactly the set
-  that fails to import
+  synthesizer selection on Linux: getSynthList skips NVDA's own copies of
+  the Windows-only driver modules (mssp, oneCore, sapi4_32, sapi5,
+  sapi5_32), which cannot import and would each log an error, but not an
+  add-on driver of the same name. The default priority list, which "auto"
+  resolves through, is espeak then silence, so that silence is only ever a
+  fallback and is never saved as the configured synth. Until eSpeak loads
+  on Linux, auto logs its failure once per start. test_transcriptSynth.py
+  checks that the skipped set is exactly the set that fails to import
+source/synthDrivers/espeak.py
+  synthesizer selection on Linux: check() answers False on Linux, because
+  the driver loads espeak.dll, so the synthesizer list does not offer a
+  voice that fails to load. The eSpeak port replaces this
 source/systemUtils.py
   import safety: winreg imported only on Windows, after the module's other
   imports. Linux: hasUiAccess() is True, as X11 isolates no client from
