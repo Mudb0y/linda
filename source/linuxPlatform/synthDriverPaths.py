@@ -17,16 +17,17 @@ def install() -> list[str]:
 	"""Add the openevv driver's directory to synthDrivers.__path__, and return the directories added.
 
 	The directory goes at the end, so that NVDA's own drivers and an add-on's driver of the same name
-	come first, and it goes only once however often this is called. A variable that is unset, or names
-	a directory without openevv.py in it, adds nothing.
+	come first, and it goes only once however often this is called and however it is spelled: through a
+	symbolic link, or with ``.`` in it, it is still the directory already on the path. A variable that is
+	unset, or names a directory without openevv.py in it, adds nothing.
 	"""
 	directory = os.environ.get(openevvDriverDirVariable)
 	if not directory or not os.path.isfile(os.path.join(directory, "openevv.py")):
 		return []
-	directory = os.path.abspath(directory)
+	directory = os.path.realpath(directory)
 	import synthDrivers
 
-	if directory in synthDrivers.__path__:
+	if any(os.path.realpath(entry) == directory for entry in synthDrivers.__path__):
 		return []
 	synthDrivers.__path__.append(directory)
 	return [directory]

@@ -178,6 +178,11 @@ def test_installAddsTheDriverDirectoryOnceAtTheEnd(tmp_path: Path):
 	withoutDriver = tmp_path / "withoutDriver"
 	withoutDriver.mkdir()
 	(withoutDriver / "_openevv.py").write_text("")
+	link = tmp_path / "link"
+	link.symlink_to(withDriver)
+	other = tmp_path / "other"
+	other.mkdir()
+	(other / "openevv.py").write_text("")
 	done = harness.runChild(
 		tmp_path,
 		f"""
@@ -198,14 +203,23 @@ def test_installAddsTheDriverDirectoryOnceAtTheEnd(tmp_path: Path):
 		os.environ[variable] = {str(withDriver)!r}
 		first = synthDriverPaths.install()
 		second = synthDriverPaths.install()
+		os.environ[variable] = {str(link)!r}
+		throughLink = synthDriverPaths.install()
+		os.environ[variable] = {str(tmp_path) + "/./withDriver"!r}
+		dotted = synthDriverPaths.install()
+		after = list(synthDrivers.__path__)
+		synthDrivers.__path__.append({str(tmp_path) + "/./other"!r})
+		os.environ[variable] = {str(other)!r}
+		alreadyThereDotted = synthDriverPaths.install()
 		result = {{
 			"variable": variable,
 			"nothingAdded": [unset, empty, noDriver, absent],
 			"unchanged": unchanged,
 			"first": first,
 			"second": second,
+			"sameDirectory": [throughLink, dotted, alreadyThereDotted],
 			"before": before,
-			"after": list(synthDrivers.__path__),
+			"after": after,
 		}}
 		""",
 		prepare="bootstrap",
@@ -215,10 +229,11 @@ def test_installAddsTheDriverDirectoryOnceAtTheEnd(tmp_path: Path):
 	assert value["variable"] == DRIVER_DIR_VARIABLE
 	assert value["nothingAdded"] == [[], [], [], []]
 	assert value["unchanged"]
-	assert value["first"] == [str(withDriver)]
+	assert value["first"] == [os.path.realpath(withDriver)]
 	assert value["second"] == []
+	assert value["sameDirectory"] == [[], [], []]
 	# Last, so that NVDA's own drivers and an add-on's driver of the same name come first.
-	assert value["after"] == value["before"] + [str(withDriver)]
+	assert value["after"] == value["before"] + [os.path.realpath(withDriver)]
 
 
 @needsDriver
