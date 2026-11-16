@@ -84,8 +84,8 @@ class _MessageWindow(windowUtils.CustomWindow):
 	def __init__(self, windowName: str | None = None):
 		if sys.platform != "win32":
 			# Nothing sends NVDA window messages on Linux, so there is no window. A new instance asks this
-			# one to quit with SIGTERM; power, display and device changes will come from UPower, RandR
-			# and udev.
+			# one to quit with SIGTERM, and Linux announces power, display and device changes through
+			# UPower, RandR and udev, none of which is a window message.
 			return
 		super().__init__(windowName)
 		_displayTracking.initialize()

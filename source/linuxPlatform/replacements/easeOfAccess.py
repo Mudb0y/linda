@@ -32,8 +32,8 @@ def willAutoStart(autoStartContext: AutoStartContext) -> bool:
 	if autoStartContext == AutoStartContext.AFTER_LOGON:
 		return xdg.isAutostartEnabled(xdg.autostartEntryName)
 	# Each display manager keeps its own configuration of what runs on its login screen, and nothing
-	# here reads or writes any of them yet. The settings that ask this are disabled on Linux, which
-	# has no installed copy.
+	# here reads or writes any of them. The settings that ask this are disabled on Linux, which has no
+	# installed copy.
 	return False
 
 
