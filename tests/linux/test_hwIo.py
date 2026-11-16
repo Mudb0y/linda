@@ -18,6 +18,11 @@ import time
 
 import NVDAHelper  # noqa: F401
 import hwIo
+from hwIo.ioThread import IoThread
+
+#: The longest any wait for an event may take. A wait returns as soon as its event is set, so this
+#: is generous: it only has to outlast a heavily loaded machine.
+WAIT = 60
 
 hwIo.initialize()
 """
@@ -40,7 +45,7 @@ def test_queuedFunctionRunsWithItsParam(tmp_path: Path):
 
 		assert not event.is_set()
 		hwIo.bgThread.queueAsApc(apc, 42)
-		result = {"ran": event.wait(2), "received": received}
+		result = {"ran": event.wait(WAIT), "received": received}
 		hwIo.terminate()
 		""",
 	)
@@ -52,8 +57,6 @@ def test_queuedFunctionsRunInOrderOnTheThread(tmp_path: Path):
 	done = runWithThread(
 		tmp_path,
 		"""
-		from hwIo.ioThread import IoThread
-
 		calls = []
 		finished = threading.Event()
 
@@ -65,7 +68,7 @@ def test_queuedFunctionsRunInOrderOnTheThread(tmp_path: Path):
 
 		for param in range(5):
 			hwIo.bgThread.queueAsApc(record, param)
-		result = {"finished": finished.wait(2), "calls": calls}
+		result = {"finished": finished.wait(WAIT), "calls": calls}
 		hwIo.terminate()
 		""",
 	)
@@ -79,8 +82,6 @@ def test_threadsQueueingAtOnceGetDistinctKeys(tmp_path: Path):
 		tmp_path,
 		"""
 		import sys
-
-		from hwIo.ioThread import IoThread
 
 		def apc(param: int) -> None:
 			pass
@@ -126,8 +127,6 @@ def test_queuedKeysWrapAt32Bits(tmp_path: Path):
 		"""
 		import itertools
 
-		from hwIo.ioThread import IoThread
-
 		def apc(param: int) -> None:
 			pass
 
@@ -155,7 +154,7 @@ def test_functionThatDiedBeforeRunningIsSkipped(tmp_path: Path):
 		after = threading.Event()
 
 		def blocker(param: int) -> None:
-			release.wait(2)
+			release.wait(WAIT)
 
 		def last(param: int) -> None:
 			after.set()
@@ -170,7 +169,7 @@ def test_functionThatDiedBeforeRunningIsSkipped(tmp_path: Path):
 		del doomed
 		gc.collect()
 		release.set()
-		result = {"after": after.wait(2), "ran": ran}
+		result = {"after": after.wait(WAIT), "ran": ran}
 		hwIo.terminate()
 		""",
 	)
@@ -192,7 +191,7 @@ def test_functionThatRaisesIsLoggedAndTheThreadCarriesOn(tmp_path: Path):
 
 		hwIo.bgThread.queueAsApc(broken)
 		hwIo.bgThread.queueAsApc(next_)
-		result = after.wait(2)
+		result = after.wait(WAIT)
 		hwIo.terminate()
 		""",
 	)
@@ -221,7 +220,7 @@ def test_timerFiresOnTheThreadAfterItsDueTime(tmp_path: Path):
 
 		armed = time.monotonic()
 		hwIo.bgThread.setWaitableTimer(timer, 150, onTimer, 7)
-		result = {"fired": fired.wait(2), **seen}
+		result = {"fired": fired.wait(WAIT), **seen}
 		hwIo.terminate()
 		""",
 	)
@@ -229,7 +228,7 @@ def test_timerFiresOnTheThreadAfterItsDueTime(tmp_path: Path):
 	assert done.value["fired"]
 	assert done.value["param"] == 7
 	assert done.value["onThread"]
-	assert 0.15 <= done.value["elapsed"] < 1
+	assert done.value["elapsed"] >= 0.15
 
 
 def test_timersFireInDueOrder(tmp_path: Path):
@@ -247,9 +246,10 @@ def test_timersFireInDueOrder(tmp_path: Path):
 				both.set()
 
 		late, early = WaitableTimer(), WaitableTimer()
-		hwIo.bgThread.setWaitableTimer(late, 300, onTimer, 2)
+		# Far enough apart that arming the second, however slowly, cannot make it due after the first.
+		hwIo.bgThread.setWaitableTimer(late, 1000, onTimer, 2)
 		hwIo.bgThread.setWaitableTimer(early, 100, onTimer, 1)
-		result = {"both": both.wait(2), "order": order}
+		result = {"both": both.wait(WAIT), "order": order}
 		hwIo.terminate()
 		""",
 	)
@@ -265,19 +265,31 @@ def test_armingATimerAgainReplacesItsPendingCall(tmp_path: Path):
 
 		timer = WaitableTimer()
 		calls = []
+		fired = threading.Event()
 
 		def onTimer(param: int) -> None:
 			calls.append(param)
+			fired.set()
 
-		hwIo.bgThread.setWaitableTimer(timer, 150, onTimer, 1)
-		hwIo.bgThread.setWaitableTimer(timer, 50, onTimer, 2)
-		time.sleep(0.5)
-		result = calls
+		# The braille handler arms its acknowledgement timer again on every write.
+		stored = len(IoThread._apcStore)
+		for param in range(100):
+			hwIo.bgThread.setWaitableTimer(timer, 60_000, onTimer, param)
+		armed = len(IoThread._apcStore) - stored
+		hwIo.bgThread.setWaitableTimer(timer, 50, onTimer, 100)
+		result = {
+			"fired": fired.wait(WAIT),
+			"calls": calls,
+			"armed": armed,
+			"timers": len(hwIo.bgThread._timers),
+			"storedAfter": len(IoThread._apcStore) - stored,
+		}
 		hwIo.terminate()
 		""",
 	)
+	# A replaced call left in the store would also be run and logged as missing, failing this.
 	done.assertClean()
-	assert done.value == [2]
+	assert done.value == {"fired": True, "calls": [100], "armed": 1, "timers": 0, "storedAfter": 0}
 
 
 def test_cancelledTimerNeverFires(tmp_path: Path):
@@ -286,21 +298,81 @@ def test_cancelledTimerNeverFires(tmp_path: Path):
 		"""
 		from linuxPlatform.ioThread import WaitableTimer
 
-		timer = WaitableTimer()
+		timer, later = WaitableTimer(), WaitableTimer()
 		calls = []
+		laterFired = threading.Event()
 
 		def onTimer(param: int) -> None:
 			calls.append(param)
 
-		hwIo.bgThread.setWaitableTimer(timer, 100, onTimer)
+		def onLater(param: int) -> None:
+			laterFired.set()
+
+		stored = len(IoThread._apcStore)
+		hwIo.bgThread.setWaitableTimer(timer, 1000, onTimer)
 		cancelled = timer.cancel()
-		time.sleep(0.4)
-		result = {"cancelled": cancelled, "calls": calls, "cancelUnarmed": timer.cancel()}
+		storedAfterCancel = len(IoThread._apcStore) - stored
+		# Timers fire in due order, so once this one has fired the cancelled one would have too.
+		hwIo.bgThread.setWaitableTimer(later, 1200, onLater)
+		result = {
+			"laterFired": laterFired.wait(WAIT),
+			"cancelled": cancelled,
+			"calls": calls,
+			"cancelUnarmed": timer.cancel(),
+			"storedAfterCancel": storedAfterCancel,
+		}
 		hwIo.terminate()
 		""",
 	)
 	done.assertClean()
-	assert done.value == {"cancelled": True, "calls": [], "cancelUnarmed": True}
+	assert done.value == {
+		"laterFired": True,
+		"cancelled": True,
+		"calls": [],
+		"cancelUnarmed": True,
+		"storedAfterCancel": 0,
+	}
+
+
+def test_timerArmedOnAnotherThreadMovesToTheNewOne(tmp_path: Path):
+	done = runWithThread(
+		tmp_path,
+		"""
+		from linuxPlatform.ioThread import IoThread as LinuxIoThread
+		from linuxPlatform.ioThread import WaitableTimer
+
+		other = LinuxIoThread()
+		other.start()
+		timer = WaitableTimer()
+		seen = []
+		fired = threading.Event()
+
+		def onTimer(param: int) -> None:
+			seen.append((param, threading.current_thread() is hwIo.bgThread))
+			fired.set()
+
+		stored = len(IoThread._apcStore)
+		other.setWaitableTimer(timer, 60_000, onTimer, 1)
+		hwIo.bgThread.setWaitableTimer(timer, 50, onTimer, 2)
+		moved = {
+			"otherTimers": len(other._timers),
+			"armedOn": "bgThread" if timer._thread is hwIo.bgThread else repr(timer._thread),
+			"stored": len(IoThread._apcStore) - stored,
+		}
+		result = {"fired": fired.wait(WAIT), "seen": seen, **moved, "storedAfter": len(IoThread._apcStore) - stored}
+		other.stop()
+		hwIo.terminate()
+		""",
+	)
+	done.assertClean()
+	assert done.value == {
+		"fired": True,
+		"seen": [[2, True]],
+		"otherTimers": 0,
+		"armedOn": "bgThread",
+		"stored": 1,
+		"storedAfter": 0,
+	}
 
 
 def test_cancelDropsADueCallTheBusyThreadHasNotTaken(tmp_path: Path):
@@ -317,7 +389,7 @@ def test_cancelDropsADueCallTheBusyThreadHasNotTaken(tmp_path: Path):
 
 		def blocker(param: int) -> None:
 			started.set()
-			hold.wait(2)
+			hold.wait(WAIT)
 
 		def onTimer(param: int) -> None:
 			calls.append(param)
@@ -326,13 +398,13 @@ def test_cancelDropsADueCallTheBusyThreadHasNotTaken(tmp_path: Path):
 			after.set()
 
 		hwIo.bgThread.queueAsApc(blocker)
-		started.wait(2)
+		started.wait(WAIT)
 		# Due at once, while the thread is still in blocker.
 		hwIo.bgThread.setWaitableTimer(timer, 0, onTimer, 1)
 		cancelled = timer.cancel()
 		hold.set()
 		hwIo.bgThread.queueAsApc(last)
-		result = {"after": after.wait(2), "cancelled": cancelled, "calls": calls}
+		result = {"after": after.wait(WAIT), "cancelled": cancelled, "calls": calls}
 		hwIo.terminate()
 		""",
 	)
@@ -379,10 +451,12 @@ def test_stopRunsWhatIsQueuedAndDropsPendingTimers(tmp_path: Path):
 
 		thread = hwIo.bgThread
 		timer = WaitableTimer()
+		stored = len(IoThread._apcStore)
 		thread.setWaitableTimer(timer, 5_000, onTimer)
 		thread.queueAsApc(slow, 1)
 		thread.queueAsApc(slow, 2)
 		hwIo.terminate()
+		storedAfterStop = len(IoThread._apcStore) - stored
 		errors = {}
 		for name, call in (
 			("stop", thread.stop),
@@ -399,6 +473,7 @@ def test_stopRunsWhatIsQueuedAndDropsPendingTimers(tmp_path: Path):
 			"bgThread": hwIo.bgThread,
 			"errors": errors,
 			"threads": [t.name for t in threading.enumerate()],
+			"storedAfterStop": storedAfterStop,
 		}
 		""",
 	)
@@ -409,7 +484,49 @@ def test_stopRunsWhatIsQueuedAndDropsPendingTimers(tmp_path: Path):
 		"bgThread": None,
 		"errors": dict.fromkeys(("stop", "queue", "timer"), "Thread is not running"),
 		"threads": ["MainThread"],
+		"storedAfterStop": 0,
 	}
+
+
+def test_crashedThreadIsLoggedAndForgetsWhatWasPending(tmp_path: Path):
+	done = runWithThread(
+		tmp_path,
+		"""
+		from linuxPlatform.ioThread import IoThread as LinuxIoThread
+		from linuxPlatform.ioThread import WaitableTimer
+
+		breakNow = threading.Event()
+
+		class BreakingThread(LinuxIoThread):
+			def _takeReady(self):
+				breakNow.wait(WAIT)
+				raise RuntimeError("broken by the test")
+
+		def apc(param: int) -> None:
+			pass
+
+		thread = BreakingThread()
+		thread.start()
+		timer = WaitableTimer()
+		stored = len(IoThread._apcStore)
+		thread.queueAsApc(apc)
+		thread.setWaitableTimer(timer, 60_000, apc)
+		pending = len(IoThread._apcStore) - stored
+		breakNow.set()
+		thread.join(WAIT)
+		result = {
+			"alive": thread.is_alive(),
+			"pending": pending,
+			"storedAfter": len(IoThread._apcStore) - stored,
+			"timerDisarmed": timer._thread is None,
+		}
+		hwIo.terminate()
+		""",
+	)
+	assert done.error is None, done.error
+	assert not done.noLinuxImplementation
+	assert done.logErrors == ["CRITICAL: Exception in IoThread function"]
+	assert done.value == {"alive": False, "pending": 2, "storedAfter": 0, "timerDisarmed": True}
 
 
 def test_restartsAsResetConfigurationDoes(tmp_path: Path):
@@ -425,7 +542,7 @@ def test_restartsAsResetConfigurationDoes(tmp_path: Path):
 			ran.set()
 
 		hwIo.bgThread.queueAsApc(apc)
-		result = {"ran": ran.wait(2), "new": hwIo.bgThread is not first, "firstAlive": first.is_alive()}
+		result = {"ran": ran.wait(WAIT), "new": hwIo.bgThread is not first, "firstAlive": first.is_alive()}
 		hwIo.terminate()
 		""",
 	)
