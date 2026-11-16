@@ -181,8 +181,8 @@ _isAudioDuckingSupported = None
 def isAudioDuckingSupported():
 	global _isAudioDuckingSupported
 	if sys.platform != "win32":
-		# Ducking other applications on Linux would take a policy in the sound server's session
-		# manager, which does not exist yet.
+		# On Linux, ducking other applications is a policy of the sound server's session manager, and
+		# no such policy is set up for NVDA's streams.
 		return False
 	if _isAudioDuckingSupported is None:
 		_isAudioDuckingSupported = config.isInstalledCopy()

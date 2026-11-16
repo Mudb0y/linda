@@ -99,7 +99,7 @@ def initialize() -> None:
 	global _audioSessionManager
 	if sys.platform != "win32":
 		# Sound split sets other applications' volumes through Windows' audio session manager, which
-		# has no Linux counterpart yet; the manager stays None and sound split is unavailable.
+		# has no Linux counterpart; the manager stays None and sound split is unavailable.
 		log.debug("Sound split is not available on this platform")
 		return
 	try:

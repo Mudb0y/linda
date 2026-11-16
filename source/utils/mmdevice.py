@@ -14,7 +14,7 @@ from pycaw.constants import DEVICE_STATE, EDataFlow
 from pycaw.utils import AudioUtilities
 
 if sys.platform != "win32":
-	from linuxPlatform import audioOutput
+	from linuxPlatform import audioOutput as _linuxAudioOutput
 
 
 class AudioOutputDevice(NamedTuple):
@@ -50,7 +50,7 @@ def getOutputDevices(
 	if sys.platform != "win32":
 		# The audio sink lists only devices that are present and usable, which are ACTIVE ones.
 		if DEVICE_STATE.ACTIVE in stateMask:
-			for deviceId, friendlyName in audioOutput.getSink().devices():
+			for deviceId, friendlyName in _linuxAudioOutput.getSink().devices():
 				yield AudioOutputDevice(deviceId, friendlyName)
 		return
 	endpointCollection = AudioUtilities.GetDeviceEnumerator().EnumAudioEndpoints(

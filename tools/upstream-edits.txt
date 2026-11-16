@@ -73,7 +73,7 @@ source/argsParsing.py
   box; the help for -f names the default log under the XDG state directory,
   where logHandler puts it on Linux, instead of %TEMP%
 source/audio/soundSplit.py
-  Linux runtime: Linux has no counterpart yet of Windows' audio
+  Linux runtime: Linux has no counterpart of Windows' audio
   session manager, through which sound split sets other applications'
   volumes. On Linux initialize() leaves it unset instead of calling pycaw,
   which core.main would not survive; the toggle script says "Sound split

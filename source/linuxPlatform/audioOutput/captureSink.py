@@ -98,7 +98,10 @@ class CaptureSink(NullSink):
 	def openStream(self, deviceId: str, fmt: StreamFormat, wake: Callable[[], None]) -> SinkStream:
 		if fmt.formatTag != WAVE_FORMAT_PCM:
 			# Python's wave module writes integer PCM only, and nvwave plays nothing else.
-			raise NoLinuxImplementation(f"capture of audio in wave format {fmt.formatTag}")
+			raise NoLinuxImplementation(
+				"linuxPlatform.audioOutput.captureSink.CaptureSink.openStream",
+				f"the capture sink keeps integer PCM only, not wave format {fmt.formatTag}",
+			)
 		with self._lock:
 			streamNumber = next(self._streamNumbers)
 		return CaptureStream(self, streamNumber, fmt)
