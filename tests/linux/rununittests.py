@@ -866,10 +866,16 @@ def main() -> int:
 		shutil.rmtree(workDir, ignore_errors=True)
 
 
-def _runChild(command: list[str], tmpDir: Path, timeout: float, capture: bool) -> tuple[int | None, str]:
+def _runChild(
+	command: list[str],
+	tmpDir: Path,
+	timeout: float,
+	capture: bool,
+) -> tuple[int | None, str, float]:
 	"""Runs a child in a process group of its own, and ends whatever is left of that group after
-	it; the status is None when the timeout ended it."""
+	it; returns its status, None when the timeout ended it, its output and the seconds it ran."""
 	tmpDir.mkdir()
+	started = time.monotonic()
 	process = subprocess.Popen(
 		command,
 		env={**os.environ, "TMPDIR": str(tmpDir)},
@@ -888,7 +894,7 @@ def _runChild(command: list[str], tmpDir: Path, timeout: float, capture: bool) -
 	finally:
 		with contextlib.suppress(ProcessLookupError):
 			os.killpg(process.pid, signal.SIGKILL)
-	return status, output or ""
+	return status, output or "", time.monotonic() - started
 
 
 def _childArguments(args: argparse.Namespace, record: Path) -> list[str]:
@@ -944,14 +950,10 @@ def _runImportCheck(
 	every import it made that was not of a package failed as stated, and how each import failed."""
 	record = workDir / f"check-{index}.json"
 	command = [*_childArguments(args, record), "--check-import", check.module]
-	status, output = _runChild(command, workDir / f"check-{index}", args.timeout, capture=True)
+	status, output, seconds = _runChild(command, workDir / f"check-{index}", args.timeout + 120, capture=True)
 	if not record.exists():
-		return [
-			(
-				f"rununittests: the import check for {check.owner} ended with status {status} before "
-				f"recording a result; its output follows\n{output}"
-			),
-		], []
+		problem = f"the import check for {check.owner} {_ending(status, seconds, args.timeout)}"
+		return [f"rununittests: {problem}; its output follows\n{output}"], []
 	result = json.loads(record.read_text(encoding="utf-8"))
 	problems = [
 		f"rununittests: refused {refused}, in the import check for {check.owner}"
@@ -981,6 +983,21 @@ def _runImportCheck(
 	return problems, [f"import fails: {outcome['module']}: {outcome['cause']}" for outcome in failed]
 
 
+def _ending(status: int | None, seconds: float, timeout: float) -> str:
+	"""Why a child that wrote no record ended, as the end of a sentence about it."""
+	if status is None:
+		return "outlived its own timeout and was killed"
+	if seconds >= timeout:
+		# Its watchdog, or the fallback for a hang that holds the interpreter lock, ended it.
+		return f"recorded no result within its timeout of {timeout:g} s, and its watchdog ended it"
+	if status < 0:
+		return f"was ended by signal {-status} before recording its result"
+	return (
+		f"ended with status {status} before recording its result: a test, fixture or module ended "
+		"the interpreter"
+	)
+
+
 def _supervise(args: argparse.Namespace, entries: EntryList, workDir: Path) -> tuple[int, list[str], Path]:
 	"""Runs the tests in one child and the import checks in others, alongside; returns the status,
 	the summary lines and where the XML report is written."""
@@ -997,18 +1014,11 @@ def _supervise(args: argparse.Namespace, entries: EntryList, workDir: Path) -> t
 			pool.submit(_runImportCheck, args, workDir, index, check) for index, check in enumerate(checks)
 		]
 		# The child's own watchdog fires at the timeout, and its fallback a minute later.
-		status, _output = _runChild(command, workDir / "tmp", args.timeout + 120, capture=False)
+		status, _output, seconds = _runChild(command, workDir / "tmp", args.timeout + 120, capture=False)
 		checkResults = [future.result() for future in pending]
 	summary: list[str] = []
-	if status is None:
-		print("rununittests: the test process outlived its own timeout and was killed", file=sys.stderr)
-		status = 1
-	elif not record.exists():
-		print(
-			f"rununittests: the test process ended with status {status} before recording its result: "
-			"a test, fixture or module ended the interpreter",
-			file=sys.stderr,
-		)
+	if not record.exists():
+		print(f"rununittests: the test process {_ending(status, seconds, args.timeout)}", file=sys.stderr)
 		status = 1
 	else:
 		result = json.loads(record.read_text(encoding="utf-8"))

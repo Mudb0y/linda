@@ -474,14 +474,28 @@ def test_timeoutEndsTheRunAndLeavesNothingBehind(tmp_path: Path):
 				def test_hangs(self):
 					time.sleep(120)
 		""",
+		"test_hangsAtImport.py": "import time\ntime.sleep(120)\n",
 	}
-	listPath = makeProbes(tmp_path, modules, "")
+	exclusions = f"{PACKAGE}.test_hangsAtImport\n  Until probe.\n  Import raises: ImportError: probe\n"
+	listPath = makeProbes(tmp_path, modules, exclusions)
 	started = time.monotonic()
-	status, _lines, output = runRunner(tmp_path, listPath, "--timeout", "3")
+	status, lines, output = runRunner(tmp_path, listPath, "--timeout", "3")
 	assert status == 1, output
 	assert time.monotonic() - started < 60
 	assert "rununittests: no result after 3 s" in output
 	assert "test_hangs" in output
+	assert (
+		"rununittests: the test process recorded no result within its timeout of 3 s, and its watchdog ended it"
+		in lines
+	), output
+	assert any(
+		line.startswith(
+			f"rununittests: the import check for the exclusion {PACKAGE}.test_hangsAtImport recorded no "
+			"result within its timeout of 3 s, and its watchdog ended it; its output follows"
+		)
+		for line in lines
+	), output
+	assert "ended the interpreter" not in output
 
 
 def checkoutStandIn(tmp_path: Path) -> Path:
