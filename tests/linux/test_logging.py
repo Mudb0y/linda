@@ -127,8 +127,7 @@ def test_exceptionWithOSError(tmp_path: Path):
 		result = {"log": logText()}
 		""",
 	)
-	assert done.error is None, done.error
-	assert not done.noLinuxImplementation, done.noLinuxImplementation
+	done.assertClean(ignoring={"logErrors"})
 	assert done.logErrors == ["ERROR: plain OSError", "ERROR: COM failure"]
 	text = done.value["log"]
 	assert re.search(r"^ERROR - .*\nplain OSError\nTraceback", text, re.MULTILINE), text
@@ -224,7 +223,7 @@ def test_errorSoundThreadThatCannotStartIsTriedAgain(tmp_path: Path):
 		result = {"refused": refused, "played": played.wait(60)}
 		""",
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"logErrors"})
 	assert done.logErrors == [
 		"ERROR: logged while no thread can start",
 		"ERROR: logged once threads start again",
@@ -265,8 +264,7 @@ def test_errorSoundCannotRecurseOrBlock(tmp_path: Path):
 		result = {"calls": calls, "askedAgain": askedAgain}
 		""",
 	)
-	assert done.error is None, done.error
-	assert not done.noLinuxImplementation, done.noLinuxImplementation
+	done.assertClean(ignoring={"logErrors"})
 	# The second error arrived while the sound was being requested and asks for nothing, and the
 	# thread that logged it went on while the player was stuck. The player's own failure is logged
 	# on the sound's thread, so nothing follows it either.
@@ -325,8 +323,7 @@ def test_errorSoundStopsWhenItsPlaybackLogsErrors(tmp_path: Path):
 		result = {"loopPlays": loopPlays, "plays": len(plays), "log": logText()}
 		""",
 	)
-	assert done.error is None, done.error
-	assert not done.noLinuxImplementation, done.noLinuxImplementation
+	done.assertClean(ignoring={"logErrors"})
 	# Each failing playback asks for the sound again; the third that follows its sound stops it.
 	assert done.value["loopPlays"] == 3, done.value
 	assert done.logErrors.count("ERROR: Error playing wave file") == 3, done.logErrors
@@ -389,9 +386,9 @@ def test_errorSoundThroughNvwaveStops(tmp_path: Path):
 		result = {"stopped": stopped.wait(60), "players": len(created)}
 		""",
 	)
-	assert done.error is None, done.error
-	assert not done.noLinuxImplementation, done.noLinuxImplementation
+	done.assertClean(ignoring={"logErrors"})
 	assert done.value == {"stopped": True, "players": 3}
+	assert done.logErrors == ["ERROR: one error"] + ["ERROR: Error playing wave file"] * 3
 
 
 def test_errorWhileSoundThreadStartsDoesNotHang(tmp_path: Path):
@@ -418,7 +415,7 @@ def test_errorWhileSoundThreadStartsDoesNotHang(tmp_path: Path):
 		""",
 		timeout=120,
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"logErrors"})
 	assert done.value == "returned"
 	assert sorted(done.logErrors) == ["ERROR: first error", "ERROR: logged while the sound thread starts"]
 
@@ -457,7 +454,7 @@ def test_errorSoundRequestsStopBeforeTheExitSound(tmp_path: Path):
 		}
 		""",
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"logErrors"})
 	assert done.logErrors == ["ERROR: late error", "ERROR: logged after the requests stopped"]
 	assert done.value["plays"] == ["error sound starting", "error sound started", "exit sound"]
 	assert "logHandler.errorSound" not in done.value["threads"]
@@ -501,7 +498,7 @@ def test_stoppingErrorSoundRequestsDropsOneNotYetMadeAndNeverWaitsLong(tmp_path:
 		result = {"neverStarted": neverStarted, "stuck": stuck, "calls": calls}
 		""",
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"logErrors"})
 	assert done.logErrors == ["ERROR: logged after the requests stopped", "ERROR: asks for the stuck player"]
 	assert done.value == {
 		"neverStarted": {"calls": [], "thread": False},
@@ -692,7 +689,7 @@ def test_noSoundThreadWhenSoundIsOff(tmp_path: Path):
 		result = [thread.name for thread in threading.enumerate()]
 		""",
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"logErrors"})
 	assert done.logErrors == ["ERROR: an error with the sound off"]
 	assert "logHandler.errorSound" not in done.value
 
@@ -721,8 +718,7 @@ def test_criticalMakesNoSound(tmp_path: Path):
 		}
 		""",
 	)
-	assert done.error is None, done.error
-	assert not done.noLinuxImplementation, done.noLinuxImplementation
+	done.assertClean(ignoring={"logErrors"})
 	assert done.logErrors == ["CRITICAL: critical by the test"]
 	assert done.value["calls"] == 0
 	assert done.value["requested"] is False
@@ -836,8 +832,7 @@ def test_logFileOptionAndRedirection(tmp_path: Path):
 		result = logText()
 		""",
 	)
-	assert done.error is None, done.error
-	assert not done.noLinuxImplementation, done.noLinuxImplementation
+	done.assertClean(ignoring={"logErrors"})
 	assert done.logErrors == ["ERROR: written to standard error by the test"]
 	text = done.value
 	assert re.search(
@@ -997,7 +992,7 @@ def test_crashDumpWithoutLogFile(tmp_path: Path):
 		""",
 		env={"XDG_STATE_HOME": str(state)},
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"logErrors"})
 	assert done.logErrors == ["ERROR: Faile to open log file, redirecting to standard output"]
 	assert done.value == {"enabled": True, "logFileName": None}
 	assert (state / "basedreader" / "nvda_crash.log").exists()
@@ -1118,8 +1113,7 @@ def test_watchdogLogsStackOfFrozenCore(tmp_path: Path):
 		}
 		""",
 	)
-	assert done.error is None, done.error
-	assert not done.noLinuxImplementation, done.noLinuxImplementation
+	done.assertClean(ignoring={"logErrors"})
 	assert done.logErrors, "no frozen core was reported"
 	assert all(record.startswith("ERROR: Core frozen in stack!") for record in done.logErrors), done.logErrors
 	assert done.value["before"] == {"cancelling": False, "readable": False}
@@ -1284,7 +1278,6 @@ def test_watchdogSendMessageIsWindowsOnly(tmp_path: Path):
 			result = str(e)
 		""",
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert done.noLinuxImplementation == ["watchdog.cancellableSendMessage"]
-	assert not done.logErrors
 	assert "watchdog.cancellableSendMessage" in done.value

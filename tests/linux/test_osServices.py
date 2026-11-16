@@ -657,10 +657,9 @@ def test_unbuiltServicesFailLoudly(tmp_path):
 			result = type(e).__name__
 		""",
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert done.value == "NoLinuxImplementation"
 	assert done.noLinuxImplementation == ["easeOfAccess.setAutoStart(AFTER_LOGON)"]
-	assert not done.logErrors
 
 
 def test_sayAllStartsReadingFromTheCaret(tmp_path):
@@ -1082,8 +1081,7 @@ def test_localeHelpersAnswerInEnglishFromIcu(tmp_path):
 		""",
 		env={**NO_LOCALE, "LANG": "pl_PL.UTF-8"},
 	)
-	assert done.error is None, done.error
-	assert not done.logErrors
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	value = done.value
 	# In English whatever the interface language, as Windows' SENGLISH names are.
 	assert value["languages"] == {
@@ -1196,8 +1194,7 @@ def test_windowsOnlyNamesFailLoudly(tmp_path):
 		}
 		""",
 	)
-	assert done.error is None, done.error
-	assert not done.logErrors
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	value = done.value
 	assert value["outcomes"] == {
 		"function": "winreg.OpenKey has no Linux implementation",
@@ -1254,8 +1251,7 @@ def test_registryPathsRaiseNoLinuxImplementation(tmp_path):
 		""",
 		env=xdgEnv(tmp_path),
 	)
-	assert done.error is None, done.error
-	assert not done.logErrors
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert done.value == {
 		"installDirX86": "winreg.OpenKey has no Linux implementation",
 		"startMenuFolder": "winreg.OpenKey has no Linux implementation",
@@ -1308,8 +1304,7 @@ def test_addonStoreOpensLinksWithTheDefaultApplication(tmp_path):
 		""",
 		env={**xdgEnv(tmp_path), "PATH": f"{fakeBin}:{os.environ['PATH']}"},
 	)
-	assert done.error is None, done.error
-	assert not done.logErrors
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert done.value == {
 		"opened": ["https://example.org/addon", "/somewhere/readme.txt"],
 		"printed": "os.startfile(operation='print') has no Linux implementation",
@@ -1339,8 +1334,7 @@ def test_customWindowFailsAtItsFirstWindowsCall(tmp_path):
 			result = str(e)
 		""",
 	)
-	assert done.error is None, done.error
-	assert not done.logErrors
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert done.value == "user32.RegisterClassExW is a Windows function with no Linux implementation"
 	assert done.noLinuxImplementation == ["user32.RegisterClassExW"]
 
@@ -1364,7 +1358,7 @@ def test_chineseWordSegmentationIsUnavailableWithoutItsLibrary(tmp_path):
 		""",
 		env=xdgEnv(tmp_path),
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"noLinuxImplementation", "logErrors"})
 	assert done.value == {"raised": ["NoWindowsLibrary", True, True], "loaded": False}
 	assert done.noLinuxImplementation == ["NVDAState.ReadPaths.coreArchLibPath"] * 2
 	# Upstream logs a library that will not load, on Windows too, and carries on without it.

@@ -393,9 +393,9 @@ def test_whatNeedsTheLiveKeyboardRaises(tmp_path: Path, call: str, missing: str)
 		""",
 		objects=True,
 	)
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert value == missing
 	assert done.noLinuxImplementation == [missing]
-	assert not done.logErrors
 
 
 #: Windows virtual-key and scan codes of the keys the seam test presses.
@@ -541,6 +541,7 @@ def test_seamGapsNeedTheLiveKeyboard(tmp_path: Path, gesture: str):
 		objects=True,
 	)
 	# keyboardHandler logs the failure and lets the key through, as it does for any error on a press.
+	done.assertClean(ignoring={"noLinuxImplementation", "logErrors"})
 	assert done.noLinuxImplementation == [missing]
 	assert done.logErrors == ["ERROR: internal_keyDownEvent"]
 	assert value["scripts"] == 0
@@ -635,8 +636,8 @@ def test_scriptWithAltNeedsKeyInjection(tmp_path: Path):
 		""",
 		objects=True,
 	)
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert done.noLinuxImplementation == ["user32.keybd_event"]
-	assert not done.logErrors
 	assert value == {
 		"passed": [True, True, False, False, True, True],
 		"ran": [],
@@ -717,9 +718,9 @@ def test_audioCoordinatesBrightnessNamesScreenCapture(tmp_path: Path):
 		""",
 		objects=True,
 	)
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert value == "screen capture"
 	assert done.noLinuxImplementation == ["screen capture"]
-	assert not done.logErrors
 
 
 def test_touchIsNotSupported(tmp_path: Path):

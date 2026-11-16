@@ -921,9 +921,10 @@ def test_autoFallsBackToSilenceAndStaysAuto(tmp_path: Path):
 	assert "schemaVersion" in done.value["savedSections"]
 	assert done.value["savedSynth"] is None
 	# The one error says why there is no voice: auto tries eSpeak first, and its check() fails on Linux.
-	assert done.error is None, done.error
-	assert not done.noLinuxImplementation, done.noLinuxImplementation
+	# Trying it loads eSpeak's library, the one thing that could sound, in a rig with no sound device.
+	done.assertClean(ignoring={"logErrors", "audio"})
 	assert done.logErrors == ["ERROR: setSynth failed for espeak"]
+	assert done.audio and all("espeak" in what for what in done.audio), done.audio
 
 
 def test_excludedDriversAreExactlyThoseThatCannotImport(tmp_path: Path):
@@ -950,6 +951,6 @@ def test_excludedDriversAreExactlyThoseThatCannotImport(tmp_path: Path):
 		result = {"failing": sorted(failing), "excluded": sorted(synthDriverHandler._windowsOnlySynthDrivers)}
 		""",
 	)
-	assert done.error is None, done.error
+	done.assertClean()
 	assert done.value["failing"] == sorted(WINDOWS_ONLY_DRIVERS)
 	assert done.value["excluded"] == sorted(WINDOWS_ONLY_DRIVERS)

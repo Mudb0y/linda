@@ -298,10 +298,9 @@ except NoLinuxImplementation:
 	result = "raised"
 """,
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert done.value == "raised"
 	assert done.noLinuxImplementation == ["product name and version of a process"]
-	assert not done.logErrors
 
 
 def test_otherUsersProcess(tmp_path: Path):

@@ -530,7 +530,8 @@ def test_recordSeesNoLinuxImplementationThatUpstreamCaught(tmp_path: Path):
 		""",
 		prepare="bootstrap",
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"noLinuxImplementation"})
+	assert done.noLinuxImplementation == ["user32.GetForegroundWindow"]
 	records = [json.loads(line) for line in recordPath.read_text(encoding="utf-8").splitlines()]
 	assert [r["what"] for r in records] == ["user32.GetForegroundWindow"]
 	assert records[0]["thread"] == "MainThread"
