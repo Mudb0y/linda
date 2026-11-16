@@ -546,7 +546,7 @@ impl Engine {
                     continue;
                 }
                 if !s.is_empty() {
-                    // Looked at again when what it holds will have played, unless it is paused.
+                    // Looked at again when what it holds will have played, unless it is silenced.
                     sooner(now + s.pending_ns().unwrap_or(RECHECK_NS) + DRAIN_CHECK_NS);
                     continue;
                 }

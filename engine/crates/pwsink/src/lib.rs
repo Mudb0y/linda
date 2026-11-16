@@ -13,7 +13,11 @@
 //! and the frames delivered say which.
 //!
 //! Every function taking a stream handle must be given a handle from pwsink_open that has not yet
-//! been passed to pwsink_close, and must not be called on one handle from two threads at once.
+//! been passed to pwsink_close. No two of them may run at once on one handle, but for pwsink_stop
+//! and pwsink_abort: those two may run on any thread at the same time as any other function on the
+//! same handle, each other included, though never at the same time as pwsink_close. Each is one
+//! atomic store, with no lock, no wake and no allocation, so it never blocks and can be called
+//! without letting go of Python's GIL.
 
 mod engine;
 
@@ -141,17 +145,28 @@ pub unsafe extern "C" fn pwsink_start(stream: *const Stream) {
     }
 }
 
-/// Silences the stream from the graph's next cycle. One atomic store.
+/// Silences the stream from the graph's next cycle until pwsink_start. One atomic store.
 ///
 /// # Safety
-/// A live handle.
+/// A live handle; on any thread, but not alongside pwsink_close.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pwsink_stop(stream: *const Stream) {
     // SAFETY: as documented.
     unsafe { &*stream }.stop();
 }
 
-/// Discards what is queued and counts from zero again.
+/// Silences the stream from the graph's next cycle until pwsink_reset, whatever pwsink_start is
+/// called meanwhile. One atomic store.
+///
+/// # Safety
+/// A live handle; on any thread, but not alongside pwsink_close.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pwsink_abort(stream: *const Stream) {
+    // SAFETY: as documented.
+    unsafe { &*stream }.abort();
+}
+
+/// Discards what is queued, counts from zero again and ends an abort.
 ///
 /// # Safety
 /// A live handle.

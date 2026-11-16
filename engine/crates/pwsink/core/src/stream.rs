@@ -2,10 +2,16 @@
 //! position the player is told, and the clock that keeps that position moving whenever PipeWire
 //! stops consuming.
 //!
-//! Three kinds of thread touch a stream, and each datum has one writer:
+//! Four kinds of thread touch a stream, and each datum but the two flags that silence it has one
+//! writer:
 //! - the producer, the one thread at a time that NVDA's player lets call it, writes the ring
-//!   ahead of the read position, `write_pos`, `base`, `paused`, the gains, the clock's fields and
-//!   `kick_ns`, and raises `skip_to`;
+//!   ahead of the read position, `write_pos`, `base`, the gains, the clock's fields and `kick_ns`,
+//!   raises `skip_to`, clears `paused` when it starts the stream and clears `aborted` when it resets
+//!   it;
+//! - any thread may set `paused` through `stop` or `aborted` through `abort`, at the same time as
+//!   anything the producer does, since NVDA's player silences a stream without waiting for the
+//!   thread that is feeding it; never during or after the stream's close, which the player rules
+//!   out. Each is one store and writes nothing else;
 //! - the real-time callback writes `read_pos`, `in_cycle`, the position snapshot and the cycle
 //!   counters;
 //! - the loop thread writes what it knows of the connection and the pw_stream: `attached_ns`,
@@ -14,8 +20,12 @@
 //!   could run.
 //!
 //! Nothing here takes a lock or waits. These are the orderings that matter:
-//! - `stop` is one store of `paused`, which the callback loads at the start of its next cycle, so
-//!   at most the cycle in progress is heard after it.
+//! - `stop` and `abort` are each one store, of `paused` and of `aborted`, which the callback loads
+//!   at the start of its next cycle, so at most the cycle in progress is heard after either.
+//!   `start` clears only `paused`, so an abort holds whatever starts the producer makes meanwhile.
+//!   `reset` clears `aborted` with Release after it has raised `skip_to`, and the callback loads
+//!   `aborted` with Acquire before `paused`: a cycle that sees an abort ended also sees what the
+//!   reset discarded, and the stop the player always makes before a reset.
 //! - The ring's bytes are published by the store of `write_pos`, which the callback loads before
 //!   reading them.
 //! - A reset or the clock raises `skip_to` while the callback may be inside a cycle that read the
@@ -77,6 +87,8 @@ pub struct Stream {
     skip_to: AtomicU64,
     in_cycle: AtomicBool,
     paused: AtomicBool,
+    /// Set by abort, cleared only by reset.
+    aborted: AtomicBool,
     gains: [AtomicU32; MAX_CHANNELS],
 
     snap_seq: AtomicU64,
@@ -152,6 +164,7 @@ impl Stream {
             skip_to: AtomicU64::new(0),
             in_cycle: AtomicBool::new(false),
             paused: AtomicBool::new(true),
+            aborted: AtomicBool::new(false),
             gains: std::array::from_fn(|_| AtomicU32::new(1.0f32.to_bits())),
             snap_seq: AtomicU64::new(0),
             snap_graph_ns: AtomicU64::new(0),
@@ -177,8 +190,8 @@ impl Stream {
         }
     }
 
-    // The producer's side. NVDA's player holds its own lock around every call, so these never run
-    // on two threads at once for one stream.
+    // The producer's side. NVDA's player calls these with its own lock held, so no two of them run
+    // at once for one stream; stop and abort, below them, may run alongside any of them.
 
     /// Copies all the whole frames in data into the ring, or nothing when they do not all fit,
     /// and returns how many it took. Also says whether the loop thread must wake the stream.
@@ -225,22 +238,19 @@ impl Stream {
         pos - self.base.load(Relaxed)
     }
 
-    /// Lets the callback give frames again from its next cycle. Says whether the loop thread must
-    /// wake the stream.
+    /// Lets the callback give frames again from its next cycle, unless the stream has been aborted
+    /// since its last reset. Says whether the loop thread must wake the stream.
     pub fn start(&self, now: u64) -> bool {
         if self.paused.swap(false, SeqCst) {
             self.restart_clock(now);
         }
-        self.write_pos.load(Relaxed) > self.consumed() && self.needs_kick(now)
+        !self.aborted.load(Relaxed)
+            && self.write_pos.load(Relaxed) > self.consumed()
+            && self.needs_kick(now)
     }
 
-    /// The callback gives nothing from its next cycle. A single store, so that it can never wait
-    /// for anything: what the graph already holds is at most the cycle in progress.
-    pub fn stop(&self) {
-        self.paused.store(true, Release);
-    }
-
-    /// Discards everything written. The callback skips to here at its next cycle.
+    /// Discards everything written and ends an abort. The callback skips to here at its next
+    /// cycle.
     pub fn reset(&self, now: u64) {
         let wp = self.write_pos.load(Relaxed);
         self.base.store(wp, Relaxed);
@@ -248,6 +258,7 @@ impl Stream {
         self.skip_to.fetch_max(wp, SeqCst);
         self.clock_pos.store(wp, Relaxed);
         self.clock_ns.store(now, Relaxed);
+        self.aborted.store(false, Release);
     }
 
     pub fn set_volume(&self, channel: u32, level: f32) -> bool {
@@ -266,6 +277,21 @@ impl Stream {
         self.restart_clock(now);
     }
 
+    // Any thread's side: each is a single store, with no lock, no wake and no allocation, so that
+    // silencing a stream never waits, whatever the producer is doing.
+
+    /// The callback gives nothing from its next cycle, until the next start: what the graph
+    /// already holds is at most the cycle in progress.
+    pub fn stop(&self) {
+        self.paused.store(true, Release);
+    }
+
+    /// The callback gives nothing from its next cycle, as after stop, and goes on giving nothing
+    /// whatever start is called, until the next reset.
+    pub fn abort(&self) {
+        self.aborted.store(true, Release);
+    }
+
     /// Moves the read position by the wall clock while the stream is started, holds frames and has
     /// not been consumed for longer than its bound, discarding at the stream's rate as a device
     /// would play. The discard goes through skip_to, never read_pos, which only the callback
@@ -275,7 +301,7 @@ impl Stream {
         let calls = self.process_calls.load(Acquire);
         let wp = self.write_pos.load(Relaxed);
         let consumed = self.consumed();
-        if self.paused.load(Relaxed)
+        if self.is_silenced()
             || consumed >= wp
             || consumed != self.clock_pos.load(Relaxed)
             || !self.stalled(now, calls)
@@ -403,9 +429,15 @@ impl Stream {
         self.write_pos.load(SeqCst) <= self.consumed()
     }
 
-    /// How long what the stream holds will take to play, or None while it is paused.
+    /// Whether the stream is stopped or aborted, so that the callback gives it nothing and the
+    /// clock does not move it on.
+    pub fn is_silenced(&self) -> bool {
+        self.aborted.load(Relaxed) || self.paused.load(Relaxed)
+    }
+
+    /// How long what the stream holds will take to play, or None while it is stopped or aborted.
     pub fn pending_ns(&self) -> Option<u64> {
-        if self.paused.load(Relaxed) {
+        if self.is_silenced() {
             return None;
         }
         let frames = self.write_pos.load(Relaxed).saturating_sub(self.consumed());
@@ -534,7 +566,8 @@ impl Stream {
     }
 
     pub fn available(&self, rp: u64) -> u64 {
-        if self.paused.load(Acquire) {
+        // aborted first: see the module's note on reset.
+        if self.aborted.load(Acquire) || self.paused.load(Acquire) {
             0
         } else {
             self.write_pos.load(Acquire).saturating_sub(rp)
@@ -709,6 +742,59 @@ mod tests {
         assert!(cycle(&s, 100, 20).is_empty());
         s.start(30);
         assert_eq!(cycle(&s, 100, 30).len(), 200);
+    }
+
+    #[test]
+    fn an_abort_holds_whatever_start_is_called_until_the_next_reset() {
+        let s = mono16(8000);
+        attach(&s, 1);
+        s.write(&frames(4000, 7), 1);
+        s.start(1);
+        assert_eq!(cycle(&s, 100, 10).len(), 200);
+        s.abort();
+        assert!(cycle(&s, 100, 20).is_empty());
+        assert!(!s.start(30), "an aborted stream asks for no wake");
+        assert!(cycle(&s, 100, 30).is_empty(), "start ended the abort");
+        assert_eq!(s.pending_ns(), None);
+        // As NVDA's player completes a stop: stop, reset, then the next utterance.
+        s.stop();
+        s.reset(40);
+        s.write(&frames(100, 3), 40);
+        s.start(40);
+        assert_eq!(cycle(&s, 400, 50), frames(100, 3));
+    }
+
+    #[test]
+    fn a_cycle_under_way_through_a_reset_gives_nothing_it_discarded() {
+        let s = mono16(8000);
+        attach(&s, 1);
+        s.write(&frames(4000, 7), 1);
+        s.start(1);
+        s.abort();
+        // The callback has read where to start from when the player completes its stop.
+        let rp = s.begin_cycle();
+        s.stop();
+        s.reset(2);
+        assert_eq!(s.available(rp), 0);
+        s.end_cycle(rp);
+    }
+
+    #[test]
+    fn an_aborted_stream_does_not_move_by_the_clock() {
+        let s = mono16(8000);
+        let t0 = 1000 * MS;
+        s.write(&frames(3200, 1), t0);
+        s.start(t0);
+        assert_eq!(s.played(t0 + 100 * MS), 800);
+        s.abort();
+        s.start(t0 + 150 * MS);
+        assert_eq!(s.played(t0 + 300 * MS), 800);
+        assert_eq!(s.buffered(t0 + 300 * MS), 2400);
+        s.stop();
+        s.reset(t0 + 300 * MS);
+        s.write(&frames(800, 1), t0 + 300 * MS);
+        s.start(t0 + 300 * MS);
+        assert_eq!(s.played(t0 + 400 * MS), 800);
     }
 
     #[test]
