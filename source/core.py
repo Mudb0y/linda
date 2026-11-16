@@ -1181,6 +1181,11 @@ def main():
 	_terminate(dataManager, name="addon dataManager")
 	_terminate(garbageHandler)
 	_terminate(schedule, name="task scheduler")
+	if sys.platform != "win32":
+		# The error sound is asked for on a thread of its own, where it would play over the exit sound.
+		from linuxPlatform import logSupport
+
+		logSupport.stopErrorSoundRequests()
 
 	if not globalVars.appArgs.minimal and config.conf["general"]["playStartAndExitSounds"]:
 		try:

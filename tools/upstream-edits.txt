@@ -126,6 +126,9 @@ source/core.py
   ends a shutdown that hangs, even in C code. The Java Access Bridge
   failing to load is logged at debug level on Linux instead of as a warning
   on every start, as Java applications are reached there through AT-SPI.
+  Before the exit sound, shutdown stops linuxPlatform.logSupport's requests
+  for the error sound, which are made on a thread of their own and would
+  otherwise play over the exit sound or outlive it.
   every platform: doStartupDialogs() shows nothing once shutdown has been
   triggered: wx.CallAfter runs it after the core
   pump's first cycles on GTK, so a quick exit ran it inside the wx.Yield of

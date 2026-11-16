@@ -13,7 +13,6 @@ import wave
 from pathlib import Path
 
 import harness
-import pytest
 
 HERE = Path(__file__).resolve().parent
 
@@ -609,12 +608,6 @@ class LateErrorSoundHeard(AssertionError):
 	"""The sound for an error logged late in shutdown cut off the exit sound, or its thread outlived it."""
 
 
-@pytest.mark.xfail(
-	"stopErrorSoundRequests(" not in (harness.SOURCE / "core.py").read_text(encoding="utf-8"),
-	reason="core.main plays the exit sound without first stopping the error sound's requests",
-	raises=LateErrorSoundHeard,
-	strict=True,
-)
 def test_lateErrorLeavesTheExitSoundWhole(tmp_path: Path):
 	"""An error logged in the last step of shutdown cuts off neither the exit sound nor outlives it.
 
