@@ -93,38 +93,6 @@ isolation = {
 #: playing, fails the test.
 IMPORTED_WITH_WEBVIEW = ("libgst", "libpulse")
 
-#: Workstream A4 owns NVDAHelper.localLib.generateBeep, whose Linux body has not landed and raises.
-#: This stands in for that one function only: a port of nvdaHelper/local/beeps.cpp, same arguments,
-#: same samples.
-GENERATE_BEEP_STUB = """
-import array
-import ctypes
-import math
-
-from NVDAHelper import localLib
-
-
-def generateBeep(buf, hz, length, left=50, right=50):
-	sampleRate, amplitude = 44100, 14000
-	samplesPerCycle = int(sampleRate / hz)
-	totalSamples = int((length / 1000.0) / (1.0 / sampleRate))
-	totalSamples += samplesPerCycle - (totalSamples % samplesPerCycle)
-	if buf is None:
-		return totalSamples * 4
-	lpan, rpan = (left / 100.0) * amplitude, (right / 100.0) * amplitude
-	sinFreq = (2.0 * math.pi) / (sampleRate / hz)
-	out = array.array("h", bytes(totalSamples * 4))
-	for n in range(totalSamples):
-		sample = min(max(math.sin((n % sampleRate) * sinFreq) * 2.0, -1.0), 1.0)
-		out[2 * n] = int(sample * lpan)
-		out[2 * n + 1] = int(sample * rpan)
-	ctypes.memmove(buf, out.tobytes(), totalSamples * 4)
-	return totalSamples * 4
-
-
-localLib.generateBeep = generateBeep
-"""
-
 
 def runAudio(tmpPath: Path, code: str, *, captureDir: Path | None = None, extra: str = "") -> dict:
 	"""Run code after PRELUDE and return its result, with the isolation findings merged in."""
@@ -455,7 +423,10 @@ def test_beepReachesCapture(tmp_path: Path):
 	value = runAudio(
 		tmp_path,
 		"""
+		import ctypes
+
 		import tones
+		from NVDAHelper import localLib
 
 		tones.initialize()
 		start = time.monotonic()
@@ -488,7 +459,6 @@ def test_beepReachesCapture(tmp_path: Path):
 		}
 		""",
 		captureDir=captureDir,
-		extra=GENERATE_BEEP_STUB,
 	)
 	assert value["beepReturned"] < 0.08
 	assert 0.1 <= value["synced"] <= 0.3
