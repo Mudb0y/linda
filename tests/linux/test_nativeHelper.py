@@ -6,9 +6,12 @@ somewhere it changes the count.
 	nix develop . -c tests/linux/rig python3 -m pytest -p no:cacheprovider tests/linux/test_nativeHelper.py
 """
 
-import math
+import ctypes
+import hashlib
 import os
-import struct
+import random
+import shutil
+import subprocess
 from itertools import pairwise
 from pathlib import Path
 
@@ -16,7 +19,7 @@ import harness
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
-FAMILY = "\U0001f469\U0001f3fb‍\U0001f467\U0001f3fb‍\U0001f466\U0001f3fb"
+FAMILY = "\U0001f469\U0001f3fb\u200d\U0001f467\U0001f3fb\u200d\U0001f466\U0001f3fb"
 """Woman, girl and boy, each with a skin tone, joined by zero width joiners: 14 UTF-16 units."""
 
 
@@ -55,10 +58,10 @@ def test_graphemeBoundaries(tmp_path: Path):
 	cases = {
 		"family": FAMILY,
 		"flag": "\U0001f1f5\U0001f1f1",
-		"keycap": "1️⃣",
-		"warning": "⚠️",
-		"combiningAcute": "é",
-		"hebrewWithPoints": "בְּ",
+		"keycap": "1\ufe0f\u20e3",
+		"warning": "\u26a0\ufe0f",
+		"combiningAcute": "e\u0301",
+		"hebrewWithPoints": "\u05d1\u05b0\u05bc",
 		"plain": "x",
 	}
 	text = "".join(cases.values())
@@ -136,6 +139,8 @@ def test_wordOffsets(tmp_path: Path):
 			"polish": [helper({polish!r}, o) for o in (0, 1, 3, 11, 14, 17, 20, 23, 26)],
 			"auto": segmenter({polish!r}, 14, WordSegFlag.AUTO),
 			"uniscribe": segmenter({polish!r}, 14, WordSegFlag.UNISCRIBE),
+			"punctuationIcu": segmenter("foox.", 0, WordSegFlag.ICU),
+			"punctuationUniscribe": segmenter("foox.", 0, WordSegFlag.UNISCRIBE),
 			"negative": helper({english!r}, -1),
 			"pastEnd": helper({english!r}, 40),
 		}}
@@ -159,6 +164,9 @@ def test_wordOffsets(tmp_path: Path):
 		[22, 28],
 	]
 	assert done.value["auto"] == done.value["uniscribe"] == [10, 16]
+	# The UNISCRIBE strategy pads the line with "xx", which joins a full stop to the word before it.
+	assert done.value["punctuationIcu"] == [0, 4]
+	assert done.value["punctuationUniscribe"] == [0, 5]
 	assert done.value["negative"] is None
 	assert done.value["pastEnd"] == [40, 41]
 
@@ -230,61 +238,124 @@ def test_icuAbsentIsReportedTruthfully(tmp_path: Path):
 	assert not done.logErrors
 
 
-def toFloat32(value: float) -> float:
-	return struct.unpack("<f", struct.pack("<f", value))[0]
+def test_characterBoundariesReturnFalseWhenIcuFails(tmp_path: Path):
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import ctypes
+		import logging
+		import NVDAHelper
+		from NVDAHelper import localLib
+		from logHandler import log
+		from winBindings import icu
+
+		warnings = []
+
+		class Collector(logging.Handler):
+			def emit(self, record):
+				warnings.append(record.getMessage())
+
+		log.addHandler(Collector(level=log.DEBUGWARNING))
+		log.setLevel(log.DEBUGWARNING)
+
+		def failingOpen(kind, locale, text, textLength, status):
+			status._obj.value = 7  # U_MEMORY_ALLOCATION_ERROR
+			return None
+
+		icu.ubrk_open = failingOpen
+		offsets = (ctypes.c_int * 4)()
+		bounds = ctypes.c_int(-1), ctypes.c_int(-1)
+		result = {
+			"boundaries": localLib.calculateCharacterBoundaries(
+				"abc", 3, offsets, ctypes.byref(ctypes.c_int())
+			),
+			"offsets": localLib.calculateCharacterOffsets("abc", 3, 1, *map(ctypes.byref, bounds)),
+			"untouched": [bound.value for bound in bounds],
+			"warnings": warnings,
+		}
+		""",
+	)
+	done.assertClean()
+	assert done.value == {
+		"boundaries": False,
+		"offsets": False,
+		"untouched": [-1, -1],
+		"warnings": ["ICU character break iterator failed"] * 2,
+	}
 
 
-def expectedBeepSamples(hz: float, length: int, left: int, right: int, count: int) -> tuple[int, list]:
-	"""nvdaHelper/local/beeps.cpp transcribed: the size in bytes and the first count frames."""
-	hz = toFloat32(hz)
-	perCycle = toFloat32(44100 / hz)
-	samplesPerCycle = int(perCycle)
-	totalSamples = int((length / 1000.0) / (1.0 / 44100))
-	totalSamples += samplesPerCycle - totalSamples % samplesPerCycle
-	lpan = (left / 100.0) * 14000
-	rpan = (right / 100.0) * 14000
-	sinFreq = (2.0 * math.pi) / perCycle
-	frames = []
-	for n in range(count):
-		sample = min(max(math.sin((n % 44100) * sinFreq) * 2.0, -1.0), 1.0)
-		frames.append([int(sample * lpan), int(sample * rpan)])
-	return totalSamples * 4, frames
+def compileUpstreamBeeps(directory: Path) -> ctypes.CDLL:
+	"""nvdaHelper/local/beeps.cpp built unchanged, behind a header that exports it with C linkage
+	instead of the Windows one it includes."""
+	compiler = shutil.which("g++")
+	assert compiler, "the dev shell provides g++"
+	shutil.copy(ROOT / "nvdaHelper" / "local" / "beeps.cpp", directory)
+	(directory / "beeps.h").write_text(
+		'extern "C" int generateBeep(short* buf, const float hz, const int length, '
+		"const int left = 50, const int right = 50);\n",
+	)
+	library = directory / "libbeeps.so"
+	subprocess.run(
+		[compiler, "-O2", "-shared", "-fPIC", "-o", library, directory / "beeps.cpp"],
+		check=True,
+	)
+	native = ctypes.CDLL(str(library)).generateBeep
+	native.restype = ctypes.c_int
+	native.argtypes = (ctypes.c_char_p, ctypes.c_float, ctypes.c_int, ctypes.c_int, ctypes.c_int)
+	return native
 
 
-def test_beepBuffer(tmp_path: Path):
-	cases = [(440, 50, 50, 50), (1000.3, 30, 20, 85), (441, 1000, 100, 0)]
+def test_beepBufferMatchesUpstreamByteForByte(tmp_path: Path):
+	cases = [
+		(440, 50, 50, 50),
+		(441, 1000, 100, 0),
+		(1000.3, 30, 20, 85),
+		(1, 100, 50, 50),
+		(19999.7, 20, 0, 100),
+		(22050, 10, 50, 50),
+		(44099.9, 10, 50, 50),
+		(100, 0, 50, 50),
+		(37.123456789, 3000, 33, 67),
+		(880.0000001, 250, 101, -5),
+		(440, -10, 50, 50),
+		(50, 2500, 100, 100),
+	]
+	rng = random.Random(20261116)
+	cases += [
+		(rng.uniform(1, 22050), rng.randint(0, 1500), rng.randint(0, 100), rng.randint(0, 100))
+		for _ in range(40)
+	]
 	done = harness.runChild(
 		tmp_path,
 		f"""
 		import ctypes
-		import struct
+		import hashlib
 		import NVDAHelper
 		from NVDAHelper.localLib import generateBeep
 		result = []
-		for hz, length, left, right in {cases!r}:
-			size = generateBeep(None, hz, length, left, right)
+		for case in {cases!r}:
+			size = generateBeep(None, *case)
+			if size <= 0:
+				result.append([size, None, None])
+				continue
 			buf = ctypes.create_string_buffer(size)
-			written = generateBeep(buf, hz, length, left, right)
-			result.append({{
-				"size": size,
-				"written": written,
-				"samples": list(struct.unpack("<%dh" % (size // 2), buf.raw)),
-			}})
+			written = generateBeep(buf, *case)
+			result.append([size, written, hashlib.sha256(buf.raw).hexdigest()])
 		""",
 	)
 	done.assertClean()
-	for (hz, length, left, right), got in zip(cases, done.value):
-		samplesPerCycle = int(toFloat32(44100 / toFloat32(hz)))
-		size, firstCycle = expectedBeepSamples(hz, length, left, right, samplesPerCycle)
-		assert got["size"] == got["written"] == size
-		# 16-bit signed stereo frames, a whole number of cycles.
-		assert size % 4 == 0 and (size // 4) % samplesPerCycle == 0
-		frames = [got["samples"][i : i + 2] for i in range(0, 2 * samplesPerCycle, 2)]
-		assert frames == firstCycle
+	native = compileUpstreamBeeps(tmp_path)
+	for case, (size, written, digest) in zip(cases, done.value, strict=True):
+		assert size == native(None, *case), case
+		if size <= 0:
+			continue
+		buf = ctypes.create_string_buffer(size)
+		native(buf, *case)
+		assert written == size, case
+		assert digest == hashlib.sha256(buf.raw).hexdigest(), case
 	# 441 Hz is exactly 100 samples a cycle and 1000 ms exactly 441 cycles, and the C++ then adds a
 	# whole extra cycle.
-	assert done.value[2]["size"] == (44100 + 100) * 4
-	assert max(done.value[2]["samples"][0::2]) == 14000 and max(done.value[2]["samples"][1::2]) == 0
+	assert done.value[1][0] == (44100 + 100) * 4
 
 
 def test_brailleTranslationThroughLouisHelper(tmp_path: Path):
@@ -322,9 +393,12 @@ def test_brailleTranslationThroughLouisHelper(tmp_path: Path):
 				"englishCells": len(english),
 				"swedish": louisHelper.backTranslate(["Se-Se.ctb"], swedish),
 				"swedishCells": len(swedish),
-				"cdecl": [
-					type(callback)._flags_ & ctypes._FUNCFLAG_CDECL == ctypes._FUNCFLAG_CDECL
-					for callback in (louisHelper.louis_log, louisHelper._resolveTable)
+				# x86-64 Linux has no stdcall, so every callback type is cdecl; what can go wrong is louis
+				# taking its Windows branch because bootstrap gave ctypes a windll.
+				"louisLoader": [
+					louis._loader is ctypes.cdll,
+					type(louis.liblouis) is ctypes.CDLL,
+					louis._functype is ctypes.CFUNCTYPE,
 				],
 				"logged": any("translat" in m.lower() for m in messages),
 			}
@@ -341,7 +415,7 @@ def test_brailleTranslationThroughLouisHelper(tmp_path: Path):
 	assert done.value["englishCells"] < len("the quick brown fox")
 	assert done.value["swedish"] == "Hej 1"
 	assert done.value["swedishCells"] == len("Hej 1")
-	assert done.value["cdecl"] == [True, True]
+	assert done.value["louisLoader"] == [True, True, True]
 	assert done.value["logged"] is True
 
 

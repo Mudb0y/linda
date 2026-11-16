@@ -20,6 +20,7 @@ from typing import Any, NoReturn
 
 from linuxPlatform import NoLinuxImplementation
 from linuxPlatform.utf16 import Utf16Buffer
+from logHandler import log
 from winBindings import icu
 
 
@@ -161,12 +162,17 @@ def calculateCharacterBoundaries(text: Any, textLength: int, offsets: Any, offse
 		return False
 	text, textLength = units
 	count = 0
-	with _characterBreaks(text, textLength) as iterator:
-		boundary = icu.ubrk_first(iterator)
-		while boundary != icu.UBRK_DONE:
-			offsets[count] = boundary
-			count += 1
-			boundary = icu.ubrk_next(iterator)
+	# Upstream returns False when Uniscribe fails, and its callers fall back to code points on False.
+	try:
+		with _characterBreaks(text, textLength) as iterator:
+			boundary = icu.ubrk_first(iterator)
+			while boundary != icu.UBRK_DONE:
+				offsets[count] = boundary
+				count += 1
+				boundary = icu.ubrk_next(iterator)
+	except RuntimeError:
+		log.debugWarning("ICU character break iterator failed", exc_info=True)
+		return False
 	_store(offsetsCount, count)
 	return True
 
@@ -185,11 +191,15 @@ def calculateCharacterOffsets(
 		_store(startOffset, offset)
 		_store(endOffset, offset + 1)
 		return True
-	with _characterBreaks(text, textLength) as iterator:
-		end = icu.ubrk_following(iterator, offset)
-		# Searching back from offset + 1 instead would go wrong when that is inside a surrogate pair,
-		# which ICU first moves back to the start of the pair.
-		start = icu.ubrk_preceding(iterator, textLength if end == icu.UBRK_DONE else end)
+	try:
+		with _characterBreaks(text, textLength) as iterator:
+			end = icu.ubrk_following(iterator, offset)
+			# Searching back from offset + 1 instead would go wrong when that is inside a surrogate pair,
+			# which ICU first moves back to the start of the pair.
+			start = icu.ubrk_preceding(iterator, textLength if end == icu.UBRK_DONE else end)
+	except RuntimeError:
+		log.debugWarning("ICU character break iterator failed", exc_info=True)
+		return False
 	_store(startOffset, 0 if start == icu.UBRK_DONE else start)
 	_store(endOffset, textLength if end == icu.UBRK_DONE else end)
 	return True
@@ -198,9 +208,12 @@ def calculateCharacterOffsets(
 def calculateWordOffsets(text: Any, textLength: int, offset: int, startOffset: Any, endOffset: Any) -> bool:
 	"""Store the bounds of the word containing offset, trailing whitespace included.
 
-	Upstream's Uniscribe rules have no Linux counterpart, so this is ICU's word segmentation as
-	textUtils.icu applies it, which upstream already made to keep Uniscribe's whitespace handling.
-	Both of NVDA's word segmenters then agree on Linux.
+	Uniscribe has no Linux counterpart, so this is ICU's word segmentation as textUtils.icu applies
+	it, which upstream made to keep Uniscribe's rule of attaching trailing whitespace to the word.
+	The two word segmenters still differ on Linux: the UNISCRIBE strategy appends "xx" to the line
+	before calling this, and under UAX 29 a full stop or apostrophe between letters joins a word, so
+	there trailing punctuation stays on the word ("logo." is one word), as Uniscribe keeps it on
+	Windows, while the ICU strategy splits it off.
 	"""
 	_requireIcu("calculateWordOffsets")
 	# Imported on first use: NVDA's import graph resolves only in upstream's order, and upstream's
