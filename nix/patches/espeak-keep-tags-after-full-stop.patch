@@ -1,0 +1,22 @@
+Keep what a tag put after a full stop
+
+When a full stop is followed, after spaces, by a tag and then by anything
+but a lower-case letter, ReadClause ends the clause at the full stop, which
+throws away whatever the tag wrote into the clause: a mark is never
+reported, and a change of rate, pitch or volume is lost. End the clause
+after the tag instead, blanking the full stop, as the branch for the end of
+the text already does.
+
+--- a/src/libespeak-ng/readclause.c
++++ b/src/libespeak-ng/readclause.c
+@@ -776,7 +776,9 @@
+ 				if (!iswspace(c1)) {
+ 					if (!IsAlpha(c1) || !iswlower(c1)) {
+ 						ungot_char2 = c1;
+-						TerminateBufWithSpaceAndZero(buf, end_clause_index, &c2);
++						// Keep what the tag put after the full stop, such as a mark or a prosody change.
++						RemoveChar(&buf[end_clause_index]);
++						TerminateBufWithSpaceAndZero(buf, ix, &c2);
+ 						return end_clause_after_tag;
+ 					}
+ 					end_clause_after_tag = 0;

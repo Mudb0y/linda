@@ -64,6 +64,7 @@
 
       louisTables = pkgs.callPackage ./nix/louis-tables.nix { };
       nvdaCldr = pkgs.callPackage ./nix/nvda-cldr.nix { };
+      espeak = pkgs.callPackage ./nix/espeak-ng.nix { };
 
       # What git describe says of the locked revision, which a flake input
       # does not record; evaluation stops until it is set again for a new one.
@@ -109,6 +110,7 @@
         louis-tables = louisTables;
         nvda-cldr = nvdaCldr;
         basedreader-bench = bench;
+        espeak-ng = espeak;
         openevv-libeci = openevvLibeci;
         openevv-driver = openevvDriver;
       };
@@ -160,6 +162,8 @@
         # include/liblouis submodule pins.
         BASEDREADER_LIBLOUIS_VERSION = pkgs.liblouis.version;
         BASEDREADER_NVDA_CLDR_DIR = "${nvdaCldr}";
+        BASEDREADER_ESPEAK_LIB = "${espeak}/lib/libespeak-ng.so.1";
+        BASEDREADER_ESPEAK_DATA_DIR = "${espeak}/share/espeak-ng-data";
         # linuxPlatform.synthDriverPaths puts it on NVDA's driver search path.
         BASEDREADER_OPENEVV_DRIVER_DIR = "${openevvDriver}";
 

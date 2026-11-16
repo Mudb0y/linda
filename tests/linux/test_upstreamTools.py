@@ -77,9 +77,15 @@ class Repo:
 
 CLDR = "c" * 40
 LOUIS = "1" * 40
+ESPEAK = "e" * 40
+SONIC = "5" * 40
 EDITS_HEADER = "# Files that came from NVDA and that this tree changes or deletes.\n\n"
 FINDER = "replacedModules: tuple[str, ...] = (\n\t{}\n)\n"
-CLDR_NIX = 'fetchFromGitHub {{\n  rev = "{}";\n}}\n'
+CLDR_NIX = 'fetchFromGitHub {{\n  repo = "nvda-cldr";\n  rev = "{}";\n}}\n'
+ESPEAK_NIX = (
+	'sonic = fetchFromGitHub {{\n  repo = "sonic";\n  rev = "{}";\n}};\n'
+	'src = fetchFromGitHub {{\n  repo = "espeak-ng";\n  rev = "{}";\n}};\n'
+)
 FORKS = "tools/upstream-forks.txt"
 LINUX_EDIT = 'import sys\n\nvalue = 1\nif sys.platform != "win32":\n\tvalue = 2\n'
 
@@ -117,6 +123,8 @@ def repo(tmp_path: Path) -> Repo:
 	r.write("tests/unit/test_tones.py", "")
 	r.link("include/nvda-cldr", CLDR)
 	r.link("include/liblouis", LOUIS)
+	r.link("include/espeak", ESPEAK)
+	r.link("include/sonic", SONIC)
 	r.commit("Import NVDA", "source", "tests")
 	r.git("checkout", "-q", "-b", "main")
 	r.write("source/edited.py", LINUX_EDIT)
@@ -125,6 +133,7 @@ def repo(tmp_path: Path) -> Repo:
 	r.write("source/linuxPlatform/replacements/watchdog.py", "")
 	writeFinder(r, "watchdog", "NVDAHelper")
 	r.write("nix/nvda-cldr.nix", CLDR_NIX.format(CLDR))
+	r.write("nix/espeak-ng.nix", ESPEAK_NIX.format(SONIC, ESPEAK))
 	writeEdits(r, "source/edited.py")
 	forks = [f"include/liblouis {LOUIS} 3.39.0"]
 	for path in ("source/nvda.pyw", "source/watchdog.py", "source/NVDAHelper/__init__.py"):
@@ -392,6 +401,22 @@ def test_cldrPinOtherThanUpstreamsFails(repo: Repo):
 def test_upstreamMovingASubmoduleMergesAndTheCldrCheckFails(repo: Repo):
 	repo.onUpstream(lambda r: r.link("include/nvda-cldr", "e" * 40))
 	assertFails(repo, f"upstream pins nvda-cldr at {'e' * 40}")
+
+
+def test_espeakAndSonicPinsOtherThanUpstreamsFail(repo: Repo):
+	repo.write("nix/espeak-ng.nix", ESPEAK_NIX.format("6" * 40, "f" * 40))
+	assertFails(
+		repo,
+		f"upstream pins sonic at {SONIC}, but nix/espeak-ng.nix fetches {'6' * 40}",
+		f"upstream pins espeak-ng at {ESPEAK}, but nix/espeak-ng.nix fetches {'f' * 40}",
+	)
+
+
+def test_upstreamMovingEspeakFailsUntilTheNixPinFollows(repo: Repo):
+	repo.onUpstream(lambda r: r.link("include/espeak", "f" * 40))
+	assertFails(repo, f"upstream pins espeak-ng at {'f' * 40}, but nix/espeak-ng.nix fetches {ESPEAK}")
+	repo.write("nix/espeak-ng.nix", ESPEAK_NIX.format(SONIC, "f" * 40))
+	assertPasses(repo)
 
 
 def test_liblouisDifferencesAreReportedWithoutFailing(repo: Repo):

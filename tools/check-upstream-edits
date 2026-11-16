@@ -14,7 +14,7 @@ place of each module in its replacedModules, and source/basedreader.py does what
 does. The upstream files stay as they are, so upstream's changes to them merge without a conflict
 into files that never run on Linux. tools/upstream-forks.txt records the upstream object each fork
 was last brought up to date with, and a fork whose upstream file has moved on fails here. So does a
-Nix pin of nvda-cldr that is not the revision upstream's submodule names. A liblouis from nixpkgs
+Nix pin of nvda-cldr, eSpeak NG or sonic that is not the revision upstream's submodule names. A liblouis from nixpkgs
 that is not the release upstream's submodule pins is reported without failing, because nixpkgs,
 not this tree, decides when that moves.
 
@@ -36,8 +36,13 @@ TOOLS = Path(__file__).resolve().parent
 EDITS = "tools/upstream-edits.txt"
 FORKS = "tools/upstream-forks.txt"
 FINDER = "source/linuxPlatform/finder.py"
-CLDR_NIX = "nix/nvda-cldr.nix"
-CLDR_LINK = "include/nvda-cldr"
+#: What the Nix expressions fetch that upstream pins as a submodule: the submodule's path, the
+#: expression, and the repository its fetchFromGitHub names just before the revision.
+NIX_PINS = (
+	("include/nvda-cldr", "nix/nvda-cldr.nix", "nvda-cldr"),
+	("include/espeak", "nix/espeak-ng.nix", "espeak-ng"),
+	("include/sonic", "nix/espeak-ng.nix", "sonic"),
+)
 LOUIS_LINK = "include/liblouis"
 
 #: Where an added file is ours by construction rather than something beside upstream's.
@@ -314,14 +319,18 @@ def checkForks(base: str) -> tuple[list[str], int]:
 	return errors, len(forked)
 
 
-def checkCldrPin(base: str) -> list[str]:
-	pin = objectAt(base, CLDR_LINK)
-	nix = Path(CLDR_NIX).read_text(encoding="utf-8")
-	found = re.search(r'^\s*rev = "([0-9a-f]{40})";', nix, re.MULTILINE)
-	fetched = found[1] if found else "no revision"
-	if fetched == pin:
-		return []
-	return [f"upstream pins nvda-cldr at {pin}, but {CLDR_NIX} fetches {fetched}: set its rev and hash to it"]
+def checkNixPins(base: str) -> list[str]:
+	errors = []
+	for link, nixFile, repo in NIX_PINS:
+		pin = objectAt(base, link)
+		nix = Path(nixFile).read_text(encoding="utf-8")
+		found = re.search(rf'\brepo = "{re.escape(repo)}";\s*rev = "([0-9a-f]{{40}})";', nix)
+		fetched = found[1] if found else "no revision"
+		if fetched != pin:
+			errors.append(
+				f"upstream pins {repo} at {pin}, but {nixFile} fetches {fetched}: set its rev and hash to it"
+			)
+	return errors
 
 
 def reportLiblouis(base: str) -> None:
@@ -347,7 +356,7 @@ def main() -> int:
 		base = upstreamRef()
 		editErrors, edited = checkEdits(base)
 		forkErrors, forked = checkForks(base)
-		errors = editErrors + forkErrors + checkCldrPin(base)
+		errors = editErrors + forkErrors + checkNixPins(base)
 		reportLiblouis(base)
 	except (Failure, OSError, SyntaxError, ValueError) as error:
 		print(error, file=sys.stderr)
