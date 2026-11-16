@@ -681,7 +681,8 @@ def _setUpWxApp() -> "wx.App":
 			"""
 
 	# wxPython puts SIGINT back to its default action, which ends the process at once, unless told not to.
-	# On Linux the launcher has already given it to GLib to exit NVDA properly.
+	# On Linux linuxPlatform.quitSignals has already given it to GLib to exit NVDA properly, or left it
+	# ignored where NVDA was started with it ignored.
 	app = App(redirect=False, clearSigInt=sys.platform == "win32")
 
 	# We support queryEndSession events, but in general don't do anything for them.

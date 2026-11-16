@@ -7,6 +7,7 @@ these handlers from the main loop itself, which wxGTK's loop is. Once that loop 
 runs them any more, and from then on a second quit signal ends the process at once.
 """
 
+import ctypes
 import signal
 
 from gi.repository import GLib, GLibUnix
@@ -17,6 +18,20 @@ _handled: list[signal.Signals] = []
 _received = 0
 #: Whether an exit is under way, or the dialogs are being ended so that it can start.
 _isExiting = False
+
+#: sigaction's flag that puts a signal back to its default action as the kernel delivers it.
+_SA_RESETHAND = 0x80000000
+
+
+class _SigAction(ctypes.Structure):
+	"""struct sigaction in glibc's generic Linux layout, which x86-64 and AArch64 use."""
+
+	_fields_ = (
+		("handler", ctypes.c_void_p),
+		("mask", ctypes.c_ulong * (1024 // (8 * ctypes.sizeof(ctypes.c_ulong)))),
+		("flags", ctypes.c_uint),
+		("restorer", ctypes.c_void_p),
+	)
 
 
 def install() -> None:
@@ -83,10 +98,23 @@ def mainLoopReturned() -> None:
 	if _received:
 		_endOnNextSignal()
 		return
-	# The first is ignored: a copy that this one started to restart NVDA sends SIGTERM as it takes over,
-	# and this one is already exiting.
+	# The first is let through: a copy that this one started to restart NVDA sends SIGTERM as it takes
+	# over, and this one is already exiting. The kernel puts each signal back to its default action
+	# as it delivers it, so that a repeat of it ends the process even while the main thread is held
+	# in C code and cannot run the Python handler, which would put back all of them.
 	for signalNumber in _handled:
 		signal.signal(signalNumber, _onSignalAfterMainLoop)
+		_resetOnDelivery(signalNumber)
+
+
+def _resetOnDelivery(signalNumber: int) -> None:
+	libc = ctypes.CDLL(None, use_errno=True)
+	action = _SigAction()
+	if libc.sigaction(signalNumber, None, ctypes.byref(action)) != 0:
+		raise OSError(ctypes.get_errno(), "sigaction")
+	action.flags |= _SA_RESETHAND
+	if libc.sigaction(signalNumber, ctypes.byref(action), None) != 0:
+		raise OSError(ctypes.get_errno(), "sigaction")
 
 
 def _onSignalAfterMainLoop(signalNumber: int, frame: object) -> None:

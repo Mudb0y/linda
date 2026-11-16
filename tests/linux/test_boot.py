@@ -465,6 +465,21 @@ def test_firstSignalAfterTheMainLoopIsNotFatal(launcher):
 	assert nvda.waitForExit() == -signal.SIGTERM, nvda.describe()
 
 
+@pytest.mark.parametrize("signalNumber", [signal.SIGTERM, signal.SIGINT])
+def test_repeatedSignalEndsAnExitHeldInC(launcher, signalNumber: signal.Signals):
+	# No signal started this exit, so the first after the main loop is let through, as a copy started
+	# to restart NVDA sends one. The probe then holds the main thread in C with the GIL, where no
+	# Python signal handler can ever run.
+	nvda = launcher("heldInC", "hangInC+exit", welcome=False)
+	nvda.waitForLog("boot probe: blocking in C", timeout=STARTUP_BOUND)
+	nvda.process.send_signal(signalNumber)
+	with pytest.raises(subprocess.TimeoutExpired):
+		nvda.process.wait(1)
+	nvda.process.send_signal(signalNumber)
+	assert nvda.waitForExit() == -signalNumber, nvda.describe()
+	assert nvda.savedSetting() == CHANGED_SETTING[2]
+
+
 def test_signalSavesTheConfigurationFirst(launcher):
 	# The probe's terminate never returns, so the exit never reaches the save after the main loop.
 	nvda = launcher("hangInTerminate", "hangInTerminate", welcome=False)

@@ -14,6 +14,9 @@ BASEDREADER_BOOT_PROBE turns it on and says what follows the sentence:
 - "hangAtExit" changes a setting and leaves a thread running that NVDA's exit waits for after its
 	main loop, and never ends it.
 - "hangInTerminate" changes a setting and makes this plugin's terminate never return.
+- "hangInC" changes a setting and makes the save of the configuration that NVDA's exit makes after
+	its main loop never return, blocked in C code that holds the GIL, so that no Python code runs
+	again in the process.
 Each of the following changes a setting, opens one or more modal dialogs and says dialogSentence once
 the innermost is open. Each call that showed a dialog logs the answer it got, as
 "boot probe: NAME answered ANSWER".
@@ -33,6 +36,7 @@ Unset, the plugin does nothing, so that other tests which add this directory to 
 never notice it.
 """
 
+import ctypes
 import os
 import threading
 import time
@@ -68,6 +72,7 @@ otherModes = (
 	"slowExit",
 	"hangAtExit",
 	"hangInTerminate",
+	"hangInC",
 )
 #: Seconds "slowExit" adds to this plugin's terminate.
 SLOW_EXIT = 2.0
@@ -122,10 +127,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
 			_magnifier.commands.toggleMagnifier()
 			core.triggerNVDAExit()
-		elif self._mode in ("hangAtExit", "hangInTerminate"):
+		elif self._mode in ("hangAtExit", "hangInTerminate", "hangInC"):
 			self._changeSetting()
 			if self._mode == "hangAtExit":
 				threading.Thread(target=threading.Event().wait, name="bootProbeHang").start()
+			elif self._mode == "hangInC":
+				# A function of the module, which the extension point's weak reference keeps after this
+				# plugin is terminated, which is before the save.
+				config.post_configSave.register(_blockInCOnceOutOfTheMainLoop)
 			if self._exitWhenOpen:
 				core.triggerNVDAExit()
 		elif self._mode in dialogModes:
@@ -247,3 +256,17 @@ def _isNativeDialogOpen() -> bool:
 	from gi.repository import Gtk
 
 	return isinstance(Gtk.grab_get_current(), Gtk.Dialog)
+
+
+#: A default pthread mutex, which all zeroes is, and room to spare.
+_mutex = ctypes.create_string_buffer(64)
+
+
+def _blockInCOnceOutOfTheMainLoop() -> None:
+	if wx.App.IsMainLoopRunning():
+		return
+	log.info("boot probe: blocking in C")
+	# PyDLL keeps the GIL through the call. A default mutex locked again by its holder never returns.
+	libc = ctypes.PyDLL(None)
+	libc.pthread_mutex_lock(_mutex)
+	libc.pthread_mutex_lock(_mutex)

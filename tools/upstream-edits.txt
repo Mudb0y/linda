@@ -123,11 +123,14 @@ source/config/registry.py
 source/core.py
   boot on Linux: the desktop object is linuxPlatform.desktop's, which
   belongs to no process and finds no object with focus, in the foreground
-  or under a point; and wx.App leaves SIGINT alone, which wxPython otherwise
-  puts back to its default action over the launcher's GLib handler, so that
-  Ctrl+C would end NVDA without shutting it down. A restart starts the new
-  copy through linuxPlatform.singleInstance, as a child process, instead of
-  through ShellExecute. On every platform, doStartupDialogs() shows nothing
+  or under a point; and wx.App is made with clearSigInt=False, as wxPython
+  otherwise puts SIGINT back to its default action, so that Ctrl+C would end
+  NVDA without shutting it down: linuxPlatform.quitSignals, which the
+  launcher installs first, has given SIGINT to GLib, or left it ignored when
+  NVDA was started with it ignored, as nohup starts a program. A restart
+  starts the new copy through linuxPlatform.singleInstance, as a child
+  process, instead of through ShellExecute.
+  On every platform, doStartupDialogs() shows nothing
   once shutdown has been triggered: wx.CallAfter runs it after the core
   pump's first cycles on GTK, so a quick exit ran it inside the wx.Yield of
   _closeAllWindows, where the welcome dialog waited for ever because the
@@ -139,9 +142,9 @@ source/core.py
   wx.GetTopLevelWindows does not list the dialogs wx.MessageBox and
   wx.FileDialog show, so NVDA never exited. Once main() is out of the main
   loop it tells linuxPlatform.quitSignals, so that a further quit signal
-  ends a shutdown that hangs. The Java Access Bridge failing to load is
-  logged at debug level on Linux instead of as a warning on every start, as
-  Java applications are reached there through AT-SPI
+  ends a shutdown that hangs, even in C code. The Java Access Bridge
+  failing to load is logged at debug level on Linux instead of as a warning
+  on every start, as Java applications are reached there through AT-SPI
 source/documentNavigation/paragraphHelper.py
   import safety when running: after moving the caret, both paragraph moves
   import the UI Automation text class only on Windows; Linux has no UI
