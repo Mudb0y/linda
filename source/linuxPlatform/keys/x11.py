@@ -395,13 +395,13 @@ class X11KeySource:
 		)
 		wanted: list[tuple[int, list[int] | None, str]] = []
 		if nvdaModifierKeys & EXTENDED_INSERT:
-			wanted.append((INSERT_KEY + 8, None, "Insert"))
+			wanted.append((INSERT_KEY + 8, None, "Insert key"))
 		if nvdaModifierKeys & CAPS_LOCK:
-			wanted.append((CAPS_LOCK_KEY + 8, None, "Caps Lock"))
+			wanted.append((CAPS_LOCK_KEY + 8, None, "Caps Lock key"))
 		if nvdaModifierKeys & NUMPAD_INSERT:
-			wanted.append((NUMPAD_INSERT_KEY + 8, numpadMods, "numpad Insert"))
+			wanted.append((NUMPAD_INSERT_KEY + 8, numpadMods, "numpad Insert key"))
 		if numpadReview:
-			wanted.extend((evdev + 8, numpadMods, "numpad") for evdev in NUMPAD_REVIEW_KEYS)
+			wanted.extend((evdev + 8, numpadMods, "numpad review keys") for evdev in NUMPAD_REVIEW_KEYS)
 		refused = []
 		for keycode, modifiers, label in wanted:
 			catcher = error.CatchError(error.BadAccess)
@@ -418,7 +418,7 @@ class X11KeySource:
 		self._display.sync()
 		for label in refused:
 			log.warning(
-				f"Another program already uses the {label} keys, so NVDA cannot take them; "
+				f"NVDA could not take the {label}, which another program holds; "
 				"is another screen reader running?",
 			)
 
