@@ -1,4 +1,4 @@
-From 962d67d5143a26bb61e7daed580b89a05192f081 Mon Sep 17 00:00:00 2001
+From a2de76768e1b768f98ae48dd24d6fefcbd2762ed Mon Sep 17 00:00:00 2001
 From: Mudb0y <stasprzecinek@gmail.com>
 Date: Mon, 16 Nov 2026 11:00:32 +0100
 Subject: [PATCH 8/8] Say in eci.h which thread runs the callback

@@ -1,4 +1,4 @@
-From ece89c5bbf8b5b31cc679af110413c36c5ff7b38 Mon Sep 17 00:00:00 2001
+From c2a317fdf6b7ba5596e651800cede246665c1325 Mon Sep 17 00:00:00 2001
 From: Mudb0y <stasprzecinek@gmail.com>
 Date: Mon, 16 Nov 2026 10:58:33 +0100
 Subject: [PATCH 6/8] Let NVDA save the driver's settings, and save what was
@@ -42,7 +42,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  3 files changed, 44 insertions(+), 3 deletions(-)
 
 diff --git a/nvda/addon/synthDrivers/_openevv.py b/nvda/addon/synthDrivers/_openevv.py
-index 1630b2f..8ec4b77 100644
+index 5c63510..cb5def0 100644
 --- a/nvda/addon/synthDrivers/_openevv.py
 +++ b/nvda/addon/synthDrivers/_openevv.py
 @@ -495,9 +495,10 @@ class Engine:

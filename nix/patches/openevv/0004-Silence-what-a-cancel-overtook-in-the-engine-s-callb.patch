@@ -1,7 +1,7 @@
-From ef2c66fa27aecfef2927c5c58e75180fbb467f2d Mon Sep 17 00:00:00 2001
+From 7837d9488bf0c5d627fc3b4259a48b1474f44bf6 Mon Sep 17 00:00:00 2001
 From: Mudb0y <stasprzecinek@gmail.com>
 Date: Mon, 16 Nov 2026 10:52:42 +0100
-Subject: [PATCH 4/8] Stop the player again after a feed a cancel overtook
+Subject: [PATCH 4/8] Silence what a cancel overtook in the engine's callback
 
 The callback looks at _discarding and then feeds the player. A cancel
 from NVDA's thread between the two sets _discarding and stops the
@@ -21,20 +21,30 @@ After a feed, _flush now stops the player again if a cancel came
 meanwhile. A cancel that came first has made _discarding true before
 its own stop, so whichever way the two interleave the buffer is
 silenced, and with the window held open no more than a millisecond of
-it was heard in any of the 10. nvda/test/engine.py holds it with a
-player whose feed a cancel overtakes.
+it was heard in any of the 10.
+
+The same window lies in front of a mark with no audio in hand ahead of
+it, which _flush reports at once rather than feeding: a cancel there
+had the silenced utterance's mark reported straight after the cancel,
+in every one of 10 tries held open the same way. NVDA's speech manager
+drops an index it does not know, so speech went on, but
+synthIndexReached fired for speech the reader had silenced. Such a mark
+is now dropped once a cancel has come. That is the same on Windows.
+
+nvda/test/engine.py holds both, with a player whose feed a cancel
+overtakes and a flush a cancel overtakes at a mark.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- nvda/addon/synthDrivers/_openevv.py |  6 ++++++
- nvda/test/engine.py                 | 16 ++++++++++++++++
- 2 files changed, 22 insertions(+)
+ nvda/addon/synthDrivers/_openevv.py | 15 +++++++++++--
+ nvda/test/engine.py                 | 33 +++++++++++++++++++++++++++++
+ 2 files changed, 46 insertions(+), 2 deletions(-)
 
 diff --git a/nvda/addon/synthDrivers/_openevv.py b/nvda/addon/synthDrivers/_openevv.py
-index 145a4bc..d262d89 100644
+index 145a4bc..fce6338 100644
 --- a/nvda/addon/synthDrivers/_openevv.py
 +++ b/nvda/addon/synthDrivers/_openevv.py
-@@ -1253,6 +1253,12 @@ class Engine:
+@@ -1253,10 +1253,21 @@ class Engine:
  				self._report(marks)
  			finally:
  				self._leftPlayer()
@@ -46,12 +56,23 @@ index 145a4bc..d262d89 100644
 +				self.player.stop()
  		else:
  			# A mark with no audio in front of it still has to be reported, or
- 			# whatever is waiting on it waits for ever.
+-			# whatever is waiting on it waits for ever.
+-			self._reportIndexes()
++			# whatever is waiting on it waits for ever. Not after a cancel that
++			# came since the callback looked at _discarding, though: the mark
++			# is then one of the silenced utterance's, and nothing waits on it.
++			if self._discarding:
++				self._pendingIndexes = []
++			else:
++				self._reportIndexes()
+ 
+ 		# Waiting for the end of the audio has to happen whether or not there
+ 		# was anything left to hand over: an utterance ending on a mark leaves
 diff --git a/nvda/test/engine.py b/nvda/test/engine.py
-index 4122a31..f2f1d46 100644
+index 4122a31..644168f 100644
 --- a/nvda/test/engine.py
 +++ b/nvda/test/engine.py
-@@ -872,6 +872,22 @@ def main():
+@@ -872,6 +872,39 @@ def main():
      engine._discarding = False
      check("a cancel in the last wait is not followed by a done", marks, [11])
  
@@ -70,6 +91,23 @@ index 4122a31..f2f1d46 100644
 +    engine._discarding = False
 +    check("a buffer a cancel overtook is stopped once it is in",
 +          player.stopped - stopped, 1)
++
++    # The same window at a mark with nothing in front of it, which is
++    # reported rather than fed: it is the silenced utterance's mark, and
++    # reporting it tells NVDA that speech it cancelled was reached.
++    def flushOvertaken(last=False):
++        if not last:
++            engine._discarding = True
++        return mod.Engine._flush(engine, last)
++
++    engine._resume()
++    marks.clear()
++    engine._flush = flushOvertaken
++    pending[:] = [lambda: index(31), lambda: waveform(20)]
++    engine.synthesize()
++    del engine._flush
++    engine._resume()
++    check("a mark a cancel overtook is not reported", marks, [])
 +
      # ---- cancelling, which is what crashed NVDA when it was done properly --
  

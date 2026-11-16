@@ -418,6 +418,63 @@ def test_noCancelledAudioPlaysAfterTheCancel(tmp_path: Path):
 
 
 @needsDriver
+def test_noMarkOfACancelledUtteranceIsReported(tmp_path: Path):
+	# The same window at a mark with no audio in hand in front of it, which the callback either hangs
+	# on the audio already fed, when there is some, or reports at once. A mark reported after the
+	# cancel tells NVDA that speech it silenced was reached, and one left with the player is reported
+	# in the next utterance.
+	done = runOpenevv(
+		tmp_path,
+		"""
+		gate = {"armed": False, "inWindow": threading.Event(), "proceed": threading.Event()}
+		_flush = engineModule.Engine._flush
+
+
+		def flush(self, last=False):
+			if gate["armed"] and not last and not self._held and self._pendingIndexes:
+				gate["armed"] = False
+				gate["inWindow"].set()
+				gate["proceed"].wait(1.0)
+			return _flush(self, last)
+
+
+		engineModule.Engine._flush = flush
+		rounds = []
+		for number in range(8):
+			cancelledMarks = {100 + number * 10, 101 + number * 10}
+			first, second = sorted(cancelledMarks)
+			if number % 2:
+				# The first mark comes before any audio of the utterance has been fed.
+				sequence = [IndexCommand(first), LONG, IndexCommand(second)]
+			else:
+				# The second of two adjacent marks, after the audio in front of the first was fed.
+				sequence = ["Hello world, this is the first part.", IndexCommand(first), IndexCommand(second), LONG]
+			gate["inWindow"].clear()
+			gate["proceed"].clear()
+			gate["armed"] = True
+			synth.speak(sequence)
+			assert gate["inWindow"].wait(5.0), "the engine never reached a mark with nothing in hand"
+			cancelled = now()
+			synth.cancel()
+			gate["proceed"].set()
+			pump(0.3)
+			following = speakAndWait(["OK button.", IndexCommand(900 + number)])
+			pump(0.2)
+			rounds.append({
+				"cancelledReported": [index for _kind, index in heard.since(cancelled) if index in cancelledMarks],
+				"following": following,
+				"number": number,
+			})
+		result = rounds
+		""",
+	)
+	done.assertClean()
+	for value in done.value:
+		assert value["cancelledReported"] == [], done.value
+		assert value["following"] == [["index", 900 + value["number"]], ["done", None]], done.value
+
+
+@needsDriver
 def test_indexesArriveInOrder(tmp_path: Path):
 	done = runOpenevv(
 		tmp_path,

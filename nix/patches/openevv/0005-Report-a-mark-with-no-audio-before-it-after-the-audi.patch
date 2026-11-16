@@ -1,4 +1,4 @@
-From ce2af0321b2286070354c3432853d2039b3b2d9a Mon Sep 17 00:00:00 2001
+From a3e68efbf85d26de47c00fb2c212303d1f054de7 Mon Sep 17 00:00:00 2001
 From: Mudb0y <stasprzecinek@gmail.com>
 Date: Mon, 16 Nov 2026 10:54:40 +0100
 Subject: [PATCH 5/8] Report a mark with no audio before it after the audio
@@ -25,17 +25,27 @@ when the player is next fed, which for an utterance of nothing but a
 mark is never: tried that way, the mark of such an utterance after a
 cancel was not reported at all, and a mark that never comes stalls
 NVDA's speech manager. So that mark is still reported at once.
+
+The empty feed has the window a feed of audio has, between the
+callback's look at _discarding and the feed, and a cancel there leaves
+the stopped player holding the silenced utterance's mark for the next
+feed, the next utterance's first. Held open in NVDA's process on Linux,
+the cancelled mark was reported inside the next utterance in 10 of 10
+tries. So the empty feed is stopped again after a cancel as a feed of
+audio is, and with that none of the 10 reported it.
+
 nvda/test/engine.py holds the order with a player that, like a real
-one, runs a callback only once the audio in front of it has played.
+one, runs a callback only once the audio in front of it has played, and
+holds the cancelled mark back with one whose stop drops what it holds.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- nvda/addon/synthDrivers/_openevv.py | 30 +++++++++++++++++++++++++++--
- nvda/test/engine.py                 | 30 +++++++++++++++++++++++++++--
- 2 files changed, 56 insertions(+), 4 deletions(-)
+ nvda/addon/synthDrivers/_openevv.py | 41 ++++++++++++++++++++---
+ nvda/test/engine.py                 | 52 +++++++++++++++++++++++++++--
+ 2 files changed, 87 insertions(+), 6 deletions(-)
 
 diff --git a/nvda/addon/synthDrivers/_openevv.py b/nvda/addon/synthDrivers/_openevv.py
-index d262d89..1630b2f 100644
+index fce6338..5c63510 100644
 --- a/nvda/addon/synthDrivers/_openevv.py
 +++ b/nvda/addon/synthDrivers/_openevv.py
 @@ -462,6 +462,10 @@ class Engine:
@@ -65,7 +75,7 @@ index d262d89..1630b2f 100644
  			except Exception:  # noqa: BLE001
  				log.error("openevv: a buffer would not play", exc_info=True)
  				self._report(marks)
-@@ -1259,9 +1265,28 @@ class Engine:
+@@ -1259,11 +1265,37 @@ class Engine:
  			# silences that buffer.
  			if self._discarding:
  				self.player.stop()
@@ -85,18 +95,29 @@ index d262d89..1630b2f 100644
 +				self._report(marks)
 +			finally:
 +				self._leftPlayer()
++			# A cancel that overtook this feed too has stopped the player, and
++			# an empty feed into a stopped player keeps its callback for the
++			# next feed, which is the next utterance's. Stopping it once more
++			# drops the silenced utterance's mark with it.
++			if self._discarding:
++				self.player.stop()
  		else:
 -			# A mark with no audio in front of it still has to be reported, or
--			# whatever is waiting on it waits for ever.
+-			# whatever is waiting on it waits for ever. Not after a cancel that
+-			# came since the callback looked at _discarding, though: the mark
+-			# is then one of the silenced utterance's, and nothing waits on it.
 +			# Nothing of this utterance is waiting to play, so nothing is in
 +			# front of the mark. Hung on the player all the same it would wait
 +			# for audio that may never come -- a player stopped by a cancel runs
 +			# no callback until it is fed again -- and a mark not reported
-+			# leaves whatever is waiting on it waiting for ever.
- 			self._reportIndexes()
- 
- 		# Waiting for the end of the audio has to happen whether or not there
-@@ -1276,6 +1301,7 @@ class Engine:
++			# leaves whatever is waiting on it waiting for ever. Not after a
++			# cancel that came since the callback looked at _discarding,
++			# though: the mark is then one of the silenced utterance's, and
++			# nothing waits on it.
+ 			if self._discarding:
+ 				self._pendingIndexes = []
+ 			else:
+@@ -1281,6 +1313,7 @@ class Engine:
  				log.debugWarning("openevv: the player would not go idle", exc_info=True)
  			finally:
  				self._leftPlayer()
@@ -105,7 +126,7 @@ index d262d89..1630b2f 100644
  	def _reportIndexes(self):
  		marks = self._pendingIndexes
 diff --git a/nvda/test/engine.py b/nvda/test/engine.py
-index f2f1d46..7c4e662 100644
+index 644168f..26098c5 100644
 --- a/nvda/test/engine.py
 +++ b/nvda/test/engine.py
 @@ -177,7 +177,9 @@ class FakePlayer:
@@ -119,7 +140,7 @@ index f2f1d46..7c4e662 100644
          if onDone is not None:
              onDone()
  
-@@ -854,7 +856,31 @@ def main():
+@@ -854,7 +856,53 @@ def main():
      utterance([lambda: waveform(50), lambda: index(1), lambda: index(2)])
      check("two marks in a row both report", marks, [1, 2, None])
      check("and only the audio that existed was sent",
@@ -148,7 +169,29 @@ index f2f1d46..7c4e662 100644
 +    utterance([lambda: index(4), lambda: waveform(20), lambda: index(5)])
 +    check("and a mark before any audio is reported at once, ahead of the rest",
 +          marks, [4, 5, None])
-+    del player.feed, player.idle
++
++    # A cancel between the callback's look at _discarding and the empty feed
++    # that hangs the second of two marks: the cancel's stop drops what the
++    # player held, and the empty feed after it is kept for the next feed.
++    def stopLater():
++        player.stopped += 1
++        del later[:]
++
++    def flushOvertakenAtMark(last=False):
++        if not last and not engine._held and engine._fedAudio:
++            engine._discarding = True
++            player.stop()
++        return mod.Engine._flush(engine, last)
++
++    player.stop = stopLater
++    engine._flush = flushOvertakenAtMark
++    utterance([lambda: waveform(50), lambda: index(6), lambda: index(7)])
++    del engine._flush
++    engine._resume()
++    utterance([lambda: waveform(20), lambda: index(8)])
++    check("a mark a cancel overtook at an empty feed is not reported in the next utterance",
++          marks, [8, None])
++    del player.feed, player.idle, player.stop
  
      idled = utterance([lambda: waveform(30), lambda: index(9)])
      check("an utterance ending on a mark still waits before saying done", idled, 1)

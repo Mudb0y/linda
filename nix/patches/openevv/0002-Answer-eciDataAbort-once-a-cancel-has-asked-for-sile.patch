@@ -1,4 +1,4 @@
-From 146d26b269483a2bbe4079d080468943c4bce8ef Mon Sep 17 00:00:00 2001
+From 54bf5446983235b86c979b6dd8bda42e563c30e2 Mon Sep 17 00:00:00 2001
 From: Mudb0y <stasprzecinek@gmail.com>
 Date: Mon, 16 Nov 2026 10:40:42 +0100
 Subject: [PATCH 2/8] Answer eciDataAbort once a cancel has asked for silence
@@ -26,32 +26,36 @@ The library alone, with no Python waiting, cut at a random buffer of the
 same sentence: 110 ms against 99 at 11,025 Hz and 345 against 81 at
 48 kHz. None of this is particular to Linux, so it holds on Windows too.
 
-The engine stayed whole through it. In 150 cuts at random buffers at
-each of the two rates, each followed by a whole utterance on the same
-instance, every follow-up had exactly the length and the marks of the
-same utterance spoken after discarding, and of the same one spoken by a
-fresh instance, and nothing faulted. What is not kept is the
-discarding's byte-identity: after an abort the follow-up's samples
-differ from the discarding one's by about a tenth of the signal's
-level, where two instances discarding in lockstep agree to the byte.
-The trace that once showed an abort leaving the synthesiser rules a bad
-depth needs a bytecode build, and was not repeated.
+In 150 cuts at random buffers at each of the two rates, each followed by
+a whole utterance on the same instance, every follow-up had exactly the
+length and the marks of the same utterance spoken after discarding, and
+of the same one spoken by a fresh instance, and nothing faulted. The
+follow-up's samples are not those after discarding, but that says
+nothing about the abort: the samples follow from everything the
+instance has made before, and two instances that both discarded, one
+having spoken the whole sentence first and the other only its first
+half, differ in the follow-up by as much, a median of a tenth of the
+signal's level over 30 tries at each rate. What would say whether the
+abort leaves the synthesiser rules as they should be is the
+DELTA_RULE_TRACE check docs/windows.md describes, which needs the rules
+interpreted and was not repeated.
 
 The callback answers the abort for a mark as well as for samples, the
 comments at the top of the layer and on cancel and the callback say what
-it does now, and docs/api.md, using.md, quirks.md and windows.md no
-longer say the three ways of cancelling cost the same.
-nvda/test/engine.py holds the callback to the abort.
+it does now, and docs/api.md, using.md, quirks.md, windows.md and
+status.md say what each way of cancelling costs at 11,025 Hz and above
+it. nvda/test/engine.py holds the callback to the abort.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  docs/api.md                         |  4 +-
  docs/quirks.md                      |  2 +-
+ docs/status.md                      |  4 +-
  docs/using.md                       |  2 +-
- docs/windows.md                     |  4 +-
+ docs/windows.md                     |  8 ++--
  nvda/addon/synthDrivers/_openevv.py | 74 ++++++++++++-----------------
  nvda/test/engine.py                 |  8 ++--
- 6 files changed, 41 insertions(+), 53 deletions(-)
+ 7 files changed, 45 insertions(+), 57 deletions(-)
 
 diff --git a/docs/api.md b/docs/api.md
 index 696a784..1d2ee83 100644
@@ -88,6 +92,22 @@ index c9c334f..69db472 100644
  
  This is settled rather than open. The rules build a shared structure as they go and later rules assume the earlier ones finished it, so abandoning a rule part way leaves that structure half built and a later rule faults on it. Six ways of adding an abandonment point were tried and all fail, and the reason is one thing rather than six. Making the machine interruptible would mean the rules checking their own inputs, which is the language and not a patch.
  
+diff --git a/docs/status.md b/docs/status.md
+index 6652450..4faeb1f 100644
+--- a/docs/status.md
++++ b/docs/status.md
+@@ -468,9 +468,9 @@ One narrow window is left in the guard and is not closed. A place is marked as p
+ 
+ What cancelling costs, measured in the engine. Every figure here is from `build/probe` on Linux with no player in the picture at all; the numbers taken through the add-on on Windows have been withdrawn by the session that took them, because the fake player in that harness paced a buffer by sleeping for its duration and a cancel did not reliably interrupt the sleep, so most of a buffer was being counted as engine time. What that harness said about *relative* improvement was measured the same way on both sides and is probably sound; its absolute numbers are not, and none of them are quoted here.
+ 
+-Cancelling costs the same by all three routes -- letting the utterance finish and throwing its samples away, answering `eciDataAbort`, and calling `eciStop` from the cancelling thread -- because all three wait for the same thing. That was measured on Windows too and is a comparison rather than an absolute, so it survives the withdrawal above.
++At 11,025 Hz cancelling costs about the same by all three routes -- letting the utterance finish and throwing its samples away, answering `eciDataAbort`, and calling `eciStop` from the cancelling thread -- because all three wait for the same thing. That was measured on Windows too and is a comparison rather than an absolute, so it survives the withdrawal above. Above 11,025 Hz the three part: throwing the samples away and `eciStop` still have the engine make the rest of the utterance's samples at the rate in force, and answering `eciDataAbort` does not. Cutting a 300-character sentence at a random buffer, the engine came back after a median of 99 ms answering the abort against 110 throwing the samples away at 11,025 Hz, and 81 against 345 at 48 kHz.
+ 
+-So the abort door being open does not help the latency, and the earlier claim here that what remained was the add-on removing its workaround was an inference from the door opening rather than a measurement. It is withdrawn. Answering `eciDataAbort` stops the engine handing over more buffers; it does not stop it finishing the utterance, and neither does `eciStop`.
++So at 11,025 Hz the abort door being open does not help the latency, and the earlier claim here that what remained was the add-on removing its workaround was an inference from the door opening rather than a measurement; at that rate it was wrong. At the higher rates the abort saves the samples it spares, which is most of a cancel. Answering `eciDataAbort` stops the engine making and handing over more buffers; it does not stop it finishing the utterance, and neither does `eciStop`.
+ 
+ **The engine cannot abandon an utterance it has been told to stop, and that is settled rather than open.** All of a cancel is `stm_qtSuspend` waiting for the synthesis thread to finish the message it is on: 71 ms of 71 for a long row, where re-initialising the language globals is 0.3 ms and suspending the queues is nought. The machine is never told to stop -- `ELOQ_BUSY` is set every time that branch is reached, so `throwDeltaErrorNow` is never called -- and the walk does exactly the work that was left: a row is 298,745 rule entries, 97,382 before the first buffer and 201,411 after the stop, and the two add up. The cooperative interrupt that is raised is honoured 123 times in the sample generators and is worth about 20 ms of that.
+ 
 diff --git a/docs/using.md b/docs/using.md
 index 95e44cd..84532b2 100644
 --- a/docs/using.md
@@ -102,20 +122,28 @@ index 95e44cd..84532b2 100644
  The engine cannot abandon an utterance it has been told to stop. That is settled rather than open -- the rules build a shared structure as they go and later rules assume the earlier ones finished it, so there is no safe abandonment point in the machine, and six ways of adding one were tried and all fault. A stop waits for the synthesis thread to finish the message it is on.
  
 diff --git a/docs/windows.md b/docs/windows.md
-index 0797bc8..badce19 100644
+index 0797bc8..62b7a2f 100644
 --- a/docs/windows.md
 +++ b/docs/windows.md
-@@ -74,9 +74,9 @@ And nothing ever interrupts the engine, which wants explaining because it is not
+@@ -70,15 +70,15 @@ The files for one volume are joined into a single temporary file and the engine
+ 
+ Four things in it are decisions rather than detail. Every call into the library happens on one thread, because the calls that queue work are not written to be entered twice at once. Prosody inside a sentence is said as a `` `vb ``, `` `vs `` or `` `vv `` annotation in the text rather than by setting a parameter, because a parameter applies to everything queued behind it and an annotation applies where it sits. Samples are held back until an index mark arrives and then handed over with the mark attached, which puts a mark on the sample it belongs to instead of a buffer later; the engine flushes a short buffer of its own just before reporting a mark, which is what makes that line up exactly.
+ 
+-And nothing ever interrupts the engine, which wants explaining because it is not what the interface says to do.
++And nothing is ever called on the engine to interrupt it: a cancel stops the player and answers `eciDataAbort` from the callback. That wants explaining, because for a long time the add-on did not interrupt at all.
  
  Both of the ways the interface offers for cutting an utterance short used to fault. Answering `eciDataAbort` from the callback died on a null indirect call in `vinitloc_new`, which is what crashed NVDA the first time the add-on was asked for silence; calling `eciStop` while synthesis was running died on a null read of its own. e0cb1f8 fixed that, and the fix is confirmed on three platforms: `make interrupt` faults without it and passes with it on Linux, and the same test cross-compiled faults on turn one without it and survives twelve turns with it both under Wine and on a real Windows machine. For the stop door the before-and-after is a rate rather than a certainty, because it is a race: without the guard 12 of 12 runs faulted under Wine and 11 of 12 on real Windows, and with it 0 of 12 on real Windows -- but still 8 of 12 under Wine, whose scheduling evidently exposes something the real one does not reach.
  
 -That is why the add-on does not interrupt, and the reason has changed twice. Once it no longer crashed, interrupting went mute: from the second interruption on, the engine accepted text, answered no error and produced nothing, because a stop put back one of the queue's two counts and not the other. 6418df2 put back both, and every follow-up is a whole utterance now: `make interrupt` on Linux, under Wine and on a real Windows machine, and `make stopthread` on Linux and under Wine. The add-on goes on stopping by throwing samples away all the same, because an interrupt waits for what that waits for and so saves nothing anyone would hear -- see below for what the traced evidence says about leaving the engine alone.
-+That is why the add-on does not interrupt, and the reason has changed twice. Once it no longer crashed, interrupting went mute: from the second interruption on, the engine accepted text, answered no error and produced nothing, because a stop put back one of the queue's two counts and not the other. 6418df2 put back both, and every follow-up is a whole utterance now: `make interrupt` on Linux, under Wine and on a real Windows machine, and `make stopthread` on Linux and under Wine. An interrupt waits for what throwing samples away waits for, the rules finishing the utterance, but it spares the engine making the samples, which at the higher sample rates is most of a cancel -- see below for what the traced evidence says about leaving the engine alone.
++That is why the add-on did not interrupt, and the reason changed twice before it began to. Once it no longer crashed, interrupting went mute: from the second interruption on, the engine accepted text, answered no error and produced nothing, because a stop put back one of the queue's two counts and not the other. 6418df2 put back both, and every follow-up is a whole utterance now: `make interrupt` on Linux, under Wine and on a real Windows machine, and `make stopthread` on Linux and under Wine. An interrupt waits for what throwing samples away waits for, the rules finishing the utterance, but it spares the engine making the samples, which at the higher sample rates is most of a cancel -- see below for what the traced evidence says about leaving the engine alone.
  
 -So the add-on stops by throwing the samples away: the callback goes on answering `eciDataProcessed` and simply drops what it is handed, the utterance finishes synthesising into nothing, and no engine state is touched. Stopping NVDA's wave player is what actually silences it. What that costs is the synthesis time of audio nobody hears, and synthesis runs some eighty times faster than speech, so throwing away eleven seconds of a sentence measures at about a seventh of a second under Wine. The next utterance is byte-identical to one spoken with no interruption at all, which is what says the engine was left alone.
-+So the add-on stops NVDA's wave player, which is what actually silences it, and answers `eciDataAbort` from the callback until the utterance is over. Nothing is called on the engine from outside it, and its rules finish the utterance as they would have. Answering `eciDataProcessed` and dropping what it is handed instead leaves the engine exactly as an uninterrupted utterance does -- the next utterance is byte-identical to one spoken with no interruption at all -- but costs the synthesis time of audio nobody hears: about a seventh of a second for eleven seconds of a sentence under Wine, and at 48 kHz on Linux about four times what the abort costs. After an abort the next utterance is not byte-identical to one after discarding: it has the same length and its marks fall on the same samples, in 300 of 300 follow-ups on Linux at 11,025 Hz and 48 kHz, and the samples differ by about a tenth of the signal's level.
++So the add-on stops NVDA's wave player, which is what actually silences it, and answers `eciDataAbort` from the callback until the utterance is over. Nothing is called on the engine from outside it, and its rules finish the utterance as they would have. Answering `eciDataProcessed` and dropping what it is handed instead leaves the engine exactly as an uninterrupted utterance does -- the next utterance is byte-identical to one spoken with no interruption at all -- but costs the synthesis time of audio nobody hears: about a seventh of a second for eleven seconds of a sentence under Wine, and at 48 kHz on Linux about four times what the abort costs. After an abort the next utterance has the same length and its marks fall on the same samples as after discarding, in 300 of 300 follow-ups on Linux at 11,025 Hz and 48 kHz. Its samples are not the same, and that says nothing either way: they follow from everything the instance has made before, and two instances that both discarded, one after a whole sentence and one after its first half, differ in the next utterance by as much, about a tenth of the signal's level.
  
- There is a second piece of evidence for that, taken with `DELTA_RULE_TRACE` set so the interpreter reports an argument area whose depth is not what the compiled code expected. Ten interruptions on one instance produce 154,253 such remarks across 520 different rules -- that diagnostic is ordinary background noise, which is why `tools/rules/check-c.sh` filters it out -- and *none at all* on `callInternalSynthesizer`, `callSynthesizeArray`, `sendArrayParameters` or `stopSynthesizing`. All 1,085 dispatches of the synthesiser rule ended the way an uninterrupted one does. A real abort put a bad depth on exactly those rules, so their silence here is the thing worth checking if this ever has to be revisited. It is not a routine check: tracing that run writes 269 MB.
+-There is a second piece of evidence for that, taken with `DELTA_RULE_TRACE` set so the interpreter reports an argument area whose depth is not what the compiled code expected. Ten interruptions on one instance produce 154,253 such remarks across 520 different rules -- that diagnostic is ordinary background noise, which is why `tools/rules/check-c.sh` filters it out -- and *none at all* on `callInternalSynthesizer`, `callSynthesizeArray`, `sendArrayParameters` or `stopSynthesizing`. All 1,085 dispatches of the synthesiser rule ended the way an uninterrupted one does. A real abort put a bad depth on exactly those rules, so their silence here is the thing worth checking if this ever has to be revisited. It is not a routine check: tracing that run writes 269 MB.
++What does say whether an interruption leaves the engine alone is a trace, taken with `DELTA_RULE_TRACE` set so the interpreter reports an argument area whose depth is not what the compiled code expected. Ten interruptions on one instance produce 154,253 such remarks across 520 different rules -- that diagnostic is ordinary background noise, which is why `tools/rules/check-c.sh` filters it out -- and *none at all* on `callInternalSynthesizer`, `callSynthesizeArray`, `sendArrayParameters` or `stopSynthesizing`. All 1,085 dispatches of the synthesiser rule ended the way an uninterrupted one does. A real abort put a bad depth on exactly those rules, so their silence here is the thing worth checking if this ever has to be revisited. It is not a routine check: tracing that run writes 269 MB, it needs the rules interpreted rather than compiled, and it has not been taken again since the add-on began answering the abort.
+ 
+ That differential is also what found the fault. Ten interruptions with those rules untouched said the damage was not in interrupting but in the stop call itself, which is what narrowed e0cb1f8 down to one guard.
  
 diff --git a/nvda/addon/synthDrivers/_openevv.py b/nvda/addon/synthDrivers/_openevv.py
 index 0821a2c..e05506e 100644
