@@ -73,12 +73,12 @@ source/argsParsing.py
   box; the help for -f names the default log under the XDG state directory,
   where logHandler puts it on Linux, instead of %TEMP%
 source/audio/soundSplit.py
-  Linux runtime: Linux has no counterpart of Windows' audio
-  session manager, through which sound split sets other applications'
-  volumes. On Linux initialize() leaves it unset instead of calling pycaw,
-  which core.main would not survive; the toggle script says "Sound split
-  not supported"; setting the state to off has nothing to restore, and any
-  other state raises NoLinuxImplementation
+  Linux runtime: sound split sets other applications' volumes through
+  Windows' audio session manager, and linuxPlatform implements no
+  per-application volumes. On Linux initialize() leaves it unset instead of
+  calling pycaw, which core.main would not survive; the toggle script says
+  "Sound split not supported"; setting the state to off has nothing to
+  restore, and any other state raises NoLinuxImplementation
 source/audioDucking.py
   Linux runtime: isAudioDuckingSupported() is False on
   Linux, which would need a ducking policy in the sound server's session
