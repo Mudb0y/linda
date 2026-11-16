@@ -1,153 +1,205 @@
 # Upstream unit tests that tests/linux/rununittests.py does not expect to pass on Linux.
 # A dotted name under tests.unit at the start of a line is an exclusion. The indented lines beneath
 # it say why, and the first of them starts with "For good", for a test of code that exists only on
-# Windows, or with "Until", naming the work that will let it pass; the runner enforces this.
-# An excluded module or package is never imported. An excluded class or single test still runs,
-# expected to fail, so that the run fails once the entry no longer holds; a reason line that starts
-# with "Not run:" drops it instead and says why running it would do harm.
+# Windows, or with "Until", naming what has to change for it to pass. One of the lines beneath also
+# states what is expected, and the runner fails the run once that no longer holds:
+#   "Raises: " an exception class name, ": " and a fragment of its message. Every test the entry
+#   covers runs, and its first failure must be such an exception, found anywhere in the exception's
+#   class hierarchy and chain of causes. An entry may name a module, a class or a single test.
+#   "Import raises: " the same, for a module or package that cannot be imported. It is never imported
+#   into the run; a process of its own imports it, and every test module it covers must fail to
+#   import with such an exception.
+#   "Not run: " and why running the tests would do harm. They are dropped.
 # A line that starts with "skipped" and a dotted name lists tests the run may skip; any other skip
 # fails the run. The runner also fails on an entry that matches nothing.
 
 # For good: Windows accessibility APIs, which AT-SPI takes the place of on Linux.
 
 tests.unit.test_UIAHandler
-  For good: UI Automation is a Windows API. linuxPlatform replaces UIAHandler with a skeleton
-  that has none of the names the test imports, such as getUIAUnitFromNVDAUnit.
+  For good: UI Automation is a Windows API. linuxPlatform replaces UIAHandler with a module that
+  has none of the names the test imports, such as getUIAUnitFromNVDAUnit.
+  Import raises: ImportError: getUIAUnitFromNVDAUnit
 tests.unit.test_NVDAObjects_UIA
   For good: UI Automation objects. UIAHandler.customProps does not exist on Linux, where
   UIAHandler is replaced.
+  Import raises: ModuleNotFoundError: UIAHandler.customProps
 tests.unit.test_UIARemoteOps
   For good: UI Automation remote operations, which run through UIARemote.dll. UIAHandler is
   replaced on Linux, so UIAHandler._remoteOps and UIAHandler.UIA do not exist.
+  Import raises: ImportError: UIAHandler
 tests.unit.test_NVDAObjects_IAccessible_ia2Web
   For good: IAccessible2 objects in web documents. IAccessibleHandler is replaced on Linux and
   does not provide IAccessibleHandler.utils, which the test imports.
+  Import raises: ModuleNotFoundError: IAccessibleHandler.utils
 tests.unit.test_orderedWinEventLimiter
   For good: the limiter for Windows WinEvents in IAccessibleHandler. IAccessibleHandler is
   replaced on Linux and does not provide orderedWinEventLimiter; Linux has no WinEvents.
+  Import raises: ImportError: orderedWinEventLimiter
 tests.unit.test_excel
   For good: Microsoft Excel objects, reached in process through nvdaHelperLocal.dll. The Linux
   NVDAHelper.localLib has no EXCEL_CELLINFO, which the test imports.
+  Import raises: ImportError: EXCEL_CELLINFO
 
 # For good: other Windows-only subsystems.
 
 tests.unit.contentRecog.test_uwpOcr
   For good: Windows.Media.Ocr through nvdaHelperLocalWin10.dll. NVDAHelper is replaced on Linux
   and does not provide NVDAHelper.localWin10.
+  Import raises: ModuleNotFoundError: NVDAHelper.localWin10
 tests.unit.test_remote.test_localMachine
   For good: sending the secure attention sequence, control+alt+delete, through Windows' SAS
   policy. The test imports winreg, which Linux never provides.
+  Import raises: ModuleNotFoundError: winreg
 tests.unit.test_magnifier.test_fullscreenMagnifier
   For good: the full-screen magnifier drives the Windows Magnification API, Magnification.dll.
   Its constructor fails first, on GetSystemMetrics; see test_magnifier.test_magnifier below.
+  Raises: NoLinuxImplementation: user32.GetSystemMetrics
 tests.unit.test_magnifier.test_focusManager.TestFocusManager.testGetReviewPositionSurvivesCOMError
   For good: builds the exception from _ctypes.COMError, which exists only on Windows.
+  Raises: AttributeError: COMError
 tests.unit.test_visionEnhancementProviders.test_magnificationAPI
   For good: calls MagInitialize in Magnification.dll, the Windows Magnification API behind the
   screen curtain.
+  Raises: NoLinuxImplementation: Magnification.MagInitialize
 tests.unit.test_winVersion.TestWinVersion.test_getWinVer
   For good: compares winVersion.getWinVer() with sys.getwindowsversion(), which exists only on
   Windows.
+  Raises: AttributeError: getwindowsversion
 tests.unit.test_winVersion.TestWinVersion.test_winVerProcessorArchitecture
   For good: reads the PROCESSOR_ARCHITECTURE environment variable, which Windows sets.
-tests.unit.test_winBindings_icu
-  For good: tests how upstream's winBindings.icu finds icu.dll or icuuc.dll through windll.
-  linuxPlatform replaces winBindings.icu with a binding that loads ICU by path from
-  BASEDREADER_ICU_LIB_DIR, which test_nativeHelper.py tests.
+  Raises: KeyError: PROCESSOR_ARCHITECTURE
+tests.unit.test_winBindings_icu.Test_icuLoading.test_noIcuLibrary
+  For good: tests how upstream's winBindings.icu reports ICU missing when neither icu.dll nor
+  icuuc.dll loads through windll. linuxPlatform replaces winBindings.icu with a binding that loads
+  ICU by path from BASEDREADER_ICU_LIB_DIR, which test_nativeHelper.py tests, so ICU is available.
+  Raises: AssertionError: True is not false
+tests.unit.test_winBindings_icu.Test_icuLoading.test_fallsBackToIcuuc
+  For good: expects upstream's winBindings.icu to bind icuuc.dll by the name "icuuc"; the Linux
+  binding loads libicuuc by its path, as described for test_noIcuLibrary above.
+  Raises: AssertionError: != 'icuuc'
 tests.unit.test_installer.Test_BatchDeletion.test_deleteFilesFailure
   For good: expects deleting a file that is open to fail, as it does on Windows; Linux deletes it.
+  Raises: AssertionError: RetriableFailure not raised
 tests.unit.test_addonHandler.test_addonImports.TestCleanupAddonImports.test_addonModuleRemovedRegardlessOfPathCase
   For good: expects paths that differ only in case to name the same file, as on Windows. On Linux
   they are different files, so keeping the module is right.
+  Raises: AssertionError: 'fakeCasedAddonModule' unexpectedly found
 tests.unit.test_textUtils.test_backendComparison.TestWordOffsetsComplexScriptDivergence
   For good: asserts where Uniscribe's word breaks differ from ICU's for Japanese and Khmer.
   Uniscribe is a Windows library; on Linux the UNISCRIBE word segmenter is ICU too, through
-  NVDAHelper.localLib, so the two agree.
+  NVDAHelper.localLib, so the two agree and assertNotEqual fails.
+  Raises: AssertionError: ==
 tests.unit.test_textUtils.test_backendComparison.TestWordOffsetsEmojiZwjSequence.test_backends_diverge
   For good: asserts that Uniscribe breaks an emoji ZWJ sequence where ICU does not; on Linux both
   segmenters are ICU.
+  Raises: AssertionError: (0, 14) == (0, 14)
 tests.unit.test_textUtils.test_backendComparison.TestMixedSpacesAndTabs.test_spacesThenTabs
   For good: asserts that Uniscribe separates spaces from the tabs after them; on Linux both
   segmenters are ICU, which keeps the run whole.
+  Raises: AssertionError: Tuples differ: (0, 4) != (0, 2)
 
-# Until later work: dependencies the dev shell does not provide.
+# Until: dependencies the dev shell does not provide.
 
 tests.unit.test_braille.test_brailleDisplayDrivers.TestBRLTTY.test_brlapi
   Until the dev shell has BRLTTY's brlapi binding for Python 3.13: nixpkgs builds it only for
-  Python 3.14, inside brltty. BRLTTY is the main route to braille displays on Linux. Workstream E.
+  Python 3.14, inside brltty. BRLTTY is the main route to braille displays on Linux.
+  Raises: AssertionError: Couldn't import the brlapi module
 tests.unit.test_mathPres.test_mathCatNavNodeMapping
-  Until libmathcat_py, MathCAT's Python extension, is packaged in the dev shell. Workstream E.
+  Until libmathcat_py, MathCAT's Python extension, is packaged in the dev shell, and
+  mathPres/MathCAT/MathCAT.py can be imported on Linux: the class body of MathCATInteraction calls
+  windll.user32.RegisterClipboardFormatW twice, which has no Linux implementation. The test
+  imports mathPres.MathCAT._navNodeMapping, and the package imports MathCAT.py first.
+  Import raises: ModuleNotFoundError: libmathcat_py
 tests.unit.test_l10nUtil
   Until crowdin-api-client, l2m4m, markdown-link-attr-modifier and mdx-gh-links are packaged:
   l10nUtil is translators' tooling and imports crowdin_api at module level. Packaging them is a
-  choice for the user, as crowdin-api-client brings a large dependency tree.
+  choice for the user, as crowdin-api-client brings a large dependency tree. The 14 tests of
+  TestGetInterpolations pass on Linux once the module imports.
+  Import raises: ModuleNotFoundError: crowdin_api
 
-# Until later work: product code with no Linux implementation yet.
+# Until: kept code whose Linux implementation does not do what the tests expect.
 
 tests.unit.test_compoundDocuments.TestTreeCompoundTextInfo.test_characterMovement
-  Until the Linux NVDAHelper.localLib breaks carriage return and line feed into two characters as
-  Uniscribe does: ICU keeps "\r\n" as one grapheme cluster, so moving by character over a
-  Windows line ending stops once, not twice. Workstream A4's calculateCharacterBoundaries and
-  calculateCharacterOffsets.
+  Until the Linux NVDAHelper.localLib's calculateCharacterBoundaries and calculateCharacterOffsets
+  break carriage return and line feed into two characters as Uniscribe does: ICU keeps "\r\n" as
+  one grapheme cluster, so moving by character over a Windows line ending stops once, not twice.
+  Raises: AssertionError: '\r\n' != '\r'
 tests.unit.test_textUtils.test_wordSeg.TestChineseWordSegmentationInitialization.test_forceInitStillInitializesForUnusedLanguage
-  Until Linux has a native library directory: ReadPaths.cppjiebaDll is built from
-  NVDAState.coreArchLibPath, which raises RuntimeError("Unsupported platform") on Linux before the
-  test's stand-in for LoadLibrary is reached. The same RuntimeError escapes _initCppJieba at run
-  time when Chinese word segmentation is configured. Needs the library layout from workstreams A2
-  and E, and cppjieba built for Linux.
+  Until Linux has a native library directory and cppjieba built for Linux: ReadPaths.cppjiebaDll
+  is built from NVDAState.coreArchLibPath, which raises RuntimeError("Unsupported platform") on
+  Linux before the test's stand-in for LoadLibrary is reached. The same RuntimeError escapes
+  _initCppJieba at run time when Chinese word segmentation is configured.
+  Raises: RuntimeError: Unsupported platform
 tests.unit.test_textUtils.test_wordSeg.TestChineseWordSegmentationInitialization.test_initFailureDisablesCppJieba
   Until Linux has a native library directory, for the reason given for
   test_forceInitStillInitializesForUnusedLanguage above.
+  Raises: RuntimeError: Unsupported platform
 tests.unit.test_textUtils.test_wordSeg.TestChineseWordSegmentationInitialization.test_initializesForUnusedLanguageWhenConfigured
   Until Linux has a native library directory, for the reason given for
   test_forceInitStillInitializesForUnusedLanguage above.
+  Raises: RuntimeError: Unsupported platform
 tests.unit.test_magnifier.test_magnifier
   Until NVDA has a magnifier on Linux: Magnifier() reads the primary display's size through
   winAPI._displayTracking.getPrimaryDisplayOrientation, which calls GetSystemMetrics, and the only
-  magnifier behind it is the Windows full-screen one. No owner yet.
+  magnifier behind it is the Windows full-screen one.
+  Raises: NoLinuxImplementation: user32.GetSystemMetrics
 tests.unit.test_magnifier.test_mouseHook
   Until NVDA has a magnifier on Linux: every test builds a magnifier first, which fails as
   described for test_magnifier.test_magnifier above.
+  Raises: NoLinuxImplementation: user32.GetSystemMetrics
 tests.unit.test_magnifier.test_spotlightManager
   Until NVDA has a magnifier on Linux: every test builds a magnifier first, which fails as
   described for test_magnifier.test_magnifier above.
+  Raises: NoLinuxImplementation: user32.GetSystemMetrics
 tests.unit.test_languageHandler
-  Until languageHandler's Windows locale helpers have Linux answers or Linux tests of the same
-  behaviour, workstream A2's area. The module cannot even be loaded: at import it builds its table
-  of locales Windows lacks through englishCountryNameFromNVDALocale, which calls GetLocaleInfoEx;
-  the class body of Test_GetLocaleInfoEx_Wrappers calls kernel32.GetACP; and the constructor of
-  Test_LanguageHandler_SetLanguage calls kernel32.SetThreadLocale, which fails as the tests are
-  loaded. Several of its tests also assert Windows locale identifiers and Windows C runtime
-  locale names.
+  Until languageHandler's Windows locale helpers have Linux answers. The module cannot be loaded:
+  at import it builds its table of locales Windows lacks through englishCountryNameFromNVDALocale,
+  which calls GetLocaleInfoEx; the class body of Test_GetLocaleInfoEx_Wrappers calls
+  kernel32.GetACP; and the constructor of Test_LanguageHandler_SetLanguage calls
+  kernel32.SetThreadLocale as the tests are loaded. Once it loads, most of its tests run, and
+  these are expected to fail: Test_GetLocaleInfoEx_Wrappers, TestLocaleNameToWindowsLCID's
+  test_knownLocale, the setLocale tests that assert Windows C runtime locale names, and
+  Test_LanguageHandler_SetLanguage.test_NVDASupportedLanguages_LanguageIsSetCorrectly; so is
+  Test_languageHandler_setLocale.test_PythonUnsupportedLocale_LocaleUnchanged, because on Linux
+  setLocale falls back to C.UTF-8 where the C library lacks a locale, rather than leaving the
+  locale unchanged.
+  Import raises: NoLinuxImplementation: kernel32.GetLocaleInfoEx
 tests.unit.test_inputCore.TestInputManagerExtensionPoints.test_decide_executeGesture
-  Until a keyboard capture layer knows the layout: KeyboardInputGesture.fromName("NVDA+T") asks
-  which key types an upper case T, and linuxPlatform.inputHook.vkKeyScan answers only for lower
-  case letters, as workstream B1 decided and test_inputAtRest.py asserts.
-tests.unit.test_synthDriverHandler
-  Until synthDrivers.oneCore imports on Linux: the test imports its SynthDriver at module level,
-  and oneCore imports winreg. Workstream C's synthDrivers, or a guarded import upstream.
+  Until linuxPlatform.inputHook.vkKeyScan answers for upper case letters:
+  KeyboardInputGesture.fromName("NVDA+T") asks which key types an upper case T, and without the
+  keyboard layout only lower case letters map to a key unambiguously, so vkKeyScan answers for
+  those alone, as test_inputAtRest.py asserts.
+  Raises: NoLinuxImplementation: depends on the keyboard layout
 tests.unit.test_synthDrivers.test_espeak.TestSynthDriver_Integration
-  Until the eSpeak port: NVDA's espeak driver loads synthDrivers/espeak.dll, which does not exist
-  on Linux. A later milestone, which waits on the user's ruling on loading libespeak-ng in the rig.
+  Until NVDA's espeak driver loads a Linux eSpeak library: it loads synthDrivers/espeak.dll, which
+  does not exist on Linux.
   Not run: setUp starts mock.patch("nvwave.WavePlayer") and then builds the driver; when that
   raises, tearDown never stops the patch, which then leaks into every later module. Running it
-  would also load eSpeak as soon as the port gives the driver a Linux library, and the runner
-  refuses that load.
+  would also load eSpeak once the driver has a Linux library, and the runner refuses that load,
+  because eSpeak's library links audio libraries.
 tests.unit.test_messageDialog.Test_MessageDialog_Sounds.test_playSoundWithTypeWithSound_0
   Until message boxes have a sound on Linux: the test patches winsound.MessageBeep and expects an
   error box to call it, but gui.message.MessageDialog._playSound plays nothing on Linux, where
   winsound is a stand-in that raises and raising would leave the default button without focus.
-  A Linux sound, such as the desktop's event sound, is later work for workstream B2.
+  Raises: AssertionError: Expected 'MessageBeep' to have been called once
 tests.unit.test_messageDialog.Test_MessageDialog_Sounds.test_playSoundWithTypeWithSound_1
   Until message boxes have a sound on Linux, for the reason given for
   test_playSoundWithTypeWithSound_0 above; this is the warning box.
+  Raises: AssertionError: Expected 'MessageBeep' to have been called once
 tests.unit.test_remote.test_remoteClient.TestRemoteClient
   Until the remote client registers its nvdaremote:// URL handler on Linux: RemoteClient()
   calls urlHandler.registerURLHandler, which writes to the Windows registry and raises NameError
-  on winreg on Linux. Porting NVDA Remote is later work with no owner yet.
+  on winreg on Linux.
+  Raises: NameError: winreg
 
 # Skips the run expects.
 
 skipped tests.unit.brailleDisplayDrivers.test_dotPad.TestDotPadBle
   Upstream skips the class on every platform until its Bluetooth Low Energy support for the Dot
   Pad lands, NVDA pull request 19122.
+skipped tests.unit.test_synthDriverHandler.test_synthDriverHandler.test_setSynth_auto_usesOneCore_ifSupportsDefaultLanguage
+  Skips unless the OneCore driver's check() is true, which it never is on Linux; while the test
+  module is imported, rununittests puts a stand-in in place of synthDrivers.oneCore.
+skipped tests.unit.test_synthDriverHandler.test_synthDriverHandler.test_setSynth_auto_fallback_ifOneCoreDoesntSupportDefaultLanguage
+  Skips unless the OneCore driver's check() is true, as for
+  test_setSynth_auto_usesOneCore_ifSupportsDefaultLanguage above.
