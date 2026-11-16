@@ -379,10 +379,11 @@ def test_channelVolumesAndTheProcessGainApplyInTheSinkOnly(pipewire: PipewireFix
 			props = ask("inspect")["value"]
 			waitPlayed(stream, len(data) // fmt.blockAlign)
 			stream.close()
-			result = dict(start=start, props=props)
+			result = dict(start=start, props=props, delivered=sink.deliveredFrames())
 			""",
 			{**pipewire.childEnv(), **steps.env()},
 		)
+	assert value["delivered"] >= 48000 * 0.8, f"the graph took {value['delivered']} of 38400 frames"
 	sound = monitor.soundAfter(value["start"])
 	silence = monitor.silenceAfter(sound)
 	left, right = monitor.samples(sound + 50 * MS, silence - 50 * MS)
