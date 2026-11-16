@@ -113,6 +113,10 @@ source/hwIo/__init__.py
   Linux runtime: the background I/O thread is linuxPlatform.ioThread's
   subclass of upstream's, which waits on a condition rather than in an
   alertable wait for APCs, which Linux does not have
+source/hwIo/base.py
+  Linux runtime: Serial raises NoLinuxImplementation before pyserial is
+  reached, because pyserial opens and configures the port as it is
+  constructed and hwIo's reads are Windows overlapped I/O
 source/hwIo/ble/_io.py
   import safety: WinRTClientArgs comes from bleak.args.winrt, where bleak 3
   defines it on every platform and where bleak says to import it from, not
@@ -122,8 +126,8 @@ source/hwPortUtils.py
   imports; on Linux winreg is absent, so the port listing functions that
   read the registry raise NameError
   Linux runtime: listComPorts, listUsbDevices and listHidDevices list
-  nothing, as there is no SetupAPI and nothing in hwIo can open a Linux
-  device yet
+  nothing, as there is no SetupAPI and hwIo refuses to open serial, HID
+  and USB devices on Linux
 source/installer.py
   import safety: winreg imported only on Windows, after the module's other
   imports; on Linux winreg is absent, so installing raises NameError

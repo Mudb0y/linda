@@ -29,7 +29,10 @@ class WaitableTimer:
 		self._thread: IoThread | None = None
 
 	def cancel(self) -> bool:
-		"""Drop the pending call, if any. A call already due runs regardless, as on Windows.
+		"""Drop the pending call, if any.
+
+		A call the thread has already taken runs. Unlike on Windows, where a timer that has fallen due
+		has already queued its APC, a call that is due but still waiting for a busy thread is dropped.
 
 		:return: True, as CancelWaitableTimer returns non-zero for a timer that is not armed.
 		"""

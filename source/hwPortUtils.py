@@ -127,8 +127,8 @@ def listComPorts(onlyAvailable: bool = True) -> typing.Iterator[dict]:
 	:return: Dicts including keys of port, friendlyName and hardwareID.
 	"""
 	if sys.platform != "win32":
-		# Linux has no SetupAPI, and nothing in hwIo can open a Linux device yet, so there is
-		# nothing to offer a driver; listing from udev belongs with Linux device I/O.
+		# Linux has no SetupAPI, and hwIo refuses to open serial, HID and USB devices on Linux, so
+		# there is nothing to offer a driver; listing from udev belongs with Linux device I/O.
 		return
 	for g_hdi, _idd, devinfo, buf in _listDevices(_GUID_CLASS_COMPORT, onlyAvailable):
 		entry = {}

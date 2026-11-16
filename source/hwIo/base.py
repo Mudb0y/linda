@@ -39,6 +39,9 @@ import time
 from .ioThread import IoThread
 import NVDAState
 
+if sys.platform != "win32":
+	from linuxPlatform import NoLinuxImplementation
+
 
 def __getattr__(attrName: str) -> Any:
 	"""Module level `__getattr__` used to preserve backward compatibility."""
@@ -268,6 +271,10 @@ class Serial(IoBase):
 			if C{None}, defaults to L{hwIo.bgThread}
 		"""
 		self._ser = None
+		if sys.platform != "win32":
+			# pyserial opens and configures the port as it is constructed, and reading it here is
+			# Windows overlapped I/O, so on Linux the device must not be opened at all.
+			raise NoLinuxImplementation("hwIo.Serial")
 		self.port = args[0] if len(args) >= 1 else kwargs["port"]
 		if _isDebug():
 			log.debug("Opening port %s" % self.port)  # noqa: UP031
