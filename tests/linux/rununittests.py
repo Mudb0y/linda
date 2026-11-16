@@ -58,12 +58,20 @@ REASON_STARTS = ("For good", "Until")
 NOT_RUN = "Not run:"
 SKIP_KEYWORD = "skipped "
 EXPECTATION = re.compile(r"^(Raises|Import raises): ([A-Za-z_][A-Za-z0-9_]*): (.+)$")
-# Directories of the checkout that git and the development tools write to while other work goes on in
-# the same checkout; the audit hook still refuses writes into them from the tests themselves.
-UNWATCHED = {".git", ".claude", ".ruff_cache", os.path.join("engine", "target")}
-# Libraries that can reach a sound server or a sound card. The rig has neither, but a test that loads
-# one is a test that would make sound outside it, so the load fails the run.
-AUDIO_LIBRARIES = ("espeak", "pcaudio", "pulse", "asound", "pipewire", "jack", "portaudio", "gst", "canberra")
+
+
+def _loadHarness() -> types.ModuleType:
+	# By path: tests/linux must stay off sys.path, where its synthDrivers would shadow NVDA's.
+	spec = importlib.util.spec_from_file_location("harness", HERE / "harness.py")
+	module = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(module)
+	return module
+
+
+#: What a write is, what an audio library is, and how a tree is compared before and after a run,
+#: as every other test of NVDA code has them. The rig has no sound server or sound card, but a test
+#: that loads an audio library is a test that would make sound outside it, so the load fails the run.
+harness = _loadHarness()
 # Extension modules that the test package's bootstrap imports and that link audio libraries, with why
 # each is allowed to. What they link is mapped but never called: no test asks it for sound.
 AUDIO_LINKERS = {
@@ -506,83 +514,6 @@ class _Recording:
 		super().addUnexpectedSuccess(test)
 
 
-def treeState(top: Path) -> dict[str, tuple]:
-	"""A directory's modification time changes whenever an entry is made or removed in it, so this
-	also shows a file that was written and deleted again. The change time is kept too, because
-	nothing can set it back, unlike the modification time."""
-	state: dict[str, tuple] = {}
-	for dirPath, dirNames, fileNames in os.walk(top):
-		dirNames[:] = [d for d in dirNames if os.path.relpath(os.path.join(dirPath, d), top) not in UNWATCHED]
-		info = os.lstat(dirPath)
-		state[dirPath] = ("directory", info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
-		for name in fileNames + [d for d in dirNames if os.path.islink(os.path.join(dirPath, d))]:
-			path = os.path.join(dirPath, name)
-			info = os.lstat(path)
-			state[path] = (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-	return state
-
-
-_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
-# Audit events that change the file system: the position of each path argument, and of the directory
-# descriptor that path is relative to, or None.
-_PATH_EVENTS: dict[str, tuple[tuple[int, int | None], ...]] = {
-	"os.mkdir": ((0, 2),),
-	"os.remove": ((0, 1),),
-	"os.rmdir": ((0, 1),),
-	"os.rename": ((0, 2), (1, 3)),
-	"os.link": ((0, 2), (1, 3)),
-	"os.symlink": ((1, 2),),
-	"os.truncate": ((0, None),),
-	"os.chmod": ((0, 2),),
-	"os.utime": ((0, 3),),
-}
-# Events that follow a symbolic link at the end of their path, and so change what it points to.
-_FOLLOWING = {"open", "os.truncate", "os.chmod", "os.utime"}
-
-
-def _absolute(path, dirFd, following: bool) -> list[str]:
-	"""The path an event names, with the directories it passes through resolved, and also with the
-	link at its end resolved when the event follows one."""
-	if isinstance(path, int):
-		return []
-	path = os.fsdecode(path)
-	if not os.path.isabs(path):
-		# The events give -1 for "no directory descriptor".
-		useFd = isinstance(dirFd, int) and dirFd >= 0
-		base = os.readlink(f"/proc/self/fd/{dirFd}") if useFd else os.getcwd()
-		path = os.path.join(base, path)
-	# Not normalised as text first: the kernel resolves a link before the ".." after it.
-	parent, name = os.path.split(path.rstrip(os.sep) or os.sep)
-	if name in ("", os.curdir, os.pardir):
-		paths = [os.path.realpath(path)]
-	else:
-		paths = [os.path.join(os.path.realpath(parent), name)]
-	if following and os.path.realpath(path) != paths[0]:
-		paths.append(os.path.realpath(path))
-	return paths
-
-
-# Events that act on a path that must exist already; one aimed at nothing changes nothing.
-_ON_EXISTING = {"os.remove", "os.rmdir", "os.rename", "os.link", "os.truncate", "os.chmod", "os.utime"}
-
-
-def writtenPaths(event: str, args: tuple) -> list[str]:
-	"""The paths an audit event is about to change, as absolute paths."""
-	if event == "open":
-		path, mode, flags = args
-		if isinstance(mode, str):
-			writes = any(letter in mode for letter in "wax+")
-		else:
-			writes = bool(flags & _WRITE_FLAGS)
-		return _absolute(path, None, True) if writes else []
-	paths: list[str] = []
-	for pathAt, fdAt in _PATH_EVENTS.get(event, ()):
-		paths += _absolute(args[pathAt], None if fdAt is None else args[fdAt], event in _FOLLOWING)
-	if event in _ON_EXISTING and paths and not os.path.lexists(paths[0]):
-		return []
-	return paths
-
-
 def mappedLibraries() -> set[str]:
 	"""The files mapped executable into this process: every shared object it has loaded."""
 	paths: set[str] = set()
@@ -673,14 +604,10 @@ def linkedClosure(path: str, mapped: set[str]) -> list[str]:
 	return reached
 
 
-def isAudioLibrary(path: str) -> bool:
-	name = os.path.basename(path).lower()
-	return any(library in name for library in AUDIO_LIBRARIES)
-
-
 class Guard:
 	"""Refuses, and records, every write into the checkout made in this process and every load of
-	an audio library. Writes by child processes are found by comparing treeState before and after.
+	an audio library. Writes by child processes are found by comparing harness.treeState before and
+	after.
 
 	Loads through ctypes are refused as they happen. Libraries the dynamic linker maps for an
 	extension module raise no audit event, so the mapped libraries are also compared after the
@@ -711,13 +638,13 @@ class Guard:
 		if not self.armed:
 			return
 		if event == "ctypes.dlopen" and isinstance(args[0], (str, bytes)):
-			if isAudioLibrary(os.fsdecode(args[0])):
+			if harness.isAudioLibrary(args[0]):
 				self._refuse(f"load of the audio library {args[0]}")
 				raise OSError(f"rununittests: loading the audio library {args[0]} is refused")
 			return
-		if event != "open" and event not in _PATH_EVENTS:
+		if event != "open" and event not in harness.WRITE_EVENTS:
 			return
-		for path in writtenPaths(event, args):
+		for path in harness.writtenPaths(event, args):
 			if self._inCheckout(path):
 				self._refuse(f"{event} of {path}")
 				raise PermissionError(f"rununittests: {event} of {path} in the checkout is refused")
@@ -731,7 +658,7 @@ class Guard:
 			if os.path.basename(path).split(".")[0] in AUDIO_LINKERS:
 				allowed.update(linkedClosure(path, self.libraries))
 		for path in sorted(self.libraries - allowed):
-			if isAudioLibrary(path):
+			if harness.isAudioLibrary(path):
 				self.refused.append(
 					f"the audio library {path}, which the bootstrap mapped unlinked by AUDIO_LINKERS"
 				)
@@ -743,11 +670,12 @@ class Guard:
 		added = current - self.libraries
 		self.libraries = current
 		for path in sorted(added):
-			if isAudioLibrary(path):
+			if harness.isAudioLibrary(path):
 				self.refused.append(f"load of the audio library {path}, during {during}")
 				continue
 			reached = next(
-				(library for library in linkedClosure(path, current) if isAudioLibrary(library)), None
+				(library for library in linkedClosure(path, current) if harness.isAudioLibrary(library)),
+				None,
 			)
 			if reached is not None:
 				self.refused.append(
@@ -795,14 +723,6 @@ def runSuite(collected: Collected, guard: Guard, xml: bool, verbose: bool) -> tu
 	return runner.run(suite), report.getvalue()
 
 
-def _requireRig() -> None:
-	# By path: tests/linux must stay off sys.path, where its synthDrivers would shadow NVDA's.
-	spec = importlib.util.spec_from_file_location("harness", HERE / "harness.py")
-	harness = importlib.util.module_from_spec(spec)
-	spec.loader.exec_module(harness)
-	harness.requireRig()
-
-
 def _parseArguments() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(description="Run NVDA's unit tests on Linux.")
 	parser.add_argument("-v", "--verbose", action="store_true", help="list every test and exclusion")
@@ -839,7 +759,7 @@ def _parseArguments() -> argparse.Namespace:
 
 
 def main() -> int:
-	_requireRig()
+	harness.requireRig()
 	sys.dont_write_bytecode = True
 	args = _parseArguments()
 	if args.record is not None:
@@ -850,15 +770,13 @@ def main() -> int:
 		return 2
 	entries = readEntries(args.exclusions, args.package)
 	checkout = args.checkout.resolve()
-	before = treeState(checkout)
+	before = harness.treeState(checkout)
 	# Every temporary file of the run, the bootstrap's configuration directory among them, goes here,
 	# and this process removes it, so that a child that dies leaves nothing behind either.
 	workDir = tempfile.mkdtemp(prefix="rununittests-")
 	try:
 		status, summary, report = _supervise(args, entries, Path(workDir))
-		after = treeState(checkout)
-		changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
-		for path in changed:
+		for path in harness.changedPaths(before, harness.treeState(checkout)):
 			print(f"rununittests: the run changed {path}", file=sys.stderr)
 			status = 1
 		sys.stderr.flush()

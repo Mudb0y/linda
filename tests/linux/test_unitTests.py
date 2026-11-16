@@ -681,68 +681,32 @@ def test_standInIsInPlaceOnlyWhileItsTestModuleIsImported():
 		assert name not in sys.modules
 
 
-def test_treeStateSeesAFileWrittenAndRemovedAgain(tmp_path: Path):
-	(tmp_path / "sub").mkdir()
-	before = rununittests.treeState(tmp_path)
-	time.sleep(0.01)
-	transient = tmp_path / "sub" / "transient.tmp"
-	transient.write_text("x")
-	transient.unlink()
-	assert rununittests.treeState(tmp_path) != before
+def test_fileWrittenAndRemovedByAChildFailsTheRun(tmp_path: Path):
+	"""A file a child process makes in the checkout and removes again leaves nothing to find but the
+	time of its directory, which the comparison of the tree after the run still sees."""
+	checkout = checkoutStandIn(tmp_path)
+	(checkout / "sub").mkdir()
+	modules = {
+		"__init__.py": BOOTSTRAP,
+		"test_writes.py": f"""
+			import subprocess
+			import sys
+			import unittest
 
+			TRANSIENT = {str(checkout / "sub" / "transient.tmp")!r}
+			BRIEF = "import os\\nopen(" + repr(TRANSIENT) + ", 'w').close()\\nos.remove(" + repr(TRANSIENT) + ")\\n"
 
-def test_treeStateSeesAFileRewrittenWithItsTimesRestored(tmp_path: Path):
-	path = tmp_path / "file.txt"
-	path.write_text("original")
-	times = path.stat()
-	before = rununittests.treeState(tmp_path)
-	time.sleep(0.01)
-	path.write_text("ALTERED!")
-	os.utime(path, ns=(times.st_atime_ns, times.st_mtime_ns))
-	assert rununittests.treeState(tmp_path) != before
-
-
-def test_writtenPathsResolvesDescriptorRelativePathsAndLinks(tmp_path: Path):
-	real = tmp_path / "real"
-	real.mkdir()
-	(real / "file").write_text("x")
-	(tmp_path / "dirLink").symlink_to(real)
-	(tmp_path / "fileLink").symlink_to(real / "file")
-	fd = os.open(tmp_path, os.O_RDONLY)
-	try:
-		assert rununittests.writtenPaths("os.mkdir", ("new", 0o777, fd)) == [str(tmp_path / "new")]
-		assert rununittests.writtenPaths("os.mkdir", (str(tmp_path / "abs"), 0o777, -1)) == [
-			str(tmp_path / "abs")
-		]
-		assert rununittests.writtenPaths("open", (str(tmp_path / "f"), "r", 0)) == []
-		assert rununittests.writtenPaths("open", (str(tmp_path / "f"), None, os.O_WRONLY | os.O_CREAT)) == [
-			str(tmp_path / "f")
-		]
-		# Removing what does not exist changes nothing.
-		assert rununittests.writtenPaths("os.remove", (str(tmp_path / "missing"), -1)) == []
-		# A directory reached through a link is resolved; so is a link at the end of the path, when the
-		# event writes to what it points to, but not when the event removes the link itself.
-		assert rununittests.writtenPaths("open", (str(tmp_path / "dirLink" / "file"), "w", 0)) == [
-			str(real / "file")
-		]
-		assert rununittests.writtenPaths("open", (str(tmp_path / "fileLink"), "w", 0)) == [
-			str(tmp_path / "fileLink"),
-			str(real / "file"),
-		]
-		assert rununittests.writtenPaths("os.remove", (str(tmp_path / "fileLink"), -1)) == [
-			str(tmp_path / "fileLink")
-		]
-		# ".." after a link leads out of where the link points to, not back to where the link is.
-		(real / "inner").mkdir()
-		(tmp_path / "outside").mkdir()
-		(tmp_path / "outside" / "innerLink").symlink_to(real / "inner")
-		up = str(tmp_path / "outside" / "innerLink" / os.pardir)
-		assert rununittests.writtenPaths("os.mkdir", (os.path.join(up, "new"), 0o777, -1)) == [
-			str(real / "new")
-		]
-		assert rununittests.writtenPaths("os.rmdir", (up, -1)) == [str(real)]
-	finally:
-		os.close(fd)
+			class TestWrites(unittest.TestCase):
+				def test_writesAndRemovesFromAChild(self):
+					subprocess.run([sys.executable, "-c", BRIEF], check=True)
+		""",
+	}
+	listPath = makeProbes(tmp_path, modules, "")
+	status, lines, output = runRunner(tmp_path, listPath, "--checkout", str(checkout))
+	assert status == 1, output
+	assert f"rununittests: the run changed {checkout / 'sub'}" in lines, output
+	assert not (checkout / "sub" / "transient.tmp").exists()
+	assert any(line.startswith("rununittests: 1 tests ran: 1 passed") for line in lines), output
 
 
 def test_outboundRemoteConnectionKeepsAliveAsOnWindows(tmp_path: Path):

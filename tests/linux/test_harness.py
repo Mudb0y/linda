@@ -361,6 +361,42 @@ def test_treeStateSeesAFileRewrittenWithItsTimesRestored(tmp_path: Path):
 	assert harness.changedPaths(before, harness.treeState(tree)) == [str(path)]
 
 
+def test_writtenPathsResolvesDescriptorRelativePathsAndLinks(tmp_path: Path):
+	real = tmp_path / "real"
+	real.mkdir()
+	(real / "file").write_text("x")
+	(tmp_path / "dirLink").symlink_to(real)
+	(tmp_path / "fileLink").symlink_to(real / "file")
+	fd = os.open(tmp_path, os.O_RDONLY)
+	try:
+		assert harness.writtenPaths("os.mkdir", ("new", 0o777, fd)) == [str(tmp_path / "new")]
+		assert harness.writtenPaths("os.mkdir", (str(tmp_path / "abs"), 0o777, -1)) == [str(tmp_path / "abs")]
+		assert harness.writtenPaths("open", (str(tmp_path / "f"), "r", 0)) == []
+		assert harness.writtenPaths("open", (str(tmp_path / "f"), None, os.O_WRONLY | os.O_CREAT)) == [
+			str(tmp_path / "f")
+		]
+		# Removing what does not exist changes nothing.
+		assert harness.writtenPaths("os.remove", (str(tmp_path / "missing"), -1)) == []
+		# A directory reached through a link is resolved; so is a link at the end of the path, when the
+		# event writes to what it points to, but not when the event removes the link itself.
+		assert harness.writtenPaths("open", (str(tmp_path / "dirLink" / "file"), "w", 0)) == [
+			str(real / "file")
+		]
+		assert harness.writtenPaths("open", (str(tmp_path / "fileLink"), "w", 0)) == [str(real / "file")]
+		assert harness.writtenPaths("os.remove", (str(tmp_path / "fileLink"), -1)) == [
+			str(tmp_path / "fileLink")
+		]
+		# ".." after a link leads out of where the link points to, not back to where the link is.
+		(real / "inner").mkdir()
+		(tmp_path / "outside").mkdir()
+		(tmp_path / "outside" / "innerLink").symlink_to(real / "inner")
+		up = str(tmp_path / "outside" / "innerLink" / os.pardir)
+		assert harness.writtenPaths("os.mkdir", (os.path.join(up, "new"), 0o777, -1)) == [str(real / "new")]
+		assert harness.writtenPaths("os.rmdir", (up, -1)) == [str(real)]
+	finally:
+		os.close(fd)
+
+
 def test_treeStateCoversTheProtectedTreesAndSkipsUnwatched():
 	state = harness.treeState()
 	assert str(harness.SOURCE / "basedreader.py") in state
