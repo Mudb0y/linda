@@ -63,7 +63,9 @@ def buildCatalogues() -> tuple[int, int]:
 		if mo.is_file() and mo.stat().st_mtime >= po.stat().st_mtime:
 			continue
 		temp = mo.with_name("nvda.mo.tmp")
-		result = subprocess.run(["msgfmt", "-o", str(temp), str(po)], capture_output=True, text=True)
+		result = subprocess.run(
+			["msgfmt", "-o", str(temp), str(po)], capture_output=True, text=True, check=False
+		)
 		if result.returncode != 0:
 			temp.unlink(missing_ok=True)
 			fail(f"msgfmt failed on {po.relative_to(root)}: {result.stderr.strip()}")

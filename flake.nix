@@ -2,12 +2,18 @@
   description = "Basedreader, NVDA brought to Linux";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # A nixpkgs revision whose ruff is the release upstream's pyproject.toml
+  # pins, which is the one its pre-commit runs over every file a merge
+  # brings in. Move it when upstream moves that pin; tests/linux/test_ruff.py
+  # fails until the two agree.
+  inputs.nixpkgs-ruff.url = "github:NixOS/nixpkgs/8b7dc2ca50dd99ca3af5af1436b06b5adb1e54c9";
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, nixpkgs-ruff }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
       lib = nixpkgs.lib;
+      inherit (nixpkgs-ruff.legacyPackages.${system}) ruff;
 
       # NVDA pins Python 3.13. Staying on it keeps the imported code, and the
       # add-ons written against it, on the interpreter they were tested with
@@ -73,6 +79,7 @@
           clippy
           rustfmt
           maturin
+          # The pinned ruff: a let binding takes precedence over with.
           ruff
           pkg-config
           gobject-introspection
