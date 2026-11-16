@@ -1360,6 +1360,47 @@ def test_aLibraryThatCannotBeLoadedFailsAtOnce(tmp_path: Path, library: str):
 	assert re.search("BASEDREADER_PWSINK_LIB|libpwsink", done.value), done.value
 
 
+def test_aStreamFailsCleanlyWhenMisused(pipewire: PipewireFixture, tmp_path: Path):
+	"""A write that does not fit leaves nothing queued, and a closed stream raises rather than
+	handing the library a handle it has freed, which would crash NVDA and its speech with it."""
+	value = runPipewireChild(
+		tmp_path,
+		"""
+		import errno
+
+		stream = sink.openStream("", SPEECH, lambda: None)
+		try:
+			stream.write(bytes(SPEECH.blockAlign * (SPEECH.samplesPerSec + 1)))
+			tooMuch = "accepted"
+		except OSError as e:
+			tooMuch = errno.errorcode[e.errno]
+		queuedAfter = stream.bufferedFrames()
+		stream.write(tone(SPEECH, 0.1))
+		stream.close()
+		stream.close()
+		closed = {}
+		for name, call in (
+			("write", lambda: stream.write(bytes(2))),
+			("bufferedFrames", stream.bufferedFrames),
+			("playedFrames", stream.playedFrames),
+			("start", stream.start),
+			("stop", stream.stop),
+			("reset", stream.reset),
+			("setChannelVolume", lambda: stream.setChannelVolume(0, 0.5)),
+		):
+			try:
+				call()
+				closed[name] = "returned"
+			except OSError as e:
+				closed[name] = errno.errorcode[e.errno]
+		result = dict(tooMuch=tooMuch, queuedAfter=queuedAfter, closed=closed)
+		""",
+		pipewire.childEnv(),
+	)
+	assert value["tooMuch"] == "ENOBUFS" and value["queuedAfter"] == 0, value
+	assert set(value["closed"].values()) == {"EBADF"}, value["closed"]
+
+
 def _fileLevels(path: Path) -> tuple[list[float], float, int]:
 	"""Each channel's energy at 48 kHz, the peak, and the frames before the first sound."""
 	with wave.open(str(path), "rb") as w:

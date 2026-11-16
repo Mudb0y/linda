@@ -184,13 +184,16 @@ impl Stream {
     // The producer's side. NVDA's player holds its own lock around every call, so these never run
     // on two threads at once for one stream.
 
-    /// Copies whole frames into the ring and returns how many it took, which is fewer only when
-    /// the ring is full. Also says whether the loop thread must wake the stream.
+    /// Copies all the whole frames in data into the ring, or nothing when they do not all fit,
+    /// and returns how many it took. Also says whether the loop thread must wake the stream.
     pub fn write(&self, data: &[u8], now: u64) -> (u64, bool) {
         self.tick(now);
         let wp = self.write_pos.load(Relaxed);
         let free = self.capacity - (wp - self.reclaim_point());
-        let frames = ((data.len() / self.stride) as u64).min(free);
+        let frames = (data.len() / self.stride) as u64;
+        if frames > free {
+            return (0, false);
+        }
         let bytes = frames as usize * self.stride;
         let start = (wp % self.capacity) as usize * self.stride;
         let first = bytes.min(self.ring_len - start);
@@ -690,11 +693,14 @@ mod tests {
     }
 
     #[test]
-    fn a_full_ring_takes_no_more() {
+    fn a_write_that_does_not_fit_takes_nothing() {
         let s = mono16(8000);
         attach(&s, 1);
-        assert_eq!(s.write(&frames(9000, 1), 1).0, 8000);
-        assert_eq!(s.write(&frames(10, 1), 1).0, 0);
+        assert_eq!(s.write(&frames(9000, 1), 1).0, 0);
+        assert_eq!(s.buffered(1), 0);
+        assert_eq!(s.write(&frames(8000, 1), 1).0, 8000);
+        assert_eq!(s.write(&frames(1, 1), 1).0, 0);
+        assert_eq!(s.buffered(1), 8000);
     }
 
     #[test]

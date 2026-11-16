@@ -93,7 +93,8 @@ pub unsafe extern "C" fn pwsink_open(
     Arc::into_raw(stream)
 }
 
-/// Copies whole frames into the stream's ring without blocking, and returns how many it took.
+/// Copies the whole frames in data into the stream's ring without blocking, and returns how many
+/// it took: all of them, or none when they do not all fit.
 ///
 /// # Safety
 /// A live handle, and bytes readable at data.

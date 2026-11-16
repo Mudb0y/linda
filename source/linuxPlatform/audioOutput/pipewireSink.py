@@ -77,28 +77,36 @@ class PipewireStream(SinkStream):
 		self.format = fmt
 		self.bufferFrames = fmt.samplesPerSec * BUFFER_MS // 1000
 
+	def _live(self) -> int:
+		# libpwsink is given only handles it made and has not freed: a stale one would crash the
+		# process, and with it the screen reader's speech.
+		if self.handle is None:
+			raise OSError(errno.EBADF, "the stream is closed")
+		return self.handle
+
 	def write(self, data: bytes) -> None:
 		frames = len(data) // self.format.blockAlign
-		if self._lib.pwsink_write(self.handle, data, len(data)) != frames:
+		# libpwsink takes all of it or, when the ring cannot hold it all, none.
+		if self._lib.pwsink_write(self._live(), data, len(data)) != frames:
 			raise OSError(errno.ENOBUFS, "the stream's ring is full")
 
 	def bufferedFrames(self) -> int:
-		return self._lib.pwsink_buffered(self.handle)
+		return self._lib.pwsink_buffered(self._live())
 
 	def playedFrames(self) -> int:
-		return self._lib.pwsink_played(self.handle)
+		return self._lib.pwsink_played(self._live())
 
 	def start(self) -> None:
-		self._lib.pwsink_start(self.handle)
+		self._lib.pwsink_start(self._live())
 
 	def stop(self) -> None:
-		self._lib.pwsink_stop(self.handle)
+		self._lib.pwsink_stop(self._live())
 
 	def reset(self) -> None:
-		self._lib.pwsink_reset(self.handle)
+		self._lib.pwsink_reset(self._live())
 
 	def setChannelVolume(self, channel: int, level: float) -> None:
-		if self._lib.pwsink_set_volume(self.handle, channel, level) < 0:
+		if self._lib.pwsink_set_volume(self._live(), channel, level) < 0:
 			raise OSError(errno.EINVAL, f"no volume {level} for channel {channel} of {self.format}")
 
 	def close(self) -> None:
