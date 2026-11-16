@@ -178,6 +178,63 @@ def test_testHooksRefuseAMissingDirectory(tmp_path: Path):
 	assert done.error is not None and "FileNotFoundError" in done.error
 
 
+def test_testHooksDoNothingInSecureMode(tmp_path: Path):
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import globalPlugins
+		import globalVars
+		import synthDrivers
+		globalVars.appArgs.secure = True
+		before = (list(synthDrivers.__path__), list(globalPlugins.__path__))
+		from linuxPlatform import testHooks
+		added = testHooks.install()
+		result = {"added": added, "unchanged": before == (synthDrivers.__path__, globalPlugins.__path__)}
+		""",
+		prepare="bootstrap",
+		env={"BASEDREADER_TEST_HOOKS_DIR": str(HERE)},
+	)
+	done.assertClean()
+	assert done.value == {"added": [], "unchanged": True}
+
+
+def test_testHooksSurviveReloadingPlugins(tmp_path: Path):
+	plugins = tmp_path / "hooks" / "globalPlugins"
+	plugins.mkdir(parents=True)
+	(plugins / "hookedPlugin.py").write_text(
+		"import globalPluginHandler\n\n\nclass GlobalPlugin(globalPluginHandler.GlobalPlugin):\n\tpass\n",
+		encoding="utf-8",
+	)
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import core
+		import NVDAHelper
+		import globalVars
+		# As tests launch NVDA; it also keeps add-ons and the scratchpad out of the reload.
+		globalVars.appArgs.disableAddons = True
+		from linuxPlatform import testHooks
+		testHooks.install()
+		import globalPluginHandler
+
+
+		def running():
+			return sorted(type(plugin).__module__ for plugin in globalPluginHandler.runningPlugins)
+
+
+		globalPluginHandler.initialize()
+		before = running()
+		# Removes globalPlugins from sys.modules and imports it again, with a fresh search path.
+		globalPluginHandler.reloadGlobalPlugins()
+		result = {"before": before, "after": running()}
+		globalPluginHandler.terminate()
+		""",
+		env={"BASEDREADER_TEST_HOOKS_DIR": str(tmp_path / "hooks")},
+	)
+	done.assertClean()
+	assert done.value == {"before": ["globalPlugins.hookedPlugin"], "after": ["globalPlugins.hookedPlugin"]}
+
+
 def test_setSynthLoadsTranscriptByName(tmp_path: Path):
 	done = runSpeech(
 		tmp_path,
@@ -318,7 +375,36 @@ def test_manualModeReleasesOnlyOnAdvance(tmp_path: Path):
 	assert steps["kinds"] == ["speak", "speak", "cancel"]
 
 
+def test_manualModeHoldsNotificationsWhilePaused(tmp_path: Path):
+	done = runSpeech(
+		tmp_path,
+		"""
+		heard = Heard()
+		synth.speak(["one", IndexCommand(1)])
+		synth.pause(True)
+		steps = {"advancedWhilePaused": synth.advance(), "heardWhilePaused": heard.plain()}
+		steps["pendingWhilePaused"] = synth.pendingNotifications
+		synth.pause(False)
+		steps["advancedAfterResume"] = synth.advance(2)
+		steps["heard"] = heard.plain()
+		result = steps
+		""",
+		mode="manual",
+	)
+	done.assertClean()
+	assert done.value == {
+		"advancedWhilePaused": 0,
+		"heardWhilePaused": [],
+		"pendingWhilePaused": [1, None],
+		"advancedAfterResume": 2,
+		"heard": [["index", 1], ["done", None]],
+	}
+
+
 def test_timedModeReportsFromItsOwnThreadAndHonoursPause(tmp_path: Path):
+	# At 10 ms a character, every wait that must see nothing outlasts the notification's due time by
+	# half a second or more, and every step the main thread must take before a notification falls due
+	# has a second, so neither kind of check depends on how loaded the machine is.
 	done = runSpeech(
 		tmp_path,
 		"""
@@ -328,50 +414,119 @@ def test_timedModeReportsFromItsOwnThreadAndHonoursPause(tmp_path: Path):
 		heard = Heard()
 		finished = threading.Event()
 		synthDriverHandler.synthDoneSpeaking.register(finished.set)
+
+
+		def since(mark):
+			return heard.plain()[mark:]
+
+
+		steps = {}
 		started = time.monotonic()
 		synth.speak(["x" * 20, IndexCommand(1), "y" * 20, IndexCommand(2)])
 		finished.wait(10)
-		elapsed = time.monotonic() - started
-		firstRun = list(heard.notifications)
+		steps["elapsed"] = time.monotonic() - started
+		steps["threads"] = sorted({thread for _kind, _index, thread in heard.notifications})
+		steps["first"] = since(0)
 
+		mark = len(heard.notifications)
 		finished.clear()
-		synth.speak(["z" * 10, IndexCommand(3)])
 		synth.pause(True)
-		time.sleep(0.5)
-		duringPause = len(heard.notifications) - len(firstRun)
+		synth.speak(["z" * 10, IndexCommand(3)])
+		time.sleep(0.6)
+		steps["pausedBeforeStart"] = since(mark)
 		synth.pause(False)
 		finished.wait(10)
-		afterPause = heard.plain()[len(firstRun):]
+		steps["resumed"] = since(mark)
 
-		synth.speak(["w" * 100, IndexCommand(4)])
+		# Due after 1 s; the pause holds it past that.
+		mark = len(heard.notifications)
+		finished.clear()
+		started = time.monotonic()
+		synth.speak(["v" * 100, IndexCommand(4)])
+		synth.pause(True)
+		time.sleep(1.5)
+		steps["pausedMidway"] = since(mark)
+		synth.pause(False)
+		finished.wait(10)
+		steps["resumedMidway"] = since(mark)
+		steps["midwayElapsed"] = time.monotonic() - started
+
+		# Cancelled once its first index is out; the second would be due 1 s after that.
+		mark = len(heard.notifications)
+		deadline = time.monotonic() + 10
+		synth.speak(["w" * 10, IndexCommand(5), "w" * 100, IndexCommand(6)])
+		while len(heard.notifications) == mark and time.monotonic() < deadline:
+			time.sleep(0.01)
 		synth.cancel()
-		time.sleep(0.5)
-		result = {
-			"elapsed": elapsed,
-			"firstRun": firstRun,
-			"duringPause": duringPause,
-			"afterPause": afterPause,
-			"afterCancel": heard.plain()[len(firstRun) + len(afterPause):],
-			"kinds": kinds(),
-		}
+		time.sleep(1.5)
+		steps["cancelled"] = since(mark)
+
+		# speech.speak cancels a paused synth and never unpauses it, so a cancel has to end the pause.
+		mark = len(heard.notifications)
+		finished.clear()
+		synth.pause(True)
+		synth.cancel()
+		synth.speak(["u" * 10, IndexCommand(7)])
+		finished.wait(10)
+		steps["afterPauseAndCancel"] = since(mark)
+		steps["kinds"] = kinds()
+		result = steps
 		""",
 		mode="timed",
 		TRANSCRIPT_SYNTH_MS_PER_CHAR="10",
 	)
 	done.assertClean()
-	result = done.value
-	assert [[kind, index] for kind, index, _thread in result["firstRun"]] == [
-		["index", 1],
-		["index", 2],
-		["done", None],
-	]
-	assert {thread for _kind, _index, thread in result["firstRun"]} == {"transcriptSynth"}
+	steps = done.value
+	assert steps["first"] == [["index", 1], ["index", 2], ["done", None]]
+	assert steps["threads"] == ["transcriptSynth"]
 	# 40 characters at 10 ms each.
-	assert result["elapsed"] >= 0.4
-	assert result["duringPause"] == 0
-	assert result["afterPause"] == [["index", 3], ["done", None]]
-	assert result["afterCancel"] == []
-	assert result["kinds"] == ["speak", "speak", "pause", "pause", "speak", "cancel"]
+	assert steps["elapsed"] >= 0.4
+	assert steps["pausedBeforeStart"] == []
+	assert steps["resumed"] == [["index", 3], ["done", None]]
+	assert steps["pausedMidway"] == []
+	assert steps["resumedMidway"] == [["index", 4], ["done", None]]
+	assert steps["midwayElapsed"] >= 1.5
+	assert steps["cancelled"] == [["index", 5]]
+	assert steps["afterPauseAndCancel"] == [["index", 7], ["done", None]]
+	assert steps["kinds"] == [
+		"speak",
+		"pause",
+		"speak",
+		"pause",
+		"speak",
+		"pause",
+		"pause",
+		"speak",
+		"cancel",
+		"pause",
+		"cancel",
+		"speak",
+	]
+
+
+def test_speakingWhilePausedInTimedModeIsHeardToTheEnd(tmp_path: Path):
+	done = runSpeech(
+		tmp_path,
+		"""
+		import time
+
+		speech.speakMessage("one")
+		speech.pauseSpeech(True)
+		speech.speakMessage("two")
+		deadline = time.monotonic() + 10
+		while speech.isSpeaking() and time.monotonic() < deadline:
+			pump()
+			time.sleep(0.01)
+		result = {"speaking": speech.isSpeaking(), "sent": spoken(), "kinds": kinds()}
+		""",
+		mode="timed",
+	)
+	done.assertClean()
+	assert done.value == {
+		"speaking": False,
+		"sent": ["one", "two"],
+		"kinds": ["speak", "pause", "cancel", "speak"],
+	}
 
 
 def test_speechReachesTheDriver(tmp_path: Path):
@@ -518,21 +673,44 @@ def test_synthListOnLinuxHasNoWindowsDriver(tmp_path: Path):
 	done = runSpeech(
 		tmp_path,
 		"""
-		result = {
-			"names": [name for name, _description in synthDriverHandler.getSynthList()],
-			"priority": synthDriverHandler.defaultSynthPriorityList,
-		}
+		names = [name for name, _description in synthDriverHandler.getSynthList()]
+		loaded = {}
+		for name in names:
+			loaded[name] = [synthDriverHandler.setSynth(name), synthDriverHandler.getSynth().name]
+		result = {"names": names, "loaded": loaded, "priority": synthDriverHandler.defaultSynthPriorityList}
+		""",
+	)
+	# Everything offered loads, with nothing logged at ERROR on the way.
+	done.assertClean()
+	assert done.value["names"] == ["transcript", "silence"]
+	assert done.value["loaded"] == {"transcript": [True, "transcript"], "silence": [True, "silence"]}
+	assert done.value["priority"] == ["espeak", "silence"]
+
+
+def test_aDriverNamedLikeAWindowsOneIsListedWhenNotNVDAs(tmp_path: Path):
+	addon = tmp_path / "addon" / "synthDrivers"
+	addon.mkdir(parents=True)
+	(addon / "sapi5.py").write_text(
+		"from synthDrivers.silence import SynthDriver as Silence\n\n\n"
+		"class SynthDriver(Silence):\n\tname = 'sapi5'\n\tdescription = 'Not Windows'\n",
+		encoding="utf-8",
+	)
+	done = runSpeech(
+		tmp_path,
+		f"""
+		import synthDrivers
+		# Where Addon.addToPackagePath puts an add-on's drivers.
+		synthDrivers.__path__.insert(0, {str(addon)!r})
+		names = [name for name, _description in synthDriverHandler.getSynthList()]
+		result = {{"names": names, "loaded": synthDriverHandler.setSynth("sapi5")}}
 		""",
 	)
 	done.assertClean()
-	names = done.value["names"]
-	assert not WINDOWS_ONLY_DRIVERS & set(names)
-	assert "transcript" in names
-	assert names[-1] == "silence"
-	assert done.value["priority"] == ["silence"]
+	assert done.value["names"] == ["sapi5", "transcript", "silence"]
+	assert done.value["loaded"] is True
 
 
-def test_autoResolvesToSilence(tmp_path: Path):
+def test_autoFallsBackToSilenceAndStaysAuto(tmp_path: Path):
 	done = harness.runChild(
 		tmp_path,
 		"""
@@ -552,12 +730,23 @@ def test_autoResolvesToSilence(tmp_path: Path):
 			"configuredBefore": configuredBefore,
 			"synth": synthDriverHandler.getSynth().name,
 			"configuredAfter": config.conf["speech"]["synth"],
+			# What config.conf.save() would write.
+			"saved": config.conf.profiles[0].get("speech", {}).get("synth"),
 		}
 		synthDriverHandler.setSynth(None)
 		""",
 	)
-	done.assertClean()
-	assert done.value == {"configuredBefore": "auto", "synth": "silence", "configuredAfter": "silence"}
+	# Silence as a fallback is not saved, so eSpeak takes over by itself once it loads.
+	assert done.value == {
+		"configuredBefore": "auto",
+		"synth": "silence",
+		"configuredAfter": "auto",
+		"saved": None,
+	}
+	# Until it does, the one error says why there is no voice. Remove it from here when eSpeak loads.
+	assert done.error is None, done.error
+	assert not done.noLinuxImplementation, done.noLinuxImplementation
+	assert done.logErrors == ["ERROR: setSynth failed for espeak"]
 
 
 def test_excludedDriversAreExactlyThoseThatCannotImport(tmp_path: Path):

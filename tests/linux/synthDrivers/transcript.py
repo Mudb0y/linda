@@ -4,7 +4,8 @@ The records go to synth.events and, when TRANSCRIPT_SYNTH_FILE names a file, to 
 Lines; _transcriptRecords describes the format and reads it back. TRANSCRIPT_SYNTH_MODE chooses
 when indexes are reported:
 - immediate, the default: every index and then done, inside speak().
-- manual: only when the test calls advance(); done counts as one step.
+- manual: only when the test calls advance(); done counts as one step. Nothing is released while
+paused, as a real driver's player holds its callbacks.
 - timed: from a worker thread, each index after TRANSCRIPT_SYNTH_MS_PER_CHAR milliseconds for every
 character spoken before it, not counting time spent paused.
 
@@ -29,6 +30,7 @@ from speech.commands import (
 	RateCommand,
 	VolumeCommand,
 )
+from speech.types import SpeechSequence
 from synthDriverHandler import SynthDriver as BaseSynthDriver
 from synthDriverHandler import VoiceInfo, synthDoneSpeaking, synthIndexReached
 
@@ -82,7 +84,7 @@ class SynthDriver(BaseSynthDriver):
 	def check(cls) -> bool:
 		return True
 
-	def __init__(self):
+	def __init__(self) -> None:
 		super().__init__()
 		self.mode = os.environ.get("TRANSCRIPT_SYNTH_MODE") or "immediate"
 		if self.mode not in modes:
@@ -110,7 +112,7 @@ class SynthDriver(BaseSynthDriver):
 	def _get_voice(self) -> str:
 		return self._settings["voice"]
 
-	def _set_voice(self, value: str):
+	def _set_voice(self, value: str) -> None:
 		if value not in self.availableVoices:
 			raise LookupError(value)
 		self._settings["voice"] = value
@@ -118,22 +120,23 @@ class SynthDriver(BaseSynthDriver):
 	def _get_rate(self) -> int:
 		return self._settings["rate"]
 
-	def _set_rate(self, value: int):
+	def _set_rate(self, value: int) -> None:
 		self._settings["rate"] = value
 
 	def _get_pitch(self) -> int:
 		return self._settings["pitch"]
 
-	def _set_pitch(self, value: int):
+	def _set_pitch(self, value: int) -> None:
 		self._settings["pitch"] = value
 
 	def _get_volume(self) -> int:
 		return self._settings["volume"]
 
-	def _set_volume(self, value: int):
+	def _set_volume(self, value: int) -> None:
 		self._settings["volume"] = value
 
 	def _record(self, kind: str, data: Any = None) -> None:
+		# Callers hold the lock, so that the order of records is the order of the state changes.
 		record = {"t": time.monotonic(), "kind": kind, "data": data}
 		self.events.append(record)
 		if self._path:
@@ -141,8 +144,7 @@ class SynthDriver(BaseSynthDriver):
 			with open(self._path, "a", encoding="utf-8") as f:
 				f.write(json.dumps(record) + "\n")
 
-	def speak(self, speechSequence: list) -> None:
-		self._record("speak", [render(item) for item in speechSequence])
+	def speak(self, speechSequence: SpeechSequence) -> None:
 		marks: list[tuple[int | None, int]] = []
 		chars = 0
 		for item in speechSequence:
@@ -152,13 +154,14 @@ class SynthDriver(BaseSynthDriver):
 				marks.append((item.index, chars))
 				chars = 0
 		marks.append((None, chars))
-		if self.mode == "immediate":
-			for index, _chars in marks:
-				self._notify(index)
-			return
 		with self._condition:
-			self._pending.extend(marks)
-			self._condition.notify_all()
+			self._record("speak", [render(item) for item in speechSequence])
+			if self.mode != "immediate":
+				self._pending.extend(marks)
+				self._condition.notify_all()
+				return
+		for index, _chars in marks:
+			self._notify(index)
 
 	def _notify(self, index: int | None) -> None:
 		if index is None:
@@ -173,12 +176,15 @@ class SynthDriver(BaseSynthDriver):
 			return [index for index, _chars in self._pending]
 
 	def advance(self, count: int = 1) -> int:
-		"""Manual mode: report the next count notifications, and return how many there were."""
+		"""Manual mode: report the next count notifications, and return how many there were.
+
+		While paused nothing is reported.
+		"""
 		if self.mode != "manual":
 			raise RuntimeError(f"advance() is for manual mode, and this synth is in {self.mode} mode")
 		reported = 0
 		with self._condition:
-			while reported < count and self._pending:
+			while reported < count and self._pending and not self._paused:
 				index, _chars = self._pending.pop(0)
 				# Under the lock, so that a cancel on another thread cannot be followed by a stale index.
 				self._notify(index)
@@ -215,11 +221,11 @@ class SynthDriver(BaseSynthDriver):
 			# NVDA's cancelSpeech ends a pause without calling pause(False), as stopping a real player does.
 			self._paused = False
 			self._condition.notify_all()
-		self._record("cancel")
+			self._record("cancel")
 
 	def pause(self, switch: bool) -> None:
-		self._record("pause", switch)
 		with self._condition:
+			self._record("pause", switch)
 			self._paused = switch
 			self._condition.notify_all()
 
