@@ -83,19 +83,22 @@ class StreamFormat:
 class SinkStream(ABC):
 	"""One player's stream on a sink.
 
-	The player calls every method but stop with its own lock held, so none of them is ever called
-	from two threads at once. stop is called without that lock, so that silencing never waits for a
-	thread that is feeding: it may run on any thread at the same time as write, bufferedFrames,
-	playedFrames or setChannelVolume, but never at the same time as start, reset or close, and never
-	after close. A sink that consumes on a thread of its own synchronises with that thread itself.
+	The player calls write, bufferedFrames, playedFrames, start, reset, setChannelVolume and close with
+	its own lock held, so none of them is ever called from two threads at once. abort and stop are
+	called without that lock, so that silencing never waits for a thread that is feeding, which can be
+	held up for whole switch intervals winning the GIL back after each call into C while other threads
+	run Python. Either may therefore run on any thread at the same time as any other method, each
+	other included, but never at the same time as close, and never after it. A sink that consumes on
+	a thread of its own synchronises with that thread itself.
 
 	The player times its waits from the format and the frame counts, which is all a sink whose
 	device keeps real time needs. A sink whose device may run ahead of that estimate calls the wake
 	function it was given whenever it has made room or moved on, so that a waiting feed or sync
 	looks again at once. wake holds a lock of the player's only for a moment, and never one these
 	methods are called with, but it runs Python, so it must be called from an ordinary thread that
-	can take the GIL, never from a real-time audio thread, which must not wait on Python. A real-time callback hands the event to a helper thread instead, through
-	an eventfd or a pipe. wake is harmless after close.
+	can take the GIL, never from a real-time audio thread, which must not wait on Python. A real-time
+	callback hands the event to a helper thread instead, through an eventfd or a pipe. wake is
+	harmless after close.
 
 	Any method may raise OSError when the sink fails; the player reports it to nvwave as a failed
 	HRESULT, E_FAIL for most errors and HRESULT_FROM_WIN32(ERROR_NOT_FOUND) for NoDevice. StreamLost
@@ -120,27 +123,39 @@ class SinkStream(ABC):
 	def playedFrames(self) -> int:
 		"""Frames the listener has heard since the stream was opened or last reset.
 
-		Never more than the frames written. Keeps advancing in real time while the stream is started
-		and holds frames, even when the device or server stops consuming them: a sink whose output
-		stalls discards in real time, so that feeds, syncs and the callbacks of NVDA's speech never
-		wait on a device that is not there.
+		Never more than the frames written. Keeps advancing while the stream is started and holds
+		frames, even when the device or server stops consuming them: a sink whose output stalls holds
+		the position for at most half a second, which is time for a new stream to be linked, and then
+		discards in real time, so that feeds, syncs and the callbacks of NVDA's speech never wait on a
+		device that is not there.
 		"""
 
 	@abstractmethod
 	def start(self) -> None:
-		"""Start or resume playing what is queued."""
+		"""Start or resume playing what is queued, unless abort has been called since the last reset."""
 
 	@abstractmethod
 	def stop(self) -> None:
-		"""Stop playing at once, keeping what is queued and the position.
+		"""Stop playing at once, keeping what is queued and the position, until the next start.
 
 		Takes effect within one device period, and never waits on anything a real-time thread holds,
 		nor on the thread that is feeding.
 		"""
 
 	@abstractmethod
+	def abort(self) -> None:
+		"""Stop playing at once as stop does, and stay silent, whatever start is called meanwhile, until
+		the next reset.
+
+		This is how the player silences a stream while another thread may be feeding it: the feeder
+		can be about to start the stream as the abort lands, and only the sink can see which came
+		first, without a lock that would make the abort wait for the feeder.
+		"""
+
+	@abstractmethod
 	def reset(self) -> None:
-		"""Discard everything queued and start counting frames from zero. Only called when stopped."""
+		"""Discard everything queued, start counting frames from zero, and end an abort. Only called
+		after stop, so that the stream is silent until the next start."""
 
 	@abstractmethod
 	def setChannelVolume(self, channel: int, level: float) -> None:

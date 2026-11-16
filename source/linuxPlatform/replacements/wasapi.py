@@ -9,7 +9,7 @@ linuxPlatform.audioOutput sink instead of a WASAPI endpoint:
   passed the end of its audio, and never before the feed that registered it has returned;
 - stop may be called from any thread, silences the stream and returns at once, without waiting for
   a thread that is feeding, wakes a blocked feeder and discards pending callbacks without calling
-  them;
+  them; a feed that runs while a stop is under way may be cut by it;
 - pause and resume keep what is queued and its position;
 - a channel volume set while another thread feeds is applied by that thread as soon as it lets go
   of the player, so that nvwave.WavePlayer.stop, which sets the volume of a sounds player, does not
@@ -92,12 +92,16 @@ class _Player:
 	"""One nvwave player and the sink stream it plays to.
 
 	Three locks, always taken in this order and never held across a wait or a callback:
-	- _lock, held by whichever thread feeds, syncs, idles or gives the stream its volumes, through
-	  everything it does but its waits and the callbacks it calls;
-	- _runLock, held only while the stream is replaced or started, stopped or reset, so that stop,
-	  which takes this lock alone, never waits for a feeding thread, which may be held up for whole
-	  switch intervals by the GIL whenever other threads run Python;
+	- _lock, held by whichever thread feeds, syncs, idles, resumes or gives the stream its volumes,
+	  through everything it does but its waits and the callbacks it calls;
+	- _runLock, held by stop and pause while they silence the stream, and by a thread taking the
+	  stream away to close it, for that moment only, so that nothing silences a closed stream. A
+	  feeding thread never holds it while it calls the stream, so stop does not wait for one, which
+	  may be held up for whole switch intervals by the GIL whenever other threads run Python;
 	- the lock of _wakeCondition, held only to count a wake and to start waiting for one.
+
+	stop and the feeding thread meet only in the stream, whose abort holds until the feeder resets
+	the stream, and in _isStopRequested (see stop).
 	"""
 
 	def __init__(
@@ -194,9 +198,8 @@ class _Player:
 			with contextlib.suppress(OSError):
 				stream.close()
 			raise
-		with self._runLock:
-			self._stream = stream
-			self._state = _PlayState.stopped
+		self._state = _PlayState.stopped
+		self._stream = stream
 
 	def _takeStream(self) -> SinkStream | None:
 		"""Take the stream away from the player, so that stop can no longer reach it, and leave the
@@ -225,9 +228,8 @@ class _Player:
 			self._call(feedId for feedId, _end in pending)
 
 	def _noteLost(self, stream: SinkStream) -> None:
-		with self._runLock:
-			if stream is self._stream:
-				self._lostStream = stream
+		if stream is self._stream:
+			self._lostStream = stream
 
 	def _isLost(self) -> bool:
 		return self._lostStream is not None and self._lostStream is self._stream
@@ -296,21 +298,22 @@ class _Player:
 			self._lock.acquire()
 
 	def _completeStop(self) -> None:
-		with self._runLock:
-			self._isStopRequested = False
-			stream = self._stream
-			if stream is not None and not self._isLost():
-				for name, step in (("stop", stream.stop), ("reset", stream.reset)):
-					try:
-						step()
-					except StreamLost:
-						self._lostStream = stream
-						break
-					except OSError:
-						# As upstream's completeStop: a stream that could not be reset is unusable or
-						# empty anyway, and the player must still start again from nothing.
-						log.debugWarning(f"Couldn't {name} the stream", exc_info=True)
-			self._state = _PlayState.stopped
+		# The flag comes down before the reset that ends any abort, so that a stop whose abort lands
+		# after that reset has raised the flag again after it too (see stop).
+		self._isStopRequested = False
+		stream = self._stream
+		if stream is not None and not self._isLost():
+			for name, step in (("stop", stream.stop), ("reset", stream.reset)):
+				try:
+					step()
+				except StreamLost:
+					self._lostStream = stream
+					break
+				except OSError:
+					# As upstream's completeStop: a stream that could not be reset is unusable or
+					# empty anyway, and the player must still start again from nothing.
+					log.debugWarning(f"Couldn't {name} the stream", exc_info=True)
+		self._state = _PlayState.stopped
 		self._nextFeedId = 0
 		self._sentFrames = 0
 		self._feedEnds = []
@@ -324,23 +327,14 @@ class _Player:
 	def _startUnlessStopping(self) -> bool:
 		"""Start the stream if the player is stopped, unless stop has been called meanwhile.
 
-		Done under _runLock, so that a stop called at the same time comes wholly before the start,
-		and is seen here, or wholly after it, and silences what was started. A stop that set its flag
-		and then stopped the stream after a start would otherwise leave a stream paused that the
-		player believes is playing.
+		A stop that lands after the look at the flag aborts the stream, which keeps it silent
+		whether the abort comes before the start or after it, and raises the flag that the second
+		look, or the next, sees.
 		"""
-		with self._runLock:
-			if self._isStopRequested:
-				shouldStart = False
-			else:
-				shouldStart = self._state is _PlayState.stopped
-				if shouldStart:
-					self._stream.start()
-					self._state = _PlayState.playing
-		if self._isStopRequested:
-			self._completeStop()
-			return False
-		return True
+		if not self._isStopRequested and self._state is _PlayState.stopped:
+			self._stream.start()
+			self._state = _PlayState.playing
+		return self._continueUnlessStopping()
 
 	def open(self) -> None:
 		with self._locked():
@@ -434,18 +428,20 @@ class _Player:
 				self._feedEnds.append((feedId, self._sentFrames))
 
 	def stop(self) -> None:
-		# The flag first, under the same lock as the stream's start and stop, so that a feed starting
-		# the stream either sees it or is silenced by what follows (see _startUnlessStopping).
+		# The flag goes up before the abort, so that a feed about to start the stream sees it, and
+		# again after, because the feeder may have taken it down and reset the stream in between,
+		# which ends the abort; the feeder must then still find the flag up, rather than play on.
+		self._isStopRequested = True
 		try:
 			with self._runLock:
-				self._isStopRequested = True
 				stream = self._stream
 				if stream is not None and not self._isLost():
 					try:
-						stream.stop()
+						stream.abort()
 					except StreamLost:
 						# Nothing is left to silence, and the next feed replaces the stream.
 						self._lostStream = stream
+			self._isStopRequested = True
 		finally:
 			self._wake()
 
@@ -473,7 +469,8 @@ class _Player:
 			self._completeStop()
 
 	def pause(self) -> None:
-		# Without the player's lock, as it silences the stream as stop does.
+		# Without the player's lock, as it silences the stream as stop does. As in wasapi.cpp, a
+		# player not yet playing is left alone, and so is one whose feeder starts it meanwhile.
 		with self._runLock:
 			stream = self._stream
 			if stream is not None and self._state is _PlayState.playing and not self._isLost():
@@ -483,7 +480,7 @@ class _Player:
 					self._lostStream = stream
 
 	def resume(self) -> None:
-		with self._locked(), self._runLock:
+		with self._locked():
 			stream = self._stream
 			if (
 				stream is not None

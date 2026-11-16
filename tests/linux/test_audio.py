@@ -764,6 +764,64 @@ def test_nullClockKeepsTimeWhenFedInSmallPieces(tmp_path: Path):
 	assert done.value["afterRunningDry"] == 150
 
 
+def test_abortHoldsUntilResetWhateverStartIsCalled(tmp_path: Path):
+	"""The null stream's abort, against a clock the test moves: it stops the clock at the call, a
+	start before the next reset leaves it stopped, and reset ends it, where a stop ends at the next
+	start. The capture stream, built on it, keeps nothing played after an abort."""
+	captureDir = tmp_path / "capture"
+	captureDir.mkdir()
+	done = harness.runChild(
+		tmp_path,
+		f"""
+		from linuxPlatform.audioOutput import StreamFormat, captureSink, nullSink
+
+		class Clock:
+			now = 1000.0
+
+			@staticmethod
+			def monotonic():
+				return Clock.now
+
+		nullSink.time = Clock
+		fmt = StreamFormat(1, 1, 8000, 16)
+		sink = captureSink.CaptureSink({str(captureDir)!r})
+		played = {{}}
+		for name, stream in (("null", nullSink.NullStream(fmt)), ("capture", sink.openStream("", fmt, lambda: None))):
+			steps = []
+			stream.write(bytes(16000))  # 1 s
+			stream.start()
+			Clock.now += 0.1
+			stream.abort()
+			Clock.now += 0.1
+			steps.append(stream.playedFrames())
+			stream.start()
+			Clock.now += 0.1
+			steps.append(stream.playedFrames())
+			stream.stop()
+			stream.reset()
+			stream.write(bytes(16000))
+			stream.start()
+			Clock.now += 0.1
+			steps.append(stream.playedFrames())
+			stream.stop()
+			Clock.now += 0.1
+			stream.start()
+			Clock.now += 0.1
+			steps.append(stream.playedFrames())
+			stream.close()
+			played[name] = steps
+		result = {{"played": played, "delivered": sink.deliveredFrames()}}
+		""",
+		prepare="bootstrap",
+	)
+	done.assertClean()
+	# 100 ms before the abort, nothing after it despite the start, then 100 ms after the reset, and
+	# 100 ms more after a stop and start.
+	assert done.value["played"] == {"null": [800, 800, 800, 1600], "capture": [800, 800, 800, 1600]}
+	assert done.value["delivered"] == 800 + 1600
+	assert sorted(len(f["frames"]) // 2 for f in captured(captureDir)) == [800, 1600]
+
+
 def test_wakeFromASinkThreadEndsWaitsEarly(tmp_path: Path):
 	"""A sink whose device runs far ahead of the player's estimate wakes the waiting feeder and
 	syncer from a thread of its own; callbacks still run only on the thread feeding or syncing."""
@@ -782,6 +840,8 @@ def test_wakeFromASinkThreadEndsWaitsEarly(tmp_path: Path):
 				self._written = self._taken = 0
 				self._dueAt = None
 				self._running = False
+				# Cleared by abort until the next reset.
+				self._isRunnable = True
 				self._closed = threading.Event()
 				threading.Thread(target=self._consume, name="sinkThread", daemon=True).start()
 
@@ -811,16 +871,21 @@ def test_wakeFromASinkThreadEndsWaitsEarly(tmp_path: Path):
 
 			def start(self):
 				with self._lock:
-					self._running = True
+					self._running = self._isRunnable
 
 			def stop(self):
 				with self._lock:
 					self._running = False
 
+			def abort(self):
+				with self._lock:
+					self._running = self._isRunnable = False
+
 			def reset(self):
 				with self._lock:
 					self._written = self._taken = 0
 					self._dueAt = None
+					self._isRunnable = True
 
 			def setChannelVolume(self, channel, level):
 				pass
@@ -1157,7 +1222,17 @@ def test_aLostStreamIsReplacedWhicheverCallFindsIt(tmp_path: Path):
 		class LosingStream(NullStream):
 			lost = False
 
-		for name in ("write", "bufferedFrames", "playedFrames", "start", "stop", "reset", "setChannelVolume", "close"):
+		for name in (
+			"write",
+			"bufferedFrames",
+			"playedFrames",
+			"start",
+			"stop",
+			"abort",
+			"reset",
+			"setChannelVolume",
+			"close",
+		):
 			setattr(LosingStream, name, losing(name, getattr(NullStream, name)))
 
 		class LosingSink(NullSink):
@@ -1174,7 +1249,7 @@ def test_aLostStreamIsReplacedWhicheverCallFindsIt(tmp_path: Path):
 		cases = {
 			"write": ("feed", "write"),
 			"start": ("feed after idle", "start"),
-			"stop": ("stop", "stop"),
+			"stop": ("stop", "abort"),
 			"setChannelVolume": ("setVolume", "setChannelVolume"),
 			"pause": ("pause and resume", "stop"),
 			"resume": ("pause and resume", "start"),
@@ -1232,9 +1307,9 @@ def test_aLostStreamIsReplacedWhicheverCallFindsIt(tmp_path: Path):
 		assert outcome == expected, case
 
 
-#: Plays speech, in eSpeak's 300 ms chunks, to a sink whose stream records when stop reached it,
-#: while other threads keep the GIL busy, and stops it at random moments.
-STOP_UNDER_LOAD = """
+#: Stand-in sinks for the stop tests: each stream records when an abort reached it on the main
+#: thread, which is where nvwave stops speech on a key press. Other threads keep the GIL busy.
+TIMED_SINKS = """
 import math
 import random
 import struct
@@ -1246,21 +1321,22 @@ from linuxPlatform.audioOutput.nullSink import NullSink, NullStream
 reached = []
 
 
-def timedStop(base):
-	class TimedStop(base):
-		def stop(self):
-			reached.append(time.monotonic())
-			super().stop()
+def timedAbort(base):
+	class TimedAbort(base):
+		def abort(self):
+			if threading.current_thread() is threading.main_thread():
+				reached.append(time.monotonic())
+			super().abort()
 
-	return TimedStop
+	return TimedAbort
 
 
 libc = ctypes.CDLL(None)
 
 
-class NativeStream(timedStop(NullStream)):
+class NativeStream(NullStream):
 	# Each call goes into C once, as a binding to a native sink does, and ctypes lets go of the GIL
-	# there, which the feeding thread must then win back while it holds the player's lock.
+	# there, which the calling thread must then win back while it holds whatever locks it holds.
 	def write(self, data):
 		libc.getpid()
 		super().write(data)
@@ -1273,6 +1349,29 @@ class NativeStream(timedStop(NullStream)):
 		libc.getpid()
 		return super().playedFrames()
 
+	def start(self):
+		libc.getpid()
+		super().start()
+
+	def stop(self):
+		libc.getpid()
+		super().stop()
+
+	def abort(self):
+		libc.getpid()
+		super().abort()
+
+	def reset(self):
+		libc.getpid()
+		super().reset()
+
+	def setChannelVolume(self, channel, level):
+		libc.getpid()
+		super().setChannelVolume(channel, level)
+
+
+NativeStream = timedAbort(NativeStream)
+
 
 class NativeSink(NullSink):
 	def openStream(self, deviceId, fmt, wake):
@@ -1283,7 +1382,7 @@ class TimedCaptureSink(CaptureSink):
 	# The capture sink writes files as the feeder calls it, which lets go of the GIL in the same way.
 	def openStream(self, deviceId, fmt, wake):
 		stream = super().openStream(deviceId, fmt, wake)
-		stream.__class__ = timedStop(type(stream))
+		stream.__class__ = timedAbort(type(stream))
 		return stream
 
 
@@ -1297,9 +1396,14 @@ def busy():
 			x += i * i
 
 
-for _ in range(3):
+for _ in range(BUSY_THREADS):
 	threading.Thread(target=busy, daemon=True).start()
+# eSpeak's 300 ms chunk at 22050 Hz.
 tone = struct.pack("<6615h", *(int(8000 * math.sin(i * 0.2)) for i in range(6615)))
+"""
+
+#: Plays speech in eSpeak's chunks and stops it at random moments well into it.
+STOP_UNDER_LOAD = """
 measured = {}
 for name, sink, purpose in (
 	("native speech", NativeSink(), nvwave.AudioPurpose.SPEECH),
@@ -1345,11 +1449,12 @@ def test_stopSilencesAtOnceWhileOtherThreadsRunPython(tmp_path: Path):
 	captureDir.mkdir()
 	value = runAudio(
 		tmp_path,
-		STOP_UNDER_LOAD,
+		TIMED_SINKS + STOP_UNDER_LOAD,
 		extra=f"""
 		import ctypes
 
 		captureDir = {str(captureDir)!r}
+		BUSY_THREADS = 3
 		ROUNDS = 15
 		""",
 	)
@@ -1363,57 +1468,188 @@ def test_stopSilencesAtOnceWhileOtherThreadsRunPython(tmp_path: Path):
 		assert returned[len(returned) // 2] < 0.002 and returned[-1] < 0.02, (name, returned)
 
 
-def test_aStopHeldUpBeforeItSilencesStillLeavesTheNextStretchPlaying(tmp_path: Path):
-	"""A stop is held up inside the stream's stop, while the feeding thread goes on to the next
-	utterance. The feeder waits for that stop rather than starting the stream underneath it: a stop
-	that silenced the stream after the next stretch had started would leave a stream paused that the
-	player takes to be playing, and its sync would never return."""
+#: Rapid arrowing: each round a synthesizer thread begins an utterance and the main thread cancels
+#: it within a few milliseconds, which is when the feeder completes the previous stop and starts the
+#: stream, each a call into C after which it must win the GIL back.
+STOP_NEAR_START = """
+measured = {}
+for purpose in (nvwave.AudioPurpose.SPEECH, nvwave.AudioPurpose.SOUNDS):
+	audioOutput._sink = NativeSink()
+	player = nvwave.WavePlayer(1, 22050, 16, wantDucking=False, purpose=purpose)
+	player.enableTrimmingLeadingSilence(False)
+	go, cancelled, finished = threading.Event(), threading.Event(), threading.Event()
+	quitting = False
+
+	def synthesize():
+		while True:
+			go.wait()
+			go.clear()
+			if quitting:
+				return
+			for _ in range(3):
+				if cancelled.is_set():
+					break
+				player.feed(tone, onDone=lambda: None)
+			player.idle()
+			finished.set()
+
+	synth = threading.Thread(target=synthesize, name="synth", daemon=True)
+	synth.start()
+	silenced, returned, hung = [], [], 0
+	for _ in range(ROUNDS):
+		cancelled.clear()
+		finished.clear()
+		go.set()
+		time.sleep(random.uniform(0, 0.004))
+		reached.clear()
+		called = time.monotonic()
+		cancelled.set()
+		player.stop()
+		returned.append(time.monotonic() - called)
+		silenced.append(min((at for at in reached if at >= called), default=math.inf) - called)
+		if not finished.wait(5):
+			hung += 1
+			break
+	quitting = True
+	go.set()
+	synth.join(5)
+	measured[purpose.name] = {"silenced": silenced, "returned": returned, "hung": hung}
+	del player
+	gc.collect()
+running = False
+result = measured
+"""
+
+
+def test_stopNearAnUtterancesStartSilencesAtOnce(tmp_path: Path):
+	"""WavePlayer.stop landing as the feeder starts an utterance reaches the sink at once, through a
+	sink whose start, stop and reset call into C as libpwsink's do, while three other threads run
+	Python. A player whose feeder held a lock that stop needs around those calls was measured
+	silencing up to 1.06 s late, with up to 17 stops in 300 more than 10 ms late."""
+	value = runAudio(
+		tmp_path,
+		TIMED_SINKS + STOP_NEAR_START,
+		extra="""
+		import ctypes
+
+		BUSY_THREADS = 3
+		ROUNDS = 300
+		""",
+	)
+	for name, measured in value.items():
+		assert measured["hung"] == 0, name
+		silenced = sorted(measured["silenced"])
+		assert silenced[len(silenced) // 2] < 0.001, (name, silenced)
+		# The main thread holds the GIL from the call on, unless the system takes the processor away.
+		assert sum(1 for s in silenced if s > 0.005) <= 1 and silenced[-1] < 0.02, (name, silenced[-10:])
+
+
+def test_aStopRacingTheFeedersResetNeitherPlaysOnNorHangs(tmp_path: Path):
+	"""stop and the feeder meet only in the stream's abort and the stop flag, and the feeder's reset
+	of the stream ends an abort. Two orders are forced here, each with a feed under way while the
+	stop is: the abort lands between the feeder taking the flag down and its reset, or after its
+	reset. In the first the feeder must still see the flag before it starts the stream; in the second
+	the abort keeps the stream silent, and the flag raised after it must end the wait of a feeder
+	whose stream will now never play. Either way a feed after the stop plays as usual."""
 	value = runAudio(
 		tmp_path,
 		"""
 		from linuxPlatform import audioOutput
 		from linuxPlatform.audioOutput.nullSink import NullSink, NullStream
 
-		inStop = threading.Event()
+		hooks = {}
+		phase = {"name": None}
+		calls = []
 
-		class SlowStopStream(NullStream):
-			def stop(self):
-				if threading.current_thread().name == "stopper":
-					inStop.set()
-					time.sleep(0.2)
-				super().stop()
+		def hook(name):
+			hooks.get(name, lambda: None)()
 
-		class SlowStopSink(NullSink):
+		class RacingStream(NullStream):
+			def write(self, data):
+				calls.append((phase["name"], "write"))
+				super().write(data)
+
+			def start(self):
+				calls.append((phase["name"], "start"))
+				super().start()
+				hook("afterStart")
+
+			def reset(self):
+				hook("beforeReset")
+				super().reset()
+
+			def abort(self):
+				hook("beforeAbort")
+				super().abort()
+				hook("afterAbort")
+
+		class RacingSink(NullSink):
 			def openStream(self, deviceId, fmt, wake):
-				return SlowStopStream(fmt)
+				return RacingStream(fmt)
 
-		audioOutput._sink = SlowStopSink()
-		player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
-		player.feed(bytes(8000), onDone=done("cancelled"))  # 500 ms
-		stopper = threading.Thread(target=player.stop, name="stopper")
-		stopper.start()
-		inStop.wait(5)
-		start = time.monotonic()
+		audioOutput._sink = RacingSink()
+		outcomes = {}
+		for case in ("abort before the reset", "abort after the reset"):
+			player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SPEECH)
+			player.enableTrimmingLeadingSilence(False)
+			events.clear()
+			calls.clear()
+			hooks.clear()
+			phase["name"] = "first"
+			player.feed(bytes(8000), onDone=done("first"))  # 500 ms
+			ready, go = threading.Event(), threading.Event()
+			if case == "abort before the reset":
+				# A stop the next feed will complete before it plays.
+				player.stop()
+				hooks["beforeReset"] = lambda: (ready.set(), go.wait(2))
+				# Held up after the abort, before stop raises the flag again.
+				hooks["afterAbort"] = lambda: (go.set(), time.sleep(0.2))
+			else:
+				# The feeder takes the flag down, resets the stream and starts it before the abort.
+				hooks["beforeAbort"] = lambda: (ready.set(), go.wait(2))
+				hooks["afterStart"] = go.set
 
-		def speakNext():
-			player.feed(bytes(1600), onDone=done("next"))  # 100 ms
+			def speak():
+				phase["name"] = "during"
+				started = time.monotonic()
+				player.feed(bytes(8000), onDone=done("during"))  # 500 ms
+				player.sync()
+				took.append(time.monotonic() - started)
+
+			took = []
+			feeder = threading.Thread(target=speak, name="feeder", daemon=True)
+			stopper = threading.Thread(target=player.stop, name="stopper", daemon=True)
+			first, second = (feeder, stopper) if case == "abort before the reset" else (stopper, feeder)
+			first.start()
+			ready.wait(2)
+			second.start()
+			feeder.join(3)
+			stopper.join(3)
+			hung = [t.name for t in (feeder, stopper) if t.is_alive()]
+			hooks.clear()
+			phase["name"] = "after"
+			player.feed(bytes(1600), onDone=done("after"))  # 100 ms
 			player.sync()
-
-		feeder = threading.Thread(target=speakNext, name="feeder", daemon=True)
-		feeder.start()
-		feeder.join(3)
-		stopper.join(3)
-		result = {
-			"hung": feeder.is_alive(),
-			"calls": [(tag, thread) for tag, thread, _at in events],
-			"took": time.monotonic() - start,
-		}
+			outcomes[case] = {
+				"hung": hung,
+				"calls": [tag for tag, _thread, _at in events],
+				"duringStreamCalls": sorted({call for name, call in calls if name == "during"}),
+				"took": took[0] if took else None,
+			}
+			del player
+			gc.collect()
+		result = outcomes
 		""",
 	)
-	assert not value["hung"]
-	assert value["calls"] == [["next", "feeder"]]
-	# The rest of the held-up stop, then the next utterance's 100 ms.
-	assert 0.25 <= value["took"] <= 0.8
+	before, after = value["abort before the reset"], value["abort after the reset"]
+	for outcome in (before, after):
+		assert outcome["hung"] == [] and outcome["calls"] == ["after"], outcome
+	# The flag was up before the feeder looked, so it neither wrote nor started; it went on only
+	# once the stopper, held up after its abort, let it, and returned at once.
+	assert before["duringStreamCalls"] == [] and before["took"] < 0.4, before
+	# The feeder found the flag down and started the stream, which the abort then silenced; the flag
+	# raised again ended the feed long before its 500 ms could have played.
+	assert after["duringStreamCalls"] == ["start", "write"] and after["took"] < 0.3, after
 
 
 def test_unsupportedFormatFailsToOpenAsWasapiDoes(tmp_path: Path):

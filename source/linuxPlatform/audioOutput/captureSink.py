@@ -5,7 +5,7 @@ closed, goes to its own file, <stretch number>-stream<stream number>.wav, number
 stretches began. A frame goes to the file only once the clock says it has been heard, at the gain
 it was heard at, so audio discarded by stopping never appears, and a stretch stopped before any of
 it was heard leaves no file and a gap in the numbering. Whatever was heard is in the files by the
-time stop returns.
+time stop or abort returns.
 """
 
 import errno
@@ -27,7 +27,7 @@ class CaptureStream(NullStream):
 		super().__init__(fmt)
 		self._sink = sink
 		self._streamNumber = streamNumber
-		# stop runs alongside the other methods, and writes what was heard as they do.
+		# stop and abort run alongside the other methods, and write what was heard as they do.
 		self._lock = threading.Lock()
 		# Written but not yet heard.
 		self._unheard = bytearray()
@@ -92,6 +92,10 @@ class CaptureStream(NullStream):
 		# The clock stops at the call, before the lock is taken, so that waiting for it cannot let
 		# more be heard.
 		super().stop()
+		self.keepHeard()
+
+	def abort(self) -> None:
+		super().abort()
 		self.keepHeard()
 
 	def reset(self) -> None:

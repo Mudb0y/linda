@@ -22,9 +22,11 @@ class NullStream(SinkStream):
 		self._takenAtMark = 0
 		self._markTime = time.monotonic()
 		self._running = False
-		# When stop was called, for the next of the other methods to apply. stop runs alongside them,
-		# and appending to a deque is the one thing it does, so that it never waits for the feeder.
+		# When stop or abort was called, for the next of the other methods to apply. Both run
+		# alongside those methods, and appending to a deque is all they do to the clock, so that they
+		# never wait for the feeder.
 		self._stops: collections.deque[float] = collections.deque()
+		self._isAborted = False
 
 	def _settle(self) -> None:
 		"""Apply each stop called since the last look, at the time it was called."""
@@ -76,11 +78,19 @@ class NullStream(SinkStream):
 
 	def start(self) -> None:
 		self._settle()
-		if not self._running:
+		# An abort this test misses queues its stop after it, and the next look at the clock applies
+		# that stop at the time it was queued.
+		if not self._running and not self._isAborted:
 			self._markTime = time.monotonic()
 			self._running = True
 
 	def stop(self) -> None:
+		self._stops.append(time.monotonic())
+
+	def abort(self) -> None:
+		# The flag before the stop, so that a start that has not seen the flag started the clock
+		# before the stop was queued, and the stop ends it.
+		self._isAborted = True
 		self._stops.append(time.monotonic())
 
 	def reset(self) -> None:
@@ -88,6 +98,7 @@ class NullStream(SinkStream):
 		self._written = 0
 		self._takenAtMark = 0
 		self._markTime = time.monotonic()
+		self._isAborted = False
 
 	def setChannelVolume(self, channel: int, level: float) -> None:
 		self.volumes[channel] = level
