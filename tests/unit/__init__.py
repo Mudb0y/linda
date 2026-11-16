@@ -101,18 +101,7 @@ import characterProcessing
 characterProcessing.initialize()
 import speech
 
-if sys.platform != "win32":
-	import synthDriverHandler
-
-	# eSpeak comes first in Linux's automatic choice, and its library links audio libraries, which
-	# tests/linux/rununittests.py refuses to load. Every synth fails to load here anyway, because the
-	# speech dictionaries are never set up, so offering silence alone leaves the run with no synth
-	# just as the full list would.
-	_defaultSynths = synthDriverHandler.defaultSynthPriorityList
-	synthDriverHandler.defaultSynthPriorityList = ["silence"]
 speech.initialize()
-if sys.platform != "win32":
-	synthDriverHandler.defaultSynthPriorityList = _defaultSynths
 
 import braille
 import braille.display

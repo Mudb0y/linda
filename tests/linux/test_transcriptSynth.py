@@ -8,6 +8,7 @@ the rig:
 """
 
 import importlib.util
+import os
 import textwrap
 from pathlib import Path
 
@@ -15,6 +16,16 @@ import harness
 
 HERE = Path(__file__).resolve().parent
 WINDOWS_ONLY_DRIVERS = {"mssp", "oneCore", "sapi4_32", "sapi5", "sapi5_32"}
+
+
+def assertOnlyEspeakReached(done: harness.ChildResult) -> None:
+	"""What the audio check found, in a run that loaded eSpeak and so ignored that check, is eSpeak NG's
+	library and nothing else: the file BASEDREADER_ESPEAK_LIB names, built without audio output."""
+	library = os.path.realpath(os.environ["BASEDREADER_ESPEAK_LIB"])
+	# Each finding is "loaded PATH" or "mapped PATH".
+	reached = {os.path.realpath(what.split(" ", 1)[1]) for what in done.audio}
+	assert reached == {library}, done.audio
+
 
 _spec = importlib.util.spec_from_file_location(
 	"_transcriptRecords",
@@ -32,6 +43,7 @@ from linuxPlatform import testHooks
 testHooks.install()
 import characterProcessing
 import config
+import languageHandler
 import nvwave
 import queueHandler
 import speech
@@ -40,6 +52,8 @@ import synthDriverHandler
 from speech.commands import *
 from speech.priorities import Spri
 
+# As core.main does before speech; eSpeak chooses its first voice by the interface language.
+languageHandler.setLanguage("en")
 nvwave.initialize()
 speechDictHandler.initialize()
 characterProcessing.initialize()
@@ -851,9 +865,14 @@ def test_synthListOnLinuxHasNoWindowsDriver(tmp_path: Path):
 		""",
 	)
 	# Everything offered loads, with nothing logged at ERROR on the way.
-	done.assertClean()
-	assert done.value["names"] == ["transcript", "silence"]
-	assert done.value["loaded"] == {"transcript": [True, "transcript"], "silence": [True, "silence"]}
+	done.assertClean(ignoring={"audio"})
+	assertOnlyEspeakReached(done)
+	assert done.value["names"] == ["espeak", "transcript", "silence"]
+	assert done.value["loaded"] == {
+		"espeak": [True, "espeak"],
+		"transcript": [True, "transcript"],
+		"silence": [True, "silence"],
+	}
 	assert done.value["priority"] == ["espeak", "silence"]
 
 
@@ -876,55 +895,69 @@ def test_aDriverNamedLikeAWindowsOneIsListedWhenNotNVDAs(tmp_path: Path):
 		""",
 	)
 	done.assertClean()
-	assert done.value["names"] == ["sapi5", "transcript", "silence"]
+	assert done.value["names"] == ["espeak", "sapi5", "transcript", "silence"]
 	assert done.value["loaded"] is True
 
 
-def test_autoFallsBackToSilenceAndStaysAuto(tmp_path: Path):
-	done = harness.runChild(
-		tmp_path,
-		"""
-		import core
-		import NVDAHelper
-		import characterProcessing
-		import config
-		import speech
-		import speechDictHandler
-		import synthDriverHandler
+#: Starts speech with the configuration's synth left on auto, saves the configuration, and reports
+#: which synth auto chose and what was configured and saved.
+AUTO = """
+import core
+import NVDAHelper
+import characterProcessing
+import config
+import languageHandler
+import speech
+import speechDictHandler
+import synthDriverHandler
 
-		speechDictHandler.initialize()
-		characterProcessing.initialize()
-		configuredBefore = config.conf["speech"]["synth"]
-		speech.initialize()
-		synth = synthDriverHandler.getSynth().name
-		config.conf.save()
-		import os
+languageHandler.setLanguage("en")
+speechDictHandler.initialize()
+characterProcessing.initialize()
+configuredBefore = config.conf["speech"]["synth"]
+speech.initialize()
+synth = synthDriverHandler.getSynth().name
+config.conf.save()
+import os
 
-		import globalVars
-		from configobj import ConfigObj
+import globalVars
+from configobj import ConfigObj
 
-		saved = ConfigObj(os.path.join(globalVars.appArgs.configPath, "nvda.ini"), encoding="UTF-8")
-		result = {
-			"configuredBefore": configuredBefore,
-			"synth": synth,
-			"configuredAfter": config.conf["speech"]["synth"],
-			"savedSections": sorted(saved),
-			"savedSynth": saved.get("speech", {}).get("synth"),
-		}
-		synthDriverHandler.setSynth(None)
-		""",
-	)
-	# Silence as a fallback is not saved, so eSpeak takes over by itself once it loads.
+saved = ConfigObj(os.path.join(globalVars.appArgs.configPath, "nvda.ini"), encoding="UTF-8")
+result = {
+	"configuredBefore": configuredBefore,
+	"synth": synth,
+	"configuredAfter": config.conf["speech"]["synth"],
+	"savedSections": sorted(saved),
+	"savedSynth": saved.get("speech", {}).get("synth"),
+}
+synthDriverHandler.setSynth(None)
+"""
+
+
+def test_autoChoosesEspeakAndSavesIt(tmp_path: Path):
+	done = harness.runChild(tmp_path, AUTO)
+	done.assertClean(ignoring={"audio"})
+	assertOnlyEspeakReached(done)
+	# As upstream does with its first choice: a synth that auto loads, other than as a fallback,
+	# becomes the configured one.
+	assert done.value["configuredBefore"] == "auto"
+	assert done.value["synth"] == "espeak"
+	assert done.value["configuredAfter"] == "espeak"
+	assert done.value["savedSynth"] == "espeak"
+
+
+def test_autoFallsBackToSilenceWithoutEspeakAndStaysAuto(tmp_path: Path):
+	done = harness.runChild(tmp_path, AUTO, env={"BASEDREADER_ESPEAK_LIB": ""})
+	# Silence as a fallback is not saved, so eSpeak takes over by itself once its library is there.
 	assert done.value["configuredBefore"] == "auto"
 	assert done.value["synth"] == "silence"
 	assert done.value["configuredAfter"] == "auto"
 	assert "schemaVersion" in done.value["savedSections"]
 	assert done.value["savedSynth"] is None
-	# The one error says why there is no voice: auto tries eSpeak first, and its check() fails on Linux.
-	# Trying it loads eSpeak's library, the one thing that could sound, in a rig with no sound device.
-	done.assertClean(ignoring={"logErrors", "audio"})
+	# The one error says why there is no voice, and no library was loaded on the way.
+	done.assertClean(ignoring={"logErrors"})
 	assert done.logErrors == ["ERROR: setSynth failed for espeak"]
-	assert done.audio and all("espeak" in what for what in done.audio), done.audio
 
 
 def test_excludedDriversAreExactlyThoseThatCannotImport(tmp_path: Path):

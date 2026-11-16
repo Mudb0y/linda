@@ -10,7 +10,8 @@ fail is imported in a process of its own, which is then thrown away, and must fa
 names. A class or test whose entry says "Not run:" is dropped instead; an entry for a whole module or
 package cannot say it, as nothing would then show it stale. A skip that the list does not expect also
 fails the run, as does any write into the checkout, any load of an audio library, and a thread that a
-test leaves running.
+test leaves running. The one library of that kind it allows is the eSpeak NG library that
+BASEDREADER_ESPEAK_LIB names, without which it does not start.
 
 The tests run in a child process that records its result only once the run has reached its end, so
 that a test, fixture or module that ends the interpreter, by whatever means, fails the run.
@@ -69,9 +70,17 @@ def _loadHarness() -> types.ModuleType:
 
 
 #: What a write is, what an audio library is, and how a tree is compared before and after a run,
-#: as every other test of NVDA code has them. The rig has no sound server or sound card, but a test
-#: that loads an audio library is a test that would make sound outside it, so the load fails the run.
+#: as every other test of NVDA code has them.
 harness = _loadHarness()
+#: Names the one eSpeak NG library the run may load, which NVDA's eSpeak driver and its unit tests
+#: load. It is built without audio output; tests/linux/test_espeak.py checks that it links no sound
+#: library.
+ESPEAK_LIBRARY_VARIABLE = "BASEDREADER_ESPEAK_LIB"
+#: Words that, anywhere in a library's file name, mark one that can reach a sound server or a sound
+#: card, besides those harness.isAudioLibrary knows. eSpeak is among them because any other build of
+#: it, a stock one for instance, links pcaudiolib. The unit tests play to the null sink and need no
+#: sound server, so a load of any of these means some code reached past the null sink.
+SOUND_LIBRARY_WORDS = ("espeak", "pcaudio", "pulse", "asound", "pipewire", "jack", "portaudio")
 # Extension modules that the test package's bootstrap imports and that link audio libraries, with why
 # each is allowed to. What they link is mapped but never called: no test asks it for sound.
 AUDIO_LINKERS = {
@@ -613,11 +622,15 @@ class Guard:
 	extension module raise no audit event, so the mapped libraries are also compared after the
 	bootstrap, after each import and after each test: a library mapped since must neither be an audio
 	library nor link one, even one that something else mapped earlier.
+
+	The one exception is the file ESPEAK_LIBRARY_VARIABLE names, by whatever links it is reached
+	through.
 	"""
 
-	def __init__(self, root: Path, tests: Path):
+	def __init__(self, root: Path, tests: Path, espeakLibrary: str):
 		self.root = os.path.realpath(root)
 		self.tests = os.path.realpath(tests)
+		self.espeakLibrary = os.path.realpath(espeakLibrary)
 		self.armed = True
 		self.refused: list[str] = []
 		#: The libraries mapped when last checked, once the bootstrap has run.
@@ -625,6 +638,13 @@ class Guard:
 
 	def _inCheckout(self, path: str) -> bool:
 		return path == self.root or path.startswith(self.root + os.sep)
+
+	def isSoundLibrary(self, path: str | bytes) -> bool:
+		path = os.fsdecode(path)
+		if os.path.realpath(path) == self.espeakLibrary:
+			return False
+		name = os.path.basename(path).lower()
+		return harness.isAudioLibrary(name) or any(word in name for word in SOUND_LIBRARY_WORDS)
 
 	def _refuse(self, what: str) -> None:
 		# The innermost test frame says which test it was; the refusal itself may be swallowed.
@@ -638,7 +658,7 @@ class Guard:
 		if not self.armed:
 			return
 		if event == "ctypes.dlopen" and isinstance(args[0], (str, bytes)):
-			if harness.isAudioLibrary(args[0]):
+			if self.isSoundLibrary(args[0]):
 				self._refuse(f"load of the audio library {args[0]}")
 				raise OSError(f"rununittests: loading the audio library {args[0]} is refused")
 			return
@@ -658,7 +678,7 @@ class Guard:
 			if os.path.basename(path).split(".")[0] in AUDIO_LINKERS:
 				allowed.update(linkedClosure(path, self.libraries))
 		for path in sorted(self.libraries - allowed):
-			if harness.isAudioLibrary(path):
+			if self.isSoundLibrary(path):
 				self.refused.append(
 					f"the audio library {path}, which the bootstrap mapped unlinked by AUDIO_LINKERS"
 				)
@@ -670,11 +690,11 @@ class Guard:
 		added = current - self.libraries
 		self.libraries = current
 		for path in sorted(added):
-			if harness.isAudioLibrary(path):
+			if self.isSoundLibrary(path):
 				self.refused.append(f"load of the audio library {path}, during {during}")
 				continue
 			reached = next(
-				(library for library in linkedClosure(path, current) if harness.isAudioLibrary(library)),
+				(library for library in linkedClosure(path, current) if self.isSoundLibrary(library)),
 				None,
 			)
 			if reached is not None:
@@ -767,6 +787,17 @@ def main() -> int:
 	print("rununittests: start", flush=True)
 	if sys.platform != "linux":
 		print("rununittests: this runner is for Linux; upstream's is rununittests.bat", file=sys.stderr)
+		return 2
+	espeakLibrary = os.environ.get(ESPEAK_LIBRARY_VARIABLE)
+	if not espeakLibrary or not os.path.isfile(espeakLibrary):
+		# Without it the eSpeak driver fails in the setUp of its integration tests, after they have
+		# started a mock.patch of nvwave.WavePlayer that their tearDown then never stops, and the mock
+		# leaks into every module that runs after them.
+		print(
+			f"rununittests: {ESPEAK_LIBRARY_VARIABLE} is unset or names no file, so NVDA's eSpeak driver "
+			"cannot load; run in the dev shell, which sets it",
+			file=sys.stderr,
+		)
 		return 2
 	entries = readEntries(args.exclusions, args.package)
 	checkout = args.checkout.resolve()
@@ -1001,7 +1032,11 @@ def _childMain(args: argparse.Namespace) -> NoReturn:
 	"""Runs the tests, or one import check, and leaves through os._exit once the record is written,
 	so that no thread left running keeps the process alive."""
 	_prepareImports(args)
-	guard = Guard(args.checkout, args.top.joinpath(*args.package.split(".")))
+	guard = Guard(
+		args.checkout,
+		args.top.joinpath(*args.package.split(".")),
+		os.environ[ESPEAK_LIBRARY_VARIABLE],
+	)
 	sys.addaudithook(guard)
 	_startWatchdog(args.timeout)
 	if args.checkImport is not None:

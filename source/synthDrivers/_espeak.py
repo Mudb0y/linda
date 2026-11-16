@@ -14,6 +14,12 @@ from logHandler import log
 import os
 
 from speechXml import toXmlLang
+import sys
+
+if sys.platform != "win32":
+	import locale
+
+	from linuxPlatform import espeakFiles
 
 isSpeaking = False
 onIndexReached = None
@@ -357,7 +363,10 @@ def initialize(indexCallback=None):
 		the number of the index or C{None} when speech stops.
 	"""
 	global espeakDLL, bgThread, bgQueue, player, onIndexReached
-	espeakDLL = cdll.LoadLibrary(os.path.join(globalVars.appDir, "synthDrivers", "espeak.dll"))
+	if sys.platform != "win32":
+		espeakDLL = cdll.LoadLibrary(espeakFiles.libraryPath())
+	else:
+		espeakDLL = cdll.LoadLibrary(os.path.join(globalVars.appDir, "synthDrivers", "espeak.dll"))
 	espeakDLL.espeak_Info.restype = c_char_p
 	espeakDLL.espeak_Synth.errcheck = espeak_errcheck
 	espeakDLL.espeak_SetVoiceByName.errcheck = espeak_errcheck
@@ -368,6 +377,12 @@ def initialize(indexCallback=None):
 	espeakDLL.espeak_GetCurrentVoice.restype = POINTER(espeak_VOICE)
 	espeakDLL.espeak_SetVoiceByName.argtypes = (c_char_p,)
 	eSpeakPath = os.path.join(globalVars.appDir, "synthDrivers")
+	if sys.platform != "win32":
+		eSpeakPath = espeakFiles.dataDir()
+		# espeak_Initialize sets LC_CTYPE to C.UTF-8. On Windows that is the C runtime linked into
+		# espeak.dll; here it is the whole process's. The locale NVDA sets is always a UTF-8 one, which
+		# is all eSpeak's wide-character functions need.
+		characterLocale = locale.setlocale(locale.LC_CTYPE)
 	sampleRate = espeakDLL.espeak_Initialize(
 		AUDIO_OUTPUT_SYNCHRONOUS,
 		300,
@@ -375,6 +390,8 @@ def initialize(indexCallback=None):
 		# #10607: ensure espeak does not exit NVDA's process on errors such as the espeak path being invalid.
 		espeakINITIALIZE_DONT_EXIT,
 	)
+	if sys.platform != "win32":
+		locale.setlocale(locale.LC_CTYPE, characterLocale)
 	if sampleRate <= 0:
 		raise OSError(
 			f"espeak_Initialize failed with code {sampleRate}. Given Espeak data path of {eSpeakPath}",
@@ -413,6 +430,8 @@ def info():
 
 def getVariantDict():
 	dir = os.path.join(globalVars.appDir, "synthDrivers", "espeak-ng-data", "voices", "!v")
+	if sys.platform != "win32":
+		dir = os.path.join(espeakFiles.dataDir(), "voices", "!v")
 	# Translators: name of the default espeak varient.
 	variantDict = {"none": pgettext("espeakVarient", "none")}
 	for fileName in os.listdir(dir):

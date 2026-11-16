@@ -26,7 +26,6 @@ from speech.commands import (
 	PhonemeCommand,
 )
 from speechXml import toXmlLang
-import sys
 
 
 class SynthDriver(SynthDriver):
@@ -73,9 +72,6 @@ class SynthDriver(SynthDriver):
 
 	@classmethod
 	def check(cls):
-		if sys.platform != "win32":
-			# _espeak.initialize loads espeak.dll, which does not exist on Linux, so setSynth would fail.
-			return False
 		return True
 
 	def __init__(self):
@@ -334,6 +330,10 @@ class SynthDriver(SynthDriver):
 		# #5783: For backwards compatibility, voice identifies should always be lowercase
 		identifier = identifier.lower()
 		if "\\" in identifier:
+			identifier = os.path.basename(identifier)
+		# eSpeak NG names voices by their path under espeak-ng-data/voices, gmw\en on Windows and gmw/en
+		# elsewhere; availableVoices is keyed by the last component.
+		if "/" in identifier:
 			identifier = os.path.basename(identifier)
 		self._voice = identifier
 		try:

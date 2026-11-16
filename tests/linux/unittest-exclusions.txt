@@ -160,13 +160,15 @@ tests.unit.test_languageHandler
   setLocale falls back to C.UTF-8 where the C library lacks a locale, rather than leaving the
   locale unchanged.
   Import raises: NoLinuxImplementation: kernel32.GetACP
-tests.unit.test_synthDrivers.test_espeak.TestSynthDriver_Integration
-  Until NVDA's espeak driver loads a Linux eSpeak library: it loads synthDrivers/espeak.dll, which
-  does not exist on Linux.
-  Not run: setUp starts mock.patch("nvwave.WavePlayer") and then builds the driver; when that
-  raises, tearDown never stops the patch, which then leaks into every later module. Running it
-  would also load eSpeak once the driver has a Linux library, and the runner refuses that load,
-  because eSpeak's library links audio libraries.
+tests.unit.test_synthDrivers.test_espeak.TestSynthDriver_Integration.test_availableLanguagesWithoutLocale
+  For good: it takes the language from each voice identifier by splitting on a backslash, the
+  directory separator in eSpeak NG's identifiers on Windows. On Linux the separator is a slash, so
+  gmw/en is never reduced to en.
+  Raises: AssertionError: 'en' != 'gmw/en'
+tests.unit.test_synthDrivers.test_espeak.TestSynthDriver_Integration.test_fallbackToBritishEnglish
+  For good: it expects the voice identifier gmw\en, spelled with Windows' directory separator. The
+  driver falls back to British English on Linux too, where eSpeak NG names it gmw/en.
+  Raises: AssertionError: 'gmw\\en' != 'gmw/en'
 tests.unit.test_messageDialog.Test_MessageDialog_Sounds.test_playSoundWithTypeWithSound_0
   Until message boxes have a sound on Linux: the test patches winsound.MessageBeep and expects an
   error box to call it, but gui.message.MessageDialog._playSound plays nothing on Linux, where

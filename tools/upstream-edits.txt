@@ -281,13 +281,25 @@ source/synthDriverHandler.py
   sapi5_32), which cannot import and would each log an error, but not an
   add-on driver of the same name. The default priority list, which "auto"
   resolves through, is espeak then silence, so that silence is only ever a
-  fallback and is never saved as the configured synth. Until eSpeak loads
-  on Linux, auto logs its failure once per start. test_transcriptSynth.py
-  checks that the skipped set is exactly the set that fails to import
+  fallback and is never saved as the configured synth.
+  test_transcriptSynth.py checks that the skipped set is exactly the set
+  that fails to import
+source/synthDrivers/_espeak.py
+  Linux runtime: the library, the data directory passed to
+  espeak_Initialize and the variants directory come from
+  linuxPlatform.espeakFiles, which reads BASEDREADER_ESPEAK_LIB and
+  BASEDREADER_ESPEAK_DATA_DIR, instead of espeak.dll and espeak-ng-data
+  beside the driver. espeak_Initialize sets the process's LC_CTYPE to
+  C.UTF-8, which on Windows touches only the C runtime linked into
+  espeak.dll, so initialize() puts back the one NVDA set
 source/synthDrivers/espeak.py
-  Linux runtime: check() answers False on Linux, because
-  the driver loads espeak.dll, so the synthesizer list does not offer a
-  voice that fails to load. The eSpeak port replaces this
+  every platform: _set_voice reduces an identifier holding a slash to its
+  last component, as it already does one holding a backslash. eSpeak NG
+  names voices by their path under espeak-ng-data/voices, gmw/en on Linux
+  where Windows has gmw\en; without it the first load stores gmw/en and the
+  next change of voice fails with KeyError, as availableVoices is keyed by
+  the last component. No Windows identifier holds a slash, so Windows does
+  as before. A fix to offer NVDA
 source/systemUtils.py
   every platform: winreg comes from linuxPlatform.windowsOnly, which on
   Windows is the real module.
@@ -387,7 +399,4 @@ tests/unit/__init__.py
   comtypes monkey patches and the load of nvdaHelperLocal.dll run only on
   Windows, and on Linux NVDAHelper.localLib stays the Linux replacement; the
   configuration directory is a temporary one, holding a copy of the test
-  braille tables, so that nothing is written under tests/unit; while speech
-  is initialised, the automatic synth choice offers only silence, so that it
-  never loads eSpeak, whose library links audio libraries, which
-  tests/linux/rununittests.py refuses to load
+  braille tables, so that nothing is written under tests/unit
