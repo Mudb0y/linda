@@ -28,6 +28,8 @@ from . import guiHelper
 from .dpiScalingHelper import DpiScalingHelperMixinWithoutInit
 from .guiHelper import SIPABCMeta, wxCallOnMain
 
+import sys
+
 _messageBoxCounterLock = threading.Lock()
 _messageBoxCounter = 0
 
@@ -1103,6 +1105,10 @@ class MessageDialog(DpiScalingHelperMixinWithoutInit, ContextHelpMixin, wx.Dialo
 
 	def _playSound(self) -> None:
 		"""Play the sound set for this dialog."""
+		if sys.platform != "win32":
+			# These are Windows' system sounds. Linux has no sound set NVDA plays yet, and failing here would
+			# also leave the dialog's default button without focus.
+			return
 		if self._soundID is not None:
 			winsound.MessageBeep(self._soundID)
 

@@ -124,6 +124,11 @@ def _showAddonsErrors() -> None:
 
 
 def doStartupDialogs():
+	if _hasShutdownBeenTriggered:
+		# Called through wx.CallAfter, this can first run inside the wx.Yield of _closeAllWindows, where a
+		# modal dialog would wait for ever: the core pump that would end it is the caller of that Yield.
+		log.debug("Not showing start-up dialogs as shutdown has been triggered.")
+		return
 	import config
 	import gui
 

@@ -80,6 +80,8 @@ import winUser
 import api
 import NVDAState
 
+import sys
+
 
 if NVDAState._allowDeprecatedAPI():
 
@@ -183,6 +185,10 @@ class MainFrame(wx.Frame):
 		if focus.processID != globalVars.appPid or getattr(focus, "isPrevFocusOnNvdaPopup", False):
 			self.prevFocus = focus
 			self.prevFocusAncestors = api.getFocusAncestors()
+		if sys.platform != "win32":
+			# Which application is in the foreground is known only through the AT-SPI backend, which does
+			# not exist yet; and on GTK raising this hidden frame would show it.
+			return
 		if winUser.getWindowThreadProcessID(winUser.getForegroundWindow())[0] != globalVars.appPid:
 			# This process is not the foreground process, so bring it to the foreground.
 			self.Raise()
@@ -193,6 +199,9 @@ class MainFrame(wx.Frame):
 		"""
 		self.prevFocus = None
 		self.prevFocusAncestors = None
+		if sys.platform != "win32":
+			# The window manager gives focus back to the window that had it before the popup.
+			return
 		if not winUser.isWindowVisible(winUser.getForegroundWindow()):
 			# The current foreground window is invisible, so we want to return to the previous foreground window.
 			# Showing and hiding our main window seems to achieve this.

@@ -123,7 +123,12 @@ source/core.py
   back to its default action over the launcher's GLib handler, so that
   Ctrl+C would end NVDA without shutting it down. A restart starts the new
   copy through linuxPlatform.singleInstance, as a child process, instead of
-  through ShellExecute
+  through ShellExecute. On every platform, doStartupDialogs() shows nothing
+  once shutdown has been triggered: wx.CallAfter runs it after the core
+  pump's first cycles on GTK, so a quick exit ran it inside the wx.Yield of
+  _closeAllWindows, where the welcome dialog waited for ever because the
+  pump that ends it was the caller; messageBox refuses after shutdown for
+  the same reason
 source/documentNavigation/paragraphHelper.py
   import safety when running: after moving the caret, both paragraph moves
   import the UI Automation text class only on Windows; Linux has no UI
@@ -133,10 +138,23 @@ source/fileUtils.py
   os.replace and then syncs the directory, where Windows calls MoveFileEx,
   so that a save replaces nvda.ini whole or not at all. A symbolic link at
   the target is followed and stays a link
+source/gui/__init__.py
+  boot on Linux: MainFrame.prePopup and postPopup skip their foreground
+  window steps. Which application is in the foreground is known only through
+  the AT-SPI backend, which does not exist yet, and on GTK raising the hidden
+  main frame would show it; the window manager returns focus after a popup
+  by itself. Every dialog NVDA opens goes through these, the welcome dialog
+  at a first start and the exit dialog among them
 source/gui/addonStoreGui/viewModels/store.py
   import safety: os.startfile imported only on Windows, after the module's
   other imports; on Linux startfile is absent, so opening an add-on's home
   page, source, scan results or downloaded file raises NameError
+source/gui/message.py
+  boot on Linux: MessageDialog._playSound plays nothing, as the sounds are
+  Windows' system sounds through winsound.MessageBeep and Linux has no
+  sound set NVDA plays yet; raising there would also stop the dialog's show
+  handler before it focuses the default button. Every error and warning
+  message box, the configuration error at start-up among them, plays one
 source/hwIo/__init__.py
   Linux runtime: the background I/O thread is linuxPlatform.ioThread's
   subclass of upstream's, which waits on a condition rather than in an
@@ -290,4 +308,7 @@ source/winVersion.py
 source/windowUtils.py
   import safety: GetModuleHandle at module level runs only on Windows; on
   Linux appInstance is absent, so creating a CustomWindow raises NameError;
-  winAPI.messageWindow's _MessageWindow creates no window on Linux
+  winAPI.messageWindow's _MessageWindow creates no window on Linux. Linux
+  runtime: getWindowScalingFactor() is 1, as wxGTK sizes are logical pixels
+  that GTK scales for the display itself; every message box and settings
+  panel asks for it

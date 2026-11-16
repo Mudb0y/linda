@@ -210,6 +210,9 @@ def getWindowScalingFactor(window: int) -> int:
 	percentage in the windows display settings. 100% is typically 96 DPI, 150% is typically 144 DPI.
 	@param window: a native Windows window handle (hWnd)
 	@returns the logical scaling factor. EG. 1.0 if the window DPI level is 96, 1.5 if the window DPI level is 144"""
+	if sys.platform != "win32":
+		# wxGTK sizes are logical pixels, which GTK scales for the display itself.
+		return 1
 	try:
 		winDpi: int = user32.GetDpiForWindow(window)
 	except:  # noqa: E722
