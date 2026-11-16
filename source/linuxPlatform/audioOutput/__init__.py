@@ -39,8 +39,14 @@ class NoDevice(OSError):
 class StreamLost(OSError):
 	"""The stream stopped working while open, as when a device goes away.
 
-	The player opens a new stream and completes every pending callback, because a stranded
-	end-of-utterance callback stalls speech.
+	Any method of SinkStream but close may raise it, and the player never passes it on to nvwave.
+	Until the stream is replaced, the player takes every frame written to it as played, so that
+	nothing waits on a clock that has stopped. Raised from write, start or bufferedFrames, which only a
+	feed calls, it closes the stream at once, opens another, completes every pending callback, because
+	a stranded end-of-utterance callback stalls speech, and plays the rest of the feed on the new
+	stream, the frames of a failed write included. Raised from any other method, it leaves the
+	replacing to the next feed, so that callbacks still run only where nvwave expects them. A stop
+	that finds the stream lost has nothing left to silence.
 	"""
 
 
@@ -92,7 +98,8 @@ class SinkStream(ABC):
 	an eventfd or a pipe. wake is harmless after close.
 
 	Any method may raise OSError when the sink fails; the player reports it to nvwave as a failed
-	HRESULT, E_FAIL for most errors and HRESULT_FROM_WIN32(ERROR_NOT_FOUND) for NoDevice.
+	HRESULT, E_FAIL for most errors and HRESULT_FROM_WIN32(ERROR_NOT_FOUND) for NoDevice. StreamLost
+	is handled by the player itself.
 	"""
 
 	#: How many frames the stream holds before write would overrun it.
@@ -107,11 +114,7 @@ class SinkStream(ABC):
 
 	@abstractmethod
 	def bufferedFrames(self) -> int:
-		"""Frames written but not yet taken by the device.
-
-		May raise StreamLost, after which the player closes this stream and opens another, or another
-		OSError.
-		"""
+		"""Frames written but not yet taken by the device."""
 
 	@abstractmethod
 	def playedFrames(self) -> int:
@@ -120,8 +123,7 @@ class SinkStream(ABC):
 		Never more than the frames written. Keeps advancing in real time while the stream is started
 		and holds frames, even when the device or server stops consuming them: a sink whose output
 		stalls discards in real time, so that feeds, syncs and the callbacks of NVDA's speech never
-		wait on a device that is not there. May raise StreamLost, after which the player takes every
-		frame written as played, or another OSError.
+		wait on a device that is not there.
 		"""
 
 	@abstractmethod

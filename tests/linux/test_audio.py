@@ -1131,6 +1131,107 @@ def test_lostStreamFoundByPlayedFramesCountsAsHeard(tmp_path: Path):
 	assert value["syncTook"] < 0.5
 
 
+def test_aLostStreamIsReplacedWhicheverCallFindsIt(tmp_path: Path):
+	"""A stream that reports its loss from any of its methods, once or from then on, as a device that
+	went away would: nothing fails in nvwave, the stream is replaced, and every callback that was not
+	cancelled by a stop still runs, the end of the next utterance among them, for speech and for
+	sounds, whose players set their volume on every feed."""
+	value = runAudio(
+		tmp_path,
+		"""
+		from linuxPlatform import audioOutput
+		from linuxPlatform.audioOutput.nullSink import NullSink, NullStream
+
+		armed = {"method": None, "persists": False}
+
+		def losing(name, base):
+			def method(self, *args):
+				if self.lost or armed["method"] == name:
+					self.lost = self.lost or armed["persists"]
+					armed["method"] = None
+					raise audioOutput.StreamLost(5, "device went away")
+				return base(self, *args)
+
+			return method
+
+		class LosingStream(NullStream):
+			lost = False
+
+		for name in ("write", "bufferedFrames", "playedFrames", "start", "stop", "reset", "setChannelVolume", "close"):
+			setattr(LosingStream, name, losing(name, getattr(NullStream, name)))
+
+		class LosingSink(NullSink):
+			def __init__(self):
+				super().__init__()
+				self.opened = 0
+
+			def openStream(self, deviceId, fmt, wake):
+				self.opened += 1
+				return LosingStream(fmt)
+
+		# Each case: what the player is asked to do once the stream is to be lost, and the stream
+		# method that reports it.
+		cases = {
+			"write": ("feed", "write"),
+			"start": ("feed after idle", "start"),
+			"stop": ("stop", "stop"),
+			"setChannelVolume": ("setVolume", "setChannelVolume"),
+			"pause": ("pause and resume", "stop"),
+			"resume": ("pause and resume", "start"),
+			"reset": ("stop", "reset"),
+		}
+		outcomes = {}
+		for case, (action, method) in cases.items():
+			for persists in (False, True):
+				for purpose in (nvwave.AudioPurpose.SPEECH, nvwave.AudioPurpose.SOUNDS):
+					sink = audioOutput._sink = LosingSink()
+					armed.update(method=None, persists=persists)
+					events.clear()
+					player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=purpose)
+					player.enableTrimmingLeadingSilence(False)
+					raised = []
+
+					def attempt(name, call):
+						try:
+							call()
+						except Exception as e:
+							raised.append((name, repr(e)))
+
+					attempt("first", lambda: player.feed(bytes(3200), onDone=done("first")))  # 200 ms
+					if action == "feed after idle":
+						attempt("idle", lambda: wasapi.wasPlay_idle(player._player))
+					armed["method"] = method
+					if action == "stop":
+						attempt("stop", player.stop)
+					elif action == "setVolume":
+						attempt("setVolume", lambda: player.setVolume(all=0.5))
+					elif action == "pause and resume":
+						attempt("pause", lambda: player.pause(True))
+						attempt("resume", lambda: player.pause(False))
+					attempt("next", lambda: player.feed(bytes(800), onDone=done("next")))  # 50 ms
+					syncer = threading.Thread(target=lambda: attempt("sync", player.sync), daemon=True)
+					syncer.start()
+					syncer.join(3)
+					outcomes[f"{case} {'from then on' if persists else 'once'} {purpose.name}"] = {
+						"lostReported": armed["method"] is None,
+						"opened": sink.opened,
+						"calls": [tag for tag, _thread, _at in events],
+						"raised": raised,
+						"hung": syncer.is_alive(),
+					}
+					del player
+					gc.collect()
+		result = outcomes
+		""",
+	)
+	assert len(value) == 28
+	for case, outcome in value.items():
+		# A stop cancels what was playing; nothing else may lose a callback.
+		calls = ["next"] if case.split()[0] in ("stop", "reset") else ["first", "next"]
+		expected = {"lostReported": True, "opened": 2, "calls": calls, "raised": [], "hung": False}
+		assert outcome == expected, case
+
+
 #: Plays speech, in eSpeak's 300 ms chunks, to a sink whose stream records when stop reached it,
 #: while other threads keep the GIL busy, and stops it at random moments.
 STOP_UNDER_LOAD = """
