@@ -36,13 +36,8 @@ import queueHandler
 import speech
 import speechDictHandler
 import synthDriverHandler
-import watchdog
 from speech.commands import *
 from speech.priorities import Spri
-
-# STUB, owned by workstream A3 (watchdog): queueHandler calls watchdog.alive() before each queued
-# function, and the Linux watchdog skeleton raises. Remove when A3's watchdog lands.
-watchdog.alive = lambda: None
 
 speechDictHandler.initialize()
 characterProcessing.initialize()
