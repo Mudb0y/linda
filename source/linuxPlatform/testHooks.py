@@ -19,7 +19,7 @@ from importlib.machinery import ModuleSpec
 from types import ModuleType
 
 #: Names a directory that may hold synthDrivers/ and globalPlugins/ subdirectories.
-environmentVariable = "BASEDREADER_TEST_HOOKS_DIR"
+ENVIRONMENT_VARIABLE = "BASEDREADER_TEST_HOOKS_DIR"
 
 #: The packages whose search paths get the subdirectory of the same name.
 packageNames = ("synthDrivers", "globalPlugins")
@@ -72,7 +72,7 @@ def install() -> list[str]:
 	search path, so a test driver or plugin can never take the place of a built-in or an add-on of
 	the same name.
 	"""
-	root = os.environ.get(environmentVariable)
+	root = os.environ.get(ENVIRONMENT_VARIABLE)
 	if not root:
 		return []
 	import globalVars
@@ -82,7 +82,7 @@ def install() -> list[str]:
 	if not os.path.isdir(root):
 		# A test that set the variable expects its drivers; carrying on without them would make it
 		# fail later and further from the cause.
-		raise FileNotFoundError(f"{environmentVariable} names {root!r}, which is not a directory")
+		raise FileNotFoundError(f"{ENVIRONMENT_VARIABLE} names {root!r}, which is not a directory")
 	root = os.path.abspath(root)
 	import globalPlugins
 	import synthDrivers
