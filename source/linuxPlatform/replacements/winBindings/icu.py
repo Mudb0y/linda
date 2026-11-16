@@ -7,14 +7,17 @@ character break type and the two iteration functions NVDAHelper.localLib needs. 
 UTF-16 code units through linuxPlatform.utf16, because c_wchar_p is UTF-32 on Linux.
 
 The ``ubrk_*`` functions are defined only when :data:`ICU_AVAILABLE` is True, as upstream's are.
+Reaching for one that is not defined, or for any other name this module lacks, raises
+NoLinuxImplementation naming it.
 """
 
 import os
 from collections.abc import Callable
 from ctypes import CDLL, POINTER, c_char_p, c_int32, c_void_p
 from enum import IntEnum
-from typing import Any
+from typing import Any, NoReturn
 
+from linuxPlatform import NoLinuxImplementation
 from linuxPlatform.utf16 import Utf16Pointer
 
 LIB_DIR_VARIABLE = "BASEDREADER_ICU_LIB_DIR"
@@ -64,6 +67,17 @@ class UBRK(IntEnum):
 def U_FAILURE(code: int) -> bool:
 	"""Return True if the given UErrorCode indicates an error."""
 	return code > 0
+
+
+def __getattr__(name: str) -> NoReturn:
+	# The import system and other tools probe modules for optional names such as __path__ and
+	# expect AttributeError when one is absent.
+	if name.startswith("__"):
+		raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+	what = f"{__name__}.{name}"
+	raise NoLinuxImplementation(
+		what, None if ICU_AVAILABLE else f"{what}: ICU did not load from {LIB_DIR_VARIABLE}"
+	)
 
 
 def _bind(name: str, restype: type | None, *argtypes: type) -> Callable[..., Any]:

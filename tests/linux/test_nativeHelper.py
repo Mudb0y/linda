@@ -254,11 +254,16 @@ def test_icuAbsentIsReportedTruthfully(tmp_path: Path):
 			raised = None
 		except NoLinuxImplementation as e:
 			raised = e.what
+		try:
+			icu.ubrk_open
+			unbound = None
+		except NoLinuxImplementation as e:
+			unbound = str(e)
 		result = {
 			"available": icu.ICU_AVAILABLE,
 			"segmenterSees": wordSegmenter.ICU_AVAILABLE,
 			"dll": icu.dll,
-			"bound": hasattr(icu, "ubrk_open"),
+			"unbound": unbound,
 			"raised": raised,
 		}
 		""",
@@ -269,10 +274,13 @@ def test_icuAbsentIsReportedTruthfully(tmp_path: Path):
 		"available": False,
 		"segmenterSees": False,
 		"dll": None,
-		"bound": False,
+		"unbound": "winBindings.icu.ubrk_open: ICU did not load from BASEDREADER_ICU_LIB_DIR",
 		"raised": "NVDAHelper.localLib.calculateWordOffsets",
 	}
-	assert done.noLinuxImplementation == ["NVDAHelper.localLib.calculateWordOffsets"]
+	assert done.noLinuxImplementation == [
+		"NVDAHelper.localLib.calculateWordOffsets",
+		"winBindings.icu.ubrk_open",
+	]
 	assert not done.logErrors
 
 
@@ -476,6 +484,63 @@ def test_brailleTablesFallBackToTheBuiltDirectory(tmp_path: Path):
 	)
 	done.assertClean()
 	assert done.value == {"tablesDir": str(builtTables), "cells": 3}
+
+
+def test_namesUpstreamHasAndLinuxLacksRaise(tmp_path: Path):
+	"""A name of upstream's module that the replacement lacks is a missing feature, reported as one,
+	never a bare AttributeError that NVDA's handlers would pass over unrecorded."""
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import importlib
+		import NVDAHelper
+		from linuxPlatform import NoLinuxImplementation
+		from winBindings import icu
+
+		def outcome(attempt):
+			try:
+				attempt()
+			except NoLinuxImplementation as e:
+				return ["NoLinuxImplementation", e.what]
+			except Exception as e:
+				return [type(e).__name__]
+			return ["returned"]
+
+		result = {
+			"attribute": [
+				outcome(lambda: NVDAHelper._setDllFuncPointer),
+				outcome(lambda: NVDAHelper.localLib.dll),
+				outcome(lambda: icu.ucol_open),
+			],
+			"fromImport": outcome(lambda: exec("from NVDAHelper.localLib import EXCEL_CELLINFO", {})),
+			"submodule": outcome(lambda: importlib.import_module("NVDAHelper.localWin10")),
+			"dunders": [
+				hasattr(module, "__path__")
+				for module in (NVDAHelper, NVDAHelper.localLib, icu)
+			],
+			"present": outcome(lambda: exec("from NVDAHelper.localLib import generateBeep", {})),
+		}
+		""",
+	)
+	assert done.error is None, done.error
+	assert done.value == {
+		"attribute": [
+			["NoLinuxImplementation", "NVDAHelper._setDllFuncPointer"],
+			["NoLinuxImplementation", "NVDAHelper.localLib.dll"],
+			["NoLinuxImplementation", "winBindings.icu.ucol_open"],
+		],
+		"fromImport": ["NoLinuxImplementation", "NVDAHelper.localLib.EXCEL_CELLINFO"],
+		"submodule": ["ModuleNotFoundError"],
+		"dunders": [True, False, False],
+		"present": ["returned"],
+	}
+	assert done.noLinuxImplementation == [
+		"NVDAHelper._setDllFuncPointer",
+		"NVDAHelper.localLib.dll",
+		"winBindings.icu.ucol_open",
+		"NVDAHelper.localLib.EXCEL_CELLINFO",
+	]
+	assert not done.logErrors
 
 
 def test_virtualBufferAndDisplayModelStillRaise(tmp_path: Path):

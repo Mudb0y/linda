@@ -2,9 +2,10 @@
 
 Upstream binds nvdaHelperLocal.dll. This has the entry points that code staying on Linux names.
 The beep generator and the three text boundary functions are implemented here, with upstream's
-calling convention, so their callers work unchanged; the others raise until they have a Linux
-implementation. Entry points that only Windows-only modules call (in-process helpers for Office,
-SysListView32, IAccessible2 and UI Automation) are left out.
+calling convention, so their callers work unchanged; the others raise NoLinuxImplementation.
+Entry points that only Windows-only modules call (in-process helpers for Office, SysListView32,
+IAccessible2 and UI Automation) are left out, and reaching for one, or for any other name upstream's
+module has and this one lacks, raises NoLinuxImplementation naming it.
 
 The text functions count in UTF-16 code units, as NVDA does everywhere: textLength, offsets and
 results are code units of the text encoded as UTF-16, whatever form the text is passed in.
@@ -61,6 +62,14 @@ isScreenFullyBlack = _notImplemented("isScreenFullyBlack")
 localListeningSocketExists = _notImplemented("localListeningSocketExists")
 nvdaInProcUtils_dumpOnCrash = _notImplemented("nvdaInProcUtils_dumpOnCrash")
 writeCrashDump = _notImplemented("writeCrashDump")
+
+
+def __getattr__(name: str) -> NoReturn:
+	# The import system and other tools probe modules for optional names such as __path__ and
+	# expect AttributeError when one is absent.
+	if name.startswith("__"):
+		raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+	raise NoLinuxImplementation(f"{__name__}.{name}")
 
 
 # The beep generator is nvdaHelper/local/beeps.cpp, statement for statement. hz arrives as a C float
