@@ -72,7 +72,9 @@
         };
         cargoLock.lockFile = ./engine/Cargo.lock;
         cargoBuildFlags = [ "--package" "basedreader-bench" ];
-        cargoTestFlags = [ "--workspace" ];
+        # The engine's tests speak D-Bus and refuse to run outside tests/linux/rig,
+        # which a Nix build cannot enter; cargo test in engine/ runs them there.
+        doCheck = false;
       };
     in
     {
