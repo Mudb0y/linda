@@ -3,6 +3,7 @@
 nix develop . -c tests/linux/rig python -m pytest tests/linux/test_harness.py
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -287,6 +288,26 @@ def test_writeUnderSourceByAnyMeansIsReported(tmp_path: Path, write: str, change
 	assert not (harness.SOURCE / "harnessTest.tmp").exists()
 
 
+def test_writesAreSeenWhateverTheChildsDirectoryIsCalled(tmp_path: Path):
+	# A launch's directory is named by the test, and overlayfs gives a backslash, a comma and a colon in
+	# its options meanings of their own.
+	odd = tmp_path / 'a "dir\\" with, a: name'
+	odd.mkdir()
+	done = harness.runChild(
+		odd,
+		f"""
+		import subprocess
+
+		subprocess.run(["touch", {str(harness.SOURCE / "harnessTest.tmp")!r}], check=True)
+		result = "ran"
+		""",
+		prepare="none",
+	)
+	assert done.value == "ran", done.stderr
+	assert done.writes == [f"changed {harness.SOURCE / 'harnessTest.tmp'}"]
+	assert problemsBesides(done) == ["writes"]
+
+
 def test_whatIsNotAWriteUnderSourceIsNotReported(tmp_path: Path):
 	done = harness.runChild(
 		tmp_path,
@@ -319,6 +340,25 @@ def test_treeStateSeesAFileWrittenAndRemovedAgain(tmp_path: Path):
 	(tmp_path / "directory" / "brief.tmp").write_text("x", encoding="utf-8")
 	(tmp_path / "directory" / "brief.tmp").unlink()
 	assert harness.changedPaths(before, harness.treeState(tmp_path)) == [str(tmp_path / "directory")]
+
+
+def test_treeStateSeesAFileRewrittenWithItsTimesRestored(tmp_path: Path):
+	tree = tmp_path / "tree"
+	tree.mkdir()
+	path = tree / "file.txt"
+	path.write_text("original")
+	times = path.stat()
+	before = harness.treeState(tree)
+	# The file system's clock ticks coarsely, and a rewrite within the tick of the first write would
+	# leave even the change time as it was.
+	clock = tmp_path / "clock"
+	clock.touch()
+	while clock.stat().st_ctime_ns <= times.st_ctime_ns:
+		clock.touch()
+	path.write_text("ALTERED!")
+	os.utime(path, ns=(times.st_atime_ns, times.st_mtime_ns))
+	assert (path.stat().st_size, path.stat().st_mtime_ns) == (times.st_size, times.st_mtime_ns)
+	assert harness.changedPaths(before, harness.treeState(tree)) == [str(path)]
 
 
 def test_treeStateCoversTheProtectedTreesAndSkipsUnwatched():
@@ -462,6 +502,68 @@ def test_nvdaLogErrorRecordsAreFoundWhateverTheCodePath():
 		)
 		assert harness.NVDA_LOG_RECORD_HEADER.search(log)
 		assert len(harness.nvdaLogErrorRecords(log)) == 1
+
+
+def endedLaunch(directory: Path, events: list[dict], files: dict[str, str]) -> harness.Launch:
+	"""A harness.Launch whose process has exited with status 0, having recorded events after its start
+	and left files in its directory, as a launch does."""
+	directory.mkdir()
+	start = {"kind": "start", "pid": 1, "launcher": str(harness.LAUNCHER), "arguments": []}
+	lines = [json.dumps(event) + "\n" for event in (start, *events)]
+	(directory / "events.jsonl").write_text("".join(lines), encoding="utf-8")
+	for name, text in files.items():
+		(directory / name).write_text(text, encoding="utf-8")
+	process = subprocess.Popen(["true"])
+	process.wait()
+	return harness.Launch(directory, process, time.monotonic())
+
+
+def test_launchLogErrorRecordsAreSeenWhateverTheCodePath(tmp_path: Path):
+	# Each of these code paths holds a space, which a header pattern must still match.
+	for index, codePath in enumerate(
+		("unhandled exception", "Exception ignored in: <function f at 0x1>", "Python warning")
+	):
+		log = (
+			"INFO - core.main (12:00:00.000) - MainThread (1):\nstarting\n"
+			f"ERROR - {codePath} (12:00:01.000) - MainThread (1):\n"
+			"Traceback (most recent call last):\nValueError: x\n"
+		)
+		launch = endedLaunch(tmp_path / str(index), [], {"nvda.log": log})
+		launch.assertClean()
+		with pytest.raises(AssertionError, match="nvda.log holds 1 records at ERROR"):
+			launch.assertClean(logNames=("nvda.log",))
+		launch.assertClean(ignoring={"logErrors"}, logNames=("nvda.log",))
+	empty = endedLaunch(tmp_path / "empty", [], {"nvda.log": ""})
+	with pytest.raises(AssertionError, match="nvda.log holds no records"):
+		empty.assertClean(ignoring={"logErrors"}, logNames=("nvda.log",))
+
+
+def test_launchStandardErrorIsChecked(tmp_path: Path):
+	allowed = (
+		"Exception ignored in: <function AutoSettings.__del__ at 0x7fffe85965c0>\n"
+		"Traceback (most recent call last):\n"
+		'  File "/x/source/autoSettingsUtils/autoSettings.py", line 43, in __del__\n'
+		'  File "/x/source/autoSettingsUtils/autoSettings.py", line 52, in _unregisterConfigSaveAction\n'
+		"AttributeError: 'NoneType' object has no attribute 'unregister'\n"
+	)
+	endedLaunch(tmp_path / "allowed", [], {"stderr.txt": allowed * 2}).assertClean()
+	unexpected = endedLaunch(
+		tmp_path / "unexpected", [], {"stderr.txt": allowed + "(python3:1): Gtk-WARNING **: something\n"}
+	)
+	with pytest.raises(AssertionError, match="standard error"):
+		unexpected.assertClean()
+	unexpected.assertClean(ignoring={"stderr"})
+
+
+def test_launchAllowsOnlyNotedGaps(tmp_path: Path):
+	def gap(what: str) -> dict:
+		return {"kind": "noLinuxImplementation", "what": what, "thread": "MainThread", "stack": []}
+
+	endedLaunch(tmp_path / "noted", [gap("winsound.MessageBeep")], {}).assertClean()
+	raised = endedLaunch(tmp_path / "raised", [gap("winsound.MessageBeep"), gap("winsound.PlaySound")], {})
+	with pytest.raises(AssertionError, match="winsound.PlaySound") as failed:
+		raised.assertClean()
+	assert "winsound.MessageBeep" not in str(failed.value)
 
 
 def test_audioLibrariesAreKnownByName():
@@ -653,6 +755,7 @@ def test_killedLaunchStillReportsWhatItDid(launches, tmp_path: Path):
 UNCLEAN_PLUGIN = """
 import ctypes
 import logging
+import json
 import os
 import subprocess
 

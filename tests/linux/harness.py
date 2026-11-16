@@ -218,18 +218,21 @@ def treeState(*tops: Path | str) -> dict[str, tuple]:
 	"""A snapshot of the trees under tops, PROTECTED by default, to compare with changedPaths.
 
 	A directory's modification time changes whenever an entry is made or removed in it, so this
-	also shows a file that was written and deleted again.
+	also shows a file that was written and deleted again. The change time is kept as well, because
+	nothing can set it back, as os.utime sets back the modification time, and the inode number, which
+	shows a file replaced by another.
 	"""
 	state: dict[str, tuple] = {}
 	for top in tops or PROTECTED:
 		for dirPath, dirNames, fileNames in os.walk(top):
 			dirNames[:] = [d for d in dirNames if os.path.join(dirPath, d) not in UNWATCHED]
-			state[dirPath] = ("directory", os.lstat(dirPath).st_mtime_ns)
+			info = os.lstat(dirPath)
+			state[dirPath] = ("directory", info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
 			# os.walk lists a symbolic link to a directory among the directories, and does not enter it.
 			for name in fileNames + [d for d in dirNames if os.path.islink(os.path.join(dirPath, d))]:
 				path = os.path.join(dirPath, name)
 				info = os.lstat(path)
-				state[path] = (info.st_size, info.st_mtime_ns)
+				state[path] = (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 	return state
 
 
@@ -302,7 +305,12 @@ def _isolate(overlay: str, *command: str) -> None:
 			work = upper.parent / "work"
 			upper.mkdir(parents=True)
 			work.mkdir()
-			options = f"lowerdir={top},upperdir={upper},workdir={work},userxattr"
+			# overlayfs reads a backslash in an option as escaping the character after it, which lets a
+			# path hold the commas and colons that otherwise separate options and layers.
+			lower, upperDir, workDir = (
+				re.sub(r"([\\,:])", r"\\\1", str(path)) for path in (top, upper, work)
+			)
+			options = f"lowerdir={lower},upperdir={upperDir},workdir={workDir},userxattr"
 			mount(b"overlay", os.fsencode(top), b"overlay", 0, os.fsencode(options))
 			# Making and removing an entry leaves only the directory's time changed.
 			os.utime(upper, ns=(0, 0))
@@ -494,6 +502,8 @@ class Checks:
 			levelno=record.levelno,
 			level=record.levelname,
 			logger=record.name,
+			# Where NVDA's own log says the record came from; liblouis's messages, for one, are known by it.
+			codepath=getattr(record, "codepath", None),
 			message=message,
 			exception=exception,
 		)
@@ -802,10 +812,8 @@ def _launch(eventsPath: str, recordLevel: str, launcher: str, *arguments: str) -
 	record = EventFile(eventsPath)
 	checks = Checks(record, recordLevel=int(recordLevel))
 	record("start", launcher=launcher, arguments=list(arguments))
-	# The rig starts its command as a background job, with SIGINT ignored, which a program inherits.
-	# NVDA started from a terminal has Python's handler.
-	if signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
-		signal.signal(signal.SIGINT, signal.default_int_handler)
+	# Signal dispositions are left as the caller's were, since a test may start NVDA as nohup does,
+	# with SIGHUP or SIGINT ignored; the rig gives its command their default actions.
 	import atexit
 	import runpy
 
@@ -907,14 +915,27 @@ class Launch:
 	def waitForSpeech(self, text: str, timeout: float) -> float:
 		"""Seconds from starting the process to text being spoken, as a whole speak record."""
 		deadline = self.started + timeout
-		while time.monotonic() < deadline:
+		while True:
+			exited = self.process.poll() is not None
+			# Read after the poll, so that what a process spoke before it exited is seen.
 			for record in self.spoken():
 				if transcriptRecords().spokenText(record) == text:
 					return record["t"] - self.started
-			if self.process.poll() is not None:
-				break
+			if exited or time.monotonic() >= deadline:
+				raise AssertionError(f"{text!r} was not spoken within {timeout} s\n{self.describe()}")
 			time.sleep(0.05)
-		raise AssertionError(f"{text!r} was not spoken within {timeout} s\n{self.describe()}")
+
+	def waitForLog(self, text: str, timeout: float, name: str = "nvda.log") -> None:
+		"""Wait until the file name in the launch's directory holds text."""
+		deadline = time.monotonic() + timeout
+		while True:
+			exited = self.process.poll() is not None
+			# Read after the poll, so that what a process wrote before it exited is seen.
+			if text in self.text(name):
+				return
+			if exited or time.monotonic() >= deadline:
+				raise AssertionError(f"{text!r} was not in {name} within {timeout} s\n{self.describe()}")
+			time.sleep(0.05)
 
 	def waitForExit(self, timeout: float) -> int:
 		try:
