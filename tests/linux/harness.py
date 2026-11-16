@@ -970,8 +970,8 @@ def startLauncher(
 	environment = _environment(
 		{
 			"BASEDREADER_TEST_HOOKS_DIR": str(hooks),
-			"TRANSCRIPT_SYNTH_FILE": str(directory / "transcript.jsonl"),
-			"TRANSCRIPT_SYNTH_MODE": "immediate",
+			"BASEDREADER_TRANSCRIPT_FILE": str(directory / "transcript.jsonl"),
+			"BASEDREADER_TRANSCRIPT_MODE": "immediate",
 			**(env or {}),
 		},
 	)

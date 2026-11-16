@@ -641,7 +641,7 @@ def test_lateErrorLeavesTheExitSoundWhole(tmp_path: Path):
 		**os.environ,
 		"BASEDREADER_TEST_HOOKS_DIR": str(hooks),
 		"BASEDREADER_AUDIO_CAPTURE_DIR": str(capture),
-		"TRANSCRIPT_SYNTH_FILE": str(tmp_path / "transcript.jsonl"),
+		"BASEDREADER_TRANSCRIPT_FILE": str(tmp_path / "transcript.jsonl"),
 		"LATE_ERROR_PROBE_RESULT": str(resultPath),
 	}
 	env.pop("BASEDREADER_BOOT_PROBE", None)
