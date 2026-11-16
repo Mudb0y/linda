@@ -4,7 +4,8 @@ Each continuous stretch of a stream's playing, from its first frame until it is 
 closed, goes to its own file, <stretch number>-stream<stream number>.wav, numbered in the order the
 stretches began. A frame goes to the file only once the clock says it has been heard, at the gain
 it was heard at, so audio discarded by stopping never appears, and a stretch stopped before any of
-it was heard leaves no file and a gap in the numbering.
+it was heard leaves no file and a gap in the numbering. Whatever was heard is in the files by the
+time stop returns.
 """
 
 import errno
@@ -26,6 +27,8 @@ class CaptureStream(NullStream):
 		super().__init__(fmt)
 		self._sink = sink
 		self._streamNumber = streamNumber
+		# stop runs alongside the other methods, and writes what was heard as they do.
+		self._lock = threading.Lock()
 		# Written but not yet heard.
 		self._unheard = bytearray()
 		self._heardFrames = 0
@@ -51,8 +54,9 @@ class CaptureStream(NullStream):
 
 	def keepHeard(self) -> None:
 		"""Write out everything heard so far."""
-		if not self._closed:
-			self._keepHeard()
+		with self._lock:
+			if not self._closed:
+				self._keepHeard()
 
 	def _endStretch(self) -> None:
 		self._keepHeard()
@@ -64,36 +68,48 @@ class CaptureStream(NullStream):
 			self._file = None
 
 	def write(self, data: bytes) -> None:
-		if self._stretchNumber is None:
-			self._stretchNumber = self._sink._nextStretchNumber()
-		super().write(data)
-		self._unheard += data
+		with self._lock:
+			if self._stretchNumber is None:
+				self._stretchNumber = self._sink._nextStretchNumber()
+			super().write(data)
+			self._unheard += data
 
 	def bufferedFrames(self) -> int:
-		self._keepHeard()
-		return super().bufferedFrames()
+		with self._lock:
+			self._keepHeard()
+			return super().bufferedFrames()
 
 	def playedFrames(self) -> int:
-		self._keepHeard()
-		return super().playedFrames()
+		with self._lock:
+			self._keepHeard()
+			return super().playedFrames()
+
+	def start(self) -> None:
+		with self._lock:
+			super().start()
 
 	def stop(self) -> None:
+		# The clock stops at the call, before the lock is taken, so that waiting for it cannot let
+		# more be heard.
 		super().stop()
-		self._keepHeard()
+		self.keepHeard()
 
 	def reset(self) -> None:
-		self._endStretch()
-		super().reset()
+		with self._lock:
+			self._endStretch()
+			super().reset()
 
 	def setChannelVolume(self, channel: int, level: float) -> None:
-		self._keepHeard()
-		super().setChannelVolume(channel, level)
+		with self._lock:
+			self._keepHeard()
+			super().setChannelVolume(channel, level)
 
 	def close(self) -> None:
 		self._sink._forget(self)
-		super().close()
-		self._endStretch()
-		self._closed = True
+		with self._lock:
+			super().close()
+			self._endStretch()
+			self._closed = True
 
 
 class CaptureSink(NullSink):

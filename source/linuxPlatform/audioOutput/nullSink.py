@@ -5,6 +5,7 @@ that the player blocks, paces its feeders and completes its callbacks exactly as
 of a device.
 """
 
+import collections
 import time
 from collections.abc import Callable
 
@@ -21,8 +22,20 @@ class NullStream(SinkStream):
 		self._takenAtMark = 0
 		self._markTime = time.monotonic()
 		self._running = False
+		# When stop was called, for the next of the other methods to apply. stop runs alongside them,
+		# and appending to a deque is the one thing it does, so that it never waits for the feeder.
+		self._stops: collections.deque[float] = collections.deque()
+
+	def _settle(self) -> None:
+		"""Apply each stop called since the last look, at the time it was called."""
+		while self._stops:
+			at = self._stops.popleft()
+			if self._running:
+				self._mark(at)
+				self._running = False
 
 	def _taken(self) -> int:
+		self._settle()
 		if not self._running:
 			return self._takenAtMark
 		elapsed = time.monotonic() - self._markTime
@@ -30,17 +43,18 @@ class NullStream(SinkStream):
 		# was written.
 		return min(self._written, self._takenAtMark + int(elapsed * self.format.samplesPerSec))
 
-	def _mark(self) -> None:
-		now = time.monotonic()
+	def _mark(self, now: float) -> None:
 		if not self._running:
 			self._markTime = now
 			return
 		rate = self.format.samplesPerSec
-		elapsedFrames = int((now - self._markTime) * rate)
+		# A stop timed before the last mark, by a thread that was held up between reading the clock
+		# and recording it, stops the count where it stands.
+		elapsedFrames = max(0, int((now - self._markTime) * rate))
 		if self._takenAtMark + elapsedFrames >= self._written:
 			# Ran dry: the device has been waiting since then, so it carries on from now.
 			self._takenAtMark = self._written
-			self._markTime = now
+			self._markTime = max(now, self._markTime)
 		else:
 			self._takenAtMark += elapsedFrames
 			# Moved on by whole frames only, so that the part of a frame already under way is not
@@ -48,9 +62,10 @@ class NullStream(SinkStream):
 			self._markTime += elapsedFrames / rate
 
 	def write(self, data: bytes) -> None:
+		self._settle()
 		# Marking first means that after an underrun the new frames play from now, not from when
 		# the queue ran dry.
-		self._mark()
+		self._mark(time.monotonic())
 		self._written += len(data) // self.format.blockAlign
 
 	def bufferedFrames(self) -> int:
@@ -60,16 +75,16 @@ class NullStream(SinkStream):
 		return self._taken()
 
 	def start(self) -> None:
+		self._settle()
 		if not self._running:
 			self._markTime = time.monotonic()
 			self._running = True
 
 	def stop(self) -> None:
-		if self._running:
-			self._mark()
-			self._running = False
+		self._stops.append(time.monotonic())
 
 	def reset(self) -> None:
+		self._settle()
 		self._written = 0
 		self._takenAtMark = 0
 		self._markTime = time.monotonic()
@@ -78,7 +93,8 @@ class NullStream(SinkStream):
 		self.volumes[channel] = level
 
 	def close(self) -> None:
-		self.stop()
+		self._stops.append(time.monotonic())
+		self._settle()
 
 
 class NullSink(Sink):

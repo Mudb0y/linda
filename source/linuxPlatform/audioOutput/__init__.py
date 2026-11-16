@@ -77,17 +77,19 @@ class StreamFormat:
 class SinkStream(ABC):
 	"""One player's stream on a sink.
 
-	The player calls these with its own lock held, so a stream is never called from two threads at
-	once. A sink that consumes on a thread of its own synchronises with that thread itself.
+	The player calls every method but stop with its own lock held, so none of them is ever called
+	from two threads at once. stop is called without that lock, so that silencing never waits for a
+	thread that is feeding: it may run on any thread at the same time as write, bufferedFrames,
+	playedFrames or setChannelVolume, but never at the same time as start, reset or close, and never
+	after close. A sink that consumes on a thread of its own synchronises with that thread itself.
 
 	The player times its waits from the format and the frame counts, which is all a sink whose
 	device keeps real time needs. A sink whose device may run ahead of that estimate calls the wake
 	function it was given whenever it has made room or moved on, so that a waiting feed or sync
-	looks again at once. wake takes the player's lock and runs Python, so it must be called from an
-	ordinary thread that can take the GIL and holds none of the locks these methods take: never
-	from inside one of these calls, which would deadlock on the player's lock, and never from a
-	real-time audio thread, which must not wait on Python. A real-time callback hands the event to
-	a helper thread instead, through an eventfd or a pipe. wake is harmless after close.
+	looks again at once. wake holds a lock of the player's only for a moment, and never one these
+	methods are called with, but it runs Python, so it must be called from an ordinary thread that
+	can take the GIL, never from a real-time audio thread, which must not wait on Python. A real-time callback hands the event to a helper thread instead, through
+	an eventfd or a pipe. wake is harmless after close.
 
 	Any method may raise OSError when the sink fails; the player reports it to nvwave as a failed
 	HRESULT, E_FAIL for most errors and HRESULT_FROM_WIN32(ERROR_NOT_FOUND) for NoDevice.
@@ -130,7 +132,8 @@ class SinkStream(ABC):
 	def stop(self) -> None:
 		"""Stop playing at once, keeping what is queued and the position.
 
-		Takes effect within one device period, and never waits on anything a real-time thread holds.
+		Takes effect within one device period, and never waits on anything a real-time thread holds,
+		nor on the thread that is feeding.
 		"""
 
 	@abstractmethod

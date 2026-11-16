@@ -7,9 +7,13 @@ linuxPlatform.audioOutput sink instead of a WASAPI endpoint:
   before its audio has been heard;
 - a completion callback runs only on a thread that is inside feed, sync or idle, once playback has
   passed the end of its audio, and never before the feed that registered it has returned;
-- stop may be called from any thread, returns at once, wakes a blocked feeder and discards pending
-  callbacks without calling them;
+- stop may be called from any thread, silences the stream and returns at once, without waiting for
+  a thread that is feeding, wakes a blocked feeder and discards pending callbacks without calling
+  them;
 - pause and resume keep what is queued and its position;
+- a channel volume set while another thread feeds is applied by that thread as soon as it lets go
+  of the player, so that nvwave.WavePlayer.stop, which sets the volume of a sounds player, does not
+  wait for it either;
 - leading silence is trimmed as SilenceDetect does it, with one silent frame put back;
 - at interpreter exit every stream is closed and no other is opened, so that no thread is left
   inside a sink as the interpreter is torn down.
@@ -54,8 +58,6 @@ _isExiting = False
 class _PlayState(Enum):
 	stopped = auto()
 	playing = auto()
-	# stop() was called; the thread that next feeds or idles finishes the job.
-	stopping = auto()
 
 
 def _value(arg: Any) -> Any:
@@ -86,6 +88,17 @@ def _entryPoint[**P, R](func: Callable[P, R]) -> Callable[P, R]:
 
 
 class _Player:
+	"""One nvwave player and the sink stream it plays to.
+
+	Three locks, always taken in this order and never held across a wait or a callback:
+	- _lock, held by whichever thread feeds, syncs, idles or gives the stream its volumes, through
+	  everything it does but its waits and the callbacks it calls;
+	- _runLock, held only while the stream is replaced or started, stopped or reset, so that stop,
+	  which takes this lock alone, never waits for a feeding thread, which may be held up for whole
+	  switch intervals by the GIL whenever other threads run Python;
+	- the lock of _wakeCondition, held only to count a wake and to start waiting for one.
+	"""
+
 	def __init__(
 		self,
 		handle: int,
@@ -98,21 +111,65 @@ class _Player:
 		self.format = fmt
 		self.callback = callback
 		self._lock = threading.Lock()
-		self._wakeCondition = threading.Condition(self._lock)
-		# Set by a wake that came while nobody waited, so the next wait returns at once.
-		self._wakePending = False
+		self._runLock = threading.Lock()
+		self._wakeCondition = threading.Condition(threading.Lock())
+		# Counts every wake, by the sink or by stop, so that one that comes while a waiter is looking
+		# at the stream, before it waits, still ends that wait.
+		self._wakeCount = 0
 		self._stream: SinkStream | None = None
 		self._state = _PlayState.stopped
+		# Set by stop for the thread that next feeds, syncs or idles to finish the job.
+		self._isStopRequested = False
 		# Each pending callback's feed id and the frame its audio ends at.
 		self._feedEnds: list[tuple[int, int]] = []
 		self._sentFrames = 0
 		self._nextFeedId = 0
 		self._isTrimmingLeadingSilence = False
 		self._volumes = [1.0] * fmt.channels
+		# Set when _volumes changed while another thread held _lock, which then gives them to the stream.
+		self._areVolumesPending = False
+
+	@contextlib.contextmanager
+	def _locked(self) -> Iterator[None]:
+		self._lock.acquire()
+		try:
+			yield
+		finally:
+			self._unlock()
+
+	def _unlock(self) -> None:
+		self._lock.release()
+		self._applyVolumesWhenFree(raising=False)
+
+	def _applyVolumesWhenFree(self, *, raising: bool) -> None:
+		"""Give the stream the volumes now, unless another thread holds _lock, which does it as it lets
+		go: each thread that lets go looks again, so a volume set at any moment is applied.
+
+		:param raising: Pass a failure on, as the thread that set the volume does; any other thread
+			only logs it, since its own call did not fail.
+		"""
+		while self._areVolumesPending and self._lock.acquire(blocking=False):
+			try:
+				self._applyVolumes()
+			except OSError:
+				if raising:
+					raise
+				log.debugWarning("Couldn't set the volume of the stream", exc_info=True)
+			finally:
+				self._lock.release()
+
+	def _applyVolumes(self) -> None:
+		self._areVolumesPending = False
+		stream = self._stream
+		if stream is None:
+			# A stream is given every volume as it opens.
+			return
+		for channel, level in enumerate(self._volumes):
+			stream.setChannelVolume(channel, level)
 
 	def _wake(self) -> None:
-		with self._lock:
-			self._wakePending = True
+		with self._wakeCondition:
+			self._wakeCount += 1
 			self._wakeCondition.notify_all()
 
 	def _open(self) -> None:
@@ -131,20 +188,29 @@ class _Player:
 			with contextlib.suppress(OSError):
 				stream.close()
 			raise
-		self._stream = stream
-		self._state = _PlayState.stopped
+		with self._runLock:
+			self._stream = stream
+			self._state = _PlayState.stopped
+
+	def _takeStream(self) -> SinkStream | None:
+		"""Take the stream away from the player, so that stop can no longer reach it, and leave the
+		player stopped."""
+		with self._runLock:
+			stream, self._stream = self._stream, None
+			self._state = _PlayState.stopped
+		return stream
 
 	def _reopenAfterLoss(self) -> None:
-		lost, self._stream = self._stream, None
 		# Stopped before reopening, so that if no stream can be opened, pause, resume and sync find
 		# nothing playing rather than a missing stream.
-		self._state = _PlayState.stopped
+		lost = self._takeStream()
 		pending, self._feedEnds = self._feedEnds, []
 		self._sentFrames = 0
 		try:
 			# The stream is gone already; failing to release it changes nothing.
-			with contextlib.suppress(OSError):
-				lost.close()
+			if lost is not None:
+				with contextlib.suppress(OSError):
+					lost.close()
 			self._open()
 		finally:
 			# A callback stranded with the old stream would never be called, and a stranded end of
@@ -177,53 +243,89 @@ class _Player:
 		if not feedIds:
 			return
 		# Released so that a callback, or another thread meanwhile, can call stop without waiting.
-		self._lock.release()
+		self._unlock()
 		try:
 			for feedId in feedIds:
+				if self._isStopRequested:
+					# Discarded, as nvwave discards them on stop.
+					break
 				self.callback(self.handle, feedId)
 		finally:
 			self._lock.acquire()
 
 	def _maybeFireCallbacks(self) -> None:
+		if self._isStopRequested:
+			return
 		playPos = self._playPos()
 		due = [feedId for feedId, end in self._feedEnds if playPos >= end]
 		if due:
 			self._feedEnds = [(feedId, end) for feedId, end in self._feedEnds if playPos < end]
 			self._call(due)
 
-	def _waitUntilNeeded(self, maxWait: float) -> None:
+	def _waitUntilNeeded(self, maxWait: float, wakesSeen: int) -> None:
+		"""Wait up to maxWait, or until the next callback is due, unless the stream was woken or stop
+		was called since the waiter read wakesSeen from _wakeCount, before it looked at the stream."""
 		if self._feedEnds:
 			untilCallback = self.format.framesToSeconds(self._feedEnds[0][1] - self._playPos())
 			maxWait = min(maxWait, untilCallback)
-		if not self._wakePending:
-			self._wakeCondition.wait(max(maxWait, _MIN_WAIT))
-		self._wakePending = False
+		self._unlock()
+		try:
+			with self._wakeCondition:
+				if self._wakeCount == wakesSeen:
+					self._wakeCondition.wait(max(maxWait, _MIN_WAIT))
+		finally:
+			self._lock.acquire()
 
 	def _completeStop(self) -> None:
-		if self._stream is not None:
-			self._stream.reset()
+		with self._runLock:
+			self._isStopRequested = False
+			stream = self._stream
+			if stream is not None:
+				stream.stop()
+				stream.reset()
+			self._state = _PlayState.stopped
 		self._nextFeedId = 0
 		self._sentFrames = 0
 		self._feedEnds = []
-		self._state = _PlayState.stopped
 
 	def _continueUnlessStopping(self) -> bool:
-		if self._state is _PlayState.stopping:
+		if self._isStopRequested:
+			self._completeStop()
+			return False
+		return True
+
+	def _startUnlessStopping(self) -> bool:
+		"""Start the stream if the player is stopped, unless stop has been called meanwhile.
+
+		Done under _runLock, so that a stop called at the same time comes wholly before the start,
+		and is seen here, or wholly after it, and silences what was started. A stop that set its flag
+		and then stopped the stream after a start would otherwise leave a stream paused that the
+		player believes is playing.
+		"""
+		with self._runLock:
+			if self._isStopRequested:
+				shouldStart = False
+			else:
+				shouldStart = self._state is _PlayState.stopped
+				if shouldStart:
+					self._stream.start()
+					self._state = _PlayState.playing
+		if self._isStopRequested:
 			self._completeStop()
 			return False
 		return True
 
 	def open(self) -> None:
-		with self._lock:
+		with self._locked():
 			self._open()
 
 	def feed(self, data: bytes | None, size: int, idOut: Any) -> None:
-		with self._lock:
+		with self._locked():
 			self._open()
 			if self._stream is None:
 				# The interpreter is exiting, and nothing more is played.
 				return
-			if self._state is _PlayState.stopping:
+			if self._isStopRequested:
 				# stop() was called after the previous feed returned.
 				self._completeStop()
 			fmt = self.format
@@ -249,12 +351,13 @@ class _Player:
 			while remainingFrames > 0:
 				if not self._continueUnlessStopping():
 					return
+				wakesSeen = self._wakeCount
 				paddingFrames = self._bufferedFrames()
 				if paddingFrames is None:
 					return
 				bufferFrames = self._stream.bufferFrames
 				if paddingFrames > bufferFrames // 2:
-					self._waitUntilNeeded(fmt.framesToSeconds(paddingFrames - bufferFrames // 2))
+					self._waitUntilNeeded(fmt.framesToSeconds(paddingFrames - bufferFrames // 2), wakesSeen)
 					if not self._continueUnlessStopping():
 						return
 					paddingFrames = self._bufferedFrames()
@@ -270,11 +373,10 @@ class _Player:
 				else:
 					# No data means silence.
 					chunk = pcm.silence(fmt, sendFrames)
-				shouldInsertSilentFrame = False
 				self._stream.write(chunk)
-				if self._state is _PlayState.stopped:
-					self._stream.start()
-					self._state = _PlayState.playing
+				if not self._startUnlessStopping():
+					return
+				shouldInsertSilentFrame = False
 				self._maybeFireCallbacks()
 				if view is not None:
 					view = view[sendBytes:]
@@ -292,64 +394,68 @@ class _Player:
 				self._feedEnds.append((feedId, self._sentFrames))
 
 	def stop(self) -> None:
-		with self._lock:
-			if self._stream is not None:
-				self._stream.stop()
-			self._state = _PlayState.stopping
-			self._wakePending = True
-			self._wakeCondition.notify_all()
+		# The flag first, under the same lock as the stream's start and stop, so that a feed starting
+		# the stream either sees it or is silenced by what follows (see _startUnlessStopping).
+		try:
+			with self._runLock:
+				self._isStopRequested = True
+				if self._stream is not None:
+					self._stream.stop()
+		finally:
+			self._wake()
 
 	def sync(self) -> None:
-		with self._lock:
+		with self._locked():
 			self._syncLocked()
 
 	def _syncLocked(self) -> None:
 		sentFrames = self._sentFrames
 		# Checked on every pass, as a callback releases the lock, and stop or the exit hook may run.
-		while self._stream is not None and self._state is _PlayState.playing:
+		while self._stream is not None and self._state is _PlayState.playing and not self._isStopRequested:
+			wakesSeen = self._wakeCount
 			playPos = self._playPos()
 			if playPos >= sentFrames:
 				# A callback right at the end of the stream.
 				self._maybeFireCallbacks()
 				return
 			self._maybeFireCallbacks()
-			self._waitUntilNeeded(self.format.framesToSeconds(sentFrames - playPos))
+			self._waitUntilNeeded(self.format.framesToSeconds(sentFrames - playPos), wakesSeen)
 
 	def idle(self) -> None:
 		self.sync()
 		self.stop()
-		with self._lock:
+		with self._locked():
 			self._completeStop()
 
 	def pause(self) -> None:
-		with self._lock:
-			if self._state is _PlayState.playing:
+		# Without the player's lock, as it silences the stream as stop does.
+		with self._runLock:
+			if self._stream is not None and self._state is _PlayState.playing:
 				self._stream.stop()
 
 	def resume(self) -> None:
-		with self._lock:
-			if self._state is _PlayState.playing:
+		with self._locked(), self._runLock:
+			if self._stream is not None and self._state is _PlayState.playing and not self._isStopRequested:
 				self._stream.start()
 
 	def setChannelVolume(self, channel: int, level: float) -> None:
-		with self._lock:
-			self._open()
-			if not 0 <= channel < self.format.channels or not 0.0 <= level <= 1.0:
-				# As IAudioStreamVolume::SetChannelVolume; nvwave relies on it for mono streams.
-				raise WindowsError(errno.EINVAL, "The parameter is incorrect", None, E_INVALIDARG)
-			self._volumes[channel] = level
-			if self._stream is not None:
-				self._stream.setChannelVolume(channel, level)
+		if not 0 <= channel < self.format.channels or not 0.0 <= level <= 1.0:
+			# As IAudioStreamVolume::SetChannelVolume; nvwave relies on it for mono streams.
+			raise WindowsError(errno.EINVAL, "The parameter is incorrect", None, E_INVALIDARG)
+		self._volumes[channel] = level
+		self._areVolumesPending = True
+		self._applyVolumesWhenFree(raising=True)
 
 	def startTrimmingLeadingSilence(self, start: bool) -> None:
-		with self._lock:
-			self._isTrimmingLeadingSilence = start
+		# Without the lock, as upstream's is a plain store: nvwave.WavePlayer.stop calls this right
+		# after stop, and must not then wait for the feeding thread.
+		self._isTrimmingLeadingSilence = start
 
 	def destroy(self) -> None:
-		with self._lock:
-			if self._stream is not None:
-				self._stream.close()
-				self._stream = None
+		with self._locked():
+			stream = self._takeStream()
+			if stream is not None:
+				stream.close()
 
 	def closeForExit(self) -> None:
 		"""Close the stream and leave any waiting feed or sync to return, without waiting for long.
@@ -362,14 +468,13 @@ class _Player:
 			# contract.
 			return
 		try:
-			stream, self._stream = self._stream, None
+			stream = self._takeStream()
 			# Stopping, so that a feed or sync now waiting returns as it does after stop().
-			self._state = _PlayState.stopping
+			self._isStopRequested = True
 			# A sync that a callback left with the lock released would otherwise wait on the next end,
 			# asking a stream that is gone how far it has played.
 			self._feedEnds = []
-			self._wakePending = True
-			self._wakeCondition.notify_all()
+			self._wake()
 			if stream is not None:
 				with contextlib.suppress(OSError):
 					stream.close()
