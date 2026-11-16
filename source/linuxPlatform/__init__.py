@@ -1,7 +1,8 @@
 """The Linux platform layer under NVDA's upstream code.
 
 Nothing in this package may be imported before linuxPlatform.bootstrap.install() has run,
-apart from bootstrap itself and the exception defined here.
+apart from bootstrap itself, what is defined here, and windowsOnly, which upstream modules import on
+every platform and which on Windows imports nothing else from this package.
 """
 
 import sys
