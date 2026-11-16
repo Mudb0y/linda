@@ -663,6 +663,8 @@ def test_launchAllowsOnlyNotedGaps(tmp_path: Path):
 def test_audioLibrariesAreKnownByName():
 	assert harness.isAudioLibrary("/nix/store/x-alsa-lib/lib/libasound.so.2")
 	assert harness.isAudioLibrary("libespeak-ng.so.1")
+	assert harness.isAudioLibrary("/nix/store/x-speechd-minimal/lib/libspeechd.so.2")
+	assert harness.isAudioLibrary("libout123.so.0")
 	assert not harness.isAudioLibrary("/nix/store/x-icu/lib/libicuuc.so.76")
 	assert harness.soundReached() == []
 

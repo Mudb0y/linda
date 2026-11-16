@@ -107,7 +107,8 @@ ALLOWED_STANDARD_ERROR = (
 )
 
 #: Libraries that can reach a sound server or a sound card, by the start of their file name with any
-#: "lib" taken off.
+#: "lib" taken off. speech-dispatcher's client reaches one through speech-dispatcher, and mpg123's
+#: out123 through the output module it loads when it opens one.
 AUDIO_LIBRARIES = (
 	"asound",
 	"pulse",
@@ -122,6 +123,8 @@ AUDIO_LIBRARIES = (
 	"sndio",
 	"espeak",
 	"gst",
+	"speechd",
+	"out123",
 )
 #: Audio libraries that a library linking them maps without anything loading them for sound, each by
 #: its exact file name, keyed by the start of the linking library's: gui.message imports wx.html2,
