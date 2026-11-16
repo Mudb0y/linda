@@ -544,8 +544,12 @@ def _absolute(path, dirFd, following: bool) -> list[str]:
 		useFd = isinstance(dirFd, int) and dirFd >= 0
 		base = os.readlink(f"/proc/self/fd/{dirFd}") if useFd else os.getcwd()
 		path = os.path.join(base, path)
-	parent, name = os.path.split(os.path.normpath(path))
-	paths = [os.path.join(os.path.realpath(parent), name)]
+	# Not normalised as text first: the kernel resolves a link before the ".." after it.
+	parent, name = os.path.split(path.rstrip(os.sep) or os.sep)
+	if name in ("", os.curdir, os.pardir):
+		paths = [os.path.realpath(path)]
+	else:
+		paths = [os.path.join(os.path.realpath(parent), name)]
 	if following and os.path.realpath(path) != paths[0]:
 		paths.append(os.path.realpath(path))
 	return paths

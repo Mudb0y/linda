@@ -672,6 +672,15 @@ def test_writtenPathsResolvesDescriptorRelativePathsAndLinks(tmp_path: Path):
 		assert rununittests.writtenPaths("os.remove", (str(tmp_path / "fileLink"), -1)) == [
 			str(tmp_path / "fileLink")
 		]
+		# ".." after a link leads out of where the link points to, not back to where the link is.
+		(real / "inner").mkdir()
+		(tmp_path / "outside").mkdir()
+		(tmp_path / "outside" / "innerLink").symlink_to(real / "inner")
+		up = str(tmp_path / "outside" / "innerLink" / os.pardir)
+		assert rununittests.writtenPaths("os.mkdir", (os.path.join(up, "new"), 0o777, -1)) == [
+			str(real / "new")
+		]
+		assert rununittests.writtenPaths("os.rmdir", (up, -1)) == [str(real)]
 	finally:
 		os.close(fd)
 
