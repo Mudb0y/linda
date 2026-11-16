@@ -362,5 +362,5 @@ tests/unit/__init__.py
   configuration directory is a temporary one, holding a copy of the test
   braille tables, so that nothing is written under tests/unit; while speech
   is initialised, the automatic synth choice offers only silence, so that it
-  never loads eSpeak, whose library links audio libraries, while the tests
-  run with no sound devices
+  never loads eSpeak, whose library links audio libraries, which
+  tests/linux/rununittests.py refuses to load

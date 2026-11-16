@@ -23,7 +23,7 @@ TOP_DIR = os.path.dirname(os.path.dirname(UNIT_DIR))
 SOURCE_DIR = os.path.join(TOP_DIR, "source")
 import sys
 
-if sys.platform == "linux":
+if sys.platform != "win32":
 	from linuxPlatform import bootstrap
 
 	bootstrap.install()
@@ -50,7 +50,7 @@ globalVars.appDir = SOURCE_DIR
 # However, config currently requires a path.
 # We use the unit test directory, since we want a clean config.
 globalVars.appArgs.configPath = UNIT_DIR
-if sys.platform == "linux":
+if sys.platform != "win32":
 	import shutil
 	import tempfile
 
@@ -101,17 +101,17 @@ import characterProcessing
 characterProcessing.initialize()
 import speech
 
-if sys.platform == "linux":
+if sys.platform != "win32":
 	import synthDriverHandler
 
-	# eSpeak comes first in Linux's automatic choice, and its library links audio libraries; nobody
-	# has ruled yet on loading it under the rig. Every synth fails to load here anyway, because the
+	# eSpeak comes first in Linux's automatic choice, and its library links audio libraries, which
+	# tests/linux/rununittests.py refuses to load. Every synth fails to load here anyway, because the
 	# speech dictionaries are never set up, so offering silence alone leaves the run with no synth
 	# just as the full list would.
 	_defaultSynths = synthDriverHandler.defaultSynthPriorityList
 	synthDriverHandler.defaultSynthPriorityList = ["silence"]
 speech.initialize()
-if sys.platform == "linux":
+if sys.platform != "win32":
 	synthDriverHandler.defaultSynthPriorityList = _defaultSynths
 
 import braille
