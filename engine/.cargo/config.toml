@@ -1,0 +1,4 @@
+# The engine's tests speak D-Bus to fake applications, and the bench to real
+# ones, so cargo test and cargo run start them inside the rig.
+[target.'cfg(target_os = "linux")']
+runner = "./run-in-rig"

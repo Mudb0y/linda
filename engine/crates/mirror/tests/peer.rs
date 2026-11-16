@@ -1,8 +1,8 @@
 //! The engine against a fake application on a private socket: one that
 //! answers some calls, never answers others, invents objects, or holds a
 //! socket without ever speaking. These speak D-Bus, so like everything else
-//! that does they run only inside the rig:
-//! rig ENGINE_TEST_BINARY --include-ignored
+//! that does they run only inside tests/linux/rig, where cargo test starts
+//! them.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -27,6 +27,19 @@ const LIMITS: WalkLimits = WalkLimits {
     max_objects: 100_000,
     max_time: Duration::from_secs(60),
 };
+
+/// Fails the test anywhere but inside the rig. The variable alone could be
+/// copied into another shell; the rig's sandbox is also the first process
+/// and has no /run/user.
+fn rig() {
+    let inside = std::env::var("BASEDREADER_RIG").as_deref() == Ok("1")
+        && std::fs::read_to_string("/proc/1/comm").is_ok_and(|c| c.trim_end() == "bwrap")
+        && !std::path::Path::new("/run/user").exists();
+    assert!(
+        inside,
+        "speaks D-Bus, so runs only inside tests/linux/rig, as cargo test does"
+    );
+}
 
 /// What the fake application does with one call: answer it, or let it go
 /// unanswered for ever.
@@ -140,8 +153,8 @@ fn mirror() -> Mirror {
 }
 
 #[test]
-#[ignore = "speaks D-Bus, so runs only inside tests/linux/rig"]
 fn a_timed_out_child_list_is_unknown_not_empty() {
+    rig();
     let answer: Answer = Box::new(|call| match (path(call).as_str(), member(call).as_str()) {
         ("/doc", "GetChildren") => children(call, &["/p1", "/p2"]),
         ("/p1", "GetChildren") => None,
@@ -173,8 +186,8 @@ fn a_timed_out_child_list_is_unknown_not_empty() {
 }
 
 #[test]
-#[ignore = "speaks D-Bus, so runs only inside tests/linux/rig"]
 fn a_walk_of_an_application_that_never_answers_changes_nothing() {
+    rig();
     let res = against(Duration::from_millis(300), Box::new(|_| None), async |c| {
         fetch::walk(c, "/doc", 16, WalkFields::ALL, None, LIMITS).await
     });
@@ -185,8 +198,8 @@ fn a_walk_of_an_application_that_never_answers_changes_nothing() {
 }
 
 #[test]
-#[ignore = "speaks D-Bus, so runs only inside tests/linux/rig"]
 fn an_error_reply_for_a_gone_object_says_so() {
+    rig();
     let answer: Answer = Box::new(|call| match member(call).as_str() {
         "GetChildren" => error(call, "org.freedesktop.DBus.Error.UnknownObject"),
         _ => error(call, "org.freedesktop.DBus.Error.Failed"),
@@ -221,8 +234,8 @@ fn inventing() -> Answer {
 }
 
 #[test]
-#[ignore = "speaks D-Bus, so runs only inside tests/linux/rig"]
 fn a_walk_of_an_endless_tree_stops_at_its_object_limit() {
+    rig();
     let limits = WalkLimits {
         max_objects: 500,
         ..LIMITS
@@ -240,8 +253,8 @@ fn a_walk_of_an_endless_tree_stops_at_its_object_limit() {
 }
 
 #[test]
-#[ignore = "speaks D-Bus, so runs only inside tests/linux/rig"]
 fn a_walk_stops_at_its_deadline() {
+    rig();
     let limits = WalkLimits {
         max_objects: usize::MAX,
         max_time: Duration::from_millis(300),
@@ -267,8 +280,8 @@ fn a_walk_stops_at_its_deadline() {
 }
 
 #[test]
-#[ignore = "speaks D-Bus, so runs only inside tests/linux/rig"]
 fn waiting_for_activation_does_not_block_the_thread() {
+    rig();
     let start = Instant::now();
     type Item<'a> = (
         (&'a str, ObjectPath<'a>),
@@ -308,8 +321,8 @@ fn waiting_for_activation_does_not_block_the_thread() {
 }
 
 #[test]
-#[ignore = "speaks D-Bus, so runs only inside tests/linux/rig"]
 fn looking_for_a_document_in_a_cyclic_tree_ends() {
+    rig();
     // The root lists a frame, and the frame lists the root.
     let answer: Answer = Box::new(|call| match (path(call).as_str(), member(call).as_str()) {
         (_, "GetRole") => reply(call, &50u32),
@@ -382,8 +395,8 @@ fn silent_listener() -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
 }
 
 #[test]
-#[ignore = "speaks D-Bus, so runs only inside tests/linux/rig"]
 fn a_server_that_never_finishes_the_handshake_is_given_up_on() {
+    rig();
     let (address, _) = silent_listener();
     let t = Instant::now();
     let r = zbus::block_on(discovery::connect_p2p(&address, me(), timeouts(300)));
@@ -397,8 +410,8 @@ fn a_server_that_never_finishes_the_handshake_is_given_up_on() {
 }
 
 #[test]
-#[ignore = "speaks D-Bus, so runs only inside tests/linux/rig"]
 fn a_server_of_another_process_is_refused_before_anything_is_sent() {
+    rig();
     let (address, sent) = silent_listener();
     let other = Peer {
         pid: me().pid + 1,
@@ -413,8 +426,8 @@ fn a_server_of_another_process_is_refused_before_anything_is_sent() {
 }
 
 #[test]
-#[ignore = "speaks D-Bus, so runs only inside tests/linux/rig"]
 fn a_tcp_address_is_refused_and_its_nonce_file_never_read() {
+    rig();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -437,8 +450,8 @@ fn a_tcp_address_is_refused_and_its_nonce_file_never_read() {
 }
 
 #[test]
-#[ignore = "speaks D-Bus, so runs only inside tests/linux/rig"]
 fn the_applications_own_server_is_connected_to() {
+    rig();
     let dir = std::env::temp_dir().join(format!("peer-ok-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let sock = dir.join("bus");

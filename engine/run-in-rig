@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Cargo's runner for the engine's tests and binaries. They speak D-Bus, and
+# anything that does runs only inside tests/linux/rig. A target directory
+# outside the checkout is made visible to the rig; the binary's profile
+# directory holds both the test binaries and the binaries they start.
+set -euo pipefail
+
+checkout=$(dirname "$(dirname "$(realpath -e -- "${BASH_SOURCE[0]}")")")
+binary=$(realpath -e -- "$1")
+binds=()
+case "$binary" in
+"$checkout"/*) ;;
+*) binds=(--bind "$(dirname "$(dirname "$binary")")") ;;
+esac
+exec "$checkout/tests/linux/rig" "${binds[@]}" "$binary" "${@:2}"
