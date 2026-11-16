@@ -3,6 +3,7 @@
 nix develop . -c tests/linux/rig python -m pytest tests/linux/test_osServices.py
 """
 
+import logging
 import os
 import stat
 import textwrap
@@ -10,32 +11,12 @@ from pathlib import Path
 
 import harness
 
-#: What nvda.pyw establishes before core.main, short of a configuration: translations installed as
-#: builtins, appDir as the working directory, and a record of every warning and error logged.
-PRELUDE = f"""
-import gettext
-import logging
+#: The steps of core.main that the tests take one at a time, on top of what nvda.pyw establishes
+#: before it, which runChild's appDir level sets up.
+PRELUDE = """
 import os
 
-gettext.NullTranslations().install(names=["pgettext", "npgettext", "ngettext"])
 import globalVars
-
-globalVars.appDir = {str(harness.SOURCE)!r}
-globalVars.appPid = os.getpid()
-os.chdir(globalVars.appDir)
-from logHandler import log
-
-logErrors = []
-warnings = []
-
-
-class Collector(logging.Handler):
-	def emit(self, record):
-		message = f"{{record.levelname}}: {{record.getMessage()}}"
-		(logErrors if record.levelno >= logging.ERROR else warnings).append(message)
-
-
-log.addHandler(Collector(level=logging.WARNING))
 
 
 def startConfig():
@@ -65,12 +46,19 @@ NO_LOCALE = {name: "" for name in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LC_MEAS
 
 
 def run(tmpPath: Path, body: str, env: dict[str, str] | None = None) -> harness.ChildResult:
-	code = PRELUDE + textwrap.dedent(body) + "\nresult = {'value': result, 'logErrors': logErrors}\n"
-	done = harness.runChild(tmpPath, code, prepare="bootstrap", env=env)
-	if done.error is None:
-		done.logErrors = done.value["logErrors"]
-		done.value = done.value["value"]
-	return done
+	"""Run body after PRELUDE, keeping every record logged at WARNING or above in logRecords."""
+	return harness.runChild(
+		tmpPath,
+		PRELUDE + textwrap.dedent(body),
+		prepare="appDir",
+		env=env,
+		recordLevel=logging.WARNING,
+	)
+
+
+def warnings(done: harness.ChildResult, about: str) -> list[str]:
+	"""The warnings the run logged whose text holds about."""
+	return [r for r in done.logRecords if r.startswith("WARNING: ") and about in r]
 
 
 def xdgEnv(tmpPath: Path) -> dict[str, str]:
@@ -492,7 +480,6 @@ def test_languagesWithoutIcuAreListedByCode(tmp_path):
 			"german": languageHandler.getLanguageDescription("de"),
 			"germanListed": languages["de"],
 			"northernKurdish": languageHandler.getLanguageDescription("kmr"),
-			"warnings": [w for w in warnings if "ICU" in w],
 		}
 		""",
 		env={
@@ -509,7 +496,7 @@ def test_languagesWithoutIcuAreListedByCode(tmp_path):
 	assert value["germanListed"] == "de"
 	# NVDA's translators' own names need no ICU.
 	assert value["northernKurdish"] == "Northern Kurdish"
-	assert len(value["warnings"]) == 1, value
+	assert len(warnings(done, "ICU")) == 1, done.logRecords
 
 
 def test_badOptionIsReportedOnStandardError(tmp_path):
@@ -716,7 +703,6 @@ def test_sayAllStartsReadingFromTheCaret(tmp_path):
 			"readers": [type(reader).__name__ for reader in started],
 			"startOffset": started[0].reader._startOffset,
 			"running": running,
-			"idleWarnings": [w for w in warnings if "idle" in w],
 		}
 		for reader in started:
 			reader.stop()
@@ -729,7 +715,7 @@ def test_sayAllStartsReadingFromTheCaret(tmp_path):
 	assert value["startOffset"] == 4
 	assert value["running"] is True
 	# Missing idle inhibition is said once in a run, not once for each say all.
-	assert len(value["idleWarnings"]) == 1, value
+	assert len(warnings(done, "idle")) == 1, done.logRecords
 
 
 def test_brailleKeyRunsItsScript(tmp_path):
@@ -780,8 +766,7 @@ def test_brailleKeyRunsItsScript(tmp_path):
 		manager.lastModifierWasInSayAll = False
 		manager.executeGesture(Key())
 		manager.executeGesture(Key())
-		idleWarnings = [w for w in warnings if "idle" in w]
-		result = {"preventsIdle": Key.shouldPreventSystemIdle, "queued": queued, "idleWarnings": len(idleWarnings)}
+		result = {"preventsIdle": Key.shouldPreventSystemIdle, "queued": queued}
 		""",
 		env=xdgEnv(tmp_path),
 	)
@@ -789,8 +774,8 @@ def test_brailleKeyRunsItsScript(tmp_path):
 	assert done.value == {
 		"preventsIdle": True,
 		"queued": ["cancelSpeech", "script_testDisplayKey"] * 2,
-		"idleWarnings": 1,
 	}
+	assert len(warnings(done, "idle")) == 1, done.logRecords
 
 
 def test_execAndPumpWaitsForItsWork(tmp_path):
@@ -893,7 +878,6 @@ def test_sessionTrackingAnnouncesLockChanges(tmp_path):
 			"announced": announced,
 			"beforeStartUpEnds": beforeStartUpEnds,
 			"whileLocked": whileLocked,
-			"warnings": len([w for w in warnings if "locked" in w]),
 			"perCallMicroseconds": perCall * 1e6,
 		}
 		""",
@@ -904,7 +888,7 @@ def test_sessionTrackingAnnouncesLockChanges(tmp_path):
 	assert value["announced"] == [True, False]
 	assert value["beforeStartUpEnds"] is False
 	assert value["whileLocked"] is True
-	assert value["warnings"] == 1
+	assert len(warnings(done, "locked")) == 1, done.logRecords
 	# Asked on every object construction, so it must stay far below a millisecond.
 	assert value["perCallMicroseconds"] < 200, value
 
