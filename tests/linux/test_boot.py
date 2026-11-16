@@ -1,8 +1,9 @@
 """The launcher as a real process: NVDA starts, speaks through the transcript synth, and exits.
 
-Each test starts source/basedreader.py with a configuration from fixtures/bootConfig and the boot
-probe plugin from globalPlugins/, which says one sentence once NVDA has started. Run under the rig,
-which gives every launch its display and its runtime directory, where the single-instance lock is:
+Each test starts source/basedreader.py with a configuration from fixtures/bootConfig, the transcript
+synth, and the boot probe plugin from fixtures/globalPlugins, which says one sentence once NVDA has
+started. Run under the rig, which gives every launch its display and its runtime directory, where the
+single-instance lock is:
 
 	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_boot.py
 """
@@ -27,7 +28,7 @@ import pytest
 HERE = Path(__file__).resolve().parent
 LAUNCHER = harness.SOURCE / "basedreader.py"
 CONFIG_FIXTURE = HERE / "fixtures" / "bootConfig" / "nvda.ini"
-#: What globalPlugins/bootProbe.py says.
+#: What fixtures/globalPlugins/bootProbe.py says.
 SENTENCE = "the boot probe has started"
 #: Seconds from starting the process to the sentence; a start under the rig takes about five.
 STARTUP_BOUND = 60.0
@@ -125,6 +126,11 @@ def launcher(tmp_path: Path) -> Iterator:
 	"""Starts launches, and makes sure none outlives the test or wrote into the repository."""
 	launches: list[Launch] = []
 	before = harness.treeState()
+	# The test hooks take one directory holding both packages' directories.
+	hooks = tmp_path / "hooks"
+	hooks.mkdir()
+	(hooks / "synthDrivers").symlink_to(HERE / "synthDrivers")
+	(hooks / "globalPlugins").symlink_to(HERE / "fixtures" / "globalPlugins")
 
 	def start(
 		name: str,
@@ -132,8 +138,8 @@ def launcher(tmp_path: Path) -> Iterator:
 		*args: str,
 		configDir: Path | None = None,
 	) -> Launch:
-		directory = tmp_path / name
-		directory.mkdir()
+		directory = tmp_path / "launches" / name
+		directory.mkdir(parents=True)
 		if configDir is None:
 			configDir = directory / "config"
 		if probe and not configDir.exists():
@@ -141,7 +147,7 @@ def launcher(tmp_path: Path) -> Iterator:
 			shutil.copy(CONFIG_FIXTURE, configDir / "nvda.ini")
 		env = {
 			**os.environ,
-			"BASEDREADER_TEST_HOOKS_DIR": str(HERE),
+			"BASEDREADER_TEST_HOOKS_DIR": str(hooks),
 			"TRANSCRIPT_SYNTH_FILE": str(directory / "transcript.jsonl"),
 			"BASEDREADER_NO_LINUX_IMPLEMENTATION_FILE": str(directory / "noLinuxImplementation.jsonl"),
 			"TRANSCRIPT_SYNTH_MODE": "immediate",
