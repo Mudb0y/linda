@@ -5,15 +5,23 @@ the start of api.processPendingEvents, in the middle of a script. So it only app
 a queue and asks for a core pump. pumpAll, which the core pump and api.processPendingEvents call,
 filters, coalesces, makes the NVDAObjects and queues NVDA's events, as IAccessibleHandler.pumpAll does
 for win events.
+
+The foreground and the focus come from AT-SPI alone. Toolkits bounce activation between the window
+being left and the one being entered for a few milliseconds around every window switch, so after any
+window activation or deactivation the focus is decided only once window events have settled, and only
+for an application that owns the window activated last.
 """
 
 import collections
+import os
 import threading
+import time
 import weakref
 
 from logHandler import log
 
-from .client import ROOT_PATH, Client, Node, NodeGone
+from . import client as _clientModule
+from .client import ROOT_PATH, AppHung, Client, Node, NodeGone
 
 #: The events registered with the registry. Registration filters nothing in at-spi2-core 2.62, so the
 #: callback filters again.
@@ -30,7 +38,10 @@ EVENT_TYPES = [
 	"object:active-descendant-changed",
 	"object:announcement",
 	"window:activate",
+	"window:deactivate",
+	"window:create",
 ]
+WINDOW_ACTIVATION_EVENTS = frozenset({"window:activate", "window:deactivate"})
 
 #: AT-SPI state changes NVDA presents as stateChange, by the state's name.
 STATE_CHANGE_STATES = frozenset(
@@ -57,9 +68,22 @@ STATE_CHANGE_STATES = frozenset(
 MAX_EVENTS_PER_APPLICATION = 10
 #: Raw events kept between pumps at most; a flood beyond this loses its oldest events.
 MAX_QUEUED = 5000
+#: Seconds without a window event, and at most in all, that focus waits for after one.
+SETTLE_QUIET_SECONDS = 0.03
+SETTLE_MAX_SECONDS = 0.15
+#: GTK 4 announces objects of a new window before they can be read; one seen this recently that cannot
+#: be read is tried again once, after RETRY_DELAY_SECONDS.
+NEW_OBJECT_SECONDS = 1.0
+RETRY_DELAY_SECONDS = 0.02
+#: How long after the foreground deactivated, with no window activated since, to look for an active
+#: window again.
+RESCAN_DELAYS_SECONDS = (0.25, 1.0)
+#: Roles whose "selected" state stands for focus in GTK, whose menu items and tabs announce focus with
+#: no focused state.
+SELECTED_AS_FOCUS_ROLES = frozenset({"menu", "menu item", "check menu item", "radio menu item", "page tab"})
+#: Containers whose focus belongs to the item within them that has it.
+_ITEM_CONTAINERS = frozenset({"list", "list box", "page tab list", "tree", "tree table", "table"})
 
-_client: Client | None = None
-_desktopNode: Node | None = None
 _queue: collections.deque = collections.deque(maxlen=MAX_QUEUED)
 _queueLock = threading.Lock()
 #: Every NVDAObject made for an accessible and still referenced, by node key, so that an event reaches
@@ -68,13 +92,26 @@ liveObjects: "weakref.WeakValueDictionary[tuple[str, str], object]" = weakref.We
 #: The last active descendant each container reported, by the container's key.
 _activeDescendants: dict[tuple[str, str], Node] = {}
 _listening = False
+_exiting = False
+_desktopNode: Node | None = None
+#: The top-level activated last, and whether it has deactivated since.
+_foreground: Node | None = None
+_foregroundActive = False
+#: When the latest window activation or deactivation arrived, and the first of those still settling.
+_lastWindowEventAt = 0.0
+_settleStartedAt: float | None = None
+#: When each accessible was first named by an event, for the GTK 4 retry.
+_firstSeen: dict[tuple[str, str], float] = {}
+#: Focus events waiting to be tried again, with when.
+_retries: list[tuple[float, tuple]] = []
+#: When to look again for an active window, after the foreground deactivated and none took its place.
+_rescans: list[float] = []
+#: Roles of event sources, read once each, to know a password field before keeping what it sent.
+_roles: dict[tuple[str, str], str] = {}
 
 
 def client() -> Client:
-	global _client
-	if _client is None:
-		_client = Client()
-	return _client
+	return _clientModule.client
 
 
 def desktopNode() -> Node:
@@ -156,12 +193,15 @@ def inTreeOrder(nodes: list[Node]) -> list[Node]:
 		return list(nodes)
 
 
-# Finding the focus, the foreground and what is under a point, which AT-SPI has no call for.
+# The foreground and the focus, which AT-SPI has no call for.
 
 
-def _activeWindow() -> Node | None:
+def _scanForActiveWindow() -> Node | None:
+	"""The top-level that says it is active, asking every application that answers."""
 	c = client()
 	for app in applications():
+		if c.isHung(app.busName):
+			continue
 		try:
 			for window in c.children(app):
 				if "active" in c.states(window):
@@ -169,6 +209,47 @@ def _activeWindow() -> Node | None:
 		except NodeGone:
 			continue
 	return None
+
+
+def _setForeground(window: Node | None, active: bool = True) -> None:
+	global _foreground, _foregroundActive
+	_foreground = window
+	_foregroundActive = active and window is not None
+
+
+def activeWindow() -> Node | None:
+	"""The top-level activated last, which is NVDA's foreground; found by asking only while none is known."""
+	if _foreground is None:
+		window = _scanForActiveWindow()
+		if window is not None:
+			_setForeground(window)
+		return window
+	return _foreground
+
+
+def _topLevelOf(node: Node) -> Node | None:
+	c = client()
+	current = node
+	for _ in range(64):
+		parent = c.parent(current)
+		if parent is None:
+			return None
+		if parent.path == ROOT_PATH:
+			return current
+		current = parent
+	return None
+
+
+def _ownsActiveWindow(node: Node) -> bool:
+	"""Whether node's application owns the window activated last and not deactivated since. Where the
+	tracking says no, the state of node's own top-level decides, and the tracking follows it."""
+	if _foreground is not None and _foregroundActive and _foreground.busName == node.busName:
+		return True
+	top = _topLevelOf(node)
+	if top is None or "active" not in client().states(top):
+		return False
+	_setForeground(top)
+	return True
 
 
 def _focusIn(window: Node) -> Node | None:
@@ -179,24 +260,26 @@ def _focusIn(window: Node) -> Node | None:
 		focused = c.firstMatchWithState(window, "focused")
 	except NodeGone:
 		return None
-	return _activeDescendantOf(focused) if focused else None
+	return activeDescendant(focused) or focused if focused else None
 
 
-def _activeDescendantOf(node: Node) -> Node:
-	"""For a container that manages its descendants, the descendant that has the focus within it."""
-	child = _activeDescendants.get(node.key)
+def activeDescendant(container: Node) -> Node | None:
+	"""For a container that manages its descendants, the descendant last reported to have the focus
+	within it, while it still has it."""
+	child = _activeDescendants.get(container.key)
 	if child is None:
-		return node
+		return None
 	try:
 		if "focused" in client().states(child):
 			return child
 	except NodeGone:
 		pass
-	return node
+	return None
 
 
-def nodeForRelation(relation) -> Node | None:
-	window = _activeWindow()
+def nodeForRelation(relation: str | tuple[int, int]) -> Node | None:
+	"""The node for an NVDAObject made for a relation: "focus", "foreground", or a point (x, y)."""
+	window = activeWindow()
 	if relation == "foreground":
 		return window
 	if relation == "focus":
@@ -205,7 +288,11 @@ def nodeForRelation(relation) -> Node | None:
 		x, y = relation
 		c = client()
 		windows = ([window] if window else []) + [
-			w for app in applications() for w in _safeChildren(app) if w != window
+			w
+			for app in applications()
+			if not c.isHung(app.busName)
+			for w in _safeChildren(app)
+			if w != window
 		]
 		for top in windows:
 			try:
@@ -239,43 +326,105 @@ def _safeChildren(node: Node) -> list[Node]:
 # Event intake.
 
 
+def _isPasswordText(node: Node) -> bool:
+	role = _roles.get(node.key)
+	if role is None:
+		try:
+			role = client().role(node)
+		except NodeGone:
+			# Unknown, so treated as the one whose text must not be kept.
+			return True
+		if len(_roles) > MAX_QUEUED:
+			_roles.clear()
+		_roles[node.key] = role
+	return role == "password text"
+
+
 def _onEvent(eventType: str, source: Node | None, detail1: int, detail2: int, anyData) -> None:
 	# Runs inside wx.Yield in the middle of whatever NVDA was doing: append and ask for a pump, nothing
 	# more.
-	if source is None:
+	if source is None or _exiting:
 		return
-	if eventType.startswith("object:state-changed:"):
-		state = eventType[len("object:state-changed:") :]
-		if state == "defunct":
-			if detail1:
-				liveObjects.pop(source.key, None)
-			return
-		if state not in STATE_CHANGE_STATES and state not in ("focused", "showing", "active"):
-			return
-	with _queueLock:
-		_queue.append((eventType, source, detail1, detail2, anyData))
 	import core
 
-	core.requestPump(immediate=eventType in ("object:state-changed:focused", "window:activate"))
+	if core._hasShutdownBeenTriggered:
+		return
+	_clientModule.heardFrom(source.busName)
+	now = time.monotonic()
+	if eventType == "object:state-changed:active":
+		# GTK can give a window back the focus, when a dialog over it closes, with only this.
+		eventType = "window:activate" if detail1 else "window:deactivate"
+	if eventType.startswith("object:state-changed:"):
+		state = eventType[len("object:state-changed:") :]
+		# libatspi sends defunct itself whenever it frees its own proxy for a live object.
+		if state not in STATE_CHANGE_STATES and state not in ("focused", "showing"):
+			return
+	elif eventType.startswith("object:text-changed:"):
+		# Qt sends what is typed into a password field in clear.
+		if _isPasswordText(source):
+			anyData = None
+	elif eventType == "object:property-change:accessible-role":
+		_roles.pop(source.key, None)
+	elif eventType in WINDOW_ACTIVATION_EVENTS:
+		global _lastWindowEventAt, _settleStartedAt
+		_lastWindowEventAt = now
+		if _settleStartedAt is None:
+			_settleStartedAt = now
+	_firstSeen.setdefault(source.key, now)
+	with _queueLock:
+		_queue.append((eventType, source, detail1, detail2, anyData))
+	core.requestPump(
+		immediate=eventType in ("object:state-changed:focused", "object:active-descendant-changed")
+		or eventType in WINDOW_ACTIVATION_EVENTS,
+	)
 
 
 def initialize() -> None:
-	global _listening
-	import os
-
-	if os.environ.get("BASEDREADER_PROTO_NOLISTEN"):
-		return
+	global _listening, _exiting
+	_exiting = False
 	client().listen(EVENT_TYPES, _onEvent)
 	_listening = True
 
 
 def terminate() -> None:
-	global _listening
-	if _listening and _client is not None:
-		_client.stopListening(EVENT_TYPES)
+	global _listening, _desktopNode, _settleStartedAt
+	if _listening:
+		client().stopListening(EVENT_TYPES)
 	_listening = False
+	with _queueLock:
+		_queue.clear()
 	liveObjects.clear()
 	_activeDescendants.clear()
+	_firstSeen.clear()
+	_retries.clear()
+	_rescans.clear()
+	_processIDs.clear()
+	_roles.clear()
+	_setForeground(None)
+	_settleStartedAt = None
+	_desktopNode = None
+	_clientModule.forgetApplications()
+
+
+def _beginExit() -> None:
+	"""Stop being an event client before _doShutdown destroys NVDA's windows, keep from reading them while
+	they are torn down, and end the process if exit hangs all the same."""
+	global _exiting
+	if _exiting:
+		return
+	_exiting = True
+	from linuxPlatform import exitGuard
+
+	exitGuard.arm()
+	c = client()
+	ownProcess = os.getpid()
+	for app in applications():
+		try:
+			if c.processID(app) == ownProcess:
+				_clientModule.refuse(app.busName)
+		except NodeGone:
+			continue
+	terminate()
 
 
 # Turning raw events into NVDA's.
@@ -294,50 +443,85 @@ def _isBlur(event) -> bool:
 	return event[0] == "object:state-changed:focused" and not event[2]
 
 
-def _processFocus(event) -> bool:
+def _trackWindow(event) -> None:
+	eventType, source = event[0], event[1]
+	log.debug(f"AT-SPI: {eventType} on {source}")
+	if eventType == "window:activate":
+		_setForeground(source)
+		_rescans.clear()
+	elif source == _foreground:
+		_setForeground(source, active=False)
+
+
+def _focusCandidate(event) -> Node | None:
+	"""The node a focus event would give the focus to, if it still holds."""
+	eventType, source, _detail1, _detail2, anyData = event
+	c = client()
+	if eventType == "window:activate":
+		return _focusIn(source) or source
+	if eventType == "object:active-descendant-changed":
+		if not isinstance(anyData, Node) or "focused" not in c.states(source):
+			return None
+		return anyData
+	states = c.states(source)
+	if "defunct" in states:
+		return None
+	if "focused" not in states:
+		# GTK 3 menu items and notebook tabs announce focus but carry only "selected"; a later loss of
+		# focus in the same batch has already ruled stale events out.
+		if "selected" not in states or c.role(source) not in SELECTED_AS_FOCUS_ROLES:
+			return None
+		if c.toolkit(source).lower() != "gtk":
+			return None
+	role = c.role(source)
+	if role == "menu" and _hasSelectedChild(source):
+		# GTK 3 focuses a menu item again as its submenu opens on a child that is already highlighted;
+		# the child's own focus event follows.
+		return None
+	if "manages-descendants" in states or role in _ITEM_CONTAINERS:
+		node = activeDescendant(source)
+		if node is None:
+			# Qt focuses a list or tab bar while one of its items carries the focused state, as Win32
+			# lists fire focus on child 0; IAccessibleHandler asks accFocus there.
+			node = _focusedItemIn(source) or source
+		return node
+	return source
+
+
+def _processFocus(event, mayRetry: bool = True) -> bool:
 	"""Queue gainFocus for a focus event if it still holds; True if it did, or was already the focus."""
 	import eventHandler
 
-	eventType, source, _detail1, _detail2, anyData = event
-	c = client()
+	source = event[1]
 	try:
-		if eventType == "window:activate":
-			node = _focusIn(source) or source
-		elif eventType == "object:active-descendant-changed":
-			if not isinstance(anyData, Node) or "focused" not in c.states(source):
-				return False
-			node = anyData
-		else:
-			states = c.states(source)
-			# GTK 3 menu items and notebook tabs announce focus but carry only "selected" in their
-			# state set; a later loss of focus in the same batch has already ruled stale events out.
-			if "defunct" in states or not ({"focused", "selected"} & states):
-				return False
-			if c.role(source) == "menu" and _hasSelectedChild(source):
-				# GTK 3 focuses a menu item again as its submenu opens on a child that is already
-				# highlighted; the child's own focus event follows.
-				return False
-			node = source
-			if "manages-descendants" in states or c.role(source) in _ITEM_CONTAINERS:
-				node = _activeDescendantOf(source)
-				if node == source:
-					# Qt focuses a list or tab bar while one of its items carries the focused state, as
-					# Win32 lists fire focus on child 0; IAccessibleHandler asks accFocus there.
-					node = _focusedItemIn(source) or source
-	except NodeGone:
+		if not _ownsActiveWindow(source):
+			log.debug(f"AT-SPI focus: {event[0]} on {source} dropped; its application is not active")
+			return False
+		node = _focusCandidate(event)
+	except AppHung:
 		return False
+	except NodeGone:
+		seen = _firstSeen.get(source.key)
+		if mayRetry and seen is not None and time.monotonic() - seen < NEW_OBJECT_SECONDS:
+			_retries.append((time.monotonic() + RETRY_DELAY_SECONDS, event))
+		log.debug(f"AT-SPI focus: {event[0]} on {source} could not be read")
+		return False
+	if node is None:
+		log.debug(f"AT-SPI focus: {event[0]} on {source} no longer holds")
+		return False
+	# Toolkits announce one focus several times, and a bounce can announce it again; NVDA on Windows
+	# drops a repeat of the last queued focus in the same layer.
 	last = eventHandler.lastQueuedFocusObject
 	if getattr(last, "node", None) == node:
 		return True
-	obj = eventObject(node)
+	try:
+		obj = eventObject(node)
+	except NodeGone:
+		return False
 	if obj is None:
 		return False
 	eventHandler.queueEvent("gainFocus", obj)
 	return True
-
-
-#: Containers whose focus belongs to the item within them that has it.
-_ITEM_CONTAINERS = frozenset({"list", "list box", "page tab list", "tree", "tree table", "table"})
 
 
 def _focusedItemIn(container: Node) -> Node | None:
@@ -357,38 +541,40 @@ def _hasSelectedChild(node: Node) -> bool:
 	return False
 
 
-def _nvdaEvent(event) -> tuple[str, Node] | None:
+def _nvdaEvents(event) -> list[str]:
+	"""The NVDA events a raw event becomes, all for its source."""
 	eventType, source, detail1, _detail2, _anyData = event
 	if eventType.startswith("object:state-changed:"):
 		state = eventType[len("object:state-changed:") :]
 		if state == "showing":
 			if not detail1:
-				return None
+				return []
 			role = client().role(source)
 			if role in ("alert", "notification", "info bar"):
-				return ("alert", source)
+				return ["alert"]
 			if role == "tool tip":
-				return ("show", source)
-			return None
-		if state == "active":
-			return None
-		return ("stateChange", source)
+				return ["show"]
+			return []
+		return ["stateChange"]
+	if eventType == "window:create":
+		# A notification is a top-level alert that never takes the focus.
+		return ["alert"] if client().role(source) == "alert" else []
 	if eventType == "object:property-change:accessible-name":
 		# A GTK 3 combo box is named by its choice, which NVDA reports as its value.
 		if client().role(source) == "combo box":
-			return ("valueChange", source)
-		return ("nameChange", source)
+			return ["valueChange"]
+		return ["nameChange"]
 	if eventType == "object:property-change:accessible-description":
-		return ("descriptionChange", source)
+		return ["descriptionChange"]
 	if eventType in ("object:property-change:accessible-value", "object:value-changed"):
-		return ("valueChange", source)
+		return ["valueChange"]
 	if eventType in ("object:text-caret-moved", "object:text-selection-changed"):
-		return ("caret", source)
+		return ["caret"]
 	if eventType.startswith("object:text-changed:insert"):
-		return ("textInsert", source)
+		return ["textInsert", "textChange"]
 	if eventType.startswith("object:text-changed:delete"):
-		return ("textRemove", source)
-	return None
+		return ["textRemove", "textChange"]
+	return []
 
 
 def _shouldAccept(nvdaEvent: str, node: Node) -> bool:
@@ -407,6 +593,69 @@ def _shouldAccept(nvdaEvent: str, node: Node) -> bool:
 	for obj in (api.getFocusObject(), api.getForegroundObject()):
 		if getattr(obj, "node", None) is not None and obj.node.busName == node.busName:
 			return True
+	return nvdaEvent in _backgroundEventsOf(node)
+
+
+#: Process IDs by bus name; one AT-SPI connection is always one process.
+_processIDs: dict[str, int] = {}
+
+
+def _backgroundEventsOf(node: Node) -> frozenset[str]:
+	"""The events an application's app module asks for while it is in the background, as marco's does
+	for the window switcher it shows but never activates."""
+	import appModuleHandler
+
+	processID = _processIDs.get(node.busName)
+	if processID is None:
+		try:
+			processID = client().processID(node)
+		except NodeGone:
+			return frozenset()
+		_processIDs[node.busName] = processID
+	appModule = appModuleHandler.getAppModuleFromProcessID(processID)
+	return getattr(appModule, "backgroundEvents", frozenset())
+
+
+def _reportTextChange(obj, event) -> None:
+	eventType, _source, detail1, detail2, anyData = event
+	try:
+		from . import typedChars
+	except ImportError:
+		return
+	kind = "insert" if eventType.startswith("object:text-changed:insert") else "delete"
+	typedChars.handleTextChange(obj, kind, detail1, detail2, anyData if isinstance(anyData, str) else None)
+
+
+def _coalesced(events: list) -> list:
+	"""The newest of each (event, object) only, in the position of the newest, as the win event limiter
+	does; focus, window and text change events are all kept."""
+	seen: set = set()
+	kept = []
+	for event in reversed(events):
+		eventType = event[0]
+		if (
+			_isFocusEvent(event)
+			or eventType in WINDOW_ACTIVATION_EVENTS
+			or eventType.startswith("object:text-changed:")
+		):
+			kept.append(event)
+			continue
+		key = (eventType, event[1].key, event[2] if eventType == "object:state-changed:focused" else None)
+		if key in seen:
+			continue
+		seen.add(key)
+		kept.append(event)
+	kept.reverse()
+	return kept
+
+
+def _isSettling(now: float) -> bool:
+	global _settleStartedAt
+	if _settleStartedAt is None:
+		return False
+	if now - _lastWindowEventAt < SETTLE_QUIET_SECONDS and now - _settleStartedAt < SETTLE_MAX_SECONDS:
+		return True
+	_settleStartedAt = None
 	return False
 
 
@@ -414,33 +663,44 @@ def pumpAll() -> None:
 	import core
 	import eventHandler
 
+	if core._hasShutdownBeenTriggered:
+		_beginExit()
+		return
+	if _exiting:
+		return
+	now = time.monotonic()
+	if _isSettling(now):
+		# Window events are still arriving; everything waits, so that what comes after them is read in
+		# order once they stop.
+		core.requestPump()
+		return
+	due = [event for at, event in _retries if at <= now]
+	_retries[:] = [(at, event) for at, event in _retries if at > now]
+	if _rescans and _rescans[0] <= now:
+		del _rescans[0]
+		if not _foregroundActive and (window := _scanForActiveWindow()) is not None:
+			_rescans.clear()
+			_setForeground(window)
+			due.append(("window:activate", window, 0, 0, None))
 	with _queueLock:
 		events = list(_queue)
 		_queue.clear()
-	if core._hasShutdownBeenTriggered:
-		# Stop being an event client before _doShutdown destroys NVDA's windows.
-		terminate()
+	if _retries or _rescans:
+		core.requestPump()
+	if not events and not due:
 		return
-	if not events:
-		# Once exit has begun NVDA destroys its own windows inside nested loops; reading their accessibles
-		# then reaches widgets GTK is tearing down, and NVDA hung at exit with the welcome dialog open.
-		return
+	for event in due:
+		_processFocus(event, mayRetry=False)
+	if len(_firstSeen) > MAX_QUEUED:
+		for key in [k for k, at in _firstSeen.items() if now - at >= NEW_OBJECT_SECONDS]:
+			del _firstSeen[key]
 	# Active descendants are remembered whatever else happens to the events.
 	for eventType, source, _d1, _d2, anyData in events:
 		if eventType == "object:active-descendant-changed" and isinstance(anyData, Node):
 			_activeDescendants[source.key] = anyData
 		elif eventType == "object:property-change:accessible-role":
 			liveObjects.pop(source.key, None)
-	# Newest of each (event, object) only, in the position of the newest, as the win event limiter does.
-	seen: set = set()
-	kept = []
-	for event in reversed(events):
-		key = (event[0], event[1].key, event[2] if event[0] == "object:state-changed:focused" else None)
-		if key in seen and not _isFocusEvent(event):
-			continue
-		seen.add(key)
-		kept.append(event)
-	kept.reverse()
+	kept = _coalesced(events)
 	# A focus event followed in the same batch by that object's loss of focus is stale.
 	blurredAfter: set[int] = set()
 	lostFocus: set = set()
@@ -450,8 +710,12 @@ def pumpAll() -> None:
 			lostFocus.add(event[1].key)
 		elif event[0] == "object:state-changed:focused" and event[1].key in lostFocus:
 			blurredAfter.add(index)
+	# After a window switch only the newest focus that holds counts, judged once every window event of
+	# the batch is known.
+	windowsChanged = any(e[0] in WINDOW_ACTIVATION_EVENTS for e in kept)
 	focusEvents: list = []
 	perApplication: collections.Counter = collections.Counter()
+	alerted: set[tuple[str, str]] = set()
 	focus = eventHandler.lastQueuedFocusObject
 	focusKey = getattr(getattr(focus, "node", None), "key", None)
 
@@ -462,25 +726,29 @@ def pumpAll() -> None:
 		focusEvents.clear()
 
 	for index, event in enumerate(kept):
+		eventType = event[0]
+		if eventType in WINDOW_ACTIVATION_EVENTS:
+			_trackWindow(event)
 		if _isBlur(event):
 			continue
 		if _isFocusEvent(event):
 			if index not in blurredAfter:
 				focusEvents.append(event)
 			continue
-		flushFocus()
+		if not windowsChanged:
+			flushFocus()
 		try:
-			mapped = _nvdaEvent(event)
+			nvdaEvents = _nvdaEvents(event)
 		except NodeGone:
 			continue
-		if mapped is None:
+		if not nvdaEvents:
 			continue
-		nvdaEvent, node = mapped
+		node = event[1]
 		if node.key != focusKey:
 			perApplication[node.busName] += 1
 			if perApplication[node.busName] > MAX_EVENTS_PER_APPLICATION:
 				continue
-		if not _shouldAccept(nvdaEvent, node):
+		if not _shouldAccept(nvdaEvents[0], node):
 			continue
 		try:
 			obj = eventObject(node)
@@ -488,6 +756,25 @@ def pumpAll() -> None:
 			continue
 		if obj is None:
 			continue
-		eventHandler.queueEvent(nvdaEvent, obj)
+		if nvdaEvents == ["alert"]:
+			# A notification is created and shown at once; it is announced once.
+			if node.key in alerted:
+				continue
+			alerted.add(node.key)
+		for nvdaEvent in nvdaEvents:
+			eventHandler.queueEvent(nvdaEvent, obj)
+		if eventType.startswith("object:text-changed:"):
+			_reportTextChange(obj, event)
+	if windowsChanged and not _foregroundActive:
+		# A window deactivated and none activated after it: marco can give the focus back to a window
+		# without that window saying so, as when a dialog closes.
+		window = _scanForActiveWindow()
+		if window is not None:
+			_setForeground(window)
+			focusEvents.insert(0, ("window:activate", window, 0, 0, None))
+		else:
+			# Nor does it always say so at once.
+			_rescans[:] = [now + delay for delay in RESCAN_DELAYS_SECONDS]
+			core.requestPump()
 	flushFocus()
 	log.debug(f"AT-SPI pump: {len(events)} raw events, {len(kept)} after coalescing")
