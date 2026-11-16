@@ -462,6 +462,11 @@ def _startNewInstance(newNVDA: NewNVDAInstance):
 	from winUser import SW_SHOWNORMAL
 
 	log.debug(f"Starting new NVDA instance: {newNVDA}")
+	if sys.platform != "win32":
+		from linuxPlatform.singleInstance import startNewInstance
+
+		startNewInstance(newNVDA.filePath, newNVDA.parameters, newNVDA.directory)
+		return
 	shellapi.ShellExecute(
 		hwnd=None,
 		operation=None,

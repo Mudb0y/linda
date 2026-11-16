@@ -6,6 +6,8 @@ XDG_RUNTIME_DIR does all of that: the running copy holds an flock on it for as l
 lives and records its process ID in it, and a new copy asks that process to quit with SIGTERM. The
 kernel drops the lock only when the process is gone, so the lock is held until the very last thing
 the old copy does, as the mutex is on Windows.
+
+NVDA also starts a new copy of itself to restart, and that copy takes over the same way.
 """
 
 import errno
@@ -14,6 +16,7 @@ import os
 import re
 import select
 import signal
+import subprocess
 import tempfile
 import time
 
@@ -89,6 +92,11 @@ class InstanceLock:
 		os.pwrite(self._fd, f"{os.getpid()}\n".encode(), 0)
 		return True
 
+	def close(self) -> None:
+		"""Close the file, which gives up the lock if this process holds it."""
+		os.close(self._fd)
+		self.isHeld = False
+
 	def holder(self) -> int | None:
 		"""The process ID recorded by the copy holding the lock, if it has recorded one yet."""
 		data = os.pread(self._fd, 32, 0)
@@ -152,3 +160,63 @@ def terminateRunning(lock: InstanceLock) -> None:
 			raise OSError(f"process {processID} did not exit after being killed")
 	finally:
 		os.close(pidfd)
+
+
+def splitWindowsCommandLine(commandLine: str) -> list[str]:
+	"""Split a command line as Windows' C runtime does, which undoes subprocess.list2cmdline.
+
+	shlex.split does not: it treats every backslash as an escape, and Windows quoting escapes only
+	the backslashes that come before a double quote.
+	"""
+	arguments: list[str] = []
+	current: list[str] = []
+	isInArgument = False
+	isQuoted = False
+	backslashes = 0
+	for char in commandLine:
+		if char == "\\":
+			backslashes += 1
+			continue
+		if char == '"':
+			current.append("\\" * (backslashes // 2))
+			if backslashes % 2:
+				current.append('"')
+			else:
+				isQuoted = not isQuoted
+			backslashes = 0
+			isInArgument = True
+			continue
+		if backslashes:
+			current.append("\\" * backslashes)
+			backslashes = 0
+			isInArgument = True
+		if char in " \t" and not isQuoted:
+			if isInArgument:
+				arguments.append("".join(current))
+				current = []
+				isInArgument = False
+			continue
+		current.append(char)
+		isInArgument = True
+	if backslashes:
+		current.append("\\" * backslashes)
+		isInArgument = True
+	if isInArgument:
+		arguments.append("".join(current))
+	return arguments
+
+
+def startNewInstance(filePath: str, parameters: str | None, directory: str | None) -> None:
+	"""Start the copy that replaces this one, from core's description of it.
+
+	core quotes the parameters for Windows' ShellExecute. The new copy takes over from this one as
+	from any copy already running, while this one is still shutting down: it asks this one to quit,
+	which it already is, and starts once it is gone. It stays in this copy's session and process
+	group, so that whatever would have stopped this copy, such as its terminal hanging up, stops the
+	new one too.
+	"""
+	subprocess.Popen(
+		[filePath, *splitWindowsCommandLine(parameters or "")],
+		cwd=directory,
+		stdin=subprocess.DEVNULL,
+	)

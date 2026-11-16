@@ -120,7 +120,9 @@ source/core.py
   foreground or under a point, until the AT-SPI backend provides the real
   desktop; and wx.App leaves SIGINT alone, which wxPython otherwise puts
   back to its default action over the launcher's GLib handler, so that
-  Ctrl+C would end NVDA without shutting it down
+  Ctrl+C would end NVDA without shutting it down. A restart starts the new
+  copy through linuxPlatform.singleInstance, as a child process, instead of
+  through ShellExecute
 source/documentNavigation/paragraphHelper.py
   import safety when running: after moving the caret, both paragraph moves
   import the UI Automation text class only on Windows; Linux has no UI
