@@ -34,7 +34,7 @@ def stateDirectory() -> str:
 
 	The log records every key typed at the input log levels, so the directory is the user's alone.
 	"""
-	path = os.path.join(xdg._baseDir("XDG_STATE_HOME", os.path.join(".local", "state")), xdg.appDirName)
+	path = xdg.userStateDir()
 	try:
 		os.makedirs(path, mode=0o700, exist_ok=True)
 		info = os.stat(path)
