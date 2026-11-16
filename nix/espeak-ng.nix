@@ -41,9 +41,11 @@ let
     '';
   };
 in
-stdenv.mkDerivation {
+stdenv.mkDerivation (finalAttrs: {
   pname = "espeak-ng-nvda";
-  version = "1.53.0-unstable-b97de3cf";
+  # Named after the commit it builds, which tests/linux/test_devShell.py
+  # holds to upstream's pin through the library's path.
+  version = "1.53.0-unstable-${lib.substring 0 8 finalAttrs.src.rev}";
   src = fetchFromGitHub {
     owner = "nvaccess";
     repo = "espeak-ng";
@@ -86,4 +88,4 @@ stdenv.mkDerivation {
     license = lib.licenses.gpl3Plus;
     platforms = lib.platforms.linux;
   };
-}
+})

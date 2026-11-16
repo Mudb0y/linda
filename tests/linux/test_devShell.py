@@ -1,0 +1,272 @@
+"""The dev shell: the variables it exports, the programs it leaves off PATH, and the native pieces it
+names.
+
+Linux code loads its native libraries and data by the absolute paths in BASEDREADER_ variables, so a
+variable that names nothing, or the wrong build, is a fault the code itself would report only as a
+feature missing. PipeWire's daemon and session manager are named for the test fixture rather than put
+on PATH, where a pw-play or wpctl run from the shell outside the rig would reach the live sound server.
+Run under the rig, which passes the shell's BASEDREADER_ variables in and gives its command the PATH
+the shell itself made:
+
+	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_devShell.py
+"""
+
+import importlib.machinery
+import importlib.util
+import os
+import re
+import shutil
+import subprocess
+from collections.abc import Callable
+from pathlib import Path
+from types import ModuleType
+
+import harness
+import pytest
+
+ELF_MAGIC = b"\x7fELF"
+STORE = "/nix/store/"
+#: Sound clients and speech programs that must not be on the shell's PATH either, by name: each can
+#: reach the live sound server or the live screen reader.
+OTHER_SOUND_PROGRAMS = (
+	"pactl",
+	"pacat",
+	"paplay",
+	"parec",
+	"pacmd",
+	"aplay",
+	"arecord",
+	"amixer",
+	"speaker-test",
+	"espeak",
+	"espeak-ng",
+	"spd-say",
+	"speech-dispatcher",
+	"orca",
+)
+#: The three modules of openevv's NVDA driver, which the driver directory holds beside openevv_engine/.
+OPENEVV_DRIVER_FILES = ("openevv.py", "_openevv.py", "_openevv_dictionaries.py")
+OPENEVV_ENGINE = "openevv_engine/libeci.so.1"
+
+
+def _directory(value: str) -> Path:
+	path = Path(value)
+	assert path.is_absolute() and path.is_dir(), f"{value} is not a directory"
+	return path
+
+
+def _elfFile(value: str) -> Path:
+	path = Path(value)
+	assert path.is_absolute() and path.is_file(), f"{value} is not a file"
+	with open(path, "rb") as f:
+		assert f.read(4) == ELF_MAGIC, f"{value} is not an ELF file"
+	return path
+
+
+def _holds(directory: Path, *names: str) -> None:
+	missing = [name for name in names if not (directory / name).exists()]
+	assert not missing, f"{directory} holds no {', '.join(missing)}"
+
+
+def _program(directory: Path, name: str) -> None:
+	path = directory / name
+	assert path.is_file() and os.access(path, os.X_OK), f"{directory} holds no program {name}"
+
+
+def _searchPath(value: str) -> None:
+	entries = [entry for entry in value.split(":") if entry]
+	assert entries, "the list is empty"
+	missing = [entry for entry in entries if not os.path.isdir(entry)]
+	assert not missing, f"no such directories: {missing}"
+
+
+def _icuLibDir(value: str) -> None:
+	_elfFile(str(_directory(value) / f"libicuuc.so.{os.environ['BASEDREADER_ICU_VERSION_MAJOR']}"))
+
+
+def _icuVersionMajor(value: str) -> None:
+	# The library's own name carries it, and ICU suffixes every C symbol with it.
+	assert re.fullmatch(r"[1-9]\d*", value), value
+	_holds(Path(os.environ["BASEDREADER_ICU_LIB_DIR"]), f"libicuuc.so.{value}")
+
+
+def _louisTablesDir(value: str) -> None:
+	# NVDA registers the last of these in mixed case, which liblouis does not ship.
+	_holds(_directory(value), "en-us-g2.ctb", "unicode.dis", "No-No-g0.utb", "Se-Se.ctb")
+
+
+def _liblouisVersion(value: str) -> None:
+	assert re.fullmatch(r"\d+\.\d+\.\d+", value), value
+
+
+def _cldrDir(value: str) -> None:
+	_holds(_directory(value), "locale/en/cldr.dic", "locale/pl/cldr.dic")
+
+
+def _espeakLib(value: str) -> None:
+	assert _elfFile(value).name == "libespeak-ng.so.1"
+
+
+def _espeakDataDir(value: str) -> None:
+	directory = _directory(value)
+	# eSpeak takes either the directory or its parent, and tells them apart by the name.
+	assert directory.name == "espeak-ng-data", value
+	_holds(directory, "phontab", "phondata", "en_dict", "pl_dict", "voices/!v", "lang")
+
+
+def _openevvDriverDir(value: str) -> None:
+	_holds(_directory(value), *OPENEVV_DRIVER_FILES, OPENEVV_ENGINE)
+
+
+def _pipewireBin(value: str) -> None:
+	_program(_directory(value), "pipewire")
+	_program(_directory(value), "pw-cli")
+
+
+def _wireplumberBin(value: str) -> None:
+	_program(_directory(value), "wireplumber")
+
+
+def _benchBin(value: str) -> None:
+	# Named without depending on the bench, so that entering the shell never builds the engine: it
+	# exists once nix build .#basedreader-bench has built it.
+	assert re.fullmatch(r"/nix/store/[0-9a-z]{32}-basedreader-bench-[^/]+/bin/basedreader-bench", value), (
+		value
+	)
+
+
+#: Every BASEDREADER_ variable the shell exports, with what makes its value right.
+SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
+	"BASEDREADER_ICU_LIB_DIR": _icuLibDir,
+	"BASEDREADER_ICU_VERSION_MAJOR": _icuVersionMajor,
+	"BASEDREADER_LOUIS_TABLES_DIR": _louisTablesDir,
+	"BASEDREADER_LIBLOUIS_VERSION": _liblouisVersion,
+	"BASEDREADER_NVDA_CLDR_DIR": _cldrDir,
+	"BASEDREADER_ESPEAK_LIB": _espeakLib,
+	"BASEDREADER_ESPEAK_DATA_DIR": _espeakDataDir,
+	"BASEDREADER_OPENEVV_DRIVER_DIR": _openevvDriverDir,
+	"BASEDREADER_PIPEWIRE_BIN": _pipewireBin,
+	"BASEDREADER_WIREPLUMBER_BIN": _wireplumberBin,
+	"BASEDREADER_BENCH_BIN": _benchBin,
+	"BASEDREADER_RIG_PATH": _searchPath,
+	"BASEDREADER_RIG_XDG_DATA_DIRS": _searchPath,
+}
+
+
+@pytest.mark.parametrize("name", SHELL_VARIABLES)
+def test_shellVariableNamesWhatItShould(name: str):
+	value = os.environ.get(name)
+	assert value, f"{name} is not set; the dev shell exports it"
+	SHELL_VARIABLES[name](value)
+
+
+def test_everyVariableNamingTheStoreIsChecked():
+	"""A variable the shell exports names a store path, which a run's own settings do not; one that is
+	not in SHELL_VARIABLES was added to the shell without saying what makes it right."""
+	unchecked = sorted(
+		name
+		for name, value in os.environ.items()
+		if name.startswith("BASEDREADER_") and STORE in value and name not in SHELL_VARIABLES
+	)
+	assert not unchecked, f"add these to SHELL_VARIABLES: {unchecked}"
+
+
+def test_liblouisVersionIsTheLibraryNvdaLoads(tmp_path: Path):
+	done = harness.runChild(tmp_path, "import louis\nresult = louis.version()", prepare="none")
+	done.assertClean()
+	assert done.value == os.environ["BASEDREADER_LIBLOUIS_VERSION"]
+
+
+@pytest.mark.parametrize("searchPath", ["PATH", "BASEDREADER_RIG_PATH"])
+def test_noPipewireOrWireplumberProgramIsOnPath(searchPath: str):
+	"""Not one of the programs PipeWire's and WirePlumber's packages install, nor another sound client.
+
+	Inside the rig PATH is the store part of BASEDREADER_RIG_PATH, which is the shell's PATH without
+	what nix develop appended from the caller's, so this is what the shell itself put there."""
+	programs = set(OTHER_SOUND_PROGRAMS)
+	for variable in ("BASEDREADER_PIPEWIRE_BIN", "BASEDREADER_WIREPLUMBER_BIN"):
+		programs.update(os.listdir(os.environ[variable]))
+	found = {
+		name: where for name in sorted(programs) if (where := shutil.which(name, path=os.environ[searchPath]))
+	}
+	assert not found, f"on {searchPath}: {found}"
+
+
+#: Loads the library SYNTH_LIBRARY names, and reports what that mapped that could sound, and every
+#: shared object mapped, for the failure message.
+LOAD_LIBRARY = """
+import ctypes
+import os
+
+path = os.path.realpath(os.environ["SYNTH_LIBRARY"])
+ctypes.CDLL(path)
+with open("/proc/self/maps", encoding="utf-8") as maps:
+	mapped = {fields[5].strip() for line in maps if len(fields := line.split(None, 5)) == 6}
+result = {
+	"sound": [found for found in harness.soundReached(allowLinked=False) if found != f"mapped {path}"],
+	"mapped": sorted(name for name in mapped if ".so" in name),
+}
+"""
+
+
+@pytest.mark.parametrize(
+	("variable", "relative"),
+	[("BASEDREADER_ESPEAK_LIB", ""), ("BASEDREADER_OPENEVV_DRIVER_DIR", OPENEVV_ENGINE)],
+)
+def test_synthesizerLibraryNeedsNoSoundLibrary(tmp_path: Path, variable: str, relative: str):
+	"""Loaded alone, the library maps nothing that can reach a sound server or a sound card, through any
+	library it needs: synthesizers hand their audio to NVDA's player and play nothing themselves."""
+	env = {"SYNTH_LIBRARY": os.path.join(os.environ[variable], relative)}
+	done = harness.runChild(tmp_path, LOAD_LIBRARY, prepare="none", env=env)
+	# Loading a library whose name says espeak is what the audio check counts; what it maps is
+	# examined below.
+	done.assertClean(ignoring={"audio"})
+	assert done.value["sound"] == [], "\n".join(done.value["mapped"])
+
+
+def _loadTool(name: str) -> ModuleType:
+	"""A script in tools/, which has no .py suffix, loaded as a module without running it."""
+	loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(harness.ROOT / "tools" / name))
+	module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+	loader.exec_module(module)
+	return module
+
+
+def test_espeakAndSonicAreTheCommitsUpstreamPins(monkeypatch: pytest.MonkeyPatch):
+	"""nix/espeak-ng.nix fetches the commits upstream's include/espeak and include/sonic submodule links
+	name, read as tools/check-upstream-edits reads them, and the library the shell names was built from
+	that eSpeak commit, which the derivation's name records."""
+	monkeypatch.chdir(harness.ROOT)
+	tool = _loadTool("check-upstream-edits")
+	base = subprocess.run(
+		[harness.ROOT / "tools" / "upstream-ref"], capture_output=True, text=True, check=True
+	).stdout.strip()
+	pins = {
+		repo: tool.objectAt(base, link)
+		for link, nixFile, repo in tool.NIX_PINS
+		if nixFile == "nix/espeak-ng.nix"
+	}
+	assert set(pins) == {"espeak-ng", "sonic"}
+	assert all(re.fullmatch(r"[0-9a-f]{40}", pin or "") for pin in pins.values()), pins
+	errors = [error for error in tool.checkNixPins(base) if any(f" {repo} " in error for repo in pins)]
+	assert not errors, errors
+	library = Path(os.environ["BASEDREADER_ESPEAK_LIB"])
+	storeName = library.relative_to(STORE).parts[0]
+	assert storeName.endswith(f"-unstable-{pins['espeak-ng'][:8]}"), storeName
+
+
+def test_openevvDriverDirectoryHoldsTheDriverAndTheEngine():
+	"""The layout of the driver's add-on on Windows: the three modules beside openevv_engine/, where
+	the driver looks for the engine library on every platform, a link to the built library."""
+	directory = _directory(os.environ["BASEDREADER_OPENEVV_DRIVER_DIR"])
+	assert sorted(entry.name for entry in directory.iterdir()) == sorted(
+		[*OPENEVV_DRIVER_FILES, "openevv_engine"]
+	)
+	for name in OPENEVV_DRIVER_FILES:
+		assert (directory / name).is_file() and not (directory / name).is_symlink(), name
+	engine = directory / OPENEVV_ENGINE
+	assert sorted(entry.name for entry in engine.parent.iterdir()) == ["libeci.so.1"]
+	assert engine.is_symlink()
+	target = os.readlink(engine)
+	assert target.startswith(STORE) and target.endswith("/lib/libeci.so.1"), target
+	_elfFile(target)
