@@ -136,7 +136,19 @@
           # tests/linux/rig builds its sandbox with this.
           bubblewrap
           git
+          # libclang for the bindings engine/crates/pwsink generates.
+          rustPlatform.bindgenHook
         ];
+
+        # PipeWire's headers and pkg-config file, for building
+        # engine/crates/pwsink. Named here rather than listed as an input,
+        # because stdenv puts every input's bin directory on PATH, and a
+        # pw-play or wpctl run from this shell outside the rig would reach the
+        # live sound server.
+        PKG_CONFIG_PATH = "${lib.getDev pkgs.pipewire}/lib/pkgconfig";
+        # Only the PipeWire test fixture starts these, inside the rig.
+        BASEDREADER_PIPEWIRE_BIN = "${lib.getBin pkgs.pipewire}/bin";
+        BASEDREADER_WIREPLUMBER_BIN = "${lib.getBin pkgs.wireplumber}/bin";
 
         # Listed as build inputs so the gobject-introspection hook puts their
         # typelibs on GI_TYPELIB_PATH.
