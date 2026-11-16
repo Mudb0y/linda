@@ -116,6 +116,12 @@ SOUND_DEVICES = "/dev/snd"
 #: Words in the path of a Unix socket that belongs to a sound server.
 SOUND_SERVER_SOCKETS = ("pulse", "pipewire")
 
+#: Audit events by which a process reaches past itself, recorded for ChildResult.reached; a test about
+#: what NVDA touches at rest reads them, as no one rule fits every test.
+REACH_EVENTS = frozenset({"socket.connect", "ctypes.dlopen", "subprocess.Popen", "os.system"})
+#: Opening a file under these reaches a device, the kernel or another program.
+SYSTEM_FILES = ("/dev/", "/sys/", "/run/")
+
 NO_LINUX_IMPLEMENTATION_EVENT = "linuxPlatform.noLinuxImplementation"
 LOG_ERROR = 40
 
@@ -328,6 +334,14 @@ class Checks:
 		logging.getLogger().addHandler(self._collector)
 
 	def _onAudit(self, event: str, args: tuple) -> None:
+		# ctypes opens the program itself, with no name, as it imports.
+		if event in REACH_EVENTS and not (event == "ctypes.dlopen" and args[0] is None):
+			what = args[0] if event == "ctypes.dlopen" else args[1] if event == "socket.connect" else args
+			self.record(
+				"reach", event=event, what=os.fsdecode(what) if isinstance(what, bytes) else str(what)
+			)
+		elif event == "open" and isinstance(args[0], str) and args[0].startswith(SYSTEM_FILES):
+			self.record("reach", event=event, what=args[0])
 		if event == NO_LINUX_IMPLEMENTATION_EVENT:
 			self.record(
 				"noLinuxImplementation",
@@ -460,6 +474,8 @@ class ChildResult:
 	unraisable: list[str] = field(default_factory=list)
 	writes: list[str] = field(default_factory=list)
 	audio: list[str] = field(default_factory=list)
+	#: "EVENT WHAT" for each of REACH_EVENTS and each open under SYSTEM_FILES; no check reads it.
+	reached: list[str] = field(default_factory=list)
 	stdout: str = ""
 	stderr: str = ""
 	#: Every record the child made, as written.
@@ -485,6 +501,8 @@ class ChildResult:
 				result.writes.append(f"{event['event']} {event['path']}")
 			elif kind == "audio":
 				result.audio.append(event["what"])
+			elif kind == "reach":
+				result.reached.append(f"{event['event']} {event['what']}")
 		return result
 
 	def _detail(self, kind: str) -> str:

@@ -324,6 +324,50 @@ def test_reachingForSoundIsReported(tmp_path: Path, reach: str):
 	assert problemsBesides(done) == ["audio"]
 
 
+def test_reachPastTheProcessIsRecordedButNotJudged(tmp_path: Path):
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import ctypes
+		import os
+		import socket
+		import subprocess
+
+		with open("/dev/null", "rb"):
+			pass
+		try:
+			socket.socket(socket.AF_UNIX).connect("/run/harnessTest")
+		except OSError:
+			pass
+		try:
+			ctypes.CDLL("libharnessTest.so")
+		except OSError:
+			pass
+		subprocess.run(["true"], check=True)
+		""",
+		prepare="none",
+	)
+	done.assertClean()
+	assert done.reached[:3] == [
+		"open /dev/null",
+		"socket.connect /run/harnessTest",
+		"ctypes.dlopen libharnessTest.so",
+	]
+	assert done.reached[3].startswith("subprocess.Popen ")
+
+
+def test_nvdaLogErrorRecordsAreFoundWhateverTheCodePath():
+	# Each of these code paths holds a space, which the header pattern must still match.
+	for codePath in ("unhandled exception", "Exception ignored in: <function f at 0x1>", "Python warning"):
+		log = (
+			"INFO - core.main (12:00:00.000) - MainThread (1):\nstarting\n"
+			f"ERROR - {codePath} (12:00:01.000) - MainThread (1):\n"
+			"Traceback (most recent call last):\nValueError: x\n"
+		)
+		assert harness.NVDA_LOG_RECORD_HEADER.search(log)
+		assert len(harness.nvdaLogErrorRecords(log)) == 1
+
+
 def test_audioLibrariesAreKnownByName():
 	assert harness.isAudioLibrary("/nix/store/x-alsa-lib/lib/libasound.so.2")
 	assert harness.isAudioLibrary("libespeak-ng.so.1")
