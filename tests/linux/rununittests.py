@@ -68,8 +68,8 @@ AUDIO_LIBRARIES = ("espeak", "pcaudio", "pulse", "asound", "pipewire", "jack", "
 # each is allowed to. What they link is mapped but never called: no test asks it for sound.
 AUDIO_LINKERS = {
 	"_html2": (
-		"gui.message imports wx.html2, whose extension module links WebKitGTK, which links GStreamer and "
-		"PulseAudio to play media in web pages"
+		"wx.html2's extension module links WebKitGTK, which links GStreamer and PulseAudio to play media in "
+		"web pages; gui.message imports it only to show an HTML message, which never plays media"
 	),
 }
 # Import checks run alongside the tests; each one starts NVDA's bootstrap in a process of its own.
