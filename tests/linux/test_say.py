@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 
 import harness
 import pytest
+from pipewireFixture import PipewireFixture, assertCleanThroughPipewire
 
 if TYPE_CHECKING:
 	from gi.repository import Gio
@@ -47,7 +48,8 @@ LAUNCHER_LOGS = {"nvda.log": "the launcher's last log\n", "nvda-old.log": "the l
 SPOKE = re.compile(
 	r"basedreader say: spoke with (?P<synth>\S+), voice (?P<voice>[^,]+), "
 	r"(?:(?P<null>into the null sink, which plays nothing)\. Speech"
-	r"|into the capture sink\. The first audio came (?P<firstAudio>\d+) milliseconds? after asking, and speech)"
+	r"|(?P<output>into the capture sink|through PipeWire)\. "
+	r"The first audio came (?P<firstAudio>\d+) milliseconds? after asking, and speech)"
 	r" finished after (?P<finished>\d+(?:\.\d)?) seconds?\.\n",
 )
 INTERRUPTED = "basedreader say: interrupted before speech finished.\n"
@@ -717,6 +719,72 @@ def test_stopSignalSilencesSpeechAtOnce(home: Home, signalNumber: signal.Signals
 	heard = sum(c.seconds for c in home.captured())
 	# Speech was playing when the signal came, and stopped there rather than playing to its end.
 	assert 0.5 < heard < sentAt - spoken[0]["t"] + 0.2, heard
+
+
+def throughPipewire(runtimeDir: str) -> dict[str, str]:
+	"""The say mode's environment for PipeWire, whose client looks for the daemon's socket in
+	runtimeDir rather than in the home's own runtime directory."""
+	return {"BASEDREADER_AUDIO_SINK": "pipewire", "PIPEWIRE_RUNTIME_DIR": runtimeDir}
+
+
+def assertCleanThroughPipewireSay(run: Say) -> None:
+	"""Say.assertClean for a run that played through PipeWire, whose client library it maps and whose
+	connection it holds until it exits."""
+	assertCleanThroughPipewire(run.result(), ignoring={"stderr", "returnCode"})
+	output = run.home.sayDir / "output.log"
+	if output.exists():
+		assert not output.read_text(encoding="utf-8", errors="replace"), run.describe()
+
+
+def test_isHeardThroughPipewire(home: Home, pipewire: PipewireFixture):
+	monitor = pipewire.monitor()
+	started = time.monotonic_ns()
+	run = say(
+		home,
+		"--synth",
+		"espeak",
+		"This is Basedreader, speaking through PipeWire.",
+		env=throughPipewire(os.environ["XDG_RUNTIME_DIR"]),
+	)
+	spoke = run.assertSpoke()
+	assertCleanThroughPipewireSay(run)
+	assert spoke["synth"] == "espeak" and spoke["output"] == "through PipeWire"
+	first = monitor.soundAfter(started)
+	sounds = [e["graph_ns"] for e in monitor.eventsOf("sound") if e["graph_ns"] >= started]
+	last = monitor.silenceAfter(sounds[-1])
+	assert (last - first) / 1e9 > 1.5, (first, last)
+
+
+def test_aStopSignalSilencesPipewireAtOnce(home: Home, pipewire: PipewireFixture):
+	monitor = pipewire.monitor()
+	started = time.monotonic_ns()
+	run = Say(home, ("say", "--synth", "espeak", LONG_TEXT), throughPipewire(os.environ["XDG_RUNTIME_DIR"]))
+	monitor.soundAfter(started, timeout=RUN_BOUND)
+	time.sleep(1.0)
+	sentAt = time.monotonic_ns()
+	run.process.send_signal(signal.SIGINT)
+	assert run.wait() == 6, run.describe()
+	assert (run.stdout, run.stderr) == ("", INTERRUPTED), run.describe()
+	assertCleanThroughPipewireSay(run)
+	# The monitor reports what the graph has played a cycle or two after it played it.
+	time.sleep(0.2)
+	edges = sorted((e["graph_ns"], kind) for kind in ("sound", "silence") for e in monitor.eventsOf(kind))
+	before = [kind for ns, kind in edges if ns < sentAt]
+	after = [(ns, kind) for ns, kind in edges if ns >= sentAt]
+	if before[-1:] == ["sound"]:
+		# One edge, to silence, and nothing heard after it.
+		assert [kind for ns, kind in after] == ["silence"], after
+		stoppedMs = (after[0][0] - sentAt) / 1e6
+		assert stoppedMs < 50, stoppedMs
+	else:
+		# The signal came in a pause between words, and the next word never began.
+		assert not after, after
+
+
+def test_withNoPipewireItEndsByItselfWithStatus4(home: Home):
+	run = say(home, "--synth", "espeak", "Nobody hears this.", env=throughPipewire(str(home.runtimeDir)))
+	run.assertFailed(4, "nothing reached PipeWire, which may not be running")
+	assertCleanThroughPipewireSay(run)
 
 
 def _xServer() -> int:
