@@ -78,9 +78,12 @@
           gobject-introspection
           gettext
           dbus
-          xvfb-run
+          xvfb
           xprop
           firefox
+          # tests/linux/rig builds its sandbox with this.
+          bubblewrap
+          git
         ];
 
         # Listed as build inputs so the gobject-introspection hook puts their

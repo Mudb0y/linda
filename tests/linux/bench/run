@@ -16,7 +16,7 @@
 # result.
 set -euo pipefail
 
-if [ -z "${RIG_PID:-}" ]; then
+if [ -z "${BASEDREADER_RIG:-}" ]; then
 	echo "bench: run this inside tests/linux/rig" >&2
 	exit 2
 fi

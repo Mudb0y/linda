@@ -1,18 +1,36 @@
 #!/usr/bin/env bash
-# Runs a command on a private X display with its own session bus,
-# accessibility bus, HOME and runtime directory. Nothing started here can
-# reach the live desktop, its screen reader or its sound server, which is
-# what makes it safe to crash a screen reader under test.
+# Runs a command in a sandbox with its own X display, session bus,
+# accessibility bus, HOME and runtime directory. The sandbox has its own
+# process, network and IPC namespaces, no sound or input devices, and none of
+# the live session's sockets or files, so nothing started here can reach the
+# live desktop, its screen reader, its sound server or the keyboard, whatever
+# it tries. That is what makes it safe to crash a screen reader under test.
+#
+# Inside, the checkout and the system are read-only and /tmp is empty.
+# --bind DIR makes DIR visible and writable, for results that should outlive
+# the run or scripts kept outside the checkout.
 set -euo pipefail
 
 if [ "${1:-}" = --inside ]; then
 	shift
-	# The rig can be killed outright by a test runner's timeout, which skips
-	# its cleanup; this notices the parent is gone and takes the session down.
-	(
-		while kill -0 "$RIG_PID" 2>/dev/null; do sleep 1; done
-		kill -TERM -- -$$ 2>/dev/null
-	) &
+	# -noreset, because the server otherwise resets when its first client
+	# leaves and drops the root window property the accessibility bus is
+	# advertised on, which is how clients find that bus on a real desktop.
+	# A number the live display never has, so that a DISPLAY that somehow
+	# got out of the sandbox would name nothing.
+	Xvfb :99 -displayfd 3 -screen 0 1280x1024x24 -nolisten tcp -noreset \
+		3>"$XDG_RUNTIME_DIR/display" 2>"$XDG_RUNTIME_DIR/xvfb.log" &
+	# The server writes its display number once it accepts connections.
+	for _ in $(seq 200); do
+		[ -s "$XDG_RUNTIME_DIR/display" ] && break
+		sleep 0.05
+	done
+	if [ ! -s "$XDG_RUNTIME_DIR/display" ]; then
+		echo "rig: the X server did not start" >&2
+		cat "$XDG_RUNTIME_DIR/xvfb.log" >&2
+		exit 1
+	fi
+	export DISPLAY=:99
 
 	"$AT_SPI_BUS_LAUNCHER" --launch-immediately &
 	up=
@@ -42,27 +60,40 @@ if [ "${1:-}" = --inside ]; then
 	set_status IsEnabled
 	# Only some at-spi2-core builds have this one.
 	set_status ScreenReaderEnabled 2>/dev/null || true
-	exec "$@"
+	# The sandbox is a background job of a shell without job control, and such
+	# a job starts with SIGINT and SIGQUIT ignored, which everything below it
+	# would inherit.
+	exec env --default-signal=INT,QUIT "$@"
 fi
 
-if [ $# -eq 0 ]; then
-	echo "usage: rig command [argument...]" >&2
+usage() {
+	echo "usage: rig [--bind DIR]... command [argument...]" >&2
 	exit 2
-fi
+}
+binds=()
+while [ "${1:-}" = --bind ]; do
+	[ $# -ge 2 ] || usage
+	dir=$(realpath -e -- "$2")
+	binds+=(--bind "$dir" "$dir")
+	shift 2
+done
+[ $# -gt 0 ] || usage
 : "${AT_SPI_BUS_LAUNCHER:?rig: run inside the dev shell, nix develop}"
+
+checkout=$(cd "$(dirname "$0")/../.." && pwd -P)
+# A worktree keeps its history in the main checkout, and git needs to read it.
+history=$(git -C "$checkout" rev-parse --path-format=absolute --git-common-dir)
 
 root=$(mktemp -d "${TMPDIR:-/tmp}/basedreader-rig.XXXXXX")
 mkdir -m 700 "$root/home" "$root/run"
 
-session=
+sandbox=
 cleanup() {
-	if [ -n "$session" ]; then
-		kill -TERM -- -"$session" 2>/dev/null || true
-		for _ in $(seq 20); do
-			kill -0 -- -"$session" 2>/dev/null || break
-			sleep 0.1
-		done
-		kill -KILL -- -"$session" 2>/dev/null || true
+	if [ -n "$sandbox" ]; then
+		# Everything inside dies with the sandbox's first process, and that
+		# one dies with bwrap.
+		kill -KILL "$sandbox" 2>/dev/null || true
+		wait "$sandbox" 2>/dev/null || true
 	fi
 	rm -rf "$root"
 }
@@ -70,38 +101,51 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# The sandbox already hides what these name. Clearing them as well makes a
+# client fail at once with a plain error instead of probing for a fallback.
 unset DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS \
 	AT_SPI_BUS_ADDRESS PIPEWIRE_REMOTE PIPEWIRE_RUNTIME_DIR \
 	PULSE_RUNTIME_PATH SPEECHD_ADDRESS GTK_MODULES NO_AT_BRIDGE \
-	LD_LIBRARY_PATH
+	LD_LIBRARY_PATH SSH_AUTH_SOCK
 export HOME="$root/home"
 export XDG_RUNTIME_DIR="$root/run"
 export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_CACHE_HOME="$HOME/.cache"
 export XDG_DATA_HOME="$HOME/.local/share"
 export XDG_STATE_HOME="$HOME/.local/state"
-# A socket that does not exist, so a client that goes looking for the sound
-# server fails at once instead of finding the real one by another route.
 export PULSE_SERVER="unix:$root/run/no-sound-server"
+export DBUS_SYSTEM_BUS_ADDRESS="unix:path=$root/run/no-system-bus"
+# nix develop points these at a directory of its own under the real /tmp.
+export TMPDIR=/tmp TMP=/tmp TEMP=/tmp TEMPDIR=/tmp
 export GSETTINGS_BACKEND=memory
 export GNOME_ACCESSIBILITY=1
 export QT_ACCESSIBILITY=1
 export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
-# The rig hides everything but the checkout itself, and several runs share
-# that; bytecode caches written into it by one would be read by the others.
+# Several runs share the checkout; bytecode caches written into it by one
+# would be read by the others.
 export PYTHONDONTWRITEBYTECODE=1
 export PYTEST_ADDOPTS="-p no:cacheprovider"
-export RIG_PID=$$
+export BASEDREADER_RIG=1
 
-# Its own session, so that cleanup can signal everything the command started
-# as one process group without touching anything else on the machine.
-# -noreset, because the server otherwise resets when its first client leaves
-# and drops the root window property the accessibility bus is advertised on,
-# which is how clients find that bus on a real desktop.
-setsid dbus-run-session -- \
-	xvfb-run -a -s "-screen 0 1280x1024x24 -nolisten tcp -noreset" \
-	"$0" --inside "$@" &
-session=$!
+# The system's locales and its GL drivers are reached through these two
+# links; the rest of /run is the live session's and stays out.
+links=()
+for link in /run/current-system /run/opengl-driver; do
+	if [ -L "$link" ]; then
+		links+=(--symlink "$(readlink "$link")" "$link")
+	fi
+done
+
+bwrap --unshare-all --die-with-parent --new-session \
+	--ro-bind /nix /nix --ro-bind /etc /etc --ro-bind /sys /sys \
+	--ro-bind /bin /bin --ro-bind /usr /usr \
+	--dev /dev --proc /proc --tmpfs /tmp --dir /tmp/.X11-unix \
+	--tmpfs /run "${links[@]}" \
+	--ro-bind "$checkout" "$checkout" --ro-bind "$history" "$history" \
+	--bind "$root" "$root" "${binds[@]}" \
+	-- dbus-run-session -- "$0" --inside "$@" &
+sandbox=$!
 status=0
-wait "$session" || status=$?
+wait "$sandbox" || status=$?
+sandbox=
 exit "$status"
