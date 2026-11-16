@@ -235,7 +235,11 @@ def _loadTool(name: str) -> ModuleType:
 def test_espeakAndSonicAreTheCommitsUpstreamPins(monkeypatch: pytest.MonkeyPatch):
 	"""nix/espeak-ng.nix fetches the commits upstream's include/espeak and include/sonic submodule links
 	name, read as tools/check-upstream-edits reads them, and the library the shell names was built from
-	that eSpeak commit, which the derivation's name records."""
+	that eSpeak commit, which the derivation's name records.
+
+	Each is fetched with builtins.fetchTree, which fetches the rev and refuses a tree whose hash is not
+	narHash. A fixed-output fetcher is found by its hash alone, so with one a rev moved without its hash
+	would name the new commit and build the old."""
 	monkeypatch.chdir(harness.ROOT)
 	tool = _loadTool("check-upstream-edits")
 	base = subprocess.run(
@@ -250,6 +254,13 @@ def test_espeakAndSonicAreTheCommitsUpstreamPins(monkeypatch: pytest.MonkeyPatch
 	assert all(re.fullmatch(r"[0-9a-f]{40}", pin or "") for pin in pins.values()), pins
 	errors = [error for error in tool.checkNixPins(base) if any(f" {repo} " in error for repo in pins)]
 	assert not errors, errors
+	nix = (harness.ROOT / "nix" / "espeak-ng.nix").read_text(encoding="utf-8")
+	for repo, pin in pins.items():
+		fetch = (
+			rf'src = builtins\.fetchTree \{{\s*type = "github";\s*owner = "[\w-]+";\s*repo = "{repo}";'
+			rf'\s*rev = "{pin}";\s*narHash = "sha256-[\w+/=]+";\s*\}};'
+		)
+		assert re.search(fetch, nix), f"nix/espeak-ng.nix does not fetch {repo} with builtins.fetchTree"
 	library = Path(os.environ["BASEDREADER_ESPEAK_LIB"])
 	storeName = library.relative_to(STORE).parts[0]
 	assert storeName.endswith(f"-unstable-{pins['espeak-ng'][:8]}"), storeName

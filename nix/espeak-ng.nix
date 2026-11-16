@@ -6,10 +6,15 @@
 # removed before compiling, as NVDA removes them; the cmn, ru and yue extended
 # lists are compiled in, as NVDA copies them in. tools/check-upstream-edits
 # fails when an upstream merge moves either pin.
+#
+# Both sources come from builtins.fetchTree rather than a fixed-output
+# fetcher. Nix finds a fixed-output derivation's result by its hash alone, so
+# a rev moved without its hash would build the old commit under the new name;
+# fetchTree fetches the rev itself and stops evaluation when that tree's hash
+# is not narHash.
 {
   lib,
   stdenv,
-  fetchFromGitHub,
   cmake,
   ninja,
 }:
@@ -21,11 +26,12 @@ let
   sonic = stdenv.mkDerivation {
     pname = "sonic-nvda";
     version = "0-unstable-b93885dc";
-    src = fetchFromGitHub {
+    src = builtins.fetchTree {
+      type = "github";
       owner = "waywardgeek";
       repo = "sonic";
       rev = "b93885dcb70aae50c6f76b0fe4e0868f029a077e";
-      hash = "sha256-kKMAjoLdC3y9vx7rw80+T1r/QZ2miBjJCIAOs3fm2dg=";
+      narHash = "sha256-kKMAjoLdC3y9vx7rw80+T1r/QZ2miBjJCIAOs3fm2dg=";
     };
     buildPhase = ''
       runHook preBuild
@@ -43,14 +49,16 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "espeak-ng-nvda";
-  # Named after the commit it builds, which tests/linux/test_devShell.py
-  # holds to upstream's pin through the library's path.
+  # Named after the commit fetchTree fetched and checked, which
+  # tests/linux/test_devShell.py holds to upstream's pin through the
+  # library's path.
   version = "1.53.0-unstable-${lib.substring 0 8 finalAttrs.src.rev}";
-  src = fetchFromGitHub {
+  src = builtins.fetchTree {
+    type = "github";
     owner = "nvaccess";
     repo = "espeak-ng";
     rev = "b97de3cf2ad32c1d48c6bd36dfbf57a9c587fedc";
-    hash = "sha256-8ST6QKlUqpnQEwBTS0SDefc+hZJhK8h6q4LgqwBFrpo=";
+    narHash = "sha256-8ST6QKlUqpnQEwBTS0SDefc+hZJhK8h6q4LgqwBFrpo=";
   };
 
   # Without it, a mark between a full stop and the next sentence is never
