@@ -195,7 +195,7 @@ class tagBIND_OPTS2(Structure):
 
 
 class _remotableHandleUnion(Union):
-	_fields_ = [("hInproc", c_int32), ("hRemote", c_int32)]
+	_fields_: ClassVar[list] = [("hInproc", c_int32), ("hRemote", c_int32)]
 
 
 class _RemotableHandle(Structure):

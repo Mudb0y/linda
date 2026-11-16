@@ -1,7 +1,7 @@
 """Stand-in for comtypes.automation: IDispatch, VARIANT and the VT_ constants."""
 
 from ctypes import Structure, Union, c_double, c_int64, c_uint16, c_void_p
-from typing import Any, NoReturn
+from typing import Any, ClassVar, NoReturn
 
 from comtypes import BSTR, GUID, IUnknown, _notOnLinux
 
@@ -62,7 +62,12 @@ class IEnumVARIANT(IUnknown):
 
 
 class _variantValue(Union):
-	_fields_ = [("llVal", c_int64), ("dblVal", c_double), ("ptr", c_void_p), ("_record", c_void_p * 2)]
+	_fields_: ClassVar[list] = [
+		("llVal", c_int64),
+		("dblVal", c_double),
+		("ptr", c_void_p),
+		("_record", c_void_p * 2),
+	]
 
 
 class tagVARIANT(Structure):
