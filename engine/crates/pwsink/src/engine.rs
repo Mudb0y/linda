@@ -43,12 +43,16 @@ pub(crate) static PROCESS_GAIN: AtomicU32 = AtomicU32::new(0x3f80_0000);
 /// Frames taken by the graph, over every stream since the library was loaded.
 pub(crate) static DELIVERED: AtomicU64 = AtomicU64::new(0);
 
-/// A stream the loop thread has given a pw_stream, with the listener on it. Boxed, since PipeWire
-/// keeps the addresses of the hook and event table.
+/// A stream the loop thread has given a pw_stream, with the listeners on it. Boxed, since PipeWire
+/// keeps the addresses of the hooks and event tables.
 struct Link {
     stream: Arc<Stream>,
     hook: spas::spa_hook,
     events: pws::pw_stream_events,
+    /// The stream's node, bound to learn when the daemon has it running.
+    node: *mut pws::pw_proxy,
+    node_hook: spas::spa_hook,
+    node_events: pws::pw_node_events,
 }
 
 struct Shared {
@@ -66,6 +70,7 @@ struct LoopState {
     core_hook: spas::spa_hook,
     core_events: pws::pw_core_events,
     core_lost: bool,
+    registry: *mut pws::pw_registry,
     next_connect_ns: u64,
     timer: *mut spas::spa_source,
     #[allow(
@@ -145,6 +150,7 @@ impl Engine {
                     core_hook: std::mem::zeroed(),
                     core_events: std::mem::zeroed(),
                     core_lost: false,
+                    registry: ptr::null_mut(),
                     next_connect_ns: 0,
                     timer: ptr::null_mut(),
                     links: Vec::new(),
@@ -333,6 +339,9 @@ impl Engine {
                 }
             }
         }
+        for link in lp.links.iter_mut() {
+            unsafe { watch_node(lp.registry, link) };
+        }
         let activity_due = unsafe { self.update_activity(lp, now) };
         let connect_due = lp.core.is_null().then_some(lp.next_connect_ns);
         let next = [pool_due, retry_due, activity_due, connect_due]
@@ -374,6 +383,13 @@ impl Engine {
                 &lp.core_events,
                 self as *const Engine as *mut c_void
             );
+            lp.registry = spa_interface_call_method!(
+                core,
+                pws::pw_core_methods,
+                get_registry,
+                pws::PW_VERSION_REGISTRY,
+                0
+            );
             lp.core = core;
             lp.core_lost = false;
         }
@@ -388,8 +404,12 @@ impl Engine {
             unsafe { self.detach(lp, s) };
         }
         if !lp.core.is_null() {
-            // SAFETY: on the loop thread; the hook was added in connect.
+            // SAFETY: on the loop thread; the registry and hook were made in connect.
             unsafe {
+                if !lp.registry.is_null() {
+                    pws::pw_proxy_destroy(lp.registry as *mut pws::pw_proxy);
+                    lp.registry = ptr::null_mut();
+                }
                 spa::utils::hook::remove(lp.core_hook);
                 lp.core_hook = std::mem::zeroed();
                 pws::pw_core_disconnect(lp.core);
@@ -417,6 +437,9 @@ impl Engine {
                 stream: s.clone(),
                 hook: std::mem::zeroed(),
                 events: std::mem::zeroed(),
+                node: ptr::null_mut(),
+                node_hook: std::mem::zeroed(),
+                node_events: std::mem::zeroed(),
             });
             link.events.version = pws::PW_VERSION_STREAM_EVENTS;
             link.events.state_changed = Some(on_stream_state);
@@ -457,12 +480,17 @@ impl Engine {
         let Some(i) = lp.links.iter().position(|l| Arc::ptr_eq(&l.stream, s)) else {
             return;
         };
-        let link = lp.links.swap_remove(i);
+        let mut link = lp.links.swap_remove(i);
         let stream = s.pw() as *mut pws::pw_stream;
         s.mark_detached();
-        // SAFETY: on the loop thread. Removing the hook takes the data loop's lock to clear the
-        // stream's real-time callbacks, so no callback runs for this stream once it returns.
+        // SAFETY: on the loop thread. Removing the stream's hook takes the data loop's lock to
+        // clear its real-time callbacks, so no callback runs for this stream once it returns.
         unsafe {
+            if !link.node.is_null() {
+                spa::utils::hook::remove(link.node_hook);
+                pws::pw_proxy_destroy(link.node);
+                link.node = ptr::null_mut();
+            }
             spa::utils::hook::remove(link.hook);
             pws::pw_stream_disconnect(stream);
             pws::pw_stream_destroy(stream);
@@ -546,6 +574,53 @@ impl Engine {
                 true
             );
         }
+    }
+}
+
+/// Binds the stream's node, once the daemon has given it an id, to hear when it is running.
+///
+/// A pw_stream reaches its streaming state when the daemon starts its node, but the daemon puts the
+/// node into the graph only after the stream has answered that start, and until then the sink is
+/// not made to wait for it: a cycle handed over in between is mixed by nobody. The node's info
+/// reports running once the node is in the graph, so the callback hands over nothing before that.
+///
+/// # Safety
+/// On the loop thread, with a registry from the live connection or null.
+unsafe fn watch_node(registry: *mut pws::pw_registry, link: &mut Link) {
+    if !link.node.is_null() || registry.is_null() {
+        return;
+    }
+    let stream = link.stream.pw() as *mut pws::pw_stream;
+    // SAFETY: as documented; the hook and event table live in the boxed link, which outlives the
+    // proxy, since detach destroys the proxy first.
+    unsafe {
+        let id = pws::pw_stream_get_node_id(stream);
+        if id == pws::PW_ID_ANY {
+            return;
+        }
+        let node = spa_interface_call_method!(
+            registry,
+            pws::pw_registry_methods,
+            bind,
+            id,
+            pws::PW_TYPE_INTERFACE_Node.as_ptr() as *const c_char,
+            pws::PW_VERSION_NODE,
+            0
+        ) as *mut pws::pw_proxy;
+        if node.is_null() {
+            return;
+        }
+        link.node = node;
+        link.node_events.version = pws::PW_VERSION_NODE_EVENTS;
+        link.node_events.info = Some(on_node_info);
+        spa_interface_call_method!(
+            node,
+            pws::pw_node_methods,
+            add_listener,
+            &mut link.node_hook,
+            &link.node_events,
+            Arc::as_ptr(&link.stream) as *mut c_void
+        );
     }
 }
 
@@ -649,21 +724,34 @@ unsafe extern "C" fn on_core_error(
     }
 }
 
+/// On the loop thread, sometimes from inside a call service makes, so it touches only the
+/// stream's atomics and leaves the rest to the next service.
 unsafe extern "C" fn on_stream_state(
     data: *mut c_void,
     _old: pws::pw_stream_state,
     state: pws::pw_stream_state,
     _error: *const c_char,
 ) {
+    // SAFETY: data is the stream's address, which its link keeps alive.
+    let s = unsafe { &*(data as *const Stream) };
+    s.set_streaming(state == pws::pw_stream_state_PW_STREAM_STATE_STREAMING);
     if state == pws::pw_stream_state_PW_STREAM_STATE_ERROR
         || state == pws::pw_stream_state_PW_STREAM_STATE_UNCONNECTED
     {
-        // SAFETY: data is the stream's address, which its link keeps alive.
-        let s = unsafe { &*(data as *const Stream) };
         s.set_broken(true);
-        if let Some(Ok(engine)) = ENGINE.get() {
-            engine.signal();
-        }
+    }
+    // The node has an id from its first state change on, which service binds to watch it.
+    if let Some(Ok(engine)) = ENGINE.get() {
+        engine.signal();
+    }
+}
+
+unsafe extern "C" fn on_node_info(data: *mut c_void, info: *const pws::pw_node_info) {
+    // SAFETY: data is the stream's address, which its link keeps alive, and info is PipeWire's
+    // for the duration of the call.
+    let (s, info) = unsafe { (&*(data as *const Stream), &*info) };
+    if info.change_mask & pws::PW_NODE_CHANGE_MASK_STATE as u64 != 0 {
+        s.set_running(info.state == pws::pw_node_state_PW_NODE_STATE_RUNNING);
     }
 }
 
@@ -681,6 +769,11 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
     // run, and pw is its live pw_stream.
     unsafe {
         let s = &*(data as *const Stream);
+        if !s.ready() {
+            // Not yet mixed by anyone: the frames stay in the ring for the first cycle that is,
+            // and the cycle is not counted as the graph consuming the stream.
+            return;
+        }
         let stream = s.pw() as *mut pws::pw_stream;
         let mut rp = s.begin_cycle();
         let available = s.available(rp);

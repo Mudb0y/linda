@@ -8,9 +8,9 @@
 //!   `kick_ns`, and raises `skip_to`;
 //! - the real-time callback writes `read_pos`, `in_cycle`, the position snapshot and the cycle
 //!   counters;
-//! - the loop thread writes what it knows of the pw_stream: `attached_ns`, `active`, `broken`,
-//!   `retry_ns` and `pw`. It also clears the cycle counters, but only in `prepare_attach`, before
-//!   there is a pw_stream whose callback could run.
+//! - the loop thread writes what it knows of the pw_stream: `attached_ns`, `active`, `streaming`,
+//!   `running`, `broken`, `retry_ns` and `pw`. It also clears the cycle counters, but only in
+//!   `prepare_attach`, before there is a pw_stream whose callback could run.
 //!
 //! Nothing here takes a lock or waits. These are the orderings that matter:
 //! - `stop` is one store of `paused`, which the callback loads at the start of its next cycle, so
@@ -26,6 +26,9 @@
 //!   stores `active` false and then loads `write_pos`, again sequentially consistent: either the
 //!   producer sees the stream inactive and asks for it to be woken, or the loop thread sees the
 //!   new frames and keeps it active.
+//! - The callback hands over audio only while `streaming` and `running` are both set, which the
+//!   loop thread stores when PipeWire says so. Seeing them a cycle late costs a cycle of waiting,
+//!   never a cycle of audio.
 
 use std::ffi::{CString, c_void};
 use std::ptr::{self, NonNull};
@@ -74,7 +77,7 @@ pub struct Stream {
     snap_pos: AtomicU64,
     snap_latency: AtomicU64,
 
-    /// Process calls since the stream was last given a pw_stream.
+    /// Cycles in which the stream could hand over audio, since it was last given a pw_stream.
     process_calls: AtomicU64,
     cycle_ns: AtomicU64,
     last_graph_ns: AtomicU64,
@@ -94,6 +97,11 @@ pub struct Stream {
     /// When the loop thread last gave the stream a pw_stream, or 0 while it has none.
     attached_ns: AtomicU64,
     active: AtomicBool,
+    /// The pw_stream is in its streaming state, which PipeWire enters once its links are set up.
+    streaming: AtomicBool,
+    /// The daemon reports the stream's node running, which it does only once the node is in the
+    /// graph and the sinks it feeds wait for it in every cycle.
+    running: AtomicBool,
     broken: AtomicBool,
     retry_ns: AtomicU64,
     pw: AtomicPtr<c_void>,
@@ -154,6 +162,8 @@ impl Stream {
             played_high: AtomicU64::new(0),
             attached_ns: AtomicU64::new(0),
             active: AtomicBool::new(false),
+            streaming: AtomicBool::new(false),
+            running: AtomicBool::new(false),
             broken: AtomicBool::new(false),
             retry_ns: AtomicU64::new(0),
             pw: AtomicPtr::new(ptr::null_mut()),
@@ -423,6 +433,8 @@ impl Stream {
         self.process_calls.store(0, Release);
         self.last_graph_ns.store(0, Relaxed);
         self.cycle_ns.store(0, Relaxed);
+        self.streaming.store(false, Release);
+        self.running.store(false, Release);
     }
 
     pub fn set_pw(&self, pw: *mut c_void) {
@@ -438,7 +450,17 @@ impl Stream {
     pub fn mark_detached(&self) {
         self.attached_ns.store(0, SeqCst);
         self.active.store(false, SeqCst);
+        self.streaming.store(false, Release);
+        self.running.store(false, Release);
         self.pw.store(ptr::null_mut(), Release);
+    }
+
+    pub fn set_streaming(&self, streaming: bool) {
+        self.streaming.store(streaming, Release);
+    }
+
+    pub fn set_running(&self, running: bool) {
+        self.running.store(running, Release);
     }
 
     pub fn set_broken(&self, broken: bool) {
@@ -474,6 +496,11 @@ impl Stream {
     }
 
     // The real-time callback's side: no allocation, no lock, no system call, no wait.
+
+    /// Whether PipeWire will mix what the callback hands over in this cycle.
+    pub fn ready(&self) -> bool {
+        self.streaming.load(Acquire) && self.running.load(Acquire)
+    }
 
     /// Enters a cycle and returns the read position, having skipped what was discarded.
     pub fn begin_cycle(&self) -> u64 {
@@ -614,10 +641,12 @@ mod tests {
         out
     }
 
-    /// What the loop thread does when it gives a stream a pw_stream.
+    /// What the loop thread does when it gives a stream a pw_stream that is linked and running.
     fn attach(s: &Stream, now: u64) {
         s.prepare_attach();
         s.mark_attached(now);
+        s.set_streaming(true);
+        s.set_running(true);
     }
 
     #[test]
@@ -826,6 +855,20 @@ mod tests {
         attach(&s, 1);
         assert!(s.deactivate_if_still_empty());
         assert!(s.write(&frames(10, 1), 3).1);
+    }
+
+    #[test]
+    fn nothing_is_handed_over_until_the_graph_mixes_it() {
+        let s = mono16(8000);
+        s.prepare_attach();
+        s.mark_attached(1);
+        assert!(!s.ready());
+        s.set_streaming(true);
+        assert!(!s.ready(), "streaming, but not yet in the graph");
+        s.set_running(true);
+        assert!(s.ready());
+        s.mark_detached();
+        assert!(!s.ready());
     }
 
     #[test]
