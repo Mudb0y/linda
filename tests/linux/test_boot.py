@@ -1,14 +1,13 @@
 """The launcher as a real process: NVDA starts, speaks through the transcript synth, and exits.
 
-Each test starts source/basedreader.py with a configuration from fixtures/bootConfig, the transcript
-synth, and the boot probe plugin from fixtures/globalPlugins, which says one sentence once NVDA has
-started. Run under the rig, which gives every launch its display and its runtime directory, where the
-single-instance lock is:
+Each test starts source/basedreader.py through harness.startLauncher, with a configuration from
+fixtures/bootConfig, the transcript synth, and the boot probe plugin from fixtures/globalPlugins,
+which says one sentence once NVDA has started. Run under the rig, which gives every launch its display
+and its runtime directory, where the single-instance lock is:
 
 	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_boot.py
 """
 
-import importlib.util
 import json
 import os
 import re
@@ -18,16 +17,15 @@ import struct
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable
 from pathlib import Path
-from types import ModuleType
 
 import configobj
 import harness
 import pytest
 
 HERE = Path(__file__).resolve().parent
-LAUNCHER = harness.SOURCE / "basedreader.py"
+LAUNCHER = harness.LAUNCHER
 CONFIG_FIXTURE = HERE / "fixtures" / "bootConfig" / "nvda.ini"
 #: What fixtures/globalPlugins/bootProbe.py says.
 SENTENCE = "the boot probe has started"
@@ -49,152 +47,37 @@ WX_ID_CLOSE_ALL = 5021
 GIVEN_UP_STATUS = 1
 
 
-def _loadFile(name: str, path: Path) -> ModuleType:
-	# Loaded on their own, as both need only the standard library, rather than by putting source/ on
-	# this process's path, where NVDA's module names would shadow others.
-	spec = importlib.util.spec_from_file_location(name, path)
-	module = importlib.util.module_from_spec(spec)
-	spec.loader.exec_module(module)
-	return module
-
-
-transcriptRecords = _loadFile("_transcriptRecords", HERE / "synthDrivers" / "_transcriptRecords.py")
-singleInstance = _loadFile("singleInstance", harness.SOURCE / "linuxPlatform" / "singleInstance.py")
-
-#: The first line of each log record: level, code path, time, thread. The code path can hold spaces:
-#: logHandler writes "unhandled exception", "Exception ignored in: <...>" and "Python warning" there.
-_recordHeader = re.compile(r"^(?P<level>[A-Z_]+) - .+? \(\d\d:\d\d:\d\d\.\d{3}\) - .*:$", re.MULTILINE)
-#: Any line that starts as a record at ERROR or above does, whatever follows it.
-_errorRecord = re.compile(r"^(?:ERROR|CRITICAL) - .*$", re.MULTILINE)
+singleInstance = harness.singleInstance()
 #: What the probe logs for each call that showed a dialog, once it has returned.
 _answer = re.compile(r"^boot probe: (?P<name>\w+) answered (?P<answer>None|-?\d+)$", re.MULTILINE)
-#: What standard error may hold after a clean run, each with the reason it is allowed.
-_allowedStandardError = (
-	# NVDAHighlighter keeps its settings in a class attribute and globalVars.settingsRing keeps the
-	# last synth, both for the life of the process, so AutoSettings.__del__ runs only as the
-	# interpreter takes config apart, and fails. Windows does the same, with no standard error to show
-	# it.
-	re.compile(
-		r"Exception ignored in: <function AutoSettings\.__del__ at 0x[0-9a-f]+>\n"
-		r"Traceback \(most recent call last\):\n"
-		r"(?:  File \"[^\"\n]*/autoSettingsUtils/autoSettings\.py\", line \d+, in \w+\n(?:    .*\n)*)+"
-		r"AttributeError: 'NoneType' object has no attribute 'unregister'\n",
-	),
-)
+
+#: start(name, probe, *arguments, configDir=None, welcome=True, env=None) starts the launcher in a
+#: directory of its own; see the start fixture.
+Start = Callable[..., harness.Launch]
 
 
-def unexpectedStandardError(text: str, alsoAllowed: tuple[re.Pattern, ...] = ()) -> str:
-	"""What is left of standard error once the allowed lines are taken out."""
-	for pattern in (*_allowedStandardError, *alsoAllowed):
-		text = pattern.sub("", text)
-	return text
+def configDirOf(launch: harness.Launch) -> Path:
+	"""The configuration directory start gives a launch that is given none."""
+	return launch.directory / "config"
 
 
-def errorRecords(log: str) -> list[str]:
-	"""The records at ERROR or above in an NVDA log, or a line that looks like one."""
-	return _errorRecord.findall(log)
+def answers(launch: harness.Launch) -> dict[str, int | None]:
+	"""What each call that showed one of the probe's dialogs got back."""
+	return {
+		m["name"]: None if m["answer"] == "None" else int(m["answer"])
+		for m in _answer.finditer(launch.text("nvda.log"))
+	}
 
 
-class Launch:
-	"""One run of the launcher, with its own log, transcript and record of NoLinuxImplementation."""
+def savedSetting(launch: harness.Launch) -> str | None:
+	"""The value the launch's nvda.ini on disk holds for the setting the probe changes."""
+	section, key, _value = CHANGED_SETTING
+	path = configDirOf(launch) / "nvda.ini"
+	return configobj.ConfigObj(str(path)).get(section, {}).get(key) if path.exists() else None
 
-	def __init__(self, directory: Path, process: subprocess.Popen, started: float, configDir: Path) -> None:
-		self.directory = directory
-		self.process = process
-		self.started = started
-		self.configDir = configDir
 
-	def log(self, name: str = "nvda.log") -> str:
-		path = self.directory / name
-		return path.read_text(encoding="utf-8") if path.exists() else ""
-
-	def sentences(self, text: str = SENTENCE) -> list[dict]:
-		return [r for r in self.spoken() if transcriptRecords.spokenText(r) == text]
-
-	def spoken(self) -> list[dict]:
-		path = self.directory / "transcript.jsonl"
-		if not path.exists():
-			return []
-		return [r for r in transcriptRecords.readRecords(path) if r["kind"] == "speak"]
-
-	def recorded(self) -> list[str]:
-		"""What each NoLinuxImplementation made in the run names, raised or not."""
-		path = self.directory / "noLinuxImplementation.jsonl"
-		lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-		return [json.loads(line)["what"] for line in lines]
-
-	def answers(self) -> dict[str, int | None]:
-		"""What each call that showed one of the probe's dialogs got back."""
-		return {
-			m["name"]: None if m["answer"] == "None" else int(m["answer"])
-			for m in _answer.finditer(self.log())
-		}
-
-	def savedSetting(self) -> str | None:
-		"""The value nvda.ini on disk holds for the setting the probe changes."""
-		section, key, _value = CHANGED_SETTING
-		path = self.configDir / "nvda.ini"
-		return configobj.ConfigObj(str(path)).get(section, {}).get(key) if path.exists() else None
-
-	def describe(self) -> str:
-		parts = [f"exit status {self.process.poll()}"]
-		for name in ("stdout.txt", "stderr.txt", "noLinuxImplementation.jsonl"):
-			path = self.directory / name
-			text = path.read_text(encoding="utf-8") if path.exists() else ""
-			if text:
-				parts.append(f"{name}:\n{text[-3000:]}")
-		parts.append(f"log tail:\n{self.log()[-6000:]}")
-		return "\n".join(parts)
-
-	def waitForSentence(self, timeout: float = STARTUP_BOUND, text: str = SENTENCE) -> float:
-		"""Seconds from starting the process to the sentence being spoken."""
-		deadline = self.started + timeout
-		while time.monotonic() < deadline:
-			if sentences := self.sentences(text):
-				# The synth stamps records with the same monotonic clock, which is system wide.
-				return sentences[0]["t"] - self.started
-			if self.process.poll() is not None:
-				break
-			time.sleep(0.05)
-		pytest.fail(f"{text!r} was not spoken within {timeout} s\n{self.describe()}")
-
-	def waitForLog(self, text: str, timeout: float = SHUTDOWN_BOUND) -> None:
-		deadline = time.monotonic() + timeout
-		while text not in self.log():
-			if time.monotonic() >= deadline or self.process.poll() is not None:
-				pytest.fail(f"{text!r} was not logged within {timeout} s\n{self.describe()}")
-			time.sleep(0.05)
-
-	def waitForExit(self, timeout: float = SHUTDOWN_BOUND) -> int:
-		try:
-			return self.process.wait(timeout)
-		except subprocess.TimeoutExpired:
-			pytest.fail(f"NVDA did not exit within {timeout} s\n{self.describe()}")
-
-	def assertClean(
-		self,
-		logNames: tuple[str, ...] = ("nvda.log",),
-		alsoAllowed: tuple[re.Pattern, ...] = (),
-	) -> None:
-		"""The run raised no NoLinuxImplementation, even one upstream caught, logged no error, and wrote
-		nothing unexpected to standard error.
-
-		:param alsoAllowed: What this run's standard error may hold besides what every run's may.
-		"""
-		recorded = self.directory / "noLinuxImplementation.jsonl"
-		assert recorded.exists(), "the launcher did not record NoLinuxImplementation as asked"
-		raised = [json.loads(line) for line in recorded.read_text(encoding="utf-8").splitlines()]
-		raised = [r for r in raised if r["what"] not in harness.NOTED_GAPS]
-		assert not raised, "NoLinuxImplementation raised:\n" + "\n".join(
-			r["what"] + "\n" + "".join(r["stack"]) for r in raised
-		)
-		for name in logNames:
-			log = self.log(name)
-			assert _recordHeader.search(log), f"{name} holds no records\n{self.describe()}"
-			errors = errorRecords(log)
-			assert not errors, f"{name} holds {len(errors)} records at ERROR or above\n{log[-8000:]}"
-		stderr = self.log("stderr.txt")
-		assert not unexpectedStandardError(stderr, alsoAllowed), f"standard error holds:\n{stderr[-4000:]}"
+def spokenCount(launch: harness.Launch, text: str = SENTENCE) -> int:
+	return launch.spokenTexts().count(text)
 
 
 def _rigLockPath() -> str:
@@ -234,17 +117,31 @@ def _readyCopy() -> int | None:
 		lock.close()
 
 
+def _catches(processID: int, signalNumber: signal.Signals) -> bool:
+	"""Whether the process has a handler of its own for the signal, from the kernel's view of it."""
+	status = Path(f"/proc/{processID}/status").read_text(encoding="ascii")
+	caught = int(re.search(r"^SigCgt:\s*([0-9a-f]+)$", status, re.MULTILINE)[1], 16)
+	return bool(caught & (1 << (signalNumber - 1)))
+
+
+def waitUntilIdle(launch: harness.Launch, timeout: float = STARTUP_BOUND) -> None:
+	"""Wait until NVDA's main thread is blocked in the main loop's poll, where only an event, a timer
+	or a signal can wake it."""
+	# The main thread's ID is the process's.
+	wchan = Path(f"/proc/{launch.process.pid}/wchan")
+	deadline = time.monotonic() + timeout
+	while "poll" not in (where := wchan.read_text(encoding="ascii")):
+		assert time.monotonic() < deadline and launch.process.poll() is None, (
+			f"the main thread was not idle within {timeout} s, last in {where!r}\n{launch.describe()}"
+		)
+		time.sleep(0.01)
+
+
 @pytest.fixture
-def launcher(tmp_path: Path) -> Iterator:
-	"""Starts launches, and makes sure none outlives the test or wrote into the repository."""
+def start(launches, tmp_path: Path) -> Start:
+	"""Starts launches through conftest's launches fixture, which makes sure none outlives the test or
+	wrote into the repository."""
 	_rigLockPath()
-	launches: list[Launch] = []
-	before = harness.treeState()
-	# The test hooks take one directory holding both packages' directories.
-	hooks = tmp_path / "hooks"
-	hooks.mkdir()
-	(hooks / "synthDrivers").symlink_to(HERE / "synthDrivers")
-	(hooks / "globalPlugins").symlink_to(HERE / "fixtures" / "globalPlugins")
 
 	def start(
 		name: str,
@@ -253,11 +150,13 @@ def launcher(tmp_path: Path) -> Iterator:
 		configDir: Path | None = None,
 		welcome: bool = True,
 		env: dict[str, str | None] | None = None,
-	) -> Launch:
+	) -> harness.Launch:
 		"""Start the launcher in a directory of its own.
 
 		:param probe: What the boot probe does, and with it a fixture configuration, a log and debug
 			logging; None for a launch that only acts on another copy.
+		:param configDir: The configuration directory, which is made from the fixture unless it exists;
+			by default configDirOf the launch.
 		:param welcome: Whether the configuration leaves the welcome dialog of a first start on.
 		:param env: Variables to set, or to unset where the value is None.
 		"""
@@ -271,52 +170,11 @@ def launcher(tmp_path: Path) -> Iterator:
 			if not welcome:
 				text = text.replace("[general]\n", "[general]\n\tshowWelcomeDialogAtStartup = False\n", 1)
 			(configDir / "nvda.ini").write_text(text, encoding="utf-8")
-		environment = {
-			**os.environ,
-			"BASEDREADER_TEST_HOOKS_DIR": str(hooks),
-			"BASEDREADER_TRANSCRIPT_FILE": str(directory / "transcript.jsonl"),
-			"BASEDREADER_NO_LINUX_IMPLEMENTATION_FILE": str(directory / "noLinuxImplementation.jsonl"),
-			"BASEDREADER_TRANSCRIPT_MODE": "immediate",
-		}
-		environment.pop("BASEDREADER_BOOT_PROBE", None)
 		if probe:
-			environment["BASEDREADER_BOOT_PROBE"] = probe
-		for variable, value in (env or {}).items():
-			if value is None:
-				environment.pop(variable, None)
-			else:
-				environment[variable] = value
-		command = [sys.executable, "-I", "-B", str(LAUNCHER), *args]
-		if probe:
-			command += ["-c", str(configDir), "-f", str(directory / "nvda.log"), "--debug-logging"]
-		with open(directory / "stdout.txt", "w") as stdout, open(directory / "stderr.txt", "w") as stderr:
-			started = time.monotonic()
-			process = subprocess.Popen(
-				command,
-				env=environment,
-				cwd=directory,
-				stdout=stdout,
-				stderr=stderr,
-			)
-		launch = Launch(directory, process, started, configDir)
-		launches.append(launch)
-		return launch
+			args = (*args, "-c", str(configDir), "-f", str(directory / "nvda.log"), "--debug-logging")
+		return launches(name, *args, env={"BASEDREADER_BOOT_PROBE": probe, **(env or {})})
 
-	yield start
-	for launch in launches:
-		if launch.process.poll() is None:
-			launch.process.kill()
-			launch.process.wait()
-	# A copy that a launch started to restart itself is not this process's child, and is found by the
-	# lock it holds.
-	lock = _rigLock()
-	try:
-		singleInstance.terminateRunning(lock)
-	finally:
-		lock.close()
-	after = harness.treeState()
-	changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
-	assert not changed, f"a launch changed the repository: {changed}"
+	return start
 
 
 def _holdLock(lockPath: str, record: str, ignoreTerm: bool = False) -> subprocess.Popen:
@@ -347,12 +205,12 @@ def _holdLock(lockPath: str, record: str, ignoreTerm: bool = False) -> subproces
 	return holder
 
 
-def test_startsSpeaksAndExitsThroughTriggerNVDAExit(launcher):
-	nvda = launcher("exit", "exit")
-	toSpeech = nvda.waitForSentence()
-	assert nvda.waitForExit() == 0, nvda.describe()
-	nvda.assertClean()
-	log = nvda.log()
+def test_startsSpeaksAndExitsThroughTriggerNVDAExit(start: Start):
+	nvda = start("exit", "exit")
+	toSpeech = nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	log = nvda.text("nvda.log")
 	assert "_doShutdown has been queued" in log
 	assert "Exiting on" not in log
 	assert "NVDA exit" in log
@@ -363,163 +221,171 @@ def test_startsSpeaksAndExitsThroughTriggerNVDAExit(launcher):
 
 
 @pytest.mark.parametrize("signalNumber", [signal.SIGTERM, signal.SIGHUP, signal.SIGINT])
-def test_exitsOnSignal(launcher, signalNumber: signal.Signals):
-	nvda = launcher("wait", "wait")
-	nvda.waitForSentence()
-	# Idle by now: nothing but the signal can wake the main loop.
-	time.sleep(0.5)
+def test_exitsOnSignal(start: Start, signalNumber: signal.Signals):
+	nvda = start("wait", "wait")
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	# Nothing but the signal is to wake the main loop.
+	waitUntilIdle(nvda)
 	asked = time.monotonic()
 	nvda.process.send_signal(signalNumber)
-	assert nvda.waitForExit() == 0, nvda.describe()
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
 	toExit = time.monotonic() - asked
-	nvda.assertClean()
-	assert f"Exiting on {signalNumber.name}" in nvda.log()
+	nvda.assertClean(logNames=("nvda.log",))
+	assert f"Exiting on {signalNumber.name}" in nvda.text("nvda.log")
 	print(f"{signalNumber.name} to exit: {toExit:.2f} s")
 
 
 @pytest.mark.parametrize("signalNumber", [signal.SIGHUP, signal.SIGINT])
-def test_signalIgnoredAtStartStaysIgnored(launcher, signalNumber: signal.Signals):
+def test_signalIgnoredAtStartStaysIgnored(start: Start, signalNumber: signal.Signals):
 	# As nohup starts a program, so that it outlives the terminal it was started from.
 	previous = signal.signal(signalNumber, signal.SIG_IGN)
 	try:
-		nvda = launcher("ignoring", "wait")
+		nvda = start("ignoring", "wait")
 	finally:
 		signal.signal(signalNumber, previous)
-	nvda.waitForSentence()
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
 	status = Path(f"/proc/{nvda.process.pid}/status").read_text(encoding="ascii")
 	ignored = int(re.search(r"^SigIgn:\s*([0-9a-f]+)$", status, re.MULTILINE)[1], 16)
 	assert ignored & (1 << (signalNumber - 1)), status
 	nvda.process.send_signal(signalNumber)
 	nvda.process.send_signal(signal.SIGTERM)
-	assert nvda.waitForExit() == 0, nvda.describe()
-	nvda.assertClean()
-	log = nvda.log()
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	log = nvda.text("nvda.log")
 	assert f"Exiting on {signalNumber.name}" not in log
 	assert "Exiting on SIGTERM" in log
 
 
-def test_repeatedQuitSignalsDuringExit(launcher):
+def test_repeatedQuitSignalsDuringExit(start: Start):
 	# The probe's terminate takes two seconds, so that these arrive while the main loop still runs.
-	nvda = launcher("repeated", "slowExit", welcome=False)
-	nvda.waitForSentence()
+	nvda = start("repeated", "slowExit", welcome=False)
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
 	nvda.process.send_signal(signal.SIGTERM)
-	nvda.waitForLog("Exiting on SIGTERM")
+	nvda.waitForLog("Exiting on SIGTERM", SHUTDOWN_BOUND)
 	# What the end of a session sends after SIGTERM, and a second request to quit.
 	nvda.process.send_signal(signal.SIGHUP)
 	nvda.process.send_signal(signal.SIGTERM)
-	assert nvda.waitForExit() == 0, nvda.describe()
-	nvda.assertClean()
-	log = nvda.log()
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	log = nvda.text("nvda.log")
 	assert log.count("Exiting on SIGTERM") == 2
 	assert "Exiting on SIGHUP" in log
 	assert "NVDA exit" in log
 
 
-def test_secondSignalEndsAnExitThatHangs(launcher):
+def test_secondSignalEndsAnExitThatHangs(start: Start):
 	# The probe leaves a thread running that NVDA's exit waits for after the main loop.
-	nvda = launcher("hang", "hangAtExit", welcome=False)
-	nvda.waitForSentence()
+	nvda = start("hang", "hangAtExit", welcome=False)
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
 	nvda.process.send_signal(signal.SIGTERM)
-	nvda.waitForLog("Waiting on <Thread(bootProbeHang")
+	nvda.waitForLog("Waiting on <Thread(bootProbeHang", SHUTDOWN_BOUND)
 	nvda.process.send_signal(signal.SIGTERM)
-	assert nvda.waitForExit() == -signal.SIGTERM, nvda.describe()
-	assert nvda.savedSetting() == CHANGED_SETTING[2]
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == -signal.SIGTERM, nvda.describe()
+	assert savedSetting(nvda) == CHANGED_SETTING[2]
+	nvda.assertClean(ignoring={"returnCode"}, logNames=("nvda.log",))
 
 
-def test_firstSignalAfterTheMainLoopIsNotFatal(launcher):
+def test_firstSignalAfterTheMainLoopIsNotFatal(start: Start):
 	# A copy that this one started to restart NVDA sends SIGTERM as it takes over, whenever that is.
-	nvda = launcher("hang", "hangAtExit+exit", welcome=False)
-	nvda.waitForLog("Waiting on <Thread(bootProbeHang", timeout=STARTUP_BOUND)
+	nvda = start("hang", "hangAtExit+exit", welcome=False)
+	nvda.waitForLog("Waiting on <Thread(bootProbeHang", STARTUP_BOUND)
 	nvda.process.send_signal(signal.SIGTERM)
-	nvda.waitForLog("SIGTERM while exiting")
+	nvda.waitForLog("SIGTERM while exiting", SHUTDOWN_BOUND)
 	assert nvda.process.poll() is None
 	nvda.process.send_signal(signal.SIGTERM)
-	assert nvda.waitForExit() == -signal.SIGTERM, nvda.describe()
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == -signal.SIGTERM, nvda.describe()
+	nvda.assertClean(ignoring={"returnCode"}, logNames=("nvda.log",))
 
 
 @pytest.mark.parametrize("signalNumber", [signal.SIGTERM, signal.SIGINT])
-def test_repeatedSignalEndsAnExitHeldInC(launcher, signalNumber: signal.Signals):
+def test_repeatedSignalEndsAnExitHeldInC(start: Start, signalNumber: signal.Signals):
 	# No signal started this exit, so the first after the main loop is let through, as a copy started
 	# to restart NVDA sends one. The probe then holds the main thread in C with the GIL, where no
 	# Python signal handler can ever run.
-	nvda = launcher("heldInC", "hangInC+exit", welcome=False)
-	nvda.waitForLog("boot probe: blocking in C", timeout=STARTUP_BOUND)
+	nvda = start("heldInC", "hangInC+exit", welcome=False)
+	nvda.waitForLog("boot probe: blocking in C", STARTUP_BOUND)
+	assert _catches(nvda.process.pid, signalNumber), nvda.describe()
 	nvda.process.send_signal(signalNumber)
-	with pytest.raises(subprocess.TimeoutExpired):
-		nvda.process.wait(1)
+	# The kernel puts the signal back to its default action as it delivers it, and the process lives on.
+	deadline = time.monotonic() + SHUTDOWN_BOUND
+	while nvda.process.poll() is None and _catches(nvda.process.pid, signalNumber):
+		assert time.monotonic() < deadline, f"the first signal was not delivered\n{nvda.describe()}"
+		time.sleep(0.01)
+	assert nvda.process.poll() is None, nvda.describe()
 	nvda.process.send_signal(signalNumber)
-	assert nvda.waitForExit() == -signalNumber, nvda.describe()
-	assert nvda.savedSetting() == CHANGED_SETTING[2]
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == -signalNumber, nvda.describe()
+	assert savedSetting(nvda) == CHANGED_SETTING[2]
+	nvda.assertClean(ignoring={"returnCode"}, logNames=("nvda.log",))
 
 
-def test_signalSavesTheConfigurationFirst(launcher):
+def test_signalSavesTheConfigurationFirst(start: Start):
 	# The probe's terminate never returns, so the exit never reaches the save after the main loop.
-	nvda = launcher("hangInTerminate", "hangInTerminate", welcome=False)
-	nvda.waitForSentence()
+	nvda = start("hangInTerminate", "hangInTerminate", welcome=False)
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
 	nvda.process.send_signal(signal.SIGTERM)
 	deadline = time.monotonic() + SHUTDOWN_BOUND
-	while nvda.savedSetting() != CHANGED_SETTING[2]:
+	while savedSetting(nvda) != CHANGED_SETTING[2]:
 		assert time.monotonic() < deadline, f"the setting was not saved\n{nvda.describe()}"
 		time.sleep(0.05)
 	assert nvda.process.poll() is None
 
 
-def test_secondLaunchReplacesFirst(launcher, tmp_path: Path):
+def test_secondLaunchReplacesFirst(start: Start, tmp_path: Path):
 	# Left by a copy with a longer process ID, which a shorter one must not leave a tail of.
 	Path(_rigLockPath()).write_text("4194303\nready\n", encoding="ascii")
 	sharedConfig = tmp_path / "config"
-	first = launcher("first", "wait", configDir=sharedConfig)
-	first.waitForSentence()
-	second = launcher("second", "exit", configDir=sharedConfig)
+	first = start("first", "wait", configDir=sharedConfig)
+	first.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	second = start("second", "exit", configDir=sharedConfig)
 	# The second asks the first to quit, and only kills it if it is still there after four seconds.
-	assert first.waitForExit() == 0, first.describe()
-	second.waitForSentence()
-	assert second.waitForExit() == 0, second.describe()
-	first.assertClean()
-	second.assertClean()
-	assert "Exiting on SIGTERM" in first.log()
+	assert first.waitForExit(SHUTDOWN_BOUND) == 0, first.describe()
+	second.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	assert second.waitForExit(SHUTDOWN_BOUND) == 0, second.describe()
+	first.assertClean(logNames=("nvda.log",))
+	second.assertClean(logNames=("nvda.log",))
+	assert "Exiting on SIGTERM" in first.text("nvda.log")
 	firstEnd = first.spoken()[-1]["t"]
 	secondStart = second.spoken()[0]["t"]
 	assert firstEnd < secondStart
 
 
-def test_copyStillStartingIsGivenTimeToStart(launcher):
+def test_copyStillStartingIsGivenTimeToStart(start: Start):
 	# The probe makes the first copy's start take longer than the QUIT_TIMEOUT a ready copy gets.
-	first = launcher("slow", "slowStart", welcome=False)
+	first = start("slow", "slowStart", welcome=False)
 	deadline = time.monotonic() + STARTUP_BOUND
 	while _runningCopy() != first.process.pid:
 		assert time.monotonic() < deadline and first.process.poll() is None, first.describe()
 		time.sleep(0.01)
 	assert _readyCopy() is None
-	second = launcher("second", "exit", welcome=False)
-	assert first.waitForExit(timeout=STARTUP_BOUND) == 0, first.describe()
-	second.waitForSentence()
-	assert second.waitForExit() == 0, second.describe()
-	first.assertClean()
-	second.assertClean()
-	assert "Exiting on SIGTERM" in first.log()
+	second = start("second", "exit", welcome=False)
+	assert first.waitForExit(STARTUP_BOUND) == 0, first.describe()
+	second.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	assert second.waitForExit(SHUTDOWN_BOUND) == 0, second.describe()
+	first.assertClean(logNames=("nvda.log",))
+	second.assertClean(logNames=("nvda.log",))
+	assert "Exiting on SIGTERM" in first.text("nvda.log")
 
 
-def test_hungCopyIsKilled(launcher):
+def test_hungCopyIsKilled(start: Start):
 	holder = _holdLock(_rigLockPath(), "PID\nready\n", ignoreTerm=True)
 	try:
-		nvda = launcher("takeover", "exit")
+		nvda = start("takeover", "exit")
 		limit = singleInstance.QUIT_TIMEOUT + singleInstance.KILL_TIMEOUT + SHUTDOWN_BOUND
 		assert holder.wait(limit) == -signal.SIGKILL
-		nvda.waitForSentence()
-		assert nvda.waitForExit() == 0, nvda.describe()
-		nvda.assertClean()
+		nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+		assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+		nvda.assertClean(logNames=("nvda.log",))
 	finally:
 		if holder.poll() is None:
 			holder.kill()
 		holder.wait()
 
 
-def test_restartStartsACopyThatTakesOver(launcher):
+def test_restartStartsACopyThatTakesOver(start: Start):
 	# The new copy's command line is quoted as Windows quotes it and split again here.
-	nvda = launcher('restart in "a dir\\" with \\\\ quotes', "restart")
-	nvda.waitForSentence()
-	assert nvda.waitForExit() == 0, nvda.describe()
+	nvda = start('restart in "a dir\\" with \\\\ quotes', "restart")
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
 	# Not this process's child, so it is found and waited for through the lock it holds, which it
 	# takes long before it speaks.
 	deadline = time.monotonic() + STARTUP_BOUND
@@ -530,8 +396,8 @@ def test_restartStartsACopyThatTakesOver(launcher):
 	# Started with the first copy's interpreter options, not just with the interpreter core names.
 	command = Path(f"/proc/{newCopy}/cmdline").read_bytes().split(b"\0")
 	assert command[1:3] == [b"-I", b"-B"], command
-	assert os.fsencode(nvda.configDir) in command, command
-	while len(nvda.sentences()) < 2:
+	assert os.fsencode(configDirOf(nvda)) in command, command
+	while spokenCount(nvda) < 2:
 		assert time.monotonic() < deadline, f"the new copy did not speak\n{nvda.describe()}"
 		time.sleep(0.05)
 	try:
@@ -547,56 +413,63 @@ def test_restartStartsACopyThatTakesOver(launcher):
 			os.close(pidfd)
 	# The new copy moved the first copy's log aside as it started.
 	nvda.assertClean(logNames=("nvda-old.log", "nvda.log"))
-	assert "Starting new NVDA instance" in nvda.log("nvda-old.log")
-	assert "NVDA exit" in nvda.log("nvda.log")
+	assert "Starting new NVDA instance" in nvda.text("nvda-old.log")
+	assert "NVDA exit" in nvda.text("nvda.log")
 
 
-def test_checkRunningAndQuit(launcher):
-	before = launcher("checkBefore", None, "--check-running")
-	assert before.waitForExit() == 1, before.describe()
-	nvda = launcher("wait", "wait")
-	nvda.waitForSentence()
-	running = launcher("checkRunning", None, "--check-running")
-	assert running.waitForExit() == 0, running.describe()
+def test_checkRunningAndQuit(start: Start):
+	before = start("checkBefore", None, "--check-running")
+	assert before.waitForExit(SHUTDOWN_BOUND) == 1, before.describe()
+	before.assertClean(ignoring={"returnCode"})
+	nvda = start("wait", "wait")
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	running = start("checkRunning", None, "--check-running")
+	assert running.waitForExit(SHUTDOWN_BOUND) == 0, running.describe()
+	running.assertClean()
 	assert nvda.process.poll() is None
-	quitter = launcher("quit", None, "--quit")
-	assert quitter.waitForExit() == 0, quitter.describe()
-	assert nvda.waitForExit() == 0, nvda.describe()
-	nvda.assertClean()
-	after = launcher("checkAfter", None, "--check-running")
-	assert after.waitForExit() == 1, after.describe()
+	quitter = start("quit", None, "--quit")
+	assert quitter.waitForExit(SHUTDOWN_BOUND) == 0, quitter.describe()
+	quitter.assertClean()
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	after = start("checkAfter", None, "--check-running")
+	assert after.waitForExit(SHUTDOWN_BOUND) == 1, after.describe()
+	after.assertClean(ignoring={"returnCode"})
 
 
-def test_coreFailureIsReportedOnStandardError(launcher):
+def test_coreFailureIsReportedOnStandardError(start: Start):
 	# wx raises SystemExit when there is no display to open.
-	nvda = launcher("noDisplay", "exit", env={"DISPLAY": None})
-	assert nvda.waitForExit() == 1, nvda.describe()
-	assert re.search(r"^CRITICAL - __main__\.main .*:\ncore failure$", nvda.log(), re.MULTILINE), (
+	nvda = start("noDisplay", "exit", env={"DISPLAY": None})
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 1, nvda.describe()
+	assert re.search(r"^CRITICAL - __main__\.main .*:\ncore failure$", nvda.text("nvda.log"), re.MULTILINE), (
 		nvda.describe()
 	)
 	# One line, and nothing from a hook of logHandler's that the interpreter took apart as it exited.
-	assert unexpectedStandardError(nvda.log("stderr.txt")) == (
+	assert harness.unexpectedStandardError(nvda.text("stderr.txt")) == (
 		"basedreader: core failure, SystemExit: Unable to access the X Display, is $DISPLAY set "
 		f"properly?; the log is {nvda.directory / 'nvda.log'}\n"
 	)
+	nvda.assertClean(ignoring={"returnCode", "logErrors", "stderr"})
 
 
-def test_launcherOptionIsRefused(launcher):
-	nvda = launcher("launcherOption", "exit", "--launcher")
-	assert nvda.waitForExit() == 1, nvda.describe()
-	assert nvda.log("stderr.txt").startswith("basedreader: --launcher ")
-	assert not nvda.log()
+def test_launcherOptionIsRefused(start: Start):
+	nvda = start("launcherOption", "exit", "--launcher")
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 1, nvda.describe()
+	assert nvda.text("stderr.txt").startswith("basedreader: --launcher ")
+	assert not nvda.text("nvda.log")
+	nvda.assertClean(ignoring={"returnCode", "stderr"})
 
 
 @pytest.mark.parametrize(
 	"option",
 	["--install", "--install-silent", "--create-portable", "--create-portable-silent"],
 )
-def test_installerOptionsAreRefused(launcher, option: str):
-	nvda = launcher(option.lstrip("-"), "exit", option)
-	assert nvda.waitForExit() == 1, nvda.describe()
-	assert nvda.log("stderr.txt").startswith(f"basedreader: {option} uses NVDA's Windows installer")
-	assert not nvda.log()
+def test_installerOptionsAreRefused(start: Start, option: str):
+	nvda = start(option.lstrip("-"), "exit", option)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 1, nvda.describe()
+	assert nvda.text("stderr.txt").startswith(f"basedreader: {option} uses NVDA's Windows installer")
+	assert not nvda.text("nvda.log")
+	nvda.assertClean(ignoring={"returnCode", "stderr"})
 
 
 def test_lockFailureIsReportedOnStandardError(tmp_path: Path):
@@ -621,22 +494,25 @@ def test_lockFailureIsReportedOnStandardError(tmp_path: Path):
 	assert done.error is not None and done.error.rstrip().endswith("SystemExit: 1"), done.error
 	assert done.stderr.startswith("basedreader: cannot take "), done.stderr
 	assert done.stderr.rstrip().endswith("No locks available"), done.stderr
+	done.assertClean(ignoring={"error", "stderr"})
 
 
-def test_greeterCopyTakesNoTestHooks(launcher):
+def test_greeterCopyTakesNoTestHooks(start: Start):
 	# On a display manager's login screen NVDA runs in secure mode, which turns logging off as well.
-	nvda = launcher("greeter", "exit", env={"XDG_SESSION_CLASS": "greeter"})
+	nvda = start("greeter", "exit", env={"XDG_SESSION_CLASS": "greeter"})
 	deadline = time.monotonic() + STARTUP_BOUND
 	while _readyCopy() != nvda.process.pid:
 		assert time.monotonic() < deadline and nvda.process.poll() is None, nvda.describe()
 		time.sleep(0.05)
 	nvda.process.send_signal(signal.SIGTERM)
-	assert nvda.waitForExit() == 0, nvda.describe()
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
 	assert not nvda.spoken()
-	assert not nvda.log()
-	recorded = (nvda.directory / "noLinuxImplementation.jsonl").read_text(encoding="utf-8")
-	assert not recorded, recorded
-	assert not unexpectedStandardError(nvda.log("stderr.txt")), nvda.describe()
+	assert not nvda.text("nvda.log")
+	# Without the test hooks it speaks through NVDA's default synthesizer, eSpeak, whose library is
+	# all it reaches for that could sound; the rig has no sound device for it to reach.
+	audio = nvda.result().audio
+	assert audio and all("espeak" in what for what in audio), audio
+	nvda.assertClean(ignoring={"audio"})
 
 
 def test_recordSeesNoLinuxImplementationThatUpstreamCaught(tmp_path: Path):
@@ -898,79 +774,25 @@ def test_lockHeldFromAnotherPidNamespaceIsNotSignalled(monkeypatch, tmp_path: Pa
 		lock.close()
 
 
-def test_assertCleanSeesEveryErrorRecord(tmp_path: Path):
-	# Each of these code paths holds a space, which a header pattern must still match.
-	for codePath in ("unhandled exception", "Exception ignored in: <function f at 0x1>", "Python warning"):
-		launch = Launch(tmp_path, subprocess.Popen(["true"]), time.monotonic(), tmp_path)
-		launch.process.wait()
-		(tmp_path / "noLinuxImplementation.jsonl").write_text("", encoding="utf-8")
-		(tmp_path / "nvda.log").write_text(
-			"INFO - core.main (12:00:00.000) - MainThread (1):\nstarting\n"
-			f"ERROR - {codePath} (12:00:01.000) - MainThread (1):\n"
-			"Traceback (most recent call last):\nValueError: x\n",
-			encoding="utf-8",
-		)
-		with pytest.raises(AssertionError, match="1 records at ERROR"):
-			launch.assertClean()
-
-
-def test_assertCleanSeesUnexpectedStandardError(tmp_path: Path):
-	launch = Launch(tmp_path, subprocess.Popen(["true"]), time.monotonic(), tmp_path)
-	launch.process.wait()
-	(tmp_path / "noLinuxImplementation.jsonl").write_text("", encoding="utf-8")
-	(tmp_path / "nvda.log").write_text(
-		"INFO - core.main (12:00:00.000) - MainThread (1):\nx\n", encoding="utf-8"
-	)
-	allowed = (
-		"Exception ignored in: <function AutoSettings.__del__ at 0x7fffe85965c0>\n"
-		"Traceback (most recent call last):\n"
-		'  File "/x/source/autoSettingsUtils/autoSettings.py", line 43, in __del__\n'
-		'  File "/x/source/autoSettingsUtils/autoSettings.py", line 52, in _unregisterConfigSaveAction\n'
-		"AttributeError: 'NoneType' object has no attribute 'unregister'\n"
-	)
-	(tmp_path / "stderr.txt").write_text(allowed * 2, encoding="utf-8")
-	launch.assertClean()
-	(tmp_path / "stderr.txt").write_text(
-		allowed + "(python3:1): Gtk-WARNING **: something\n", encoding="utf-8"
-	)
-	with pytest.raises(AssertionError, match="standard error"):
-		launch.assertClean()
-
-
-def test_assertCleanAllowsOnlyNotedGaps(tmp_path: Path):
-	launch = Launch(tmp_path, subprocess.Popen(["true"]), time.monotonic(), tmp_path)
-	launch.process.wait()
-	(tmp_path / "nvda.log").write_text(
-		"INFO - core.main (12:00:00.000) - MainThread (1):\nx\n", encoding="utf-8"
-	)
-	record = {"what": "winsound.MessageBeep", "thread": "MainThread", "stack": []}
-	(tmp_path / "noLinuxImplementation.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
-	launch.assertClean()
-	record["what"] = "winsound.PlaySound"
-	(tmp_path / "noLinuxImplementation.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
-	with pytest.raises(AssertionError, match="winsound.PlaySound"):
-		launch.assertClean()
-
-
-def test_startsFromUpstreamDefaults(launcher):
+def test_startsFromUpstreamDefaults(start: Start):
 	# The fixture leaves the welcome dialog, the question at exit and every other first-start dialog
 	# at upstream's defaults; the welcome dialog is open while the probe speaks.
 	assert "showWelcomeDialogAtStartup" not in CONFIG_FIXTURE.read_text(encoding="utf-8")
-	nvda = launcher("defaults", "wait")
-	nvda.waitForSentence()
-	nvda.waitForLog("Did context help binding for WelcomeDialog", timeout=STARTUP_BOUND)
+	nvda = start("defaults", "wait")
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	nvda.waitForLog("Did context help binding for WelcomeDialog", STARTUP_BOUND)
 	nvda.process.send_signal(signal.SIGTERM)
-	assert nvda.waitForExit() == 0, nvda.describe()
-	nvda.assertClean()
-	assert "ending modal <gui.startupDialogs.WelcomeDialog" in nvda.log()
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	assert "ending modal <gui.startupDialogs.WelcomeDialog" in nvda.text("nvda.log")
 
 
-def test_exitCommandAsksFirst(launcher):
-	nvda = launcher("exitDialog", "exitDialog")
-	nvda.waitForSentence(text=EXIT_DIALOG_SENTENCE)
+def test_exitCommandAsksFirst(start: Start):
+	nvda = start("exitDialog", "exitDialog")
+	nvda.waitForSpeech(EXIT_DIALOG_SENTENCE, STARTUP_BOUND)
 	nvda.process.send_signal(signal.SIGTERM)
-	assert nvda.waitForExit() == 0, nvda.describe()
-	nvda.assertClean()
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
 
 
 @pytest.mark.parametrize(
@@ -985,29 +807,29 @@ def test_exitCommandAsksFirst(launcher):
 		("alert", None),
 	],
 )
-def test_exitsOnSignalWithMessageBoxOpen(launcher, probe: str, answer: int | None):
-	nvda = launcher(probe, probe)
-	nvda.waitForSentence(text=DIALOG_SENTENCE)
+def test_exitsOnSignalWithMessageBoxOpen(start: Start, probe: str, answer: int | None):
+	nvda = start(probe, probe)
+	nvda.waitForSpeech(DIALOG_SENTENCE, STARTUP_BOUND)
 	asked = time.monotonic()
 	nvda.process.send_signal(signal.SIGTERM)
 	# Well within the four seconds after which a copy replacing this one would kill it.
-	assert nvda.waitForExit(timeout=singleInstance.QUIT_TIMEOUT) == 0, nvda.describe()
+	assert nvda.waitForExit(singleInstance.QUIT_TIMEOUT) == 0, nvda.describe()
 	toExit = time.monotonic() - asked
-	nvda.assertClean()
-	log = nvda.log()
+	nvda.assertClean(logNames=("nvda.log",))
+	log = nvda.text("nvda.log")
 	assert "Exiting on SIGTERM" in log
 	assert "_doShutdown has been queued" in log
-	assert nvda.answers() == {probe: answer}
-	assert nvda.savedSetting() == CHANGED_SETTING[2]
+	assert answers(nvda) == {probe: answer}
+	assert savedSetting(nvda) == CHANGED_SETTING[2]
 	if probe == "messageBox":
 		# An error box, whose sound Linux does not have.
-		assert nvda.recorded() == ["winsound.MessageBeep"]
+		assert nvda.result().noLinuxImplementation == ["winsound.MessageBeep"]
 	print(f"SIGTERM to exit with {probe} open: {toExit:.2f} s")
 
 
 @pytest.mark.parametrize("route", ["signal", "triggerNVDAExit"])
 @pytest.mark.parametrize(
-	("probe", "welcome", "answers"),
+	("probe", "welcome", "answered"),
 	[
 		# GTK's own dialog, inside the welcome dialog.
 		("nativeMessageBox", True, {"nativeMessageBox": WX_CANCEL}),
@@ -1017,71 +839,74 @@ def test_exitsOnSignalWithMessageBoxOpen(launcher, probe: str, answer: int | Non
 	],
 )
 def test_exitsWithModalDialogsOpen(
-	launcher,
+	start: Start,
 	probe: str,
 	welcome: bool,
-	answers: dict,
+	answered: dict,
 	route: str,
 ):
-	nvda = launcher(probe, probe if route == "signal" else f"{probe}+exit", welcome=welcome)
-	nvda.waitForSentence(text=DIALOG_SENTENCE)
+	nvda = start(probe, probe if route == "signal" else f"{probe}+exit", welcome=welcome)
+	nvda.waitForSpeech(DIALOG_SENTENCE, STARTUP_BOUND)
 	if route == "signal":
 		nvda.process.send_signal(signal.SIGTERM)
-	assert nvda.waitForExit(timeout=singleInstance.QUIT_TIMEOUT) == 0, nvda.describe()
-	nvda.assertClean()
-	assert nvda.answers() == answers
-	assert nvda.savedSetting() == CHANGED_SETTING[2]
-	assert "NVDA exit" in nvda.log()
+	assert nvda.waitForExit(singleInstance.QUIT_TIMEOUT) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	assert answers(nvda) == answered
+	assert savedSetting(nvda) == CHANGED_SETTING[2]
+	assert "NVDA exit" in nvda.text("nvda.log")
 
 
 @pytest.mark.parametrize("route", ["signal", "triggerNVDAExit"])
-def test_exitsWhileTheCallInsideADialogGoesOn(launcher, route: str):
+def test_exitsWhileTheCallInsideADialogGoesOn(start: Start, route: str):
 	# Once its dialog is answered, the call that showed it handles events and then asks a question
 	# inside the outer dialog. Ended before that call returns, the outer dialog either never ends or is
 	# destroyed under the question.
-	nvda = launcher("followUp", "followUp" if route == "signal" else "followUp+exit", welcome=False)
-	nvda.waitForSentence(text=DIALOG_SENTENCE)
+	nvda = start("followUp", "followUp" if route == "signal" else "followUp+exit", welcome=False)
+	nvda.waitForSpeech(DIALOG_SENTENCE, STARTUP_BOUND)
 	if route == "signal":
 		nvda.process.send_signal(signal.SIGTERM)
-	assert nvda.waitForExit(timeout=singleInstance.QUIT_TIMEOUT) == 0, nvda.describe()
-	nvda.assertClean()
+	assert nvda.waitForExit(singleInstance.QUIT_TIMEOUT) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
 	# In the order the calls returned.
-	assert list(nvda.answers().items()) == [
+	assert list(answers(nvda).items()) == [
 		("inner", WX_ID_CLOSE_ALL),
 		("followUp", WX_CANCEL),
 		("outer", WX_ID_CLOSE_ALL),
 	]
-	assert nvda.savedSetting() == CHANGED_SETTING[2]
+	assert savedSetting(nvda) == CHANGED_SETTING[2]
 
 
-def test_callThatNeverReturnsInsideADialogEndsNVDA(launcher):
+def test_callThatNeverReturnsInsideADialogEndsNVDA(start: Start):
 	# Once its dialog is answered, the call that showed it handles events for ever inside the outer
 	# dialog, which can therefore never be ended.
-	nvda = launcher("neverReturns", "neverReturns", welcome=False)
-	nvda.waitForSentence(text=DIALOG_SENTENCE)
+	nvda = start("neverReturns", "neverReturns", welcome=False)
+	nvda.waitForSpeech(DIALOG_SENTENCE, STARTUP_BOUND)
 	nvda.process.send_signal(signal.SIGTERM)
-	assert nvda.waitForExit(timeout=singleInstance.QUIT_TIMEOUT) == GIVEN_UP_STATUS, nvda.describe()
-	log = nvda.log()
-	assert re.search(
+	assert nvda.waitForExit(singleInstance.QUIT_TIMEOUT) == GIVEN_UP_STATUS, nvda.describe()
+	log = nvda.text("nvda.log")
+	given = re.search(
 		r"^Gave up ending modal dialogs: the call that showed .* has not returned after [\d.]+ s; "
 		r"ending NVDA without finishing its exit$",
 		log,
 		re.MULTILINE,
-	), log[-4000:]
-	assert nvda.answers() == {"inner": WX_ID_CLOSE_ALL}
-	assert nvda.savedSetting() == CHANGED_SETTING[2]
+	)
+	assert given, log[-4000:]
+	assert answers(nvda) == {"inner": WX_ID_CLOSE_ALL}
+	assert savedSetting(nvda) == CHANGED_SETTING[2]
+	assert nvda.result().logErrors == [f"ERROR: {given[0]}"]
+	nvda.assertClean(ignoring={"returnCode", "logErrors", "stderr"}, logNames=("nvda.log",))
 
 
 @pytest.mark.parametrize("route", ["signal", "triggerNVDAExit"])
-def test_dialogReopenedForEverEndsNVDA(launcher, route: str):
+def test_dialogReopenedForEverEndsNVDA(start: Start, route: str):
 	# Code that shows its dialog again each time it is ended would otherwise keep NVDA half shut down
 	# for ever, its plugins terminated and its main loop never returning.
-	nvda = launcher("reopening", "reopening" if route == "signal" else "reopening+exit", welcome=False)
-	nvda.waitForSentence(text=DIALOG_SENTENCE)
+	nvda = start("reopening", "reopening" if route == "signal" else "reopening+exit", welcome=False)
+	nvda.waitForSpeech(DIALOG_SENTENCE, STARTUP_BOUND)
 	if route == "signal":
 		nvda.process.send_signal(signal.SIGTERM)
-	assert nvda.waitForExit(timeout=singleInstance.QUIT_TIMEOUT) == GIVEN_UP_STATUS, nvda.describe()
-	log = nvda.log()
+	assert nvda.waitForExit(singleInstance.QUIT_TIMEOUT) == GIVEN_UP_STATUS, nvda.describe()
+	log = nvda.text("nvda.log")
 	given = re.search(
 		r"^Gave up ending modal dialogs: .* is still open after ending (\d+); ending NVDA without "
 		r"finishing its exit$",
@@ -1089,36 +914,38 @@ def test_dialogReopenedForEverEndsNVDA(launcher, route: str):
 		re.MULTILINE,
 	)
 	assert given, log[-4000:]
-	assert len(errorRecords(log)) == 1, log[-4000:]
+	assert len(harness.nvdaLogErrorRecords(log)) == 1, log[-4000:]
 	assert log.count("ending modal <Gtk.MessageDialog") == int(given[1])
-	assert nvda.savedSetting() == CHANGED_SETTING[2]
-	assert f"basedreader: {given[0]}\n" in nvda.log("stderr.txt")
+	assert savedSetting(nvda) == CHANGED_SETTING[2]
+	assert f"basedreader: {given[0]}\n" in nvda.text("stderr.txt")
+	assert nvda.result().logErrors == [f"ERROR: {given[0]}"]
+	nvda.assertClean(ignoring={"returnCode", "logErrors", "stderr"}, logNames=("nvda.log",))
 
 
-def test_magnifierToggleSaysItCannotStart(launcher):
-	nvda = launcher("magnifier", "magnifier")
-	nvda.waitForSentence()
-	assert nvda.waitForExit() == 0, nvda.describe()
-	nvda.assertClean()
-	spoken = [transcriptRecords.spokenText(r) for r in nvda.spoken()]
+def test_magnifierToggleSaysItCannotStart(start: Start):
+	nvda = start("magnifier", "magnifier")
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	spoken = nvda.spokenTexts()
 	assert "Cannot start magnifier. NVDA's magnifier is not available on Linux." in spoken
 	assert "Magnifier enabled" not in spoken
 
 
-def test_exitsOnSignalAsSoonAsItHoldsTheLock(launcher):
+def test_exitsOnSignalAsSoonAsItHoldsTheLock(start: Start):
 	# A copy replacing this one can send SIGTERM from the moment this one holds the lock.
-	nvda = launcher("early", "wait")
+	nvda = start("early", "wait")
 	deadline = time.monotonic() + STARTUP_BOUND
 	while _runningCopy() != nvda.process.pid:
 		assert time.monotonic() < deadline and nvda.process.poll() is None, nvda.describe()
 		time.sleep(0.001)
 	nvda.process.send_signal(signal.SIGTERM)
-	assert nvda.waitForExit(timeout=STARTUP_BOUND) == 0, nvda.describe()
-	nvda.assertClean()
-	assert "Exiting on SIGTERM" in nvda.log()
+	assert nvda.waitForExit(STARTUP_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	assert "Exiting on SIGTERM" in nvda.text("nvda.log")
 
 
-def test_lockHolderThatRecordedNothingIsNeverSignalled(launcher):
+def test_lockHolderThatRecordedNothingIsNeverSignalled(start: Start):
 	# A process can hold the lock while the file still names the copy before it, which may be gone
 	# and its process ID reused by anything.
 	bystander = subprocess.Popen(["sleep", "60"])
@@ -1127,17 +954,20 @@ def test_lockHolderThatRecordedNothingIsNeverSignalled(launcher):
 	holder = _holdLock(lockPath, "")
 	try:
 		assert _runningCopy() == holder.pid
-		running = launcher("checkRunning", None, "--check-running")
-		assert running.waitForExit() == 0, running.describe()
-		quitter = launcher("quit", None, "--quit")
-		assert quitter.waitForExit() == 0, quitter.describe()
-		assert "has not recorded itself" in quitter.log("stderr.txt")
+		running = start("checkRunning", None, "--check-running")
+		assert running.waitForExit(SHUTDOWN_BOUND) == 0, running.describe()
+		running.assertClean()
+		quitter = start("quit", None, "--quit")
+		assert quitter.waitForExit(SHUTDOWN_BOUND) == 0, quitter.describe()
+		assert "has not recorded itself" in quitter.text("stderr.txt")
+		quitter.assertClean(ignoring={"stderr"})
 		# A copy that would start waits its while for the lock, as nvda.pyw waits for the mutex, and
 		# gives up.
-		starter = launcher("start", None)
-		assert starter.waitForExit() == 1, starter.describe()
-		assert "has not recorded itself" in starter.log("stderr.txt")
-		assert f"basedreader: another NVDA still holds {lockPath}\n" in starter.log("stderr.txt")
+		starter = start("start", None)
+		assert starter.waitForExit(SHUTDOWN_BOUND) == 1, starter.describe()
+		assert "has not recorded itself" in starter.text("stderr.txt")
+		assert f"basedreader: another NVDA still holds {lockPath}\n" in starter.text("stderr.txt")
+		starter.assertClean(ignoring={"returnCode", "stderr"})
 		assert bystander.poll() is None
 		assert holder.poll() is None
 	finally:
@@ -1147,13 +977,14 @@ def test_lockHolderThatRecordedNothingIsNeverSignalled(launcher):
 		bystander.wait()
 
 
-def test_unlockedRecordIsNeverSignalled(launcher):
+def test_unlockedRecordIsNeverSignalled(start: Start):
 	# A process ID left in the lock file by a copy that has gone may since belong to anything.
 	bystander = subprocess.Popen(["sleep", "60"])
 	try:
 		Path(_rigLockPath()).write_text(f"{bystander.pid}\nready\n", encoding="ascii")
-		quitter = launcher("quit", None, "--quit")
-		assert quitter.waitForExit() == 0, quitter.describe()
+		quitter = start("quit", None, "--quit")
+		assert quitter.waitForExit(SHUTDOWN_BOUND) == 0, quitter.describe()
+		quitter.assertClean()
 		assert bystander.poll() is None
 	finally:
 		bystander.kill()
