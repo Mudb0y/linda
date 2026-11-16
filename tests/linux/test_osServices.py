@@ -10,7 +10,6 @@ import textwrap
 from pathlib import Path
 
 import harness
-import pytest
 
 #: What nvda.pyw establishes before core.main, short of a configuration: translations installed as
 #: builtins, appDir, and a record of every warning and error logged. The working directory stays the child's own,
@@ -276,9 +275,7 @@ def test_saveSurvivesAFileSystemThatCannotSyncDirectories(tmp_path):
 	assert target.read_text(encoding="utf-8") == "replacement\n"
 
 
-# Upgrading a schema 13 configuration looks the old speech output device up among the audio devices,
-# which A5's Linux utils.mmdevice provides. Until then the upgrade fails and the configuration is reset.
-@pytest.mark.xfail(strict=True, reason="needs a Linux utils.mmdevice.getOutputDevices, from A5")
+# Upgrading a schema 13 configuration looks the old speech output device up among the audio devices.
 def test_olderWindowsConfigurationUpgrades(tmp_path):
 	configDir = tmp_path / "xdgConfig" / "basedreader"
 	configDir.mkdir(parents=True)
