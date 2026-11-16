@@ -571,10 +571,18 @@ def runUnitTestRunner(tmpPath: Path, test: str, env: dict[str, str]) -> subproce
 
 
 def test_unitTestRunnerAllowsThisEspeakAndNoOther(tmp_path: Path):
-	# Paths that do not exist, so that nothing would load even if the runner let them through.
+	# Paths that do not exist, so that nothing would load even if the runner let them through. The last
+	# two link no sound library and make sound all the same: speech-dispatcher's client, a second
+	# speech channel beside NVDA's own, and mpg123's output library.
+	refused = (
+		"/nonexistent/libespeak-ng.so.1",
+		"/nonexistent/libspa-pipewire-probe.so",
+		"/nonexistent/libspeechd.so.2",
+		"/nonexistent/libout123.so.0",
+	)
 	done = runUnitTestRunner(
 		tmp_path,
-		"""
+		f"""
 		import ctypes
 		import os
 		import unittest
@@ -584,7 +592,7 @@ def test_unitTestRunnerAllowsThisEspeakAndNoOther(tmp_path: Path):
 				ctypes.CDLL(os.environ["BASEDREADER_ESPEAK_LIB"])
 
 			def test_otherLibraries(self):
-				for path in ("/nonexistent/libespeak-ng.so.1", "/nonexistent/libspa-pipewire-probe.so"):
+				for path in {refused!r}:
 					with self.assertRaises(OSError):
 						ctypes.CDLL(path)
 		""",
@@ -593,13 +601,9 @@ def test_unitTestRunnerAllowsThisEspeakAndNoOther(tmp_path: Path):
 	output = done.stdout + done.stderr
 	assert done.returncode == 1, output
 	refusals = sorted(line for line in output.splitlines() if line.startswith("rununittests: refused "))
-	assert len(refusals) == 2, output
-	assert refusals[0].startswith(
-		"rununittests: refused load of the audio library /nonexistent/libespeak-ng.so.1"
-	)
-	assert refusals[1].startswith(
-		"rununittests: refused load of the audio library /nonexistent/libspa-pipewire-probe.so"
-	)
+	assert len(refusals) == len(refused), output
+	for path, refusal in zip(sorted(refused), refusals, strict=True):
+		assert refusal.startswith(f"rununittests: refused load of the audio library {path}"), refusal
 	assert "rununittests: 2 tests ran: 2 passed" in output, output
 
 

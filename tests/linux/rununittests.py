@@ -78,9 +78,21 @@ harness = _loadHarness()
 ESPEAK_LIBRARY_VARIABLE = "BASEDREADER_ESPEAK_LIB"
 #: Words that, anywhere in a library's file name, mark one that can reach a sound server or a sound
 #: card, besides those harness.isAudioLibrary knows. eSpeak is among them because any other build of
-#: it, a stock one for instance, links pcaudiolib. The unit tests play to the null sink and need no
-#: sound server, so a load of any of these means some code reached past the null sink.
-SOUND_LIBRARY_WORDS = ("espeak", "pcaudio", "pulse", "asound", "pipewire", "jack", "portaudio")
+#: it, a stock one for instance, links pcaudiolib. libspeechd links no sound library, as it speaks
+#: through speech-dispatcher's socket, and libout123 loads its outputs only when it opens one. The unit
+#: tests play to the null sink and need no sound server, so a load of any of these means some code
+#: reached past the null sink.
+SOUND_LIBRARY_WORDS = (
+	"espeak",
+	"pcaudio",
+	"pulse",
+	"asound",
+	"pipewire",
+	"jack",
+	"portaudio",
+	"speechd",
+	"out123",
+)
 # Extension modules that the test package's bootstrap imports and that link audio libraries, with why
 # each is allowed to. What they link is mapped but never called: no test asks it for sound.
 AUDIO_LINKERS = {
