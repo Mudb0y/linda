@@ -93,7 +93,10 @@ def writeEdits(r: Repo, *paths: str) -> None:
 
 
 def writeReason(r: Repo, *lines: str) -> None:
-	r.write("tools/upstream-edits.txt", EDITS_HEADER + "source/edited.py\n" + "".join(f"  {line}\n" for line in lines))
+	r.write(
+		"tools/upstream-edits.txt",
+		EDITS_HEADER + "source/edited.py\n" + "".join(f"  {line}\n" for line in lines),
+	)
 
 
 @pytest.fixture
@@ -202,14 +205,18 @@ def test_reasonWithoutAKindFails(repo: Repo):
 
 def test_editWindowsRunsMustSaySo(repo: Repo):
 	repo.write("source/edited.py", "value = 2\n")
-	assertFails(repo, "Windows runs a change, but no line of the reason starts every platform:\nsource/edited.py")
+	assertFails(
+		repo, "Windows runs a change, but no line of the reason starts every platform:\nsource/edited.py"
+	)
 	writeReason(repo, "every platform: why")
 	assertPasses(repo)
 
 
 def test_editOnlyLinuxRunsMustNotClaimWindowsRunsIt(repo: Repo):
 	writeReason(repo, "every platform: why")
-	assertFails(repo, "a line starts every platform:, but Windows runs the same code as upstream:\nsource/edited.py")
+	assertFails(
+		repo, "a line starts every platform:, but Windows runs the same code as upstream:\nsource/edited.py"
+	)
 
 
 def test_reasonMayGiveSeveralKinds(repo: Repo):
@@ -301,7 +308,9 @@ def test_editsWindowsRunsAreSeen(repo: Repo, change: tuple[str, str]):
 	repo.onUpstream(addUpstreamModule)
 	repo.write("source/registry.py", UPSTREAM_MODULE.replace(*change))
 	writeEdits(repo, "source/edited.py", "source/registry.py")
-	assertFails(repo, "Windows runs a change, but no line of the reason starts every platform:\nsource/registry.py")
+	assertFails(
+		repo, "Windows runs a change, but no line of the reason starts every platform:\nsource/registry.py"
+	)
 
 
 def test_entryWithoutAReasonFails(repo: Repo):
