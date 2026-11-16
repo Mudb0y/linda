@@ -6,6 +6,7 @@
 
 import ctypes  # noqa: I001
 import ctypes.wintypes
+import itertools
 import threading
 import winKernel
 import typing
@@ -59,7 +60,10 @@ class IoThread(threading.Thread):
 	"""A thread used for background writes and raw I/O, e.g. for braille displays."""
 
 	exit: bool = False
-	_apcParamCounter = _generateApcParams()
+	# count's next() is a single C call that no other thread can interrupt, where a generator raises
+	# ValueError in a thread that advances it while another is inside it. What it gives is wrapped to
+	# 32 bits where it is taken, as _generateApcParams describes.
+	_apcParamCounter = itertools.count()
 	#: Store of Python functions to be called as APC.
 	#: This allows us to have a single APC function in the class rather than on
 	#: each instance, which prevents reference cycles.
@@ -162,7 +166,7 @@ class IoThread(threading.Thread):
 			raise RuntimeError("Thread is not running")
 
 		# generate a number to identify the function in the store.
-		internalParam = next(self._apcParamCounter)
+		internalParam = next(self._apcParamCounter) % 0x100000000
 		# Generate a weak reference to the function
 		reference = BoundMethodWeakref(func) if ismethod(func) else AnnotatableWeakref(func)
 		reference.funcName = repr(func)

@@ -74,6 +74,76 @@ def test_queuedFunctionsRunInOrderOnTheThread(tmp_path: Path):
 	assert done.value["calls"] == [[param, True, True] for param in range(5)]
 
 
+def test_threadsQueueingAtOnceGetDistinctKeys(tmp_path: Path):
+	done = runWithThread(
+		tmp_path,
+		"""
+		import sys
+
+		from hwIo.ioThread import IoThread
+
+		def apc(param: int) -> None:
+			pass
+
+		# The braille handler queues from the main thread while the I/O thread arms its timer.
+		# Switching as often as the interpreter allows makes two registrations overlap.
+		perThread = 20_000
+		keys = [[], []]
+		errors = []
+		together = threading.Barrier(2)
+
+		def register(into: list) -> None:
+			together.wait()
+			try:
+				for _ in range(perThread):
+					into.append(hwIo.bgThread._registerToCallAsApc(apc))
+			except Exception as e:
+				errors.append(repr(e))
+
+		workers = [threading.Thread(target=register, args=(into,)) for into in keys]
+		sys.setswitchinterval(1e-6)
+		try:
+			for worker in workers:
+				worker.start()
+			for worker in workers:
+				worker.join()
+		finally:
+			sys.setswitchinterval(0.005)
+		allKeys = keys[0] + keys[1]
+		for key in allKeys:
+			IoThread._apcStore.pop(key, None)
+		result = {"errors": errors[:3], "count": len(allKeys), "distinct": len(set(allKeys))}
+		hwIo.terminate()
+		""",
+	)
+	done.assertClean()
+	assert done.value == {"errors": [], "count": 40_000, "distinct": 40_000}
+
+
+def test_queuedKeysWrapAt32Bits(tmp_path: Path):
+	done = runWithThread(
+		tmp_path,
+		"""
+		import itertools
+
+		from hwIo.ioThread import IoThread
+
+		def apc(param: int) -> None:
+			pass
+
+		IoThread._apcParamCounter = itertools.count(0xFFFFFFFF)
+		keys = [hwIo.bgThread._registerToCallAsApc(apc) for _ in range(2)]
+		for key in keys:
+			IoThread._apcStore.pop(key, None)
+		result = keys
+		hwIo.terminate()
+		""",
+	)
+	done.assertClean()
+	# A Windows APC's parameter is a ULONG_PTR, which holds 32 bits.
+	assert done.value == [0xFFFFFFFF, 0]
+
+
 def test_functionThatDiedBeforeRunningIsSkipped(tmp_path: Path):
 	done = runWithThread(
 		tmp_path,

@@ -181,6 +181,12 @@ source/hwIo/ble/_io.py
   every platform: WinRTClientArgs comes from bleak.args.winrt, where bleak 3
   defines it on every platform and where bleak says to import it from, not
   from bleak's WinRT backend, which imports only on Windows
+source/hwIo/ioThread.py
+  a fix for every platform: queued calls are numbered by itertools.count,
+  wrapped to 32 bits as before, instead of a generator shared by every
+  thread, which raises ValueError when the main thread queues a braille
+  write while the I/O thread arms its acknowledgement timer. Windows has
+  the same race, so the change is unguarded and suits upstream as it is
 source/hwPortUtils.py
   every platform: winreg comes from linuxPlatform.windowsOnly, so the
   Bluetooth port readers raise NoLinuxImplementation on Linux.
