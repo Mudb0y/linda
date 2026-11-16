@@ -8,9 +8,13 @@ On Linux, startfile opens a file, directory or URL with the desktop's default ap
 winreg is a stand-in. Class bodies and default arguments read winreg's constants while the module
 imports, so an upper-case name such as HKEY_LOCAL_MACHINE gives an inert placeholder. Every other
 name, functions and types alike, raises NoLinuxImplementation naming the module and the attribute,
-and so does every use of a placeholder: calling it, converting it, comparing it or testing its
-truth. Code that names winreg in an except clause, an annotation evaluated at import or an
-isinstance test therefore fails loudly too.
+and so does every use of a placeholder other than combining it with |: calling it, converting it,
+comparing it, testing its truth, doing arithmetic with it or reading its attributes. Code that
+names winreg in an except clause, an annotation evaluated at import or an isinstance test
+therefore fails loudly too, and so do hasattr and getattr with a default, which catch only
+AttributeError. Making the error an AttributeError so that they could answer instead would hide
+it wherever winreg is used inside a property, since Python takes an AttributeError raised by a
+property's getter to mean that the attribute is absent.
 
 The stand-in is never put in sys.modules: the standard library looks for winreg there and behaves
 as it does on Windows when it finds it.
@@ -56,18 +60,28 @@ class _Placeholder:
 		raise NoLinuxImplementation(self._what)
 
 	__call__ = _refuse
-	__bool__ = __int__ = __index__ = __float__ = __str__ = __format__ = _refuse
+	__bool__ = __int__ = __index__ = __float__ = __complex__ = _refuse
+	__str__ = __bytes__ = __format__ = _refuse
 	__eq__ = __ne__ = __lt__ = __le__ = __gt__ = __ge__ = _refuse
-	__iter__ = __len__ = __getitem__ = __contains__ = __enter__ = _refuse
+	__iter__ = __reversed__ = __len__ = __getitem__ = __contains__ = __enter__ = _refuse
+	__and__ = __rand__ = __xor__ = __rxor__ = __invert__ = _refuse
+	__lshift__ = __rlshift__ = __rshift__ = __rrshift__ = _refuse
+	__add__ = __radd__ = __sub__ = __rsub__ = __mul__ = __rmul__ = _refuse
+	__truediv__ = __rtruediv__ = __floordiv__ = __rfloordiv__ = __mod__ = __rmod__ = _refuse
+	__pow__ = __rpow__ = __neg__ = __pos__ = __abs__ = __round__ = _refuse
 	# A placeholder can still be a key of a table built at import time, and is equal only to itself.
 	__hash__ = object.__hash__
 
 	# Access flags are combined with | in default arguments too, as KEY_READ | KEY_WOW64_64KEY.
 	def __or__(self, other: object) -> "_Placeholder":
-		return _Placeholder(f"{self._what} | {other!r}")
+		return _Placeholder(f"{self._what} combined with {_describe(other)}")
 
 	def __ror__(self, other: object) -> "_Placeholder":
-		return _Placeholder(f"{other!r} | {self._what}")
+		return _Placeholder(f"{_describe(other)} combined with {self._what}")
+
+
+def _describe(value: object) -> str:
+	return value._what if isinstance(value, _Placeholder) else repr(value)
 
 
 class WindowsOnlyModule:

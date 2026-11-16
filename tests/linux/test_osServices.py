@@ -1187,7 +1187,13 @@ def test_windowsOnlyNamesFailLoudly(tmp_path):
 			"comparison": lambda: key == 0x80000002,
 			"text": lambda: f"{key}",
 			"attribute": lambda: key.Close,
+			"and": lambda: key & 0x100,
+			"invert": lambda: ~key,
+			"add": lambda: key + 1,
+			"hasattr": lambda: hasattr(winreg, "OpenKey"),
+			"getattr": lambda: getattr(winreg, "OpenKey", None),
 			"combined": lambda: int(combined),
+			"combinedWithNumber": lambda: int(winreg.KEY_READ | 0x100),
 		}
 		outcomes = {}
 		for name, use in uses.items():
@@ -1218,9 +1224,13 @@ def test_windowsOnlyNamesFailLoudly(tmp_path):
 		"comparison": "winreg.HKEY_LOCAL_MACHINE has no Linux implementation",
 		"text": "winreg.HKEY_LOCAL_MACHINE has no Linux implementation",
 		"attribute": "winreg.HKEY_LOCAL_MACHINE.Close has no Linux implementation",
-		"combined": (
-			"winreg.KEY_READ | <winreg.KEY_WOW64_64KEY, which Linux does not have> has no Linux implementation"
-		),
+		"and": "winreg.HKEY_LOCAL_MACHINE has no Linux implementation",
+		"invert": "winreg.HKEY_LOCAL_MACHINE has no Linux implementation",
+		"add": "winreg.HKEY_LOCAL_MACHINE has no Linux implementation",
+		"hasattr": "winreg.OpenKey has no Linux implementation",
+		"getattr": "winreg.OpenKey has no Linux implementation",
+		"combined": "winreg.KEY_READ combined with winreg.KEY_WOW64_64KEY has no Linux implementation",
+		"combinedWithNumber": "winreg.KEY_READ combined with 256 has no Linux implementation",
 	}
 	assert value["sameEachTime"] is True
 	assert value["repr"] == "<winreg.HKEY_LOCAL_MACHINE, which Linux does not have>"
