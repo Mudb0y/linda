@@ -139,7 +139,9 @@ source/core.py
   wx.GetTopLevelWindows does not list the dialogs wx.MessageBox and
   wx.FileDialog show, so NVDA never exited. Once main() is out of the main
   loop it tells linuxPlatform.quitSignals, so that a further quit signal
-  ends a shutdown that hangs
+  ends a shutdown that hangs. The Java Access Bridge failing to load is
+  logged at debug level on Linux instead of as a warning on every start, as
+  Java applications are reached there through AT-SPI
 source/documentNavigation/paragraphHelper.py
   import safety when running: after moving the caret, both paragraph moves
   import the UI Automation text class only on Windows; Linux has no UI

@@ -384,6 +384,9 @@ def test_startsSpeaksAndExitsThroughTriggerNVDAExit(launcher):
 	assert "_doShutdown has been queued" in log
 	assert "Exiting on" not in log
 	assert "NVDA exit" in log
+	# Java applications are reached through AT-SPI, so the missing Windows bridge is no warning.
+	assert "Java Access Bridge not available" not in log
+	assert "No Java Access Bridge on Linux" in log
 	print(f"start-up to speech: {toSpeech:.2f} s")
 
 

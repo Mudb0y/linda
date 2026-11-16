@@ -914,10 +914,15 @@ def main():
 
 	import JABHandler
 
+	# Linux has no Access Bridge to miss: Java applications are reached there through AT-SPI, so its
+	# absence is no warning. Empty, and so catching nothing, on Windows.
+	bridgeAbsentOnLinux = (NotImplementedError,) if sys.platform != "win32" else ()
 	log.debug("initializing Java Access Bridge support")
 	try:
 		JABHandler.initialize()
 		log.info("Java Access Bridge support initialized")
+	except bridgeAbsentOnLinux:
+		log.debug("No Java Access Bridge on Linux; Java applications are reached through AT-SPI")
 	except NotImplementedError:
 		log.warning("Java Access Bridge not available")
 	except:  # noqa: E722
