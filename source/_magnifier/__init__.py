@@ -116,6 +116,18 @@ def start() -> None:
 		application is already running, or screen curtain is active). The exception carries a
 		user-facing message so the caller can present it (spoken or in a message box).
 	"""
+	if sys.platform != "win32":
+		# initialize() makes no magnifier on Linux, which start() would otherwise log as an error and
+		# return from as though it had started one.
+		setEnabled(False)
+		raise MagnifierStartError(
+			pgettext(
+				"magnifier",
+				# Translators: Message when NVDA's Magnifier cannot start because the operating system has no
+				# magnification API that it supports.
+				"Cannot start magnifier. NVDA's magnifier is not available on Linux.",
+			),
+		)
 	if _magnifier is None:
 		log.error("Attempted to start magnifier, but it is not initialized.")
 		return

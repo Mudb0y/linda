@@ -48,9 +48,10 @@ source/NVDAState.py
 source/_magnifier/__init__.py
   Linux runtime: initialize() makes no magnifier, as every magnified view is
   built on Windows' Magnification API and its constructor reads the cursor
-  through Win32; isActive() and getMagnifier() report none. The magnifier's
-  toggle command then logs an error and still announces the magnifier
-  enabled, which a Linux magnifier will have to put right
+  through Win32; isActive() and getMagnifier() report none. start() raises
+  MagnifierStartError saying the magnifier is not available on Linux and
+  records it as disabled, so the toggle command speaks that, as it does any
+  failure to start, instead of logging an error and announcing it enabled
 source/_remoteClient/localMachine.py
   import safety: winreg imported only on Windows, after the module's other
   imports; the SAS policy's registry key class attribute is defined only
