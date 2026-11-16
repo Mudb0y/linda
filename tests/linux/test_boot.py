@@ -618,6 +618,17 @@ def test_launcherOptionIsRefused(launcher):
 	assert not nvda.log()
 
 
+@pytest.mark.parametrize(
+	"option",
+	["--install", "--install-silent", "--create-portable", "--create-portable-silent"],
+)
+def test_installerOptionsAreRefused(launcher, option: str):
+	nvda = launcher(option.lstrip("-"), "exit", option)
+	assert nvda.waitForExit() == 1, nvda.describe()
+	assert nvda.log("stderr.txt").startswith(f"basedreader: {option} uses NVDA's Windows installer")
+	assert not nvda.log()
+
+
 def test_lockFailureIsReportedOnStandardError(tmp_path: Path):
 	done = harness.runChild(
 		tmp_path,

@@ -93,6 +93,16 @@ def main() -> NoReturn:
 	if appArgs.launcher:
 		# The dialog it shows offers to install NVDA or make a portable copy, both through Windows' installer.
 		_fail("--launcher is how NVDA's Windows installer starts it, and Linux has no such installer")
+	# core.main would hand these to installer, which writes Windows' registry and shortcuts: it fails
+	# part way, logs an error and leaves this copy running.
+	for option, given in (
+		("--install", appArgs.install),
+		("--install-silent", appArgs.installSilent),
+		("--create-portable", appArgs.createPortable),
+		("--create-portable-silent", appArgs.createPortableSilent),
+	):
+		if given:
+			_fail(f"{option} uses NVDA's Windows installer, which Linux does not have")
 
 	try:
 		instanceLock = singleInstance.InstanceLock(singleInstance.lockFilePath())
