@@ -120,25 +120,21 @@ tests.unit.test_l10nUtil
 
 # Until: kept code whose Linux implementation does not do what the tests expect.
 
-tests.unit.test_compoundDocuments.TestTreeCompoundTextInfo.test_characterMovement
-  Until the Linux NVDAHelper.localLib's calculateCharacterBoundaries and calculateCharacterOffsets
-  break carriage return and line feed into two characters as Uniscribe does: ICU keeps "\r\n" as
-  one grapheme cluster, so moving by character over a Windows line ending stops once, not twice.
-  Raises: AssertionError: '\r\n' != '\r'
 tests.unit.test_textUtils.test_wordSeg.TestChineseWordSegmentationInitialization.test_forceInitStillInitializesForUnusedLanguage
   Until Linux has a native library directory and cppjieba built for Linux: ReadPaths.cppjiebaDll
-  is built from NVDAState.coreArchLibPath, which raises RuntimeError("Unsupported platform") on
-  Linux before the test's stand-in for LoadLibrary is reached. The same RuntimeError escapes
-  _initCppJieba at run time when Chinese word segmentation is configured.
-  Raises: RuntimeError: Unsupported platform
+  is built from NVDAState.coreArchLibPath, which on Linux raises
+  linuxPlatform.windowsOnly.NoWindowsLibrary, a FileNotFoundError. _initCppJieba takes that as the
+  library missing, as on a Windows copy without it, and never reaches the test's stand-in for
+  LoadLibrary.
+  Raises: AssertionError: Expected 'LoadLibrary' to have been called once
 tests.unit.test_textUtils.test_wordSeg.TestChineseWordSegmentationInitialization.test_initFailureDisablesCppJieba
   Until Linux has a native library directory, for the reason given for
   test_forceInitStillInitializesForUnusedLanguage above.
-  Raises: RuntimeError: Unsupported platform
+  Raises: AssertionError: Expected 'LoadLibrary' to have been called once
 tests.unit.test_textUtils.test_wordSeg.TestChineseWordSegmentationInitialization.test_initializesForUnusedLanguageWhenConfigured
   Until Linux has a native library directory, for the reason given for
   test_forceInitStillInitializesForUnusedLanguage above.
-  Raises: RuntimeError: Unsupported platform
+  Raises: AssertionError: Expected 'LoadLibrary' to have been called once
 tests.unit.test_magnifier.test_magnifier
   Until NVDA has a magnifier on Linux: Magnifier() reads the primary display's size through
   winAPI._displayTracking.getPrimaryDisplayOrientation, which calls GetSystemMetrics, and the only
@@ -153,24 +149,17 @@ tests.unit.test_magnifier.test_spotlightManager
   described for test_magnifier.test_magnifier above.
   Raises: NoLinuxImplementation: user32.GetSystemMetrics
 tests.unit.test_languageHandler
-  Until languageHandler's Windows locale helpers have Linux answers. The module cannot be loaded:
-  at import it builds its table of locales Windows lacks through englishCountryNameFromNVDALocale,
-  which calls GetLocaleInfoEx; the class body of Test_GetLocaleInfoEx_Wrappers calls
-  kernel32.GetACP; and the constructor of Test_LanguageHandler_SetLanguage calls
-  kernel32.SetThreadLocale as the tests are loaded. Once it loads, most of its tests run, and
-  these are expected to fail: Test_GetLocaleInfoEx_Wrappers, TestLocaleNameToWindowsLCID's
-  test_knownLocale, the setLocale tests that assert Windows C runtime locale names, and
+  Until kernel32.GetACP and kernel32.SetThreadLocale have Linux answers. The module cannot be
+  loaded: the class body of Test_GetLocaleInfoEx_Wrappers calls kernel32.GetACP, and the
+  constructor of Test_LanguageHandler_SetLanguage calls kernel32.SetThreadLocale as the tests are
+  loaded. Once it loads, most of its tests run, and these are expected to fail:
+  Test_GetLocaleInfoEx_Wrappers, TestLocaleNameToWindowsLCID's test_knownLocale, the setLocale
+  tests that assert Windows C runtime locale names, and
   Test_LanguageHandler_SetLanguage.test_NVDASupportedLanguages_LanguageIsSetCorrectly; so is
   Test_languageHandler_setLocale.test_PythonUnsupportedLocale_LocaleUnchanged, because on Linux
   setLocale falls back to C.UTF-8 where the C library lacks a locale, rather than leaving the
   locale unchanged.
-  Import raises: NoLinuxImplementation: kernel32.GetLocaleInfoEx
-tests.unit.test_inputCore.TestInputManagerExtensionPoints.test_decide_executeGesture
-  Until linuxPlatform.inputHook.vkKeyScan answers for upper case letters:
-  KeyboardInputGesture.fromName("NVDA+T") asks which key types an upper case T, and without the
-  keyboard layout only lower case letters map to a key unambiguously, so vkKeyScan answers for
-  those alone, as test_inputAtRest.py asserts.
-  Raises: NoLinuxImplementation: depends on the keyboard layout
+  Import raises: NoLinuxImplementation: kernel32.GetACP
 tests.unit.test_synthDrivers.test_espeak.TestSynthDriver_Integration
   Until NVDA's espeak driver loads a Linux eSpeak library: it loads synthDrivers/espeak.dll, which
   does not exist on Linux.
@@ -189,9 +178,9 @@ tests.unit.test_messageDialog.Test_MessageDialog_Sounds.test_playSoundWithTypeWi
   Raises: AssertionError: Expected 'MessageBeep' to have been called once
 tests.unit.test_remote.test_remoteClient.TestRemoteClient
   Until the remote client registers its nvdaremote:// URL handler on Linux: RemoteClient()
-  calls urlHandler.registerURLHandler, which writes to the Windows registry and raises NameError
-  on winreg on Linux.
-  Raises: NameError: winreg
+  calls urlHandler.registerURLHandler, which writes to the Windows registry, and on Linux winreg
+  is linuxPlatform.windowsOnly's stand-in, whose CreateKey raises NoLinuxImplementation.
+  Raises: NoLinuxImplementation: winreg.CreateKey
 
 # Skips the run expects.
 
