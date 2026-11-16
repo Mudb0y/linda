@@ -15,6 +15,7 @@ Run it under the rig, after tools/build-artifacts:
 import argparse
 import faulthandler
 import importlib
+import importlib.util
 import io
 import os
 import re
@@ -435,7 +436,16 @@ def runSuite(collected: Collected, xml: bool, verbose: bool) -> tuple[_Recording
 	return runner.run(suite), report.getvalue()
 
 
+def _requireRig() -> None:
+	# By path: tests/linux must stay off sys.path, where its synthDrivers would shadow NVDA's.
+	spec = importlib.util.spec_from_file_location("harness", HERE / "harness.py")
+	harness = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(harness)
+	harness.requireRig()
+
+
 def main() -> int:
+	_requireRig()
 	parser = argparse.ArgumentParser(description="Run NVDA's unit tests on Linux.")
 	parser.add_argument("-v", "--verbose", action="store_true", help="list every test and exclusion")
 	parser.add_argument("--xml", type=Path, help="also write a JUnit XML report to this file")

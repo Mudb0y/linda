@@ -52,6 +52,35 @@ class ChildResult:
 		assert not self.logErrors, f"logged at ERROR or above: {self.logErrors}"
 
 
+def whyNotInRig() -> str | None:
+	"""What shows that this process is outside tests/linux/rig, or None when it is inside.
+
+	The tests start screen readers, open windows and signal whatever holds the display's lock. In
+	the rig's sandbox none of that can reach the desktop the machine's owner is using; outside it,
+	all of it would.
+	"""
+	if os.environ.get("BASEDREADER_RIG") != "1":
+		return "BASEDREADER_RIG is not set"
+	# The variable alone could have been copied into another shell. These hold only in the sandbox.
+	try:
+		firstProcess = Path("/proc/1/comm").read_text(encoding="ascii").strip()
+	except OSError:
+		firstProcess = ""
+	if firstProcess != "bwrap":
+		return "process 1 is not the sandbox's"
+	if os.path.exists("/run/user"):
+		return "the live session's runtime directory is visible"
+	return None
+
+
+def requireRig() -> None:
+	why = whyNotInRig()
+	if why is not None:
+		sys.exit(
+			f"refusing to run outside the rig ({why}). Use: nix develop . -c tests/linux/rig COMMAND",
+		)
+
+
 def treeState() -> dict[str, tuple]:
 	state: dict[str, tuple] = {}
 	for top in PROTECTED:
@@ -77,6 +106,7 @@ def runChild(
 	The code runs as a module body. Whatever it leaves in the name ``result`` comes back as
 	ChildResult.value and has to survive JSON.
 	"""
+	requireRig()
 	assert prepare in PREPARE_LEVELS, prepare
 	work = Path(tempfile.mkdtemp(prefix="child-", dir=tmpPath))
 	codePath = work / "code.py"
@@ -103,6 +133,7 @@ def runChild(
 
 
 def _child(resultPath: str, prepare: str, codePath: str) -> None:
+	requireRig()
 	called: list[str] = []
 	logErrors: list[str] = []
 	outcome: dict = {"value": None, "error": None, "noLinuxImplementation": called, "logErrors": logErrors}
