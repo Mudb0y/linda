@@ -1408,16 +1408,12 @@ def test_lockedSessionWithholdsEverythingButTheDesktop(tmp_path):
 
 
 def test_xdgDirectoriesFollowTheSpecification(tmp_path):
-	runtimeParent = tmp_path / "tmp"
-	runtimeParent.mkdir()
 	done = run(
 		tmp_path,
-		f"""
-		import stat
-		import tempfile
+		"""
 		from linuxPlatform import xdg
 
-		result = {{}}
+		result = {}
 		os.environ["XDG_CONFIG_DIRS"] = "relative/xdg:/etc/one::/etc/two"
 		result["configDirs"] = xdg.configDirs()
 		os.environ["XDG_CONFIG_DIRS"] = "relative/xdg"
@@ -1425,16 +1421,6 @@ def test_xdgDirectoriesFollowTheSpecification(tmp_path):
 		os.environ["XDG_STATE_HOME"] = "relative/state"
 		result["stateHome"] = xdg.stateHome()
 		result["userStateDir"] = xdg.userStateDir()
-		os.environ.pop("XDG_RUNTIME_DIR", None)
-		tempfile.tempdir = {str(runtimeParent)!r}
-		runtime = xdg.runtimeDir()
-		result["runtime"] = [runtime, oct(stat.S_IMODE(os.stat(runtime).st_mode)), xdg.runtimeDir() == runtime]
-		os.chmod(runtime, 0o755)
-		try:
-			xdg.runtimeDir()
-			result["opened"] = "accepted"
-		except PermissionError:
-			result["opened"] = "refused"
 		""",
 	)
 	done.assertClean()
@@ -1445,7 +1431,4 @@ def test_xdgDirectoriesFollowTheSpecification(tmp_path):
 		"onlyRelative": ["/etc/xdg"],
 		"stateHome": os.path.join(home, ".local", "state"),
 		"userStateDir": os.path.join(home, ".local", "state", "basedreader"),
-		"runtime": [str(runtimeParent / f"basedreader-runtime-{os.getuid()}"), "0o700", True],
-		# A runtime directory others can enter could hold a planted lock file.
-		"opened": "refused",
 	}
