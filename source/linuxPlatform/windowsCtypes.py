@@ -147,10 +147,18 @@ names: dict[str, Any] = {
 }
 
 
-def install() -> None:
+def check() -> None:
+	"""Refuse, changing nothing, if ctypes already has one of these names bound to something else.
+
+	:raises RuntimeError: Naming the first such name.
+	"""
 	for name, value in names.items():
 		existing = getattr(ctypes, name, None)
-		if existing is None:
-			setattr(ctypes, name, value)
-		elif existing is not value:
+		if existing is not None and existing is not value:
 			raise RuntimeError(f"ctypes.{name} already exists and is not the Linux stand-in")
+
+
+def install() -> None:
+	check()
+	for name, value in names.items():
+		setattr(ctypes, name, value)

@@ -357,6 +357,27 @@ def test_installTwiceIsHarmless(tmp_path: Path):
 	assert hazard["after"]["finders"] == 1
 
 
+@pytest.mark.parametrize(
+	("condition", "raised", "ctypesNames"),
+	[
+		("winregImported", "RuntimeError", []),
+		# The condition itself puts HRESULT there.
+		("ctypesNameTaken", "RuntimeError", ["HRESULT"]),
+		("windowsErrorTaken", "RuntimeError", []),
+		("missingReplacement", "FileNotFoundError", []),
+	],
+)
+def test_refusedInstallChangesNothing(tmp_path: Path, condition: str, raised: str, ctypesNames: list[str]):
+	"""A refusal a caller catches must not leave the Windows names in ctypes without the finder:
+	upstream modules imported then would bind against them and be told a Windows library loaded."""
+	result = runProbe(tmp_path, "refuseWhen", condition)
+	assert result["raised"] == [raised, raised]
+	assert not result["installed"]
+	assert result["ctypesNames"] == ctypesNames
+	assert not result["windowsErrorIsLinux"]
+	assert result["findersAdded"] == 0
+
+
 def test_installRefusesOffLinux(tmp_path: Path):
 	result = runProbe(tmp_path, "refuse")
 	assert result["raised"] == "RuntimeError"

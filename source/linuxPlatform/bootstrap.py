@@ -44,9 +44,13 @@ def install() -> None:
 
 	from . import finder, windowsCtypes
 
-	windowsCtypes.install()
+	# Every check that can refuse comes before the first change, so that a refusal a caller catches
+	# leaves no Windows names in ctypes for upstream modules to bind against without the finder.
+	windowsCtypes.check()
 	if getattr(builtins, "WindowsError", WindowsError) is not WindowsError:
 		raise RuntimeError("builtins.WindowsError already exists and is not the Linux one")
+	platformFinder = finder.prepare()
+	windowsCtypes.install()
 	builtins.WindowsError = WindowsError
-	finder.install()
+	finder.install(platformFinder)
 	_installed = True

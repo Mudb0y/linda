@@ -1,6 +1,6 @@
 """One import-surface check, run in a fresh interpreter; test_importSurface.py starts it.
 
-usage: importSurfaceProbe.py RESULT_JSON core|sweep|hazard NAME|refuse
+usage: importSurfaceProbe.py RESULT_JSON core|sweep|hazard NAME|refuse|noLouis|refuseWhen CONDITION
 
 It writes its findings to RESULT_JSON and exits 0 whatever they are; deciding pass or fail is the
 test's job.
@@ -448,6 +448,43 @@ def runRefuse() -> dict:
 	return {"raised": None}
 
 
+def runRefuseWhen(condition: str) -> dict:
+	"""install() refused by a condition found only after its first check, and called twice, since a
+	caller that catches the refusal may well try again."""
+	import ctypes
+	import types
+
+	sys.path.insert(0, SOURCE)
+	from linuxPlatform import bootstrap, finder, windowsCtypes
+
+	if condition == "winregImported":
+		sys.modules["winreg"] = types.ModuleType("winreg")
+	elif condition == "ctypesNameTaken":
+		# The last name install() adds, so that adding them one by one would leave the rest behind.
+		ctypes.HRESULT = ctypes.c_long
+	elif condition == "windowsErrorTaken":
+		builtins.WindowsError = OSError
+	elif condition == "missingReplacement":
+		finder.replacedModules = (*finder.replacedModules, "noSuchReplacement")
+	else:
+		raise ValueError(f"unknown condition {condition}")
+	raised = []
+	for _ in range(2):
+		try:
+			bootstrap.install()
+		except Exception as e:  # noqa: BLE001
+			raised.append(type(e).__name__)
+		else:
+			raised.append(None)
+	return {
+		"raised": raised,
+		"installed": bootstrap._installed,
+		"ctypesNames": sorted(name for name in windowsCtypes.names if hasattr(ctypes, name)),
+		"windowsErrorIsLinux": getattr(builtins, "WindowsError", None) is bootstrap.WindowsError,
+		"findersAdded": sum(isinstance(f, finder.PlatformFinder) for f in sys.meta_path),
+	}
+
+
 def runNoLouis() -> dict:
 	sys.path.insert(0, SOURCE)
 	sys.modules["louis"] = None
@@ -468,6 +505,8 @@ def main() -> None:
 			result.update(runRefuse())
 		elif mode == "noLouis":
 			result.update(runNoLouis())
+		elif mode == "refuseWhen":
+			result.update(runRefuseWhen(sys.argv[3]))
 		else:
 			prepare()
 			result["core"] = runCoreMainImports()

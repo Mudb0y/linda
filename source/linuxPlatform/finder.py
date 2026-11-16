@@ -137,10 +137,28 @@ class PlatformFinder(importlib.abc.MetaPathFinder):
 		return spec
 
 
-def install() -> None:
+def prepare() -> PlatformFinder | None:
+	"""Make every check that can refuse install(), and change nothing.
+
+	:return: The finder for install() to put in place, or None when one is in place already.
+	:raises RuntimeError: If a module Linux never provides is already imported, or a table is wrong.
+	:raises FileNotFoundError: If a listed module has no file.
+	"""
 	if any(isinstance(f, PlatformFinder) for f in sys.meta_path):
-		return
-	for name in neverProvided:
+		return None
+	for name in sorted(neverProvided):
 		if name in sys.modules:
 			raise RuntimeError(f"{name} is already imported, which Linux must never allow")
-	sys.meta_path.insert(0, PlatformFinder())
+	return PlatformFinder()
+
+
+def install(prepared: PlatformFinder | None = None) -> None:
+	"""Put the finder first on sys.meta_path, unless one is there already.
+
+	:param prepared: What prepare() returned, so that a caller can make every check before it
+		changes anything; without it, install() calls prepare() itself.
+	"""
+	platformFinder = prepared or prepare()
+	if platformFinder is None or any(isinstance(f, PlatformFinder) for f in sys.meta_path):
+		return
+	sys.meta_path.insert(0, platformFinder)
