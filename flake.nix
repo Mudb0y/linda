@@ -82,6 +82,29 @@
         libeci = openevvLibeci;
       };
 
+      # The BASEDREADER_ variables the program reads, the same in the dev shell
+      # and in the package's wrappers. Linux code finds native libraries and
+      # data through these rather than through the loader's search path, so
+      # that what it loads is exactly what the flake pins.
+      runtimeEnv = {
+        BASEDREADER_ICU_LIB_DIR = "${lib.getLib pkgs.icu}/lib";
+        # ICU exports every C symbol with this suffix, as in ubrk_open_78.
+        BASEDREADER_ICU_VERSION_MAJOR = lib.versions.major pkgs.icu.version;
+        BASEDREADER_ESPEAK_LIB = "${espeak}/lib/libespeak-ng.so.1";
+        BASEDREADER_ESPEAK_DATA_DIR = "${espeak}/share/espeak-ng-data";
+        # linuxPlatform.synthDriverPaths puts it on NVDA's driver search path.
+        BASEDREADER_OPENEVV_DRIVER_DIR = "${openevvDriver}";
+      };
+
+      basedreader = pkgs.callPackage ./nix/basedreader.nix {
+        inherit python runtimeEnv louisTables nvdaCldr;
+      };
+      app = name: description: {
+        type = "app";
+        program = "${basedreader}/bin/${name}";
+        meta = { inherit description; };
+      };
+
       bench = pkgs.rustPlatform.buildRustPackage {
         pname = "basedreader-bench";
         inherit ((lib.importTOML ./engine/Cargo.toml).workspace.package) version;
@@ -101,7 +124,17 @@
       };
     in
     {
+      apps.${system} =
+        {
+          default = app "basedreader" "Start Basedreader";
+        }
+        // lib.optionalAttrs (basedreader.programs ? basedreader-say) {
+          say = app "basedreader-say" "Speak a sentence through Basedreader's speech and audio, then exit";
+        };
+
       packages.${system} = {
+        default = basedreader;
+        inherit basedreader;
         inherit (pythonInterpreter.pkgs)
           configobj
           fast-diff-match-patch
@@ -116,7 +149,7 @@
         openevv-driver = openevvDriver;
       };
 
-      devShells.${system}.default = pkgs.mkShell {
+      devShells.${system}.default = pkgs.mkShell (runtimeEnv // {
         nativeBuildInputs = with pkgs; [
           python
           cargo
@@ -164,21 +197,12 @@
         # the host may or may not have.
         AT_SPI_BUS_LAUNCHER = "${pkgs.at-spi2-core}/libexec/at-spi-bus-launcher";
 
-        # Linux code finds native libraries and data through these rather
-        # than through the loader's search path, so that what it loads is
-        # exactly what the flake pins.
-        BASEDREADER_ICU_LIB_DIR = "${lib.getLib pkgs.icu}/lib";
-        # ICU exports every C symbol with this suffix, as in ubrk_open_78.
-        BASEDREADER_ICU_VERSION_MAJOR = lib.versions.major pkgs.icu.version;
+        # tools/build-artifacts takes the tables and the CLDR data from these.
         BASEDREADER_LOUIS_TABLES_DIR = "${louisTables}";
+        BASEDREADER_NVDA_CLDR_DIR = "${nvdaCldr}";
         # tools/check-upstream-edits compares it with the release upstream's
         # include/liblouis submodule pins.
         BASEDREADER_LIBLOUIS_VERSION = pkgs.liblouis.version;
-        BASEDREADER_NVDA_CLDR_DIR = "${nvdaCldr}";
-        BASEDREADER_ESPEAK_LIB = "${espeak}/lib/libespeak-ng.so.1";
-        BASEDREADER_ESPEAK_DATA_DIR = "${espeak}/share/espeak-ng-data";
-        # linuxPlatform.synthDriverPaths puts it on NVDA's driver search path.
-        BASEDREADER_OPENEVV_DRIVER_DIR = "${openevvDriver}";
 
         # Where tests/linux/bench/run finds the bench once nix build
         # .#basedreader-bench has built it. Stripped of its dependency on the
@@ -207,6 +231,6 @@
           # falls back on.
           BASEDREADER_RIG_XDG_DATA_DIRS=$GSETTINGS_SCHEMAS_PATH:${pkgs.hicolor-icon-theme}/share:$BASEDREADER_RIG_XDG_DATA_DIRS
         '';
-      };
+      });
     };
 }
