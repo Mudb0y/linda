@@ -84,6 +84,48 @@ def topLevelNames() -> list[str]:
 	return names
 
 
+def activeTopLevelNames() -> list[str]:
+	"""The names of the top-level windows that say they are active, read afresh."""
+	Atspi = _atspi()
+	from gi.repository import GLib
+
+	desktop = Atspi.get_desktop(0)
+	desktop.clear_cache()
+	names = []
+	for appIndex in range(desktop.get_child_count()):
+		try:
+			app = desktop.get_child_at_index(appIndex)
+			if app is None:
+				continue
+			app.clear_cache()
+			for index in range(app.get_child_count()):
+				window = app.get_child_at_index(index)
+				if window is not None and window.get_state_set().contains(Atspi.StateType.ACTIVE):
+					names.append(window.get_name() or "")
+		except GLib.Error:
+			continue
+	return names
+
+
+def activate(title: str, timeout: float = 10) -> None:
+	"""Give the keyboard to the top-level window named title, and wait until it is the only window that
+	says it is active.
+
+	marco may not give the keyboard to a window that asks for it with no key press behind it, as a
+	window a test starts does; asked as a pager asks, it does. Qt also says for a moment that its
+	window is active again after losing the keyboard.
+	"""
+	deadline = time.monotonic() + timeout
+	while True:
+		# -F matches the whole title: without it "Fixture window" would also pick "Qt fixture window".
+		subprocess.run(["wmctrl", "-F", "-a", title], check=False, capture_output=True)
+		active = activeTopLevelNames()
+		if active == [title]:
+			return
+		assert time.monotonic() < deadline, f"{title!r} did not become active within {timeout} s: {active}"
+		time.sleep(0.2)
+
+
 def _matches(expected: str, spoken: str) -> bool:
 	if expected.endswith(PREFIX_MARK):
 		return spoken.startswith(expected[: -len(PREFIX_MARK)])

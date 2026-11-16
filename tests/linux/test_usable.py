@@ -14,6 +14,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import desktopSession
 import harness
 import pytest
 from desktopSession import DesktopSession
@@ -47,6 +48,7 @@ def startSession(desktop: DesktopSession, *apps: tuple[str, str]) -> harness.Lau
 		app = desktop.startApp(desktop.fixture(name), title=title)
 		# On the accessibility desktop before it has presented itself and has the keyboard.
 		assert app.stdout.readline() == "ready\n"
+	desktopSession.activate(apps[-1][1])
 	return desktop.startNVDA(SESSION_CONFIG, env=TIMED_SPEECH)
 
 
@@ -87,9 +89,12 @@ def test_usableSession(desktop: DesktopSession):
 	step(desktop, "Tab", "Colour: combo box Green collapsed Alt plus C")
 	step(desktop, "Tab", "Name: edit Alt plus N selected Alice")
 
-	mark = desktop.mark()
-	desktop.typeText("Bob")
-	desktop.expect("B", "o", "b", since=mark)
+	# Each letter after the one before has been spoken: a key that types cuts short what is still
+	# being said, as on Windows, and "selection removed" comes before the B.
+	for letter in "Bob":
+		mark = desktop.mark()
+		desktop.typeText(letter)
+		desktop.expect(letter, since=mark)
 
 	step(desktop, "Left", "b")
 	step(desktop, "Insert+Up", "Bob")
