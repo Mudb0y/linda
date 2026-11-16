@@ -13,6 +13,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import desktopSession
 import harness
 import pytest
 from desktopSession import DesktopSession
@@ -24,11 +25,13 @@ STARTUP_BOUND = 60.0
 QUIET = 0.8
 GTK_TITLE = "Fixture window"
 QT_TITLE = "Qt fixture window"
-#: Both fixtures start with their first button focused, and name and describe it alike.
+#: Both fixtures start with their first button focused, and name and describe it alike; how its
+#: shortcut is spoken depends on the toolkit.
 PRESS_ME = "Press me button Does nothing Alt plus P"
+PRESS_ME_ANY = "Press me button Does nothing\N{HORIZONTAL ELLIPSIS}"
 
 #: A global plugin that runs key gestures sent to it through a FIFO as if their keys had been pressed,
-#: for commands whose keys NVDA cannot take from the rig's display by itself.
+#: so that what a command says is timed apart from how its keys are captured.
 PROBE = textwrap.dedent(
 	'''\
 	"""Runs a gesture for each line "gesture NAME" written to the FIFO BASEDREADER_FOCUS_PROBE names."""
@@ -61,6 +64,42 @@ PROBE = textwrap.dedent(
 						queueHandler.queueFunction(queueHandler.eventQueue, _run, argument)
 	''',
 )
+
+
+def _windowManagerIsAlive() -> bool:
+	"""Whether the window manager the root window names still exists; its properties outlive it."""
+	shown = subprocess.run(
+		["xprop", "-root", "_NET_SUPPORTING_WM_CHECK"], capture_output=True, text=True, check=False
+	).stdout
+	if "window id #" not in shown:
+		return False
+	window = shown.split("#")[-1].strip()
+	return subprocess.run(["xprop", "-id", window], capture_output=True, check=False).returncode == 0
+
+
+@pytest.fixture(scope="module", autouse=True)
+def windowManager(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+	"""One marco for every test here, unless the rig started one: a DesktopSession takes the
+	properties a marco it stopped left on the root window for a running one, and starts none."""
+	if _windowManagerIsAlive():
+		yield
+		return
+	log = tmp_path_factory.mktemp("marco") / "marco.log"
+	with open(log, "w") as output:
+		marco = subprocess.Popen(["marco", "--no-force-fullscreen"], stdout=output, stderr=subprocess.STDOUT)
+	try:
+		deadline = time.monotonic() + 5
+		while not (_windowManagerIsAlive() and desktopSession.windowManagerIsRunning()):
+			assert marco.poll() is None and time.monotonic() < deadline, log.read_text()
+			time.sleep(0.05)
+		yield
+	finally:
+		marco.terminate()
+		try:
+			marco.wait(3)
+		except subprocess.TimeoutExpired:
+			marco.kill()
+			marco.wait()
 
 
 @pytest.fixture
@@ -117,6 +156,30 @@ def _startNVDA(desktop: DesktopSession, tmp_path: Path) -> tuple[harness.Launch,
 	return launch, Probe(fifo)
 
 
+def _waitUntilActive(title: str, timeout: float = 10) -> None:
+	"""Wait until the top-level window named title is the only one that says it is active, as it does
+	once it has the keyboard; a fixture says it is ready before that, and Qt says for a moment that its
+	window is active again after losing the keyboard."""
+	Atspi = desktopSession._atspi()
+	deadline = time.monotonic() + timeout
+	while True:
+		# marco may not give the keyboard to a window that asks for it with no key press behind it;
+		# asked as a pager would ask, it does, once the window is mapped.
+		subprocess.run(["wmctrl", "-F", "-a", title], check=False, capture_output=True)
+		desktop = Atspi.get_desktop(0)
+		active = []
+		for appIndex in range(desktop.get_child_count()):
+			app = desktop.get_child_at_index(appIndex)
+			for index in range(app.get_child_count() if app else 0):
+				window = app.get_child_at_index(index)
+				if window is not None and window.get_state_set().contains(Atspi.StateType.ACTIVE):
+					active.append(window.get_name())
+		if active == [title]:
+			return
+		assert time.monotonic() < deadline, f"{title!r} did not become active within {timeout} s: {active}"
+		time.sleep(0.2)
+
+
 def _waitForQuiet(desktop: DesktopSession, limit: float = 10) -> None:
 	"""Wait until NVDA has said nothing new for QUIET seconds."""
 	end = time.monotonic() + limit
@@ -155,6 +218,7 @@ def _closeClean(desktop: DesktopSession, nvda: harness.Launch) -> None:
 
 def test_startSpeaksTheActiveWindowAndItsFocus(desktop: DesktopSession, tmp_path: Path):
 	desktop.startApp(desktop.fixture("gtkFixture"), title=GTK_TITLE)
+	_waitUntilActive(GTK_TITLE)
 	nvda, probe = _startNVDA(desktop, tmp_path)
 	desktop.expect(GTK_TITLE, PRESS_ME, since=0, timeout=STARTUP_BOUND)
 	probe.close()
@@ -164,17 +228,19 @@ def test_startSpeaksTheActiveWindowAndItsFocus(desktop: DesktopSession, tmp_path
 def test_altTabSpeaksTitleAndFocusOnce(desktop: DesktopSession, tmp_path: Path):
 	desktop.startApp(desktop.fixture("qtFixture"), title=QT_TITLE)
 	gtk = desktop.startApp(desktop.fixture("gtkFixture"), title=GTK_TITLE)
-	# Started last, it is presented last and is the active window.
 	assert gtk.stdout.readline() == "ready\n"
+	_waitUntilActive(GTK_TITLE)
 	nvda, probe = _startNVDA(desktop, tmp_path)
 	desktop.expect(GTK_TITLE, PRESS_ME, since=0, timeout=STARTUP_BOUND)
 	_waitForQuiet(desktop)
 	for title in (QT_TITLE, GTK_TITLE, QT_TITLE, GTK_TITLE):
 		mark = desktop.mark()
 		desktop.press("alt+Tab")
-		desktop.expect(title, PRESS_ME, since=mark)
+		desktop.expect(title, PRESS_ME_ANY, since=mark)
 		_waitForQuiet(desktop)
-		assert desktop.spokenSince(mark) == [title, PRESS_ME]
+		spoken = desktop.spokenSince(mark)
+		assert len(spoken) == 2 and spoken[0] == title, spoken
+		assert spoken[1].startswith(PRESS_ME_ANY[:-1]), spoken
 	probe.close()
 	_closeClean(desktop, nvda)
 
@@ -192,6 +258,7 @@ def test_closingADialogReturnsToTheWindowsFocus(desktop: DesktopSession, tmp_pat
 	_waitForQuiet(desktop, limit=STARTUP_BOUND)
 	mark = desktop.mark()
 	command("first")
+	_waitUntilActive("First window")
 	desktop.expect("First window", "Alpha button Alt plus A", since=mark)
 	mark = desktop.mark()
 	desktop.press("Tab")
@@ -213,19 +280,21 @@ def test_stoppedApplicationsDoNotStallSpeech(desktop: DesktopSession, tmp_path: 
 	qt = desktop.startApp(desktop.fixture("qtFixture"), title=QT_TITLE)
 	gtk = desktop.startApp(desktop.fixture("gtkFixture"), title=GTK_TITLE)
 	assert gtk.stdout.readline() == "ready\n"
+	_waitUntilActive(GTK_TITLE)
 	nvda, probe = _startNVDA(desktop, tmp_path)
 	desktop.expect(GTK_TITLE, PRESS_ME, since=0, timeout=STARTUP_BOUND)
 	_waitForQuiet(desktop)
+	foreground, background = gtk, qt
 	try:
-		qt.send_signal(signal.SIGSTOP)
+		background.send_signal(signal.SIGSTOP)
 		mark = desktop.mark()
 		pressed = time.monotonic()
 		subprocess.run(["xdotool", "key", "Tab"], check=True)
 		record = _firstRecordAfter(nvda, mark, timeout=5)
 		assert record["t"] - pressed < 0.3, (record, nvda.describe())
 		_waitForQuiet(desktop)
-		qt.send_signal(signal.SIGCONT)
-		gtk.send_signal(signal.SIGSTOP)
+		background.send_signal(signal.SIGCONT)
+		foreground.send_signal(signal.SIGSTOP)
 		mark = desktop.mark()
 		asked = time.monotonic()
 		probe.gesture("NVDA+t")
