@@ -1,8 +1,11 @@
 """The PipeWire sink, heard through a private daemon in the rig.
 
-	nix develop . -c env BASEDREADER_PWSINK_LIB=$PWD/engine/target/release/libpwsink.so \\
-		BASEDREADER_PWMON=$PWD/engine/target/release/pwmon \\
-		tests/linux/rig python3 -m pytest tests/linux/test_pipewireSink.py
+	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_pipewireSink.py
+
+The dev shell names the library the flake builds. To test a build of engine/crates/pwsink instead,
+name it and its pwmon with BASEDREADER_PWSINK_LIB and BASEDREADER_PWMON, which the rig passes in.
+BENCH_PWSINK_ROUNDS sets how many stops and starts are timed at each quantum and rate, 30 by
+default.
 
 Every case plays from a fresh NVDA process, through nvwave and the wasapi replacement or straight
 into the sink, to the null sinks of tests/linux/pipewireFixture.py, and checks what their monitor
@@ -13,6 +16,7 @@ it is the sink's own.
 
 import json
 import math
+import os
 import re
 import signal
 import statistics
@@ -33,6 +37,8 @@ from pipewireFixture import RATE, PipewireFixture, assertCleanThroughPipewire
 CRATE = harness.ROOT / "engine" / "crates" / "pwsink"
 WAVES = harness.SOURCE / "waves"
 MS = 1_000_000
+#: Stops and starts timed at each quantum and rate.
+STOP_ROUNDS = int(os.environ.get("BENCH_PWSINK_ROUNDS", "30"))
 
 #: Run in every child first: NVDA's audio as core.main brings it up, the sink, and helpers.
 PRELUDE = '''
@@ -576,10 +582,13 @@ def test_stopIsSilentAndStartIsHeardWithinTheQuantum(pipewire: PipewireFixture, 
 	"""Stopping a player is silent at the sink once the cycle in progress has played, and a new feed
 	is heard from the next cycle, at the quanta of 256 and 512.
 
-	At the graph's rate nothing is resampled and STOP_BOUNDS apply unchanged. At 22050 Hz, eSpeak's
-	rate, PipeWire's resampler holds a few frames, about 1.3 ms, which it reports for the stream. They
-	play out after a stop, since dropping them would take a flush, so each stop bound there is
-	STOP_BOUNDS plus that delay. Starting has room to spare and keeps START_BOUNDS at every rate."""
+	WavePlayer.stop reaches the sink as the stream's abort, once per stop and within a millisecond of
+	the call; the time to silence is counted from there. At the graph's rate nothing is resampled and
+	STOP_BOUNDS apply unchanged. At 22050 Hz, eSpeak's rate, PipeWire's resampler holds a few frames,
+	about 1.3 ms, which it reports for the stream. They play out after a stop, since dropping them
+	would take a flush, so each stop bound there is STOP_BOUNDS plus that delay. A start is counted
+	from the first feed after a stop, which completes that stop, and keeps START_BOUNDS at every
+	rate."""
 	pipewire.setQuantum(256)
 	monitor = pipewire.monitor()
 	actions = {f"quantum{q}": (lambda q=q: pipewire.setQuantum(q)) for q in (256, 512)}
@@ -587,6 +596,16 @@ def test_stopIsSilentAndStartIsHeardWithinTheQuantum(pipewire: PipewireFixture, 
 		value = runPipewireChild(
 			tmp_path,
 			"""
+			from linuxPlatform.audioOutput.pipewireSink import PipewireStream
+
+			aborts = []
+			abort = PipewireStream.abort
+
+			def timedAbort(self):
+				aborts.append(mono())
+				abort(self)
+
+			PipewireStream.abort = timedAbort
 			random.seed(1)
 			players = {}
 			for rate in (48000, 22050):
@@ -601,13 +620,17 @@ def test_stopIsSilentAndStartIsHeardWithinTheQuantum(pipewire: PipewireFixture, 
 				time.sleep(0.2)
 				for rate, player in players.items():
 					chunk = tone(StreamFormat(1, 1, rate, 16), 0.3)
-					for i in range(30):
+					for i in range(PARAMS["rounds"]):
 						start = mono()
 						player.feed(chunk)
 						time.sleep(random.uniform(0.05, 0.2))
+						del aborts[:]
 						stop = mono()
 						player.stop()
-						rounds.append(dict(quantum=quantum, rate=rate, start=start, stop=stop, stopCall=mono() - stop))
+						returned = mono()
+						rounds.append(
+							dict(quantum=quantum, rate=rate, start=start, stop=stop, stopCall=returned - stop, aborts=list(aborts))
+						)
 						time.sleep(0.08)
 					handle = wasapi._players[player._player]._stream.handle
 					resampler[f"{quantum} {rate}"] = lib.pwsink_resampler_frames(handle)
@@ -616,22 +639,30 @@ def test_stopIsSilentAndStartIsHeardWithinTheQuantum(pipewire: PipewireFixture, 
 			result = dict(rounds=rounds, resampler=resampler)
 			""",
 			{**pipewire.childEnv(), **steps.env()},
+			params={"rounds": STOP_ROUNDS},
 		)
 	measured = {}
 	failures = []
 	for quantum in (256, 512):
 		for rate in (48000, 22050):
 			mine = [r for r in value["rounds"] if r["quantum"] == quantum and r["rate"] == rate]
+			assert all(len(r["aborts"]) == 1 for r in mine), "a stop did not reach the stream's abort once"
+			reached = [(r["aborts"][0] - r["stop"]) / MS for r in mine]
+			assert max(reached) < 1, f"the abort was reached up to {max(reached):.2f} ms after the stop"
 			starts, stops = [], []
 			for r in mine:
 				sound = monitor.soundAfter(r["start"])
 				starts.append((sound - r["start"]) / MS)
 				silence = monitor.silenceAfter(sound)
-				# A graph starved of CPU can run dry before the stop, which then has nothing to
-				# silence; such a round says nothing about stop.
-				if silence >= r["stop"]:
-					stops.append((silence - r["stop"]) / MS)
-			assert len(stops) >= 20, f"only {len(stops)} rounds were still sounding at the stop"
+				# An abort that lands after the cycle in progress began but before the stream's
+				# callback ran in it silences that whole cycle, up to a quantum before the call. A
+				# silence earlier than that is a graph starved of the processor running dry, and
+				# says nothing about stop.
+				if silence >= r["aborts"][0] - quantumMs(quantum) * MS:
+					stops.append((silence - r["aborts"][0]) / MS)
+			assert len(stops) >= len(mine) * 2 // 3, (
+				f"only {len(stops)} rounds were still sounding at the stop"
+			)
 			delay = value["resampler"][f"{quantum} {rate}"] / rate * 1000
 			row = {
 				"startToSound": summary(starts),
@@ -639,6 +670,7 @@ def test_stopIsSilentAndStartIsHeardWithinTheQuantum(pipewire: PipewireFixture, 
 				"resamplerMs": round(delay, 2),
 			}
 			row["stopCall"] = summary([r["stopCall"] / MS for r in mine])
+			row["stopToAbort"] = summary(reached)
 			measured[f"quantum {quantum}, {rate} Hz"] = row
 			for name, bounds, allowance in (
 				("startToSound", START_BOUNDS, 0),
@@ -1273,19 +1305,21 @@ def test_aWokenStreamWaitsForASlowDaemonRatherThanLoseItsStart(pipewire: Pipewir
 	assert all(ms > 120 - quantumMs(256) - 1 for ms in heard), heard
 
 
-def test_stopNeverWaitsWhileOtherStreamsOpenAndClose(pipewire: PipewireFixture, tmp_path: Path):
-	"""stop() is one store: 10,000 calls while another thread keeps opening and closing streams,
-	which keeps the library's thread busy in PipeWire, never take 0.2 ms.
+def test_stopAndAbortNeverWaitWhileOtherStreamsOpenAndClose(pipewire: PipewireFixture, tmp_path: Path):
+	"""stop and abort are each one store: 10,000 calls of each, while another thread keeps opening
+	and closing streams, which keeps the library's thread busy in PipeWire, never wait for anything
+	and never take 0.2 ms.
 
-	The calls go through ctypes.PyDLL, which keeps the GIL, so that the time measured is the
-	library's and not the wait for the GIL after a call that released it."""
+	They are timed as the stream calls them, through foreign functions that keep the GIL, with the
+	collector held off, so that what is timed is the library. A call that waited for a lock, or for
+	the GIL, would show as a voluntary context switch of the calling thread, of which there must be
+	none. A call during which the system took the processor away from the thread, which a loaded
+	machine does now and then, says nothing about the library and is not timed."""
 	value = runPipewireChild(
 		tmp_path,
 		"""
-		fast = ctypes.PyDLL(os.environ["BASEDREADER_PWSINK_LIB"])
-		fast.pwsink_stop.argtypes = [ctypes.c_void_p]
-		fast.pwsink_stop.restype = None
 		stream = sink.openStream("", SPEECH, lambda: None)
+		chunk = tone(SPEECH, 0.005)
 		stream.write(tone(SPEECH, 0.9))
 		stream.start()
 		running = True
@@ -1304,26 +1338,322 @@ def test_stopNeverWaitsWhileOtherStreamsOpenAndClose(pipewire: PipewireFixture, 
 		churner = threading.Thread(target=churn, name="churn")
 		churner.start()
 		time.sleep(0.2)
-		handle = stream.handle
-		took = []
+		import resource
+
+		took = {"stop": [], "abort": []}
+		waited = {"stop": 0, "abort": 0}
+		preempted = {"stop": 0, "abort": 0}
 		clock = time.perf_counter_ns
-		for i in range(10000):
+		usage = resource.getrusage
+		thread = resource.RUSAGE_THREAD
+		silencers = stream._silencers
+		handle = stream.handle
+		gc.disable()
+		for i in range(20000):
+			name = "abort" if i % 2 else "stop"
+			call = silencers.abort if i % 2 else silencers.stop
+			before = usage(thread)
 			start = clock()
-			fast.pwsink_stop(handle)
-			took.append(clock() - start)
+			call(handle)
+			end = clock()
+			after = usage(thread)
+			waited[name] += after.ru_nvcsw - before.ru_nvcsw
+			if after.ru_nivcsw == before.ru_nivcsw:
+				took[name].append(end - start)
+			else:
+				preempted[name] += 1
+			if name == "abort":
+				# As the player completes a stop: only a reset ends an abort.
+				stream.stop()
+				stream.reset()
+				stream.write(chunk)
 			stream.start()
 			time.sleep(0.0001)
+		gc.enable()
 		running = False
 		churner.join()
 		stream.close()
-		took.sort()
-		result = dict(median=took[len(took) // 2], worst=took[-1], churned=churned[0], attached=lib.pwsink_attached_streams())
+		result = dict(churned=churned[0])
+		for name, times in took.items():
+			times.sort()
+			result[name] = dict(
+				n=len(times), median=times[len(times) // 2], worst=times[-1], waited=waited[name], preempted=preempted[name]
+			)
 		""",
 		pipewire.childEnv(),
 	)
-	report("stop under contention, ns", value)
+	report("stop and abort under contention, ns", value)
 	assert value["churned"] > 100
-	assert value["worst"] < 200_000
+	for name in ("stop", "abort"):
+		assert value[name]["waited"] == 0, name
+		assert value[name]["n"] >= 9900, name
+		assert value[name]["worst"] < 200_000, name
+
+
+def test_anAbortFromAnotherThreadHoldsUntilTheFeedersReset(pipewire: PipewireFixture, tmp_path: Path):
+	"""abort and stop may land on any thread while the feeding thread is inside any other call on the
+	same stream, as when NVDA's player is stopped while its feeder is writing and starting.
+
+	In each round one thread keeps the stream topped up, starting it and asking its position and
+	volume without pause, as a feeder that has not yet seen the stop does, while another aborts and
+	stops it at a random moment. The feeder goes on writing and starting for 60 ms after the abort
+	before it stops and resets the stream. The abort is silent at the sink within one quantum and
+	5 ms, and nothing is heard again before the reset. Then both threads call everything at random
+	for a second and a half, and the stream still plays a sound whole."""
+	pipewire.setQuantum(256)
+	monitor = pipewire.monitor()
+	value = runPipewireChild(
+		tmp_path,
+		"""
+		random.seed(3)
+		fmt = StreamFormat(1, 1, 48000, 16)
+		chunk = tone(fmt, 0.02)
+		chunkFrames = len(chunk) // fmt.blockAlign
+		stream = sink.openStream("", fmt, lambda: None)
+		# Linked before the first round, whose abort could otherwise land before anything is heard.
+		stream.write(chunk)
+		stream.start()
+		waitPlayed(stream, chunkFrames)
+		stream.stop()
+		stream.reset()
+		time.sleep(0.1)
+
+		def feedUntil(done):
+			while not done():
+				if stream.bufferedFrames() < 5 * chunkFrames:
+					stream.write(chunk)
+				stream.start()
+				stream.playedFrames()
+				stream.setChannelVolume(0, 1.0)
+				time.sleep(0.0005)
+
+		go = threading.Event()
+		quitting = [False]
+		abortedAt = []
+
+		def stopper():
+			while True:
+				go.wait()
+				go.clear()
+				if quitting[0]:
+					return
+				time.sleep(random.uniform(0.03, 0.15))
+				abortedAt.append(mono())
+				stream.abort()
+				stream.stop()
+
+		stopping = threading.Thread(target=stopper, name="stopper")
+		stopping.start()
+		rounds = []
+		for i in range(30):
+			start = mono()
+			before = len(abortedAt)
+			go.set()
+			feedUntil(lambda: len(abortedAt) > before)
+			hold = mono() + 60_000_000
+			feedUntil(lambda: mono() > hold)
+			reset = mono()
+			stream.stop()
+			stream.reset()
+			rounds.append(dict(start=start, abort=abortedAt[-1], reset=reset))
+			time.sleep(0.1)
+		quitting[0] = True
+		go.set()
+		stopping.join()
+
+		running = [True]
+		silenced = [0]
+
+		def hammer():
+			while running[0]:
+				random.choice((stream.abort, stream.stop))()
+				silenced[0] += 1
+				time.sleep(random.uniform(0, 0.001))
+
+		hammering = threading.Thread(target=hammer, name="hammer")
+		hammering.start()
+		calls = 0
+		end = mono() + 1_500_000_000
+		while mono() < end:
+			step = random.randrange(5)
+			if step == 0 and stream.bufferedFrames() < 5 * chunkFrames:
+				stream.write(chunk)
+			elif step == 1:
+				stream.start()
+			elif step == 2:
+				stream.stop()
+				stream.reset()
+			elif step == 3:
+				stream.playedFrames()
+			else:
+				stream.setChannelVolume(0, random.choice((0.5, 1.0)))
+			calls += 1
+			time.sleep(random.uniform(0, 0.0005))
+		running[0] = False
+		hammering.join()
+		stream.stop()
+		stream.reset()
+		stream.setChannelVolume(0, 1.0)
+		time.sleep(0.2)
+		data = tone(fmt, 0.2)
+		before = sink.deliveredFrames()
+		final = mono()
+		stream.write(data)
+		stream.start()
+		waitPlayed(stream, len(data) // fmt.blockAlign)
+		played = dict(start=final, ms=(mono() - final) / 1e6, taken=sink.deliveredFrames() - before)
+		stream.close()
+		result = dict(rounds=rounds, final=played, calls=calls, silenced=silenced[0])
+		""",
+		pipewire.childEnv(),
+	)
+	bound = quantumMs(256) + 5
+	final = value["final"]
+	# Taken whole by the graph rather than discarded by the clock.
+	assert final["taken"] == 9600, f"after the hammering, the graph took {final}"
+	sound = monitor.soundAfter(final["start"])
+	heard = (monitor.silenceAfter(sound) - sound) / MS
+	edges = sorted((e["graph_ns"], kind) for kind in ("sound", "silence") for e in monitor.eventsOf(kind))
+	toSilence, failures, leftOut = [], [], []
+	for i, r in enumerate(value["rounds"]):
+		end = r["reset"] + 50 * MS
+		timeline = ", ".join(
+			f"{kind} at {(ns - r['abort']) / MS:+.1f} ms" for ns, kind in edges if r["start"] <= ns <= end
+		)
+		prior = [(ns, kind) for ns, kind in edges if r["start"] <= ns < r["abort"]]
+		later = [(ns, kind) for ns, kind in edges if r["abort"] <= ns <= end]
+		if prior[-1:] and prior[-1][1] == "silence" and prior[-1][0] >= r["abort"] - quantumMs(256) * MS:
+			# The abort landed after the cycle in progress began but before the stream's callback ran
+			# in it, so nothing was handed over for that cycle, which is heard as silence from its
+			# start.
+			silence, rest = prior[-1][0], later
+		elif prior[-1:] and prior[-1][1] == "sound":
+			if not later or later[0][1] != "silence":
+				failures.append(f"round {i}, never silent before the reset: {timeline}")
+				continue
+			silence, rest = later[0][0], later[1:]
+		else:
+			# Nothing was being heard as the abort landed, as when a graph starved of the processor
+			# has run dry; such a round says nothing about the abort.
+			leftOut.append(f"round {i}: {timeline}")
+			continue
+		toSilence.append((silence - r["abort"]) / MS)
+		if toSilence[-1] > bound or rest:
+			failures.append(f"round {i}: {timeline}")
+	report(
+		"abort from another thread",
+		{
+			"toSilenceMs": summary(toSilence),
+			"leftOut": leftOut,
+			"hammerCalls": value["calls"],
+			"hammerSilences": value["silenced"],
+		},
+	)
+	assert not failures, failures
+	assert len(toSilence) >= 20, f"only {len(toSilence)} rounds were sounding at the abort: {leftOut}"
+	assert value["calls"] > 500 and value["silenced"] > 500
+	assert heard > 200 - 1, f"a 200 ms sound after the hammering was heard for {heard:.1f} ms"
+
+
+#: Run in a child: three threads that do nothing but run Python, as NVDA's own can.
+BUSY_THREADS = """
+busyRunning = [True]
+
+
+def busy():
+	x = 0
+	while busyRunning[0]:
+		for i in range(1000):
+			x += i * i
+
+
+busyThreads = [threading.Thread(target=busy, name=f"busy {i}") for i in range(3)]
+for thread in busyThreads:
+	thread.start()
+
+
+def stopBusyThreads():
+	busyRunning[0] = False
+	for thread in busyThreads:
+		thread.join()
+"""
+
+
+def test_aPlayersStopReturnsAtOnceWhileOtherThreadsRunPython(pipewire: PipewireFixture, tmp_path: Path):
+	"""WavePlayer.stop, landing as an utterance starts, returns at once while three other threads run
+	Python, for speech and for sounds.
+
+	It reaches the sink as the stream's abort, which, like the stream's stop, is a foreign function
+	that keeps the GIL, and the test checks that of both. One that let it go would have the thread
+	stopping speech win it back from the busy threads afterwards. That mostly happens at once and
+	now and then takes a switch interval for each of them, so the times alone would show it only
+	sometimes."""
+	pipewire.setQuantum(512)
+	value = runPipewireChild(
+		tmp_path,
+		BUSY_THREADS
+		+ textwrap.dedent("""
+		random.seed(4)
+		chunk = tone(SPEECH, 0.3)
+		measured = {}
+		for purpose in (nvwave.AudioPurpose.SPEECH, nvwave.AudioPurpose.SOUNDS):
+			player = nvwave.WavePlayer(1, 22050, 16, wantDucking=False, purpose=purpose)
+			player.enableTrimmingLeadingSilence(False)
+			go, cancelled, finished = threading.Event(), threading.Event(), threading.Event()
+			quitting = [False]
+
+			def synthesize():
+				while True:
+					go.wait()
+					go.clear()
+					if quitting[0]:
+						return
+					for _ in range(3):
+						if cancelled.is_set():
+							break
+						player.feed(chunk, onDone=lambda: None)
+					player.idle()
+					finished.set()
+
+			synth = threading.Thread(target=synthesize, name="synth")
+			synth.start()
+			silencers = wasapi._players[player._player]._stream._silencers
+			keepsGil = [bool(type(f)._flags_ & ctypes._FUNCFLAG_PYTHONAPI) for f in (silencers.stop, silencers.abort)]
+			returned, hung = [], 0
+			for _ in range(300):
+				cancelled.clear()
+				finished.clear()
+				go.set()
+				time.sleep(random.uniform(0, 0.004))
+				called = mono()
+				cancelled.set()
+				player.stop()
+				returned.append((mono() - called) / 1e6)
+				if not finished.wait(5):
+					hung += 1
+					break
+			quitting[0] = True
+			go.set()
+			synth.join()
+			measured[purpose.name] = dict(returned=returned, hung=hung, keepsGil=keepsGil)
+			del player
+			gc.collect()
+		stopBusyThreads()
+		result = measured
+		"""),
+		pipewire.childEnv(),
+	)
+	report(
+		"WavePlayer.stop with three busy threads, ms",
+		{name: summary(m["returned"]) for name, m in value.items()},
+	)
+	for name, measured in value.items():
+		returned = measured["returned"]
+		assert measured["keepsGil"] == [True, True], "the stream's stop or abort lets go of the GIL"
+		assert measured["hung"] == 0 and len(returned) == 300, name
+		# The stopping thread holds the GIL from the call on, unless the system takes the processor
+		# away from it.
+		assert sum(1 for ms in returned if ms > 5) <= 1 and max(returned) < 20, (name, sorted(returned)[-10:])
 
 
 def test_noCallFromPythonWaitsForTheLibrarysThreadOrTheDaemon(pipewire: PipewireFixture, tmp_path: Path):
@@ -1482,6 +1812,7 @@ def test_aStreamFailsCleanlyWhenMisused(pipewire: PipewireFixture, tmp_path: Pat
 			("playedFrames", stream.playedFrames),
 			("start", stream.start),
 			("stop", stream.stop),
+			("abort", stream.abort),
 			("reset", stream.reset),
 			("setChannelVolume", lambda: stream.setChannelVolume(0, 0.5)),
 		):
