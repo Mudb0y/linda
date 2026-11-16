@@ -27,6 +27,7 @@ let
   # Each program installed, with the arguments it puts before the caller's.
   programs = {
     basedreader = [ ];
+    basedreader-say = [ "say" ];
   };
 
   # A caller's values for these would load code from outside the package into
