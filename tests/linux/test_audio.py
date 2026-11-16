@@ -2,10 +2,11 @@
 
 nix develop . -c tests/linux/rig python -m pytest tests/linux/test_audio.py
 
-Every case runs in a fresh interpreter, enters NVDA's import graph where core.main does, and ends by
-checking from the process's own maps and file descriptors that no sound device was opened and no
-sound library loaded. The timings asserted are loose enough for a loaded machine but tight enough
-to tell a player that paces its feeders from one that does not.
+Every case runs in a fresh interpreter through harness.runChild, whose clean run loads no sound
+library, opens no sound device and reaches no sound server, and enters NVDA's import graph where
+core.main does; the cases that play also check that playing mapped nothing new that could sound. The
+timings asserted are loose enough for a loaded machine but tight enough to tell a player that paces
+its feeders from one that does not.
 """
 
 import textwrap
@@ -16,7 +17,9 @@ import harness
 
 WAVES = harness.SOURCE / "waves"
 
-#: Opens nvwave the way core.main does, and watches the process for anything that could make sound.
+#: Opens nvwave the way core.main does, and notes what could sound before any audio plays. The harness
+#: fails a run that loads a sound library, opens a sound device or reaches a sound server; this keeps the
+#: finer claim that playing maps nothing that could sound, not even what WebKitGTK links.
 PRELUDE = """
 import gc
 import os
@@ -24,48 +27,13 @@ import sys
 import threading
 import time
 
-_soundLibraries = (
-	"libasound", "libpulse", "libpipewire", "libjack", "libportaudio", "libpcaudio", "libopenal",
-	"libSDL", "libcanberra", "libao.", "libsndio", "libespeak", "libgst",
-)
-_soundOpens = []
-
-
-def _isSound(path):
-	return path.startswith("/dev/snd") or any(name in os.path.basename(path) for name in _soundLibraries)
-
-
-def _watchForSound(event, args):
-	if event == "open" and isinstance(args[0], (str, bytes)) and _isSound(os.fsdecode(args[0])):
-		_soundOpens.append(os.fsdecode(args[0]))
-	elif event == "ctypes.dlopen" and args[0] and _isSound(os.fsdecode(args[0])):
-		_soundOpens.append(f"dlopen {args[0]}")
-
-
-def _soundMappings():
-	paths = set()
-	with open("/proc/self/maps", encoding="utf-8") as maps:
-		for line in maps:
-			fields = line.split(None, 5)
-			if len(fields) == 6:
-				paths.add(fields[5].strip())
-	for fd in os.listdir("/proc/self/fd"):
-		try:
-			paths.add(os.readlink(f"/proc/self/fd/{fd}"))
-		except OSError:
-			pass
-	return len(paths), sorted(path for path in paths if _isSound(path))
-
-
-sys.addaudithook(_watchForSound)
-
 # NVDAHelper first, as core.main imports it: NVDA's import graph resolves only when entered there.
 import NVDAHelper  # noqa: E402, F401
 import nvwave  # noqa: E402
 import wasapi  # noqa: E402
 
 nvwave.initialize()
-_soundBeforeAudio = _soundMappings()[1]
+_soundBeforeAudio = harness.soundReached(allowLinked=False)
 events = []
 
 
@@ -76,14 +44,11 @@ def done(tag):
 	return onDone
 """
 
-#: Run last: what in this process could have reached a sound device, and what the audio added.
+#: Run last: what could sound before the audio, and what the audio added.
 ISOLATION = """
-_mappedCount, _soundAfterAudio = _soundMappings()
 isolation = {
-	"mappedFiles": _mappedCount,
 	"soundAtStart": _soundBeforeAudio,
-	"addedByAudio": sorted(set(_soundAfterAudio) - set(_soundBeforeAudio)),
-	"opened": _soundOpens,
+	"addedByAudio": sorted(set(harness.soundReached(allowLinked=False)) - set(_soundBeforeAudio)),
 }
 """
 
@@ -101,10 +66,8 @@ def runAudio(tmpPath: Path, code: str, *, captureDir: Path | None = None, extra:
 	done = harness.runChild(tmpPath, "result = None\n" + body, env=env)
 	done.assertClean()
 	isolation = done.value["isolation"]
-	assert isolation["mappedFiles"] > 0
-	assert isolation["opened"] == []
-	assert isolation["addedByAudio"] == []
 	assert isolation["soundAtStart"] == []
+	assert isolation["addedByAudio"] == []
 	return done.value["value"]
 
 
@@ -147,25 +110,9 @@ def test_backEndAloneMapsNothingThatCouldSound(tmp_path: Path):
 		wasapi.wasPlay_feed(player, ctypes.cast(data, ctypes.c_char_p), len(data), ctypes.byref(feedId))
 		wasapi.wasPlay_sync(player)
 		wasapi.wasPlay_destroy(player)
-		mapped = set()
-		with open("/proc/self/maps", encoding="utf-8") as maps:
-			for line in maps:
-				fields = line.split(None, 5)
-				if len(fields) == 6:
-					mapped.add(fields[5].strip())
-		for fd in os.listdir("/proc/self/fd"):
-			try:
-				mapped.add(os.readlink(f"/proc/self/fd/{fd}"))
-			except OSError:
-				pass
-		sound = (
-			"/dev/snd", "libasound", "libpulse", "libpipewire", "libjack", "libportaudio", "libpcaudio",
-			"libopenal", "libSDL", "libcanberra", "libsndio", "libgst",
-		)
 		result = {
 			"calls": calls,
-			"mapped": len(mapped),
-			"sound": sorted(path for path in mapped if any(name in path for name in sound)),
+			"sound": harness.soundReached(allowLinked=False),
 			"wx": "wx" in sys.modules,
 		}
 		"""
@@ -175,7 +122,6 @@ def test_backEndAloneMapsNothingThatCouldSound(tmp_path: Path):
 		)
 		done.assertClean()
 		assert done.value["calls"] == [0]
-		assert done.value["mapped"] > 0
 		assert done.value["sound"] == []
 		assert not done.value["wx"]
 	[got] = captured(captureDir)
@@ -938,6 +884,17 @@ def test_exitClosesEveryStreamWithoutWaitingForItsAudio(tmp_path: Path):
 		audioOutput._sink = RecordingSink()
 		feeding = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
 		syncing = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+		# Feed and sync both wait here, holding the player's lock until the wait gives it up, which the
+		# exit hook needs.
+		waiting = {"feeder": threading.Event(), "syncer": threading.Event()}
+		waitUntilNeeded = wasapi._Player._waitUntilNeeded
+
+		def noteWaiting(self, maxWait):
+			if (name := threading.current_thread().name) in waiting:
+				waiting[name].set()
+			waitUntilNeeded(self, maxWait)
+
+		wasapi._Player._waitUntilNeeded = noteWaiting
 
 		def feedLong():
 			feeding.feed(bytes(32000), onDone=done("fed"))  # 2 s, five times the buffer
@@ -948,7 +905,7 @@ def test_exitClosesEveryStreamWithoutWaitingForItsAudio(tmp_path: Path):
 		syncing.feed(bytes(16000), onDone=done("synced"))  # 1 s
 		syncer = threading.Thread(target=syncing.idle, name="syncer")
 		syncer.start()
-		time.sleep(0.1)
+		blocked = all(event.wait(30) for event in waiting.values())
 		start = time.monotonic()
 		wasapi._closeForExit()
 		hookTook = time.monotonic() - start
@@ -958,6 +915,7 @@ def test_exitClosesEveryStreamWithoutWaitingForItsAudio(tmp_path: Path):
 		late.feed(bytes(1600), onDone=done("late"))
 		late.sync()
 		result = {
+			"blocked": blocked,
 			"hookTook": hookTook,
 			"alive": [thread.name for thread in (feeder, syncer) if thread.is_alive()],
 			"closed": closed,
@@ -966,6 +924,7 @@ def test_exitClosesEveryStreamWithoutWaitingForItsAudio(tmp_path: Path):
 		}
 		""",
 	)
+	assert value["blocked"]
 	assert value["alive"] == []
 	# Neither stream's audio was waited for.
 	assert value["hookTook"] < 0.5
@@ -982,7 +941,6 @@ def test_aPlayerStillPlayingAtExitIsClosedBeforeTheInterpreterGoes(tmp_path: Pat
 		tmp_path,
 		f"""
 		import threading
-		import time
 
 		import NVDAHelper
 		import nvwave
@@ -995,10 +953,14 @@ def test_aPlayerStillPlayingAtExitIsClosedBeforeTheInterpreterGoes(tmp_path: Pat
 				f.write(what + "\\n")
 
 
+		wrote = threading.Event()
+
+
 		class RecordingStream(NullStream):
 			def write(self, data):
 				note("write")
 				super().write(data)
+				wrote.set()
 
 			def close(self):
 				note("close")
@@ -1022,12 +984,11 @@ def test_aPlayerStillPlayingAtExitIsClosedBeforeTheInterpreterGoes(tmp_path: Pat
 
 
 		threading.Thread(target=play, name="player", daemon=True).start()
-		time.sleep(0.3)
-		result = "exiting"
+		result = "exiting while playing" if wrote.wait(30) else "nothing played"
 		""",
 	)
 	done.assertClean()
-	assert done.returnCode == 0, done.stderr
+	assert done.value == "exiting while playing"
 	assert "Traceback" not in done.stderr, done.stderr
 	calls = record.read_text(encoding="utf-8").split()
 	assert calls[0] == "open"
@@ -1295,8 +1256,7 @@ def test_soundSplitRefusesAnyStateButOff(tmp_path: Path):
 		result = refused
 		""",
 	)
-	assert done.error is None, done.error
-	assert not done.logErrors, done.logErrors
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert done.value == ["audio.soundSplit._setSoundSplitState has no Linux implementation"] * 7
 	assert done.noLinuxImplementation == ["audio.soundSplit._setSoundSplitState"] * 7
 
@@ -1342,6 +1302,7 @@ def test_missingCaptureDirectoryFailsAtStart(tmp_path: Path):
 		env={"BASEDREADER_AUDIO_CAPTURE_DIR": str(tmp_path / "absent")},
 	)
 	assert done.error is not None and "NotADirectoryError" in done.error
+	done.assertClean(ignoring={"error"})
 
 
 def test_duckingReportsUnsupported(tmp_path: Path):
