@@ -622,6 +622,26 @@ def test_audioLibraryTheBootstrapMapsIsRefusedUnlessAnAllowedModuleLinksIt(tmp_p
 	), refusals
 
 
+def test_moduleEntryCannotLeaveItsTestsUnrun(tmp_path: Path):
+	modules = {
+		"__init__.py": BOOTSTRAP,
+		"test_hidden.py": """
+			import unittest
+
+			class TestHidden(unittest.TestCase):
+				def test_passes(self):
+					pass
+		""",
+	}
+	listPath = makeProbes(tmp_path, modules, f"{PACKAGE}.test_hidden\n  Until probe.\n  Not run: probe.\n")
+	status, lines, output = runRunner(tmp_path, listPath)
+	assert status == 1, output
+	assert (
+		f"rununittests: {PACKAGE}.test_hidden says Not run: but names a module or package; only a class or "
+		"a test can be left unrun"
+	) in lines, output
+
+
 def test_entriesMustStateTheirExpectedCause(tmp_path: Path):
 	cases = {
 		"probeUnit.test_a\n  Until probe.\n": "needs exactly one line",

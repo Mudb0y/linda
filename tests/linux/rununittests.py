@@ -7,7 +7,8 @@ at import. Every exclusion states the cause it expects, and the run fails once t
 holds. An excluded class or test, or every test of an excluded module whose tests are run, must fail
 with the exception its entry names, or the run fails. A module or package whose import is expected to
 fail is imported in a process of its own, which is then thrown away, and must fail there as its entry
-names. An entry that says "Not run:" is dropped instead. A skip that the list does not expect also
+names. A class or test whose entry says "Not run:" is dropped instead; an entry for a whole module or
+package cannot say it, as nothing would then show it stale. A skip that the list does not expect also
 fails the run, as does any write into the checkout, any load of an audio library, and a thread that a
 test leaves running.
 
@@ -335,6 +336,12 @@ def collect(top: Path, package: str, exclusions: dict[str, Entry], guard: "Guard
 		if entry is not None and entry.raises is None:
 			entry.matched += 1
 			collected.excludedModules.append(name)
+			if entry.notRun:
+				# Nothing would show that such a module had come to import and pass.
+				collected.problems.append(
+					f"rununittests: {entry.name} says {NOT_RUN} but names a module or package; only a class "
+					"or a test can be left unrun",
+				)
 			continue
 		try:
 			# Imported here rather than by loadTestsFromName, which turns a failed import into a test

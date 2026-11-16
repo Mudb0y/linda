@@ -9,7 +9,8 @@
 #   "Import raises: " the same, for a module or package that cannot be imported. It is never imported
 #   into the run; a process of its own imports it, and every test module it covers must fail to
 #   import with such an exception.
-#   "Not run: " and why running the tests would do harm. They are dropped.
+#   "Not run: " and why running the tests would do harm, for a class or a single test only. They are
+#   dropped.
 # A line that starts with "skipped" and a dotted name lists tests the run may skip; any other skip
 # fails the run. The runner also fails on an entry that matches nothing.
 
