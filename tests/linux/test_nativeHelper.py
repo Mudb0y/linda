@@ -8,7 +8,6 @@ somewhere it changes the count.
 
 import ctypes
 import hashlib
-import os
 import random
 import shutil
 import subprocess
@@ -405,12 +404,13 @@ def test_beepBufferMatchesUpstreamByteForByte(tmp_path: Path):
 
 
 def test_brailleTranslationThroughLouisHelper(tmp_path: Path):
+	builtTables = ROOT / "source" / "louis" / "tables"
+	assert builtTables.is_dir(), "run tools/build-artifacts first"
 	done = harness.runChild(
 		tmp_path,
 		"""
 		import ctypes
 		import logging
-		import os
 		import brailleTables
 		import config
 		import louis
@@ -432,6 +432,7 @@ def test_brailleTranslationThroughLouisHelper(tmp_path: Path):
 		try:
 			english, *_ = louisHelper.translate(["en-ueb-g2.ctb"], "the quick brown fox")
 			swedish, *_ = louisHelper.translate(["Se-Se.ctb"], "Hej 1")
+			norwegian, *_ = louisHelper.translate(["No-No-g1.ctb"], "hei")
 			result = {
 				"tablesDir": brailleTables.TABLES_DIR,
 				"resolved": list(louisHelper._resolveTableInner(["Se-Se.ctb"])),
@@ -439,6 +440,7 @@ def test_brailleTranslationThroughLouisHelper(tmp_path: Path):
 				"englishCells": len(english),
 				"swedish": louisHelper.backTranslate(["Se-Se.ctb"], swedish),
 				"swedishCells": len(swedish),
+				"norwegianCells": len(norwegian),
 				# x86-64 Linux has no stdcall, so every callback type is cdecl; what can go wrong is louis
 				# taking its Windows branch because bootstrap gave ctypes a windll.
 				"louisLoader": [
@@ -453,37 +455,18 @@ def test_brailleTranslationThroughLouisHelper(tmp_path: Path):
 		""",
 	)
 	done.assertClean()
-	tablesDir = os.environ["BASEDREADER_LOUIS_TABLES_DIR"]
-	assert done.value["tablesDir"] == tablesDir
-	assert done.value["resolved"] == [os.path.join(tablesDir, "Se-Se.ctb")]
+	# Upstream's own appDir/louis/tables, which tools/build-artifacts links to the dev shell's tables.
+	assert done.value["tablesDir"] == str(builtTables)
+	assert done.value["resolved"] == [str(builtTables / "Se-Se.ctb")]
 	assert done.value["english"] == "the quick brown fox"
 	# Grade 2 contracts "the" and "quick" to one cell or two.
 	assert done.value["englishCells"] < len("the quick brown fox")
 	assert done.value["swedish"] == "Hej 1"
 	assert done.value["swedishCells"] == len("Hej 1")
+	# NVDA names the Norwegian and Swedish tables in mixed case, which liblouis ships in lower case.
+	assert done.value["norwegianCells"] == len("hei")
 	assert done.value["louisLoader"] == [True, True, True]
 	assert done.value["logged"] is True
-
-
-def test_brailleTablesFallBackToTheBuiltDirectory(tmp_path: Path):
-	builtTables = ROOT / "source" / "louis" / "tables"
-	assert builtTables.is_dir(), "run tools/build-artifacts first"
-	done = harness.runChild(
-		tmp_path,
-		"""
-		import brailleTables
-		import louisHelper
-		louisHelper.initialize()
-		try:
-			cells, *_ = louisHelper.translate(["No-No-g1.ctb"], "hei")
-		finally:
-			louisHelper.terminate()
-		result = {"tablesDir": brailleTables.TABLES_DIR, "cells": len(cells)}
-		""",
-		env={"BASEDREADER_LOUIS_TABLES_DIR": ""},
-	)
-	done.assertClean()
-	assert done.value == {"tablesDir": str(builtTables), "cells": 3}
 
 
 def test_namesUpstreamHasAndLinuxLacksRaise(tmp_path: Path):

@@ -91,10 +91,6 @@ source/braille/brailleHandler.py
 source/braille/display/driver.py
   Linux runtime: an acknowledgement from the display cancels the Linux
   timer object rather than calling CancelWaitableTimer
-source/brailleTables/__init__.py
-  Linux runtime: TABLES_DIR is the directory BASEDREADER_LOUIS_TABLES_DIR names when
-  it is set, and otherwise upstream's appDir/louis/tables, which
-  tools/build-artifacts links to the same tables
 source/browseMode.py
   Linux runtime: _extractStyles imports the UI Automation Word
   document class only on Windows; Linux has no UI Automation and uses an

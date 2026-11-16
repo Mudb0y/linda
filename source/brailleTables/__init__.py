@@ -8,7 +8,6 @@
 import collections  # noqa: I001
 from enum import Enum, StrEnum, auto
 import os
-import sys
 from locale import strxfrm
 from typing import NamedTuple
 
@@ -22,10 +21,6 @@ import languageHandler
 
 TABLES_DIR = os.path.join(globalVars.appDir, "louis", "tables")
 """The directory in which liblouis braille tables are located."""
-
-if sys.platform != "win32":
-	# Linux takes liblouis's tables from the dev shell or the package, which names their directory.
-	TABLES_DIR = os.environ.get("BASEDREADER_LOUIS_TABLES_DIR") or TABLES_DIR
 
 DEFAULT_TABLE = "en-ueb-g1.ctb"
 """The default braille table."""
