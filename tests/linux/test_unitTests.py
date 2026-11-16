@@ -596,6 +596,32 @@ def test_audioLibraryLinkedThroughAnExtensionModuleIsRefused(tmp_path: Path):
 	assert any("/wx/_media." in line for line in refusals), refusals
 
 
+def test_audioLibraryTheBootstrapMapsIsRefusedUnlessAnAllowedModuleLinksIt(tmp_path: Path):
+	modules = {
+		"__init__.py": BOOTSTRAP + "\nimport wx.media\n",
+		"test_passes.py": """
+			import unittest
+
+			class TestPasses(unittest.TestCase):
+				def test_passes(self):
+					pass
+		""",
+	}
+	listPath = makeProbes(tmp_path, modules, "")
+	status, lines, output = runRunner(tmp_path, listPath)
+	assert status == 1, output
+	refusals = [line for line in lines if line.startswith("rununittests: refused ")]
+	assert refusals, output
+	assert all(
+		re.fullmatch(
+			r"rununittests: refused the audio library \S*libgst\S*, which the bootstrap mapped unlinked by "
+			r"AUDIO_LINKERS",
+			line,
+		)
+		for line in refusals
+	), refusals
+
+
 def test_entriesMustStateTheirExpectedCause(tmp_path: Path):
 	cases = {
 		"probeUnit.test_a\n  Until probe.\n": "needs exactly one line",
