@@ -45,6 +45,8 @@ RIG_DISPLAY = ":99"
 WX_CANCEL = 16
 WX_ID_CANCEL = 5101
 WX_ID_CLOSE_ALL = 5021
+#: linuxPlatform.modalDialogs.GIVEN_UP_STATUS: NVDA ended without finishing its exit.
+GIVEN_UP_STATUS = 1
 
 
 def _loadFile(name: str, path: Path) -> ModuleType:
@@ -1053,17 +1055,27 @@ def test_exitsWithModalDialogsOpen(
 	assert "NVDA exit" in nvda.log()
 
 
-def test_dialogReopenedForEverIsGivenUpOn(launcher):
-	# Code that shows its dialog again each time it is ended would otherwise keep the exit busy for ever.
-	nvda = launcher("reopening", "reopening", welcome=False)
+@pytest.mark.parametrize("route", ["signal", "triggerNVDAExit"])
+def test_dialogReopenedForEverEndsNVDA(launcher, route: str):
+	# Code that shows its dialog again each time it is ended would otherwise keep NVDA half shut down
+	# for ever, its plugins terminated and its main loop never returning.
+	nvda = launcher("reopening", "reopening" if route == "signal" else "reopening+exit", welcome=False)
 	nvda.waitForSentence(text=DIALOG_SENTENCE)
-	nvda.process.send_signal(signal.SIGTERM)
-	nvda.waitForLog("Gave up ending modal dialogs")
+	if route == "signal":
+		nvda.process.send_signal(signal.SIGTERM)
+	assert nvda.waitForExit(timeout=singleInstance.QUIT_TIMEOUT) == GIVEN_UP_STATUS, nvda.describe()
 	log = nvda.log()
-	given = re.search(r"^Gave up ending modal dialogs after ending (\d+);", log, re.MULTILINE)
+	given = re.search(
+		r"^Gave up ending modal dialogs: .* is still open after ending (\d+); ending NVDA without "
+		r"finishing its exit$",
+		log,
+		re.MULTILINE,
+	)
 	assert given, log[-4000:]
+	assert len(errorRecords(log)) == 1, log[-4000:]
 	assert log.count("ending modal <Gtk.MessageDialog") == int(given[1])
 	assert nvda.savedSetting() == CHANGED_SETTING[2]
+	assert f"basedreader: {given[0]}\n" in nvda.log("stderr.txt")
 
 
 def test_magnifierToggleSaysItCannotStart(launcher):

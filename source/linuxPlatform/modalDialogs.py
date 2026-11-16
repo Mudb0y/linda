@@ -10,10 +10,16 @@ all.
 
 So the dialog ended is the innermost, the one holding GTK's grab, and the next one out is ended only
 once the call that showed it has returned. GLib dispatches from one nested loop fewer by then.
+
+When the dialogs cannot be ended, NVDA is ended without them, with its configuration saved: the loops
+they run would keep it from ever leaving its main loop, half shut down.
 """
 
+import os
+import sys
 import time
 from collections.abc import Callable
+from typing import NoReturn
 
 import gi
 import wx
@@ -25,14 +31,19 @@ from gi.repository import GLib, Gtk
 
 #: Milliseconds between looks at the dialogs while they close.
 _INTERVAL = 20
-#: Dialogs ended at most. Code that shows another dialog each time its own is ended would otherwise
-#: keep NVDA from exiting for ever.
+#: Dialogs ended at most while NVDA exits. Code that shows another dialog each time its own is ended
+#: would otherwise keep NVDA from exiting for ever.
 MAX_DIALOGS = 20
 #: Seconds the call that showed an ended dialog has to return, before the dialogs outside it are given
 #: up on.
 RETURN_TIMEOUT = 3.0
+#: The exit status when the dialogs are given up on.
+GIVEN_UP_STATUS = 1
 
 ModalDialog = wx.Dialog | Gtk.Dialog
+
+#: Dialogs ended so far, by every unwinding: core's runs again after each, and a quit signal's first.
+_ended = 0
 
 
 def _openDialogs() -> list[ModalDialog]:
@@ -69,12 +80,22 @@ def _end(dialog: ModalDialog, returnCode: int) -> None:
 		dialog.EndModal(returnCode)
 
 
+def _giveUp(reason: str) -> NoReturn:
+	import config
+
+	message = f"Gave up ending modal dialogs: {reason}; ending NVDA without finishing its exit"
+	log.error(message)
+	config.saveOnExit()
+	if sys.__stderr__ is not None:
+		print(f"basedreader: {message}", file=sys.__stderr__, flush=True)
+	os._exit(GIVEN_UP_STATUS)
+
+
 class _Unwinding:
 	def __init__(self, returnCode: int, then: Callable[[], None], until: Callable[[], bool]) -> None:
 		self._returnCode = returnCode
 		self._then = then
 		self._until = until
-		self._ended = 0
 		#: The dialog ended last, and those open around it then.
 		self._waitingFor: list[ModalDialog] = []
 		#: How deep in nested loops GLib was dispatching when the last dialog was ended.
@@ -82,11 +103,8 @@ class _Unwinding:
 		self._deadline = 0.0
 
 	def turn(self) -> bool:
-		"""End the innermost dialog if it may be ended now, finish, or give up; True to be called again.
-
-		Giving up leaves then uncalled. Whatever kept the dialogs open would keep NVDA from exiting
-		however its exit went on, and then may well start ending them again.
-		"""
+		"""End the innermost dialog if it may be ended now, or finish; True to be called again."""
+		global _ended
 		try:
 			dialogs = _openDialogs()
 			innermost = dialogs[-1] if dialogs else None
@@ -99,23 +117,18 @@ class _Unwinding:
 				# inside it since.
 				if time.monotonic() < self._deadline:
 					return True
-				log.error(
-					f"Gave up ending modal dialogs: the call that showed {self._waitingFor[0]} has not returned "
-					f"after {RETURN_TIMEOUT} s",
+				_giveUp(
+					f"the call that showed {self._waitingFor[0]} has not returned after {RETURN_TIMEOUT} s"
 				)
-				return False
 			if innermost is None or self._until():
 				return self._finish()
-			if self._ended >= MAX_DIALOGS:
-				log.error(
-					f"Gave up ending modal dialogs after ending {MAX_DIALOGS}; {innermost} is still open"
-				)
-				return False
+			if _ended >= MAX_DIALOGS:
+				_giveUp(f"{innermost} is still open after ending {MAX_DIALOGS}")
 			_end(innermost, self._returnCode)
 		except Exception:
-			log.exception("Gave up ending modal dialogs")
-			return False
-		self._ended += 1
+			log.exception("Error ending modal dialogs")
+			_giveUp("an error ended the unwinding")
+		_ended += 1
 		self._waitingFor = [innermost, *dialogs[:-1]]
 		self._depth = GLib.main_depth()
 		self._deadline = time.monotonic() + RETURN_TIMEOUT
@@ -147,11 +160,13 @@ def endModalDialogs(
 	The first dialog is ended at once, and each one after it on a later turn of the main loop. Every
 	call that showed a dialog gets its answer and returns before the dialog outside it is ended.
 
+	The dialogs are given up on when the call that showed one has not returned within RETURN_TIMEOUT,
+	or once MAX_DIALOGS have been ended during this exit. That logs an error, saves the configuration
+	and ends the process at once with GIVEN_UP_STATUS.
+
 	:param returnCode: What each of wx's dialogs returns to the code that showed it. GTK's own dialogs
 		are cancelled, which wx returns as ID_CANCEL, or as wx.CANCEL from wx.MessageBox.
-	:param then: Called from the main loop once the dialogs are ended. Never called when they are given
-		up on, which logs an error: when the call that showed one has not returned within
-		RETURN_TIMEOUT, or once MAX_DIALOGS have been ended.
+	:param then: Called from the main loop once the dialogs are ended.
 	:param until: Ends the unwinding early once it returns True.
 	"""
 	unwinding = _Unwinding(returnCode, then, until)
