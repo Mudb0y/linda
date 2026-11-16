@@ -125,6 +125,12 @@ def doesAppModuleExist(name: str) -> bool:
 		modSpec = importlib.util.find_spec(f"appModules.{name}", package=appModules)
 	except ImportError:
 		modSpec = None
+	if (
+		sys.platform != "win32"
+		and modSpec is not None
+		and not _linuxProcesses.isAppModuleUsable(name, modSpec.origin, os.path.dirname(appModules.__file__))
+	):
+		return False
 	if modSpec is None:  # noqa: SIM103
 		return False
 	return True
@@ -153,14 +159,15 @@ def getAppNameFromProcessID(processID: int, includeExt: bool = False) -> str:
 	@returns: application name
 	"""
 	if sys.platform != "win32":
-		# Linux executables have no extension to include or strip.
+		# A Linux executable's name is kept whole: a dot in it is part of the name, not an extension, so
+		# LibreOffice is soffice.bin and its app module would be soffice_bin, not Windows' soffice.
 		if processID == globalVars.appPid:
 			return "nvda"
 		appName = _linuxProcesses.getAppName(processID)
 		if not appName:
 			return appName
-		# A Windows app module named like a Linux program can fail to import here; fetchAppModule
-		# imports it again straight after and reports the failure there.
+		# An add-on's app module can fail to import here; fetchAppModule imports it again straight after
+		# and reports the failure there.
 		try:
 			return _importAppModuleForExecutable(appName).getAppNameFromHost(processID)
 		except (AttributeError, LookupError, ImportError):
@@ -667,9 +674,10 @@ class AppModule(baseObject.ScriptableObject):
 		Subclasses should call the superclass method first.
 		"""
 		if sys.platform != "win32":
+			# Linux has no process handle to close and no nvdaHelperRemote RPC context to free.
 			self._processWatch.close()
-		else:
-			winKernel.closeHandle(self.processHandle)
+			return
+		winKernel.closeHandle(self.processHandle)
 		if getattr(self, "_helperPreventDisconnect", False):
 			return
 		if self._inprocRegistrationHandle:

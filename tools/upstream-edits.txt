@@ -61,8 +61,12 @@ source/appModuleHandler.py
   through linuxPlatform.processes, not from Toolhelp, a process handle,
   IsWow64Process2 or the logon session. processHandle is None, so
   getAppModuleForNVDAObject never asks a window for one; product name and
-  version raise NoLinuxImplementation; a Windows app module that fails to
-  import while a name is looked up is reported by fetchAppModule instead
+  version raise NoLinuxImplementation; doesAppModuleExist answers False for a
+  bundled app module not in linuxPlatform.processes.portedAppModules, so a
+  Linux program named like a Windows one (code, audacity) gets the base app
+  module; an add-on app module that fails to import while a name is looked
+  up is reported by fetchAppModule instead; terminate returns before the RPC
+  teardown, which Linux has none of
 source/argsParsing.py
   Linux: help goes to standard output and a command-line error to standard
   error with exit status 2, as argparse does, instead of a Windows message

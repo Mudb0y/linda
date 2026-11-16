@@ -7,6 +7,7 @@ NVDA asks of one is either in /proc or answered by a pidfd.
 import os
 import re
 import select
+import threading
 import weakref
 from dataclasses import dataclass
 
@@ -21,6 +22,22 @@ def _unwrap(name: str) -> str:
 	while match := _wrappedName.fullmatch(name):
 		name = match.group(1)
 	return name
+
+
+#: NVDA's bundled app modules that work on Linux. The others were written against Windows objects and
+#: window classes, and a Linux program that shares a Windows program's name, as VS Code's code and
+#: Audacity do, would load one and fail in it on every object. A bundled module therefore stays unused
+#: until it is ported and named here. Add-on app modules are not limited, since their authors chose the
+#: program and the platform they serve.
+portedAppModules: frozenset[str] = frozenset({"nvda"})
+
+
+def isAppModuleUsable(name: str, origin: str | None, bundledDirectory: str) -> bool:
+	"""Whether the app module named name, found at origin, may serve a Linux process."""
+	if name in portedAppModules or not origin:
+		return True
+	bundled = os.path.realpath(bundledDirectory) + os.sep
+	return not os.path.realpath(origin).startswith(bundled)
 
 
 @dataclass(frozen=True)
@@ -42,12 +59,16 @@ class _Interpreter:
 	#: Whether single-letter options combine into one argument, as in python -uc.
 	clusters: bool = False
 	suffixes: tuple[str, ...] = ()
+	#: Trailing path components that hold an app rather than name it, as electron is pointed at
+	#: name/resources/app.asar or name/electron.
+	containers: frozenset[str] = frozenset()
 
 
 _interpreters: tuple[_Interpreter, ...] = (
 	_Interpreter(
 		family="python",
-		executable=re.compile(r"(python|pypy)[\d.]*"),
+		# A trailing t is the free-threaded build.
+		executable=re.compile(r"(python|pypy)[\d.]*t?"),
 		valueOptions=frozenset({"-W", "-X", "--check-hash-based-pycs"}),
 		inlineOptions=frozenset({"-c"}),
 		programOptions=frozenset({"-m"}),
@@ -67,9 +88,48 @@ _interpreters: tuple[_Interpreter, ...] = (
 				"-C",
 				"--conditions",
 				"--title",
+				"--env-file",
+				"--env-file-if-exists",
+				"--input-type",
+				"--inspect-port",
+				"--debug-port",
+				"--disable-warning",
+				"--dns-result-order",
+				"--unhandled-rejections",
+				"--redirect-warnings",
+				"--openssl-config",
+				"--icu-data-dir",
+				"--localstorage-file",
+				"--snapshot-blob",
+				"--watch-path",
+				"--allow-fs-read",
+				"--allow-fs-write",
+				"--diagnostic-dir",
+				"--report-dir",
+				"--report-directory",
+				"--report-filename",
+				"--report-signal",
+				"--heapsnapshot-signal",
+				"--cpu-prof-dir",
+				"--cpu-prof-name",
+				"--heap-prof-dir",
+				"--heap-prof-name",
+				"--trace-event-categories",
+				"--trace-event-file-pattern",
+				"--secure-heap",
+				"--secure-heap-min",
+				"--max-http-header-size",
+				"--tls-cipher-list",
+				"--use-largepages",
+				# V8's own options also take their value from the next argument.
+				"--max-old-space-size",
+				"--max-semi-space-size",
+				"--stack-size",
+				"--stack-trace-limit",
 			},
 		),
-		inlineOptions=frozenset({"-e", "--eval", "-p", "--print"}),
+		# --run runs a package.json script, which has no file to name the program after.
+		inlineOptions=frozenset({"-e", "--eval", "-p", "--print", "--run"}),
 		suffixes=(".js", ".mjs", ".cjs"),
 	),
 	_Interpreter(
@@ -109,10 +169,27 @@ _interpreters: tuple[_Interpreter, ...] = (
 				"--module-path",
 				"--add-modules",
 				"--upgrade-module-path",
+				"--add-opens",
+				"--add-exports",
+				"--add-reads",
+				"--patch-module",
+				"--limit-modules",
+				"--enable-native-access",
+				"--source",
 			},
 		),
+		inlineOptions=frozenset({"-d", "--describe-module"}),
 		programOptions=frozenset({"-jar", "-m", "--module"}),
 		suffixes=(".jar", ".java"),
+	),
+	# nixpkgs runs many apps on one shared electron, which it points at the app's directory or archive.
+	_Interpreter(
+		family="electron",
+		executable=re.compile(r"electron"),
+		valueOptions=frozenset({"-r", "--require"}),
+		inlineOptions=frozenset({"-i", "--interactive"}),
+		suffixes=(".js", ".mjs", ".cjs", ".asar"),
+		containers=frozenset({"app.asar", "app", "resources", "electron"}),
 	),
 )
 
@@ -127,10 +204,17 @@ def _findProgram(interpreter: _Interpreter, args: list[str]) -> str | None:
 		if arg == "--":
 			return following
 		if arg == "-":
-			# The program comes from standard input.
+			# A program read from standard input has no file to name it after.
 			return None
 		if not arg.startswith("-"):
 			return arg
+		if arg.startswith("--") and "=" in arg:
+			option, _, value = arg.partition("=")
+			if option in interpreter.programOptions:
+				return value
+			if option in interpreter.inlineOptions:
+				return None
+			continue
 		if arg in interpreter.inlineOptions:
 			return None
 		if arg in interpreter.programOptions:
@@ -157,7 +241,10 @@ def _findProgram(interpreter: _Interpreter, args: list[str]) -> str | None:
 
 
 def _programName(interpreter: _Interpreter, program: str) -> str:
-	name = _unwrap(os.path.basename(program.rstrip("/")))
+	path = program.rstrip("/")
+	while path and os.path.basename(path) in interpreter.containers:
+		path = os.path.dirname(path)
+	name = _unwrap(os.path.basename(path))
 	for suffix in interpreter.suffixes:
 		if name.lower().endswith(suffix) and len(name) > len(suffix):
 			name = name[: -len(suffix)]
@@ -203,11 +290,14 @@ def getAppName(processID: int | None) -> str:
 	args: list[str] | None = None
 	try:
 		executable = os.path.basename(getExecutablePath(processID))
-	except OSError:
+	except PermissionError:
 		# Reading the executable link needs the right to trace the process, which another user's
 		# process does not grant. Windows names every process whoever owns it, and the name picks the
 		# app module and the profile, so this falls back to argv[0], which anyone may read, and then to
 		# comm, cut to 15 bytes but there for as long as the process exists.
+		if _readStat(processID) is None:
+			# Another user's zombie has no executable left either, and is as nameless as this user's.
+			return ""
 		args = _readCommandLine(processID)
 		if args:
 			executable = os.path.basename(args[0])
@@ -216,9 +306,13 @@ def getAppName(processID: int | None) -> str:
 				with open(f"/proc/{processID}/comm", encoding="utf-8", errors="surrogateescape") as f:
 					executable = f.read().rstrip("\n")
 			except OSError:
-				# The process has exited. Windows answers an empty name here too, the base app module
-				# takes it, and cleanup() drops that module once the process is seen to be gone.
+				# It exited after its state was read.
 				return ""
+	except OSError:
+		# The process has exited, or is a zombie whose parent has not reaped it yet; either way it has no
+		# executable left. Windows answers an empty name for a process it no longer finds, the base app
+		# module takes it, and cleanup() drops that module once the process is seen to be gone.
+		return ""
 	name = _unwrap(executable).lower()
 	for interpreter in _interpreters:
 		if interpreter.executable.fullmatch(name):
@@ -293,8 +387,8 @@ def getProductInfo(processID: int) -> tuple[str, str]:
 	)
 
 
-def _readStartTime(processID: int) -> bytes | None:
-	"""The process's start time in clock ticks since boot, or None if it is gone or a zombie."""
+def _readStat(processID: int) -> list[bytes] | None:
+	"""The fields of /proc/PID/stat after comm, or None if the process is gone or a zombie."""
 	try:
 		with open(f"/proc/{processID}/stat", "rb") as f:
 			stat = f.read()
@@ -304,7 +398,13 @@ def _readStartTime(processID: int) -> bytes | None:
 	fields = stat.rpartition(b")")[2].split()
 	if len(fields) < 20 or fields[0] in (b"Z", b"X"):
 		return None
-	return fields[19]
+	return fields
+
+
+def _readStartTime(processID: int) -> bytes | None:
+	"""The process's start time in clock ticks since boot, or None if it is gone or a zombie."""
+	fields = _readStat(processID)
+	return fields[19] if fields is not None else None
 
 
 class ProcessWatch:
@@ -314,9 +414,12 @@ class ProcessWatch:
 	so a check is one poll, cheap enough for appModuleHandler.cleanup() on every focus change.
 	"""
 
-	def __init__(self, processID: int | None):
+	def __init__(self, processID: int | None) -> None:
 		self.processID = processID
 		self._alive = True
+		# A select.poll object refuses to be polled from two threads at once, and the pidfd must not be
+		# closed under a poll in progress.
+		self._lock = threading.Lock()
 		self._poll: select.poll | None = None
 		self._startTime: bytes | None = None
 		if processID is None:
@@ -342,16 +445,21 @@ class ProcessWatch:
 	def isAlive(self) -> bool:
 		if not self._alive:
 			return False
-		if self._poll is not None:
-			if self._poll.poll(0):
-				self._alive = False
-				self.close()
-		elif self._startTime is not None:
-			self._alive = _readStartTime(self.processID) == self._startTime
-		return self._alive
+		with self._lock:
+			if self._poll is not None:
+				if self._poll.poll(0):
+					self._alive = False
+					self._close()
+			elif self._startTime is not None:
+				self._alive = _readStartTime(self.processID) == self._startTime
+			return self._alive
 
 	def close(self) -> None:
 		"""Release the pidfd. Afterwards the watch keeps the last answer it gave."""
+		with self._lock:
+			self._close()
+
+	def _close(self) -> None:
 		if self._poll is not None:
 			self._poll = None
 			self._release()

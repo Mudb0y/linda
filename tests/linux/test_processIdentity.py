@@ -1,5 +1,9 @@
 """App modules find their application from the process on Linux, through /proc and pidfd.
 
+Flatpak apps are not covered: they reach the accessibility bus through xdg-dbus-proxy, so which
+process the AT-SPI backend reports for them, and how they are named, waits for that backend and for
+the application-name hook that object-model.md R6 describes.
+
 nix develop . -c tests/linux/rig python3 -m pytest -p no:cacheprovider tests/linux/test_processIdentity.py
 """
 
@@ -15,8 +19,9 @@ import pytest
 #: its program from argv[0], so each copy is started with argv[0] "sleep" and keeps its own file name.
 SLEEP = os.path.realpath(shutil.which("sleep") or "/bin/sleep")
 
-#: Defines start(path, *args), which starts a process the child owns and so may stop, and
-#: stop(process). Any process it starts is stopped when the child exits.
+#: Defines start(path, *args), which starts a process the child owns and so may stop,
+#: stop(process), and makeZombie(process), which kills it and leaves it unreaped. Any process it
+#: starts is stopped when the child exits.
 START = """
 import atexit, subprocess, sys, time
 
@@ -43,6 +48,29 @@ def stop(process):
 	if process.poll() is None:
 		process.kill()
 	process.wait()
+
+def makeZombie(process):
+	process.kill()
+	deadline = time.monotonic() + 10
+	while time.monotonic() < deadline:
+		with open(f"/proc/{process.pid}/stat", "rb") as f:
+			if f.read().rpartition(b")")[2].split()[0] == b"Z":
+				return
+		time.sleep(0.001)
+	raise TimeoutError("the process did not become a zombie")
+"""
+
+#: Makes /proc/PID/exe unreadable for the process IDs in the set unreadable, as it is for another
+#: user's process, which this user cannot start.
+UNREADABLE = """
+import os
+unreadable = set()
+_readlink = os.readlink
+def readlink(path, *args, **kwargs):
+	if any(path == f"/proc/{pid}/exe" for pid in unreadable):
+		raise PermissionError(13, "Permission denied", path)
+	return _readlink(path, *args, **kwargs)
+os.readlink = readlink
 """
 
 
@@ -135,8 +163,30 @@ def test_interpreterCommandLines(tmp_path: Path):
 		"ruby": (["ruby3.3", "-r", "json", "tool.rb"], "tool"),
 		"java jar": (["java", "-Xmx1g", "-cp", "a.jar", "-jar", "/opt/App.jar"], "app"),
 		"java class": (["java", "-classpath", "lib", "org.example.Main"], "org.example.main"),
+		"java options with values": (
+			["java", "--add-opens", "java.base/java.lang=ALL-UNNAMED", "-jar", "/opt/app.jar"],
+			"app",
+		),
+		"java module attached": (["java", "--module=org.foo/org.foo.Main", "arg"], "org.foo.main"),
+		"java source file": (["java", "--source", "21", "Tool.java"], "tool"),
+		"java describe module": (["java", "-d", "org.foo"], "java"),
+		"node env file": (["node", "--env-file", ".env", "server.js"], "server"),
+		"node V8 option": (["node", "--max-old-space-size", "4096", "app.js"], "app"),
+		"node package script": (["node", "--run", "build"], "node"),
 		"standard input": (["python3", "-"], "python"),
 		"no program": (["python3.13"], "python"),
+		"free-threaded python": (["python3.13t", "app.py"], "app"),
+		"electron archive": (
+			[
+				"electron",
+				"--ozone-platform-hint=auto",
+				"/nix/store/x-vesktop/share/vesktop/resources/app.asar",
+			],
+			"vesktop",
+		),
+		"electron directory": (["electron", "/nix/store/x-element/share/element/electron"], "element"),
+		"electron app directory": (["electron", "-r", "hook.js", "/opt/Signal/app"], "signal"),
+		"electron no app": (["electron"], "electron"),
 	}
 	done = harness.runChild(
 		tmp_path,
@@ -250,9 +300,9 @@ def test_otherUsersProcess(tmp_path: Path):
 	info = os.stat("/proc/1")
 	if info.st_uid == os.getuid() or os.access("/proc/1/exe", os.R_OK):
 		pytest.skip("process 1 belongs to this user here")
-	comm = Path("/proc/1/comm").read_text(encoding="utf-8").strip()
-	if len(comm) >= 15:
-		pytest.skip("process 1's comm may be cut short")
+	argv0 = Path("/proc/1/cmdline").read_bytes().split(b"\0")[0].decode()
+	if not argv0:
+		pytest.skip("process 1's command line is empty here")
 	done = harness.runChild(
 		tmp_path,
 		"""
@@ -269,12 +319,106 @@ result = {
 	)
 	done.assertClean()
 	assert done.value == {
-		"appName": comm.lower(),
+		"appName": os.path.basename(argv0).lower(),
 		"alive": True,
 		"appPath": None,
 		"appArchitecture": "unknown",
 		"isRunningUnderDifferentLogonSession": True,
 	}
+
+
+def test_unreadableExecutableIsNamedFromArgv0ThenComm(tmp_path: Path):
+	path = copyAs(tmp_path, "filename")
+	done = harness.runChild(
+		tmp_path,
+		START
+		+ UNREADABLE
+		+ f"""
+import appModuleHandler
+from linuxPlatform import processes
+result = {{}}
+process = start({path!r}, "60", argv0="/elsewhere/sleep")
+# Run as a multi-call binary, coreutils renames itself after argv[0] through PR_SET_NAME soon after it
+# starts, so comm settles on that name cut to 15 bytes, which differs from both argv[0]'s and the
+# file's name.
+deadline = time.monotonic() + 10
+while time.monotonic() < deadline:
+	with open(f"/proc/{{process.pid}}/comm") as f:
+		if f.read().strip() == "/elsewhere/slee":
+			break
+	time.sleep(0.001)
+unreadable.add(process.pid)
+result["argv[0]"] = appModuleHandler.getAppNameFromProcessID(process.pid)
+readCommandLine = processes._readCommandLine
+processes._readCommandLine = lambda pid: [] if pid == process.pid else readCommandLine(pid)
+result["comm"] = appModuleHandler.getAppNameFromProcessID(process.pid)
+processes._readCommandLine = readCommandLine
+makeZombie(process)
+result["zombie"] = appModuleHandler.getAppNameFromProcessID(process.pid)
+""",
+	)
+	done.assertClean()
+	assert done.value == {"argv[0]": "sleep", "comm": "/elsewhere/slee", "zombie": ""}
+
+
+def test_zombieIsUnnamedAndCleanedUp(tmp_path: Path):
+	plain = copyAs(tmp_path, "zombieapp")
+	longWrapped = copyAs(tmp_path, ".averylongname-wrapped")
+	done = harness.runChild(
+		tmp_path,
+		START
+		+ f"""
+import appModuleHandler
+result = {{}}
+for path in ({plain!r}, {longWrapped!r}):
+	process = start(path, "60", argv0="sleep")
+	makeZombie(process)
+	mod = appModuleHandler.getAppModuleFromProcessID(process.pid)
+	appModuleHandler.cleanup()
+	result[path.rsplit("/", 1)[1]] = {{
+		"name": appModuleHandler.getAppNameFromProcessID(process.pid),
+		"base module": type(mod) is appModuleHandler.AppModule,
+		"appName": mod.appName,
+		"alive": mod.isAlive,
+		"kept by cleanup": process.pid in appModuleHandler.runningTable,
+	}}
+	process.wait()
+""",
+	)
+	done.assertClean()
+	expected = {"name": "", "base module": True, "appName": "", "alive": False, "kept by cleanup": False}
+	assert done.value == {"zombieapp": expected, ".averylongname-wrapped": expected}
+
+
+def test_isAliveFromManyThreads(tmp_path: Path):
+	path = copyAs(tmp_path, "threadedapp")
+	done = harness.runChild(
+		tmp_path,
+		START
+		+ f"""
+import threading, appModuleHandler
+process = start({path!r}, "60", argv0="sleep")
+mod = appModuleHandler.getAppModuleFromProcessID(process.pid)
+answers = set()
+errors = []
+start_ = threading.Barrier(8)
+def check():
+	start_.wait()
+	try:
+		for _ in range(5000):
+			answers.add(mod.isAlive)
+	except Exception as e:
+		errors.append(repr(e))
+threads = [threading.Thread(target=check) for _ in range(8)]
+for thread in threads:
+	thread.start()
+for thread in threads:
+	thread.join()
+result = {{"errors": errors, "answers": sorted(answers)}}
+""",
+	)
+	done.assertClean()
+	assert done.value == {"errors": [], "answers": [True]}
 
 
 @pytest.mark.parametrize("watch", ["pidfd", "proc"])
@@ -372,9 +516,14 @@ def test_addonAppModules(tmp_path: Path):
 		"import appModuleHandler\n\nclass AppModule(appModuleHandler.AppModule):\n\tfromAddon = True\n",
 		encoding="utf-8",
 	)
+	# An add-on may serve a program that a bundled Windows app module is also named after.
+	(addonDir / "code.py").write_text(
+		"import appModuleHandler\n\nclass AppModule(appModuleHandler.AppModule):\n\tfromAddon = True\n",
+		encoding="utf-8",
+	)
 	direct = copyAs(tmp_path, "addonapp")
 	registered = copyAs(tmp_path, "other.app")
-	windowsOnly = copyAs(tmp_path, "code")
+	sharedName = copyAs(tmp_path, "code")
 	done = harness.runChild(
 		tmp_path,
 		START
@@ -384,20 +533,57 @@ import appModuleHandler, appModules
 appModules.__path__.insert(0, {str(addonDir)!r})
 appModuleHandler.registerExecutableWithAppModule("other.app", "addonapp")
 result = {{}}
-for path in ({direct!r}, {registered!r}):
+for path in ({direct!r}, {registered!r}, {sharedName!r}):
 	process = start(path, "60", argv0="sleep")
 	mod = appModuleHandler.getAppModuleFromProcessID(process.pid)
 	result[mod.appName] = [type(mod).__module__, getattr(mod, "fromAddon", False)]
 	stop(process)
-process = start({windowsOnly!r}, "60", argv0="sleep")
-result["Windows app module's name"] = appModuleHandler.getAppNameFromProcessID(process.pid)
 """,
 	)
 	done.assertClean()
 	assert done.value == {
 		"addonapp": ["appModules.addonapp", True],
 		"other.app": ["appModules.addonapp", True],
-		"Windows app module's name": "code",
+		"code": ["appModules.code", True],
+	}
+
+
+def test_bundledWindowsAppModulesStayUnused(tmp_path: Path):
+	# Each of these names a Linux program as well as a bundled app module written for Windows: code
+	# and notepad fail to import, and audacity, eclipse, spotify and thunderbird fail on every object.
+	names = ["code", "notepad", "audacity", "eclipse", "spotify", "thunderbird"]
+	paths = [copyAs(tmp_path, name) for name in names]
+	done = harness.runChild(
+		tmp_path,
+		START
+		+ f"""
+import sys, appModuleHandler, ui
+from NVDAObjects import NVDAObject
+spoken = []
+ui.message = lambda text, *args, **kwargs: spoken.append(text)
+result = {{}}
+for path in {paths!r}:
+	name = path.rsplit("/", 1)[1]
+	process = start(path, "60", argv0="sleep")
+
+	class InProcess(NVDAObject):
+		processID = process.pid
+		windowThreadID = 0
+		name = "object"
+		role = 0
+
+	obj = InProcess()
+	result[name] = [type(obj.appModule).__module__, obj.appModule.appName, f"appModules.{{name}}" in sys.modules]
+	stop(process)
+result["spoken"] = spoken
+result["exists"] = {{name: appModuleHandler.doesAppModuleExist(name) for name in ("code", "audacity", "nvda")}}
+""",
+	)
+	done.assertClean()
+	assert done.value == {
+		**{name: ["appModuleHandler", name, False] for name in names},
+		"spoken": [],
+		"exists": {"code": False, "audacity": False, "nvda": True},
 	}
 
 
