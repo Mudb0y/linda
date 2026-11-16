@@ -2232,8 +2232,9 @@ def test_deliveredFramesCountWhatReachedAnOutput(tmp_path: Path):
 		# 1 s, which returns with 400 ms still to be heard, cut off by the stop.
 		player.feed(bytes(16000))
 		time.sleep(0.05)
+		asked = time.monotonic() - started
 		counts["whilePlaying"] = sink.deliveredFrames()
-		counts["playingFor"] = time.monotonic() - started
+		counts["playingFor"] = [asked, time.monotonic() - started]
 		player.stop()
 		counts["afterStop"] = sink.deliveredFrames()
 		del player
@@ -2253,8 +2254,10 @@ def test_deliveredFramesCountWhatReachedAnOutput(tmp_path: Path):
 	keptFrames = sum(len(f["frames"]) // 2 for f in captured(captureDir))
 	assert counts["atStart"] == 0
 	assert counts["afterOne"] == 800
-	playedFor = counts["playingFor"]
-	assert 800 + (playedFor - 0.05) * 8000 <= counts["whilePlaying"] <= 800 + (playedFor + 0.01) * 8000
+	asked, answered = counts["playingFor"]
+	# Up to date when asked, allowing for the clock starting a little after the feed was called: a
+	# count only as fresh as the feed's own last look would be 50 ms behind.
+	assert 800 + (asked - 0.02) * 8000 <= counts["whilePlaying"] <= 800 + (answered + 0.01) * 8000
 	assert counts["whilePlaying"] <= counts["afterStop"] == counts["atEnd"] == keptFrames < 800 + 8000
 
 
