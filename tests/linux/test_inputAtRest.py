@@ -15,14 +15,24 @@ import harness
 import pytest
 
 #: Enters NVDA's import cycle where core.main does, and watches for anything that reaches past the
-#: process: device and system files, sockets, native libraries and child processes.
+#: process: device and system files, sockets, native libraries and child processes. The one native
+#: library expected is the dev shell's ICU, which textUtils loads at import for segmentation, as
+#: upstream loads Windows' ICU.
 PRELUDE = """
+import os
 import sys
 
 _touched = []
+_icuDir = os.environ.get("BASEDREADER_ICU_LIB_DIR")
+
+
+def _isIcu(args):
+	return bool(_icuDir) and isinstance(args[0], str) and os.path.dirname(args[0]) == _icuDir
 
 
 def _watch(event, args):
+	if event == "ctypes.dlopen" and _isIcu(args):
+		return
 	if event in ("socket.connect", "ctypes.dlopen", "subprocess.Popen", "os.system"):
 		_touched.append(f"{event} {args!r}")
 	elif event == "open" and isinstance(args[0], str) and args[0].startswith(("/dev/", "/sys/", "/run/")):
