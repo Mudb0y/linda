@@ -132,10 +132,13 @@ source/installer.py
   import safety: winreg imported only on Windows, after the module's other
   imports; on Linux winreg is absent, so installing raises NameError
 source/keyboardHandler.py
-  Linux runtime: the sticky keys flags come from linuxPlatform.inputHook,
-  where a capture layer will report them, and a single character in a key
-  name is looked up there without the live layout, which answers for lower
-  case letters only and raises NoLinuxImplementation otherwise
+  Linux runtime: what a key press needs from the live keyboard comes from
+  linuxPlatform.inputHook, where a capture layer will answer it: the sticky
+  keys flags, whether num lock is on for a numpad operator key, and the
+  character that names a key with no name of its own. A single character in
+  a key name is looked up there too, which answers for lower case letters
+  without the layout. Until a capture layer exists the rest raise
+  NoLinuxImplementation
 source/languageHandler.py
   Linux: the interface language, the C locale, language names and the
   measurement system come from linuxPlatform.posixLocale, which reads the
@@ -171,10 +174,11 @@ source/mathPres/__init__.py
   MathCAT that fails to import now gives the same warning instead of
   stopping NVDA's start-up
 source/mouseHandler.py
-  Linux runtime: initialize takes the pointer position from wx and makes no
-  GDI screen bitmap, so scrBmpObj stays None and audio coordinates cannot
-  read brightness; terminate does not ask whether NVDA locked a button,
-  which it cannot do on Linux
+  Linux runtime: initialize takes the pointer position from wx, and
+  scrBmpObj is linuxPlatform.screenBitmap's, whose captureImage raises
+  NoLinuxImplementation, since Linux has no GDI screen capture, so audio
+  coordinates that read brightness fail naming what is missing; terminate
+  does not ask whether NVDA locked a button, which it cannot do on Linux
 source/oleacc.py
   import safety: on Linux the oleacc type library's names come from the
   comInterfaces.Accessibility stand-in, since comtypes.client.GetModule

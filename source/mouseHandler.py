@@ -26,6 +26,9 @@ import threading
 from winAPI.winUser.constants import SystemMetrics
 from winBindings import user32
 
+if sys.platform != "win32":
+	from linuxPlatform.screenBitmap import ScreenBitmap as _LinuxScreenBitmap
+
 
 WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
@@ -257,8 +260,9 @@ def initialize():
 		scrBmpObj = screenBitmap.ScreenBitmap(1, 1)
 		(x, y) = winUser.getCursorPos()
 	else:
-		# Linux has no GDI screen capture, which only the brightness of audio coordinates reads, so
-		# scrBmpObj stays None. The X server knows where the pointer is.
+		# Linux has no GDI screen capture, which only the brightness of audio coordinates reads; this
+		# one raises naming that. The X server knows where the pointer is.
+		scrBmpObj = _LinuxScreenBitmap(1, 1)
 		(x, y) = wx.GetMousePosition().Get()
 	desktopObject = api.getDesktopObject()
 	try:

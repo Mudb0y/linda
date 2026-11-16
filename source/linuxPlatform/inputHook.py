@@ -4,8 +4,10 @@ On Windows, winInputHook installs low-level hooks on a thread of its own, and th
 callbacks that keyboardHandler and mouseHandler register through winInputHook.setCallbacks. On Linux
 a capture layer will take the hooks' place. It is started and stopped here, and it hands each event
 to deliverKey or deliverMouse, which call those same callbacks with the same arguments and return
-their answer, whether the event goes on to the rest of the system. No capture layer exists yet, so
-initialize and terminate start and stop nothing, and only tests deliver events.
+their answer, whether the event goes on to the rest of the system. What keyboardHandler asks of the
+live keyboard while it turns those events into gestures, the layout and the key states, is
+answered here too, by the capture layer once one exists. Until then initialize and terminate start
+and stop nothing, only tests deliver events, and what needs the live keyboard raises.
 """
 
 import string
@@ -84,4 +86,30 @@ def vkKeyScan(char: str) -> tuple[int, int]:
 		return 0, ord(char.upper())
 	raise NoLinuxImplementation(
 		"keyboard layout lookup", f"which key types {char!r} depends on the keyboard layout"
+	)
+
+
+def mapVirtualKeyToChar(vkCode: int) -> int:
+	"""What the key with vkCode types unshifted, as user32.MapVirtualKeyEx with MAPVK_VK_TO_CHAR returns it.
+
+	keyboardHandler names a key that has no name of its own, such as the punctuation keys, after
+	this character, so every press of one asks.
+
+	:return: The character's code, with the top bit of 32 set for a dead key, or 0 if it types none.
+	"""
+	raise NoLinuxImplementation(
+		"keyboard layout lookup", f"what virtual key {vkCode:#x} types depends on the keyboard layout"
+	)
+
+
+def getKeyState(vkCode: int) -> int:
+	"""The state of a key, as winUser.getKeyState returns it.
+
+	keyboardHandler reads whether num lock is on for every press of a numpad operator key, since
+	those keys have the same virtual-key code whether it is on or off.
+
+	:return: Bit 0 set while a toggle key is on, and bit 15 set while the key is held down.
+	"""
+	raise NoLinuxImplementation(
+		"keyboard state", f"the state of virtual key {vkCode:#x} is the capture layer's"
 	)

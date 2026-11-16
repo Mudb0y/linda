@@ -528,7 +528,12 @@ class KeyboardInputGesture(inputCore.InputGesture):
 		modifiers.discard((vkCode, isExtended))
 		if (
 			vkCode in (winUser.VK_DIVIDE, winUser.VK_MULTIPLY, winUser.VK_SUBTRACT, winUser.VK_ADD)
-			and winUser.getKeyState(winUser.VK_NUMLOCK) & 1
+			and (
+				winUser.getKeyState(winUser.VK_NUMLOCK)
+				if sys.platform == "win32"
+				else _linuxInputHook.getKeyState(winUser.VK_NUMLOCK)
+			)
+			& 1
 		):
 			# Some numpad keys have the same vkCode regardless of numlock.
 			# For these keys, treat numlock as a modifier.
@@ -573,7 +578,10 @@ class KeyboardInputGesture(inputCore.InputGesture):
 		if self.vkCode == vkCodes.VK_PACKET:
 			# Unicode character from non-keyboard input.
 			return chr(self.scanCode)
-		vkChar = user32.MapVirtualKeyEx(self.vkCode, winUser.MAPVK_VK_TO_CHAR, getInputHkl())
+		if sys.platform == "win32":
+			vkChar = user32.MapVirtualKeyEx(self.vkCode, winUser.MAPVK_VK_TO_CHAR, getInputHkl())
+		else:
+			vkChar = _linuxInputHook.mapVirtualKeyToChar(self.vkCode)
 		# the highest bit of a 32 bit value denotes a dead key
 		DEAD_KEY_FLAG = 0x80000000
 		if vkChar > 0 and not (vkChar & DEAD_KEY_FLAG):

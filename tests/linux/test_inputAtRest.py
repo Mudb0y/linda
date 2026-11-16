@@ -303,9 +303,9 @@ def test_gestureModifierLogic(tmp_path: Path):
 		("KeyboardInputGesture.fromName('NVDA+1')", "keyboard layout lookup"),
 		("KeyboardInputGesture.fromName('T')", "keyboard layout lookup"),
 		# The numpad operators read whether num lock is on.
-		("KeyboardInputGesture.fromName('numpadPlus')", "user32.GetKeyState"),
+		("KeyboardInputGesture.fromName('numpadPlus')", "keyboard state"),
 		# A key with no name of its own is named after what it types.
-		("KeyboardInputGesture(set(), 0xBA, 0x27, False).mainKeyName", "user32.GetKeyboardLayout"),
+		("KeyboardInputGesture(set(), 0xBA, 0x27, False).mainKeyName", "keyboard layout lookup"),
 		("KeyboardInputGesture.fromName('a').character", "user32.GetKeyboardLayout"),
 		("KeyboardInputGesture.fromName('control+a').send()", "user32.GetKeyState"),
 		("keyboardHandler.injectRawKeyboardInput(True, 0x1E, False)", "user32.GetKeyboardLayout"),
@@ -450,6 +450,133 @@ def test_passNextKeyThroughLetsABoundGestureThrough(tmp_path: Path):
 	assert value == {"passed": [True, True, True, True], "count": -1, "again": [False] * 4, "ran": 1}
 
 
+#: Keys whose gestures need the live keyboard while they are pressed: (keys, what is missing).
+SEAM_GAPS = {
+	# The laptop layout's NVDA+[ and its other punctuation bindings: [ has no name of its own.
+	"NVDA+[": ((INSERT, (0xDB, 0x1A, False)), "keyboard layout lookup"),
+	# Say all on the desktop layout: the numpad operators read whether num lock is on.
+	"numpadPlus": (((0x6B, 0x4E, False),), "keyboard state"),
+}
+
+
+@pytest.mark.parametrize("gesture", SEAM_GAPS)
+def test_seamGapsWaitForTheCaptureLayer(tmp_path: Path, gesture: str):
+	keys, missing = SEAM_GAPS[gesture]
+	done, value = run(
+		tmp_path,
+		SEAM,
+		f"""
+		keys = {keys!r}
+		passed = [press(key) for key in keys] + [release(key) for key in reversed(keys)]
+		result = {{"passed": passed, "scripts": drain().count("_queueScriptCallback")}}
+		keyboardHandler.terminate()
+		""",
+		objects=True,
+	)
+	# keyboardHandler logs the failure and lets the key through, as it does for any error on a press.
+	assert done.noLinuxImplementation == [missing]
+	assert done.logErrors == ["ERROR: internal_keyDownEvent"]
+	assert value["scripts"] == 0
+	assert value["passed"][len(keys) - 1] is True
+
+
+def test_captureLayerAnswersCompleteTheSeam(tmp_path: Path):
+	done, value = run(
+		tmp_path,
+		SEAM,
+		"""
+		import winUser
+
+		NUMPAD_PLUS = (0x6B, 0x4E, False)
+		BRACKET = (0xDB, 0x1A, False)
+
+
+		# What a capture layer will answer from the live layout and key states.
+		def mapVirtualKeyToChar(vkCode):
+			return {0xDB: ord("["), 0xBE: ord(".")}.get(vkCode, 0)
+
+
+		numLock = [0]
+
+
+		def getKeyState(vkCode):
+			return numLock[0] if vkCode == winUser.VK_NUMLOCK else 0
+
+
+		inputHook.mapVirtualKeyToChar = mapVirtualKeyToChar
+		inputHook.getKeyState = getKeyState
+
+
+		class Plugin2(globalPluginHandler.GlobalPlugin):
+			def script_bracket(self, gesture):
+				ran.append([inputCore.normalizeGestureIdentifier(i) for i in gesture.identifiers])
+
+			script_plus = script_bracket
+
+			__gestures = {"kb:NVDA+[": "bracket", "kb:numpadPlus": "plus"}
+
+
+		globalPluginHandler.runningPlugins.add(Plugin2())
+		passed = [press(INSERT), press(BRACKET), release(BRACKET), release(INSERT)]
+		passed += [press(NUMPAD_PLUS), release(NUMPAD_PLUS)]
+		drain()
+		numLock[0] = 1
+		passed += [press(NUMPAD_PLUS), release(NUMPAD_PLUS)]
+		drain()
+		result = {"passed": passed, "ran": ran}
+		keyboardHandler.terminate()
+		""",
+		objects=True,
+	)
+	done.assertClean()
+	assert value == {
+		# With num lock on, the numpad plus key types and is not say all.
+		"passed": [False, False, False, False, False, False, True, True],
+		"ran": [["kb(desktop):[+nvda", "kb:[+nvda"], ["kb(desktop):numpadplus", "kb:numpadplus"]],
+	}
+
+
+def test_scriptWithAltNeedsKeyInjection(tmp_path: Path):
+	done, value = run(
+		tmp_path,
+		SEAM,
+		"""
+		from linuxPlatform import NoLinuxImplementation
+
+		CONTROL = (0xA2, 0x1D, False)
+		ALT = (0xA4, 0x38, False)
+		N = (0x4E, 0x31, False)
+
+
+		class Plugin2(globalPluginHandler.GlobalPlugin):
+			def script_alt(self, gesture):
+				ran.append("alt")
+
+			__gestures = {"kb:control+alt+n": "alt"}
+
+
+		globalPluginHandler.runningPlugins.add(Plugin2())
+		passed = [press(CONTROL), press(ALT), press(N), release(N), release(ALT), release(CONTROL)]
+		# Alt pressed and released alone would open a menu, so before the script runs keyboardHandler
+		# injects a key the application ignores, which needs key injection.
+		try:
+			drain()
+		except NoLinuxImplementation as e:
+			missing = e.what
+		result = {"passed": passed, "ran": ran, "missing": missing}
+		keyboardHandler.terminate()
+		""",
+		objects=True,
+	)
+	assert done.noLinuxImplementation == ["user32.keybd_event"]
+	assert not done.logErrors
+	assert value == {
+		"passed": [True, True, False, False, True, True],
+		"ran": [],
+		"missing": "user32.keybd_event",
+	}
+
+
 def test_mouseInitializesAndTerminates(tmp_path: Path):
 	done, value = run(
 		tmp_path,
@@ -486,6 +613,34 @@ def test_mouseInitializesAndTerminates(tmp_path: Path):
 		"running": False,
 		"timer": None,
 	}
+
+
+def test_audioCoordinatesBrightnessNamesScreenCapture(tmp_path: Path):
+	done, value = run(
+		tmp_path,
+		"""
+		import types
+
+		import wx
+
+		app = wx.App()
+		import mouseHandler
+		from linuxPlatform import NoLinuxImplementation
+
+		mouseHandler.initialize()
+		try:
+			mouseHandler.playAudioCoordinates(10, 20, 100, 100, types.SimpleNamespace(x=0, y=0), detectBrightness=True)
+		except NoLinuxImplementation as e:
+			missing = e.what
+		mouseHandler.terminate()
+		result = missing
+		app.Destroy()
+		""",
+		objects=True,
+	)
+	assert value == "screen capture"
+	assert done.noLinuxImplementation == ["screen capture"]
+	assert not done.logErrors
 
 
 def test_touchIsNotSupported(tmp_path: Path):
@@ -670,7 +825,7 @@ class AckDisplay(BrailleDisplayDriver):
 	description = "acknowledges writes"
 	isThreadSafe = True
 	receivesAckPackets = True
-	timeout = 0.05
+	timeout = 0.25
 
 	def __init__(self):
 		super().__init__()
@@ -681,13 +836,28 @@ class AckDisplay(BrailleDisplayDriver):
 		self.written.append(list(cells))
 
 
+resetterCalls = []
+_resetter = handler._ackTimeoutResetter
+
+
+def recordingResetter(param):
+	resetterCalls.append(param)
+	_resetter(param)
+
+
+# The handler arms its timer with whatever this holds when it writes. Counting the calls, rather than
+# the timeouts logged, sees a timer that was not cancelled even after the acknowledgement.
+handler._ackTimeoutResetter = recordingResetter
 display = AckDisplay()
 handler.display = display
 handler.queuedWrite = [1, 2, 3, 4]
 handler._writeCellsInBackground()
 deadline = time.monotonic() + 2
-while not display._awaitingAck and time.monotonic() < deadline:
-	time.sleep(0.01)
+# The handler waits for an acknowledgement before it arms the timer; acknowledging in between would
+# cancel nothing.
+while handler.ackTimerHandle._thread is None and not resetterCalls and time.monotonic() < deadline:
+	time.sleep(0.005)
+armed = handler.ackTimerHandle._thread is not None
 awaiting = display._awaitingAck
 """
 
@@ -707,11 +877,13 @@ def test_brailleAckTimer(tmp_path: Path, acknowledged: bool):
 		if {acknowledged!r}:
 			display._handleAck()
 		# Twice the display's timeout is when the handler stops waiting for an acknowledgement.
-		time.sleep(0.4)
+		time.sleep(1)
 		up = {{
 			"written": [list(cells) for cells in display.written],
+			"armed": armed,
 			"awaitingAfterWrite": awaiting,
 			"awaitingNow": display._awaitingAck,
+			"timerRan": len(resetterCalls),
 			"timedOut": len(timedOut),
 		}}
 		# The test's display has no configuration section for terminate to save its settings to.
@@ -725,7 +897,9 @@ def test_brailleAckTimer(tmp_path: Path, acknowledged: bool):
 	done.assertClean()
 	assert value == {
 		"written": [[1, 2, 3, 4]],
+		"armed": True,
 		"awaitingAfterWrite": True,
 		"awaitingNow": False,
+		"timerRan": 0 if acknowledged else 1,
 		"timedOut": 0 if acknowledged else 1,
 	}
