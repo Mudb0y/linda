@@ -2,7 +2,8 @@
 """Starts NVDA on Linux, as nvda.pyw starts it on Windows.
 
 It does what nvda.pyw does before core.main, with each Windows step replaced by its Linux counterpart
-or left out where Linux has none, and then runs core.main.
+or left out where Linux has none, and then runs core.main. With say as its first argument it speaks
+the rest through linuxPlatform.say and exits instead.
 """
 
 import os
@@ -17,6 +18,8 @@ if appDir not in sys.path:
 #: Names a file that receives a JSON line for every NoLinuxImplementation raised in this process,
 #: including those upstream catches and treats as a feature being absent.
 NO_LINUX_IMPLEMENTATION_FILE_VARIABLE = "BASEDREADER_NO_LINUX_IMPLEMENTATION_FILE"
+#: As the first argument, runs linuxPlatform.say instead of the screen reader.
+SAY_COMMAND = "say"
 
 
 def _recordNoLinuxImplementation(path: str) -> None:
@@ -54,7 +57,24 @@ def _fail(message: str) -> NoReturn:
 	sys.exit(1)
 
 
+def _handOverToSay(arguments: list[str]) -> NoReturn:
+	from linuxPlatform import bootstrap
+
+	bootstrap.install()
+	from linuxPlatform import say
+
+	say.main(arguments)
+
+
 def main() -> NoReturn:
+	# Before NVDA's parser, which takes any argument it does not know and starts the screen reader anyway.
+	if sys.argv[1:2] == [SAY_COMMAND]:
+		_handOverToSay(sys.argv[2:])
+	if SAY_COMMAND in sys.argv[2:]:
+		_tell(
+			f"the word {SAY_COMMAND} starts the say mode only as the first argument, so nothing was started"
+		)
+		sys.exit(2)
 	recordPath = os.environ.get(NO_LINUX_IMPLEMENTATION_FILE_VARIABLE)
 	if recordPath:
 		_recordNoLinuxImplementation(recordPath)
