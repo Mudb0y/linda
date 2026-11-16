@@ -8,6 +8,7 @@ somewhere it changes the count.
 
 import ctypes
 import hashlib
+import logging
 import random
 import shutil
 import subprocess
@@ -17,6 +18,8 @@ from pathlib import Path
 import harness
 
 ROOT = Path(__file__).resolve().parent.parent.parent
+#: logHandler.Logger.DEBUGWARNING, the level NVDA logs its expected failures at.
+DEBUGWARNING = 15
 
 FAMILY = "\U0001f469\U0001f3fb\u200d\U0001f467\U0001f3fb\u200d\U0001f466\U0001f3fb"
 """Woman, girl and boy, each with a skin tone, joined by zero width joiners: 14 UTF-16 units."""
@@ -352,7 +355,7 @@ def test_icuAbsentIsReportedTruthfully(tmp_path: Path):
 		""",
 		env={"BASEDREADER_ICU_LIB_DIR": "/nonexistent"},
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert done.value == {
 		"available": False,
 		"segmenterSees": False,
@@ -364,7 +367,6 @@ def test_icuAbsentIsReportedTruthfully(tmp_path: Path):
 		"NVDAHelper.localLib.calculateWordOffsets",
 		"winBindings.icu.ubrk_open",
 	]
-	assert not done.logErrors
 
 
 def test_characterBoundariesReturnFalseWhenIcuFails(tmp_path: Path):
@@ -372,19 +374,12 @@ def test_characterBoundariesReturnFalseWhenIcuFails(tmp_path: Path):
 		tmp_path,
 		"""
 		import ctypes
-		import logging
 		import NVDAHelper
 		from NVDAHelper import localLib
 		from logHandler import log
 		from winBindings import icu
 
-		warnings = []
-
-		class Collector(logging.Handler):
-			def emit(self, record):
-				warnings.append(record.getMessage())
-
-		log.addHandler(Collector(level=log.DEBUGWARNING))
+		# A record below its logger's level is never made.
 		log.setLevel(log.DEBUGWARNING)
 
 		def failingOpen(kind, locale, text, textLength, status):
@@ -400,17 +395,18 @@ def test_characterBoundariesReturnFalseWhenIcuFails(tmp_path: Path):
 			),
 			"offsets": localLib.calculateCharacterOffsets("abc", 3, 1, *map(ctypes.byref, bounds)),
 			"untouched": [bound.value for bound in bounds],
-			"warnings": warnings,
 		}
 		""",
+		recordLevel=DEBUGWARNING,
 	)
 	done.assertClean()
 	assert done.value == {
 		"boundaries": False,
 		"offsets": False,
 		"untouched": [-1, -1],
-		"warnings": ["ICU character break iterator failed"] * 2,
 	}
+	logged = [(event["levelno"], event["message"]) for event in done.events if event["kind"] == "log"]
+	assert logged == [(DEBUGWARNING, "ICU character break iterator failed")] * 2
 
 
 def compileUpstreamBeeps(directory: Path) -> ctypes.CDLL:
@@ -528,14 +524,7 @@ def test_brailleTranslationThroughLouisHelper(tmp_path: Path):
 		import louisHelper
 		from logHandler import log
 
-		messages = []
-
-		class Collector(logging.Handler):
-			def emit(self, record):
-				if "liblouis at internal log level" in str(getattr(record, "codepath", "")):
-					messages.append(record.getMessage())
-
-		log.addHandler(Collector(level=logging.DEBUG))
+		# A record below its logger's level is never made.
 		log.setLevel(logging.DEBUG)
 		config.conf["debugLog"]["louis"] = True
 		louisHelper.initialize()
@@ -559,13 +548,18 @@ def test_brailleTranslationThroughLouisHelper(tmp_path: Path):
 					type(louis.liblouis) is ctypes.CDLL,
 					louis._functype is ctypes.CFUNCTYPE,
 				],
-				"logged": any("translat" in m.lower() for m in messages),
 			}
 		finally:
 			louisHelper.terminate()
 		""",
+		recordLevel=logging.DEBUG,
 	)
 	done.assertClean()
+	louisMessages = [
+		event["message"]
+		for event in done.events
+		if event["kind"] == "log" and "liblouis at internal log level" in (event["codepath"] or "")
+	]
 	# Upstream's own appDir/louis/tables, which tools/build-artifacts links to the dev shell's tables.
 	assert done.value["tablesDir"] == str(builtTables)
 	assert done.value["resolved"] == [str(builtTables / "Se-Se.ctb")]
@@ -577,7 +571,7 @@ def test_brailleTranslationThroughLouisHelper(tmp_path: Path):
 	# NVDA names the Norwegian and Swedish tables in mixed case, which liblouis ships in lower case.
 	assert done.value["norwegianCells"] == len("hei")
 	assert done.value["louisLoader"] == [True, True, True]
-	assert done.value["logged"] is True
+	assert any("translat" in message.lower() for message in louisMessages), louisMessages
 
 
 def test_namesUpstreamHasAndLinuxLacksRaise(tmp_path: Path):
@@ -616,7 +610,7 @@ def test_namesUpstreamHasAndLinuxLacksRaise(tmp_path: Path):
 		}
 		""",
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert done.value == {
 		"attribute": [
 			["NoLinuxImplementation", "NVDAHelper._setDllFuncPointer", True, "_setDllFuncPointer"],
@@ -634,7 +628,6 @@ def test_namesUpstreamHasAndLinuxLacksRaise(tmp_path: Path):
 		"winBindings.icu.ucol_open",
 		"NVDAHelper.getHelperLocalWin10Dll",
 	]
-	assert not done.logErrors
 
 
 def test_probingForAMissingNameKeepsPythonsRules(tmp_path: Path):
@@ -669,7 +662,7 @@ def test_probingForAMissingNameKeepsPythonsRules(tmp_path: Path):
 		}
 		""",
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert done.value == {
 		"hasattr": ["returned", False],
 		"getattrDefault": ["returned", "default"],
@@ -688,7 +681,6 @@ def test_probingForAMissingNameKeepsPythonsRules(tmp_path: Path):
 		"NVDAHelper.localWin10",
 		"NVDAHelper.localLib.EXCEL_CELLINFO",
 	]
-	assert not done.logErrors
 
 
 def test_virtualBufferAndDisplayModelStillRaise(tmp_path: Path):
@@ -706,7 +698,7 @@ def test_virtualBufferAndDisplayModelStillRaise(tmp_path: Path):
 				result.append(name)
 		""",
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	expected = ["VBuf_getTextLength", "VBuf_createBuffer", "displayModel_getWindowTextInRect"]
 	assert done.value == expected
 	assert done.noLinuxImplementation == [f"NVDAHelper.localLib.{name}" for name in expected]
