@@ -49,14 +49,39 @@ def messagesLanguages() -> list[str]:
 	return list(dict.fromkeys(name for name in wanted if name))
 
 
+def _translatedAs(name: str, available: Collection[str]) -> str | None:
+	"""How NVDA would name a wanted language so that setLanguage finds a translation for it, or None.
+
+	setLanguage tries a name and then its language alone, so either having a translation keeps the name
+	as it is, as Windows reports "pl_PL" for Polish. A language given alone, as LANGUAGE lists usually
+	give them, may have a translation only for a region, which setLanguage would not find.
+	"""
+	language, _, region = name.partition("_")
+	if name in available or language in available:
+		return name
+	if region:
+		return None
+	# Python's copy of glibc's locale aliases knows each language's usual region, and aliases such as
+	# "polish". Failing that, the regional translations are taken in a fixed order.
+	usual = _nvdaName(locale.normalize(name))
+	if usual and usual != name and (usual in available or usual.partition("_")[0] in available):
+		return usual
+	return next((code for code in sorted(available) if code.startswith(f"{language}_")), None)
+
+
 def uiLanguage(available: Collection[str]) -> str:
-	"""The first wanted language NVDA has an interface translation for, trying each without its region
-	too, or English when there is none."""
-	for name in messagesLanguages():
-		for candidate in (name, name.partition("_")[0]):
-			if candidate in available:
-				return candidate
-	return "en"
+	"""The language the user wants NVDA's interface in, as Windows reports its display language.
+
+	Windows has one display language and LANGUAGE may list several, so the first listed that NVDA has a
+	translation for is the one. When none has, the first wanted language is reported all the same, as
+	Windows reports a display language NVDA has no translation for: setLanguage falls back from it as
+	it does there, and other callers, such as word segmentation, want the user's real language.
+	"""
+	wanted = messagesLanguages()
+	for name in wanted:
+		if translated := _translatedAs(name, available):
+			return translated
+	return wanted[0] if wanted else "en"
 
 
 def _utf8Locales(localeName: str) -> list[str]:
@@ -128,11 +153,7 @@ def usesImperialMeasurements() -> bool:
 class _Icu:
 	"""The few ICU functions that name languages, from the library the dev shell or package names."""
 
-	def __init__(self):
-		libDir = os.environ.get("BASEDREADER_ICU_LIB_DIR")
-		version = os.environ.get("BASEDREADER_ICU_VERSION_MAJOR")
-		if not libDir or not version:
-			raise RuntimeError("BASEDREADER_ICU_LIB_DIR and BASEDREADER_ICU_VERSION_MAJOR must name ICU")
+	def __init__(self, libDir: str, version: str) -> None:
 		lib = ctypes.CDLL(os.path.join(libDir, f"libicuuc.so.{version}"))
 		# ICU suffixes every exported name with its major version.
 		self.openForContext = getattr(lib, f"uldn_openForContext_{version}")
@@ -155,25 +176,44 @@ class _Icu:
 
 
 @functools.cache
-def _icu() -> _Icu:
-	return _Icu()
+def _icu() -> _Icu | None:
+	"""ICU, or None when it cannot be loaded, which is said once.
+
+	Language names are a convenience; without them the language list shows bare codes, as
+	getLanguageDescription's callers expect for a language nothing can name.
+	"""
+	libDir = os.environ.get("BASEDREADER_ICU_LIB_DIR")
+	version = os.environ.get("BASEDREADER_ICU_VERSION_MAJOR")
+	if not libDir or not version:
+		log.warning("BASEDREADER_ICU_LIB_DIR and BASEDREADER_ICU_VERSION_MAJOR do not name ICU")
+		return None
+	try:
+		return _Icu(libDir, version)
+	except (OSError, AttributeError):
+		log.warning("ICU cannot be loaded, so languages are not named", exc_info=True)
+		return None
 
 
 @functools.cache
-def _displayNames(displayLocale: str) -> int:
-	"""ICU's names of languages in displayLocale. Kept for the life of the process; there are few."""
-	icu = _icu()
+def _displayNames(icu: _Icu, displayLocale: str) -> int | None:
+	"""ICU's names of languages in displayLocale, or None when ICU has none, which is said once.
+	Kept for the life of the process; there are few."""
 	contexts = (ctypes.c_int * len(_ICU_DISPLAY_CONTEXTS))(*_ICU_DISPLAY_CONTEXTS)
 	status = ctypes.c_int(0)
 	handle = icu.openForContext(displayLocale.encode(), contexts, len(contexts), ctypes.byref(status))
 	if status.value > 0 or not handle:
-		raise RuntimeError(f"ICU cannot name languages in {displayLocale}: error {status.value}")
+		log.warning(f"ICU cannot name languages in {displayLocale}: error {status.value}")
+		return None
 	return handle
 
 
 def _icuDisplayName(code: str, displayLocale: str) -> str | None:
 	icu = _icu()
-	handle = _displayNames(displayLocale)
+	if icu is None:
+		return None
+	handle = _displayNames(icu, displayLocale)
+	if handle is None:
+		return None
 	size = 128
 	while True:
 		buffer = (ctypes.c_uint16 * size)()

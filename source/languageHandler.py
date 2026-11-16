@@ -16,12 +16,13 @@ import weakref
 import locale
 import gettext
 import enum
-import sys
 import globalVars
 from logHandler import log
 import winBindings.kernel32
 import winKernel
 from utils._deprecate import RemovedSymbol, handleDeprecations
+
+import sys
 
 if sys.platform != "win32":
 	from linuxPlatform import posixLocale

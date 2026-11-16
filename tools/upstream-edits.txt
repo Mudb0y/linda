@@ -43,9 +43,8 @@ source/NVDAState.py
   imports so that upstream's import block stays whole. On Linux
   _forceSecureModeEnabled and _serviceDebugEnabled, which the launcher asks
   at start-up, answer False, as Linux has no system-wide store for those
-  administrator settings yet; coreArchLibPath raises NoLinuxImplementation,
-  as NVDA's helper DLLs have no Linux counterpart. The installer-only
-  registry readers still raise NameError on Linux
+  administrator settings yet. The installer-only registry readers still
+  raise NameError on Linux
 source/_remoteClient/localMachine.py
   import safety: winreg imported only on Windows, after the module's other
   imports; the SAS policy's registry key class attribute is defined only
@@ -81,7 +80,8 @@ source/documentNavigation/paragraphHelper.py
 source/fileUtils.py
   Linux: FaultTolerantFile puts the synced temporary file in place with
   os.replace and then syncs the directory, where Windows calls MoveFileEx,
-  so that a save replaces nvda.ini whole or not at all
+  so that a save replaces nvda.ini whole or not at all. A symbolic link at
+  the target is followed and stays a link
 source/gui/addonStoreGui/viewModels/store.py
   import safety: os.startfile imported only on Windows, after the module's
   other imports; on Linux startfile is absent, so opening an add-on's home
@@ -100,7 +100,10 @@ source/installer.py
 source/languageHandler.py
   Linux: the interface language, the C locale, language names and the
   measurement system come from linuxPlatform.posixLocale, which reads the
-  POSIX environment, instead of from Windows locale calls. Converting a name
+  POSIX environment, instead of from Windows locale calls. getWindowsLanguage
+  reports the first language LANGUAGE lists that NVDA has a translation for,
+  and otherwise the user's own language whether translated or not, as
+  Windows reports its display language. Converting a name
   to a Windows locale identifier gives LCID_NONE and the reverse uses
   Python's table. The catalogue directory is absolute under appDir on every
   platform, so translations no longer depend on the working directory
@@ -121,12 +124,21 @@ source/oleacc.py
 source/systemUtils.py
   import safety: winreg imported only on Windows, after the module's other
   imports. Linux: hasUiAccess() is True, as X11 isolates no client from
-  another; hasSyswow64Dir() and _isSystemClockSecondsVisible() are False;
-  the configuration directory opens through xdg-open; preventSystemIdle()
-  raises NoLinuxImplementation until the session's idle inhibitor is used,
-  and resetThreadExecutionState() has nothing to release. The process token,
-  logon session, elevation and desktop name functions still fail on Linux
-  through the Windows stand-ins
+  another; Wayland sessions are not handled. Its consumers then do this:
+  gui's MainFrame skips the Show and Hide trick, which is wanted; the
+  full-screen magnifier believes input transforms are supported; touch and
+  audio ducking still answer unsupported, through isInstalledCopy(); the
+  remote client's _canSendSAS goes on to winreg, which is absent, so a
+  remote control+alt+delete raises NameError; and _isObjectBelowLockScreen
+  goes on to Win32 z-order calls, which fail through the stand-ins once lock
+  tracking exists. hasSyswow64Dir() and _isSystemClockSecondsVisible() are
+  False; the configuration directory opens through xdg-open;
+  preventSystemIdle() warns once that the session may still go idle and
+  returns, as say all and braille keys call it, and
+  resetThreadExecutionState() has nothing to release. ExecAndPump waits for
+  its thread while yielding to the wx main loop instead of pumping Windows
+  messages. The process token, logon session, elevation and desktop name
+  functions still fail on Linux through the Windows stand-ins
 source/utils/security.py
   Linux: isRunningOnSecureDesktop() is True only in a display manager's
   login screen session, the counterpart of the secure desktop, as

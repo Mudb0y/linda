@@ -42,7 +42,8 @@ from winBindings import advapi32, user32
 if sys.platform == "win32":
 	import winreg
 else:
-	from linuxPlatform import NoLinuxImplementation
+	from linuxPlatform import session as _linuxSession
+	from linuxPlatform import threads as _linuxThreads
 	from linuxPlatform import xdg as _xdg
 
 
@@ -85,7 +86,8 @@ TokenUIAccess = 26
 def hasUiAccess():
 	if sys.platform != "win32":
 		# X11 does not isolate one client's windows from another's input or inspection, so every client
-		# already has what UI Access grants on Windows. Wayland does isolate them, so this is X11's answer.
+		# already has what UI Access grants on Windows. Wayland does isolate them; this answers for X11
+		# whatever the session type, and Wayland sessions are not handled yet.
 		return True
 	token = ctypes.wintypes.HANDLE()
 	advapi32.OpenProcessToken(
@@ -254,6 +256,11 @@ class ExecAndPump(threading.Thread, Generic[_execAndPumpResT]):
 		)
 		self.threadExc: Exception | None = None
 		self.start()
+		if sys.platform != "win32":
+			_linuxThreads.joinWhileYieldingToWx(self)
+			if self.threadExc:
+				raise self.threadExc
+			return
 		time.sleep(0.1)
 		threadHandle = ctypes.wintypes.HANDLE()
 		threadHandle.value = winBindings.kernel32.OpenThread(0x100000, False, self.ident)
@@ -282,9 +289,8 @@ def preventSystemIdle(preventDisplayTurningOff: bool | None = None, persistent: 
 	:param persistent: If `True`, the state will be maintained until calling :func:`resetThreadExecutionState` is called.
 	"""
 	if sys.platform != "win32":
-		# Braille display keys and say all are activity the X server never sees, so the session's idle
-		# time has to be reset, or inhibited for say all, through the screensaver or session manager.
-		raise NoLinuxImplementation("systemUtils.preventSystemIdle")
+		# Say all and every braille key ask this; a session that may still idle must not stop either.
+		return _linuxSession.preventIdle()
 	if preventDisplayTurningOff is None:
 		import config
 

@@ -10,7 +10,6 @@ Message windows can be used to handle communications from other processes, new N
 """
 
 from enum import IntEnum  # noqa: I001
-import sys
 
 
 from . import (
@@ -20,6 +19,8 @@ from . import (
 from .types import HWNDValT
 import extensionPoints
 import windowUtils
+
+import sys
 
 __all__ = ["WindowMessage", "_MessageWindow", "pre_handleWindowMessage"]
 

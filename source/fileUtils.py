@@ -6,7 +6,6 @@
 import os  # noqa: I001
 import ctypes
 import array
-import sys
 from contextlib import contextmanager
 from tempfile import NamedTemporaryFile
 from logHandler import log
@@ -15,6 +14,8 @@ import shlobj
 from functools import wraps
 import systemUtils
 import winBindings.version
+
+import sys
 
 if sys.platform != "win32":
 	from linuxPlatform import files as _linuxFiles

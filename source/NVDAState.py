@@ -246,11 +246,6 @@ class _ReadPaths:
 				return self.versionedLibARM64Path
 			case "win32":
 				return self.versionedLibX86Path
-			case _ if sys.platform == "linux":
-				from linuxPlatform import NoLinuxImplementation
-
-				# NVDA's helper DLLs have no Linux counterpart to point at.
-				raise NoLinuxImplementation("NVDAState.ReadPaths.coreArchLibPath")
 			case _:
 				raise RuntimeError("Unsupported platform")
 

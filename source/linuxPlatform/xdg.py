@@ -2,6 +2,7 @@
 
 import configparser
 import os
+import shutil
 import subprocess
 
 #: The name of the directory Basedreader keeps under each XDG base directory.
@@ -35,11 +36,27 @@ def userConfigDir() -> str:
 autostartEntryName = f"{appDirName}.desktop"
 
 
+def currentDesktops() -> list[str]:
+	"""The names of the running desktop environment, such as "MATE", most specific first."""
+	return [name for name in os.environ.get("XDG_CURRENT_DESKTOP", "").split(":") if name]
+
+
+def _isShownIn(entry: configparser.SectionProxy, desktops: list[str]) -> bool:
+	"""Whether a desktop entry applies to the running desktop, by its OnlyShowIn and NotShowIn keys."""
+	onlyShowIn = {name for name in entry.get("OnlyShowIn", "").split(";") if name}
+	if onlyShowIn and onlyShowIn.isdisjoint(desktops):
+		return False
+	notShowIn = {name for name in entry.get("NotShowIn", "").split(";") if name}
+	return notShowIn.isdisjoint(desktops)
+
+
 def isAutostartEnabled(entryName: str) -> bool:
 	"""Whether the desktop session starts the entry at login, as the Desktop Application Autostart
 	Specification decides it: the user's own directory hides the system directories' entry of the same
-	name, and an entry marked hidden, or disabled by a desktop's own key, does not start.
+	name, and an entry does not start when it is marked hidden, is not shown in the running desktop,
+	names a TryExec program that is not installed, or is disabled by the running desktop's own key.
 	"""
+	desktops = currentDesktops()
 	for directory in (configHome(), *configDirs()):
 		path = os.path.join(directory, "autostart", entryName)
 		if not os.path.isfile(path):
@@ -52,12 +69,14 @@ def isAutostartEnabled(entryName: str) -> bool:
 		except (configparser.Error, KeyError, UnicodeDecodeError):
 			# A session manager skips an entry it cannot parse.
 			return False
-		if section.get("Hidden", "false").strip() == "true":
+		if section.get("Hidden", "false").strip() == "true" or not _isShownIn(section, desktops):
 			return False
-		# MATE, GNOME and others each honour their own X-<desktop>-Autostart-enabled key.
+		tryExec = section.get("TryExec", "").strip()
+		if tryExec and shutil.which(tryExec) is None:
+			return False
+		# MATE, GNOME and others each honour only their own X-<desktop>-Autostart-enabled key.
 		return not any(
-			key.startswith("X-") and key.endswith("-Autostart-enabled") and value.strip() == "false"
-			for key, value in section.items()
+			section.get(f"X-{desktop}-Autostart-enabled", "true").strip() == "false" for desktop in desktops
 		)
 	return False
 
