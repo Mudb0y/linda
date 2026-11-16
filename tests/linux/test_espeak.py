@@ -9,9 +9,9 @@ under the rig:
 A run that loads eSpeak maps a library whose name the harness counts among sound libraries, so those
 runs ignore the audio check and then require that what it found is that library and nothing else.
 
-The tests of cancelling each hold the driver's thread where a cancel used to slip past it: between
-the callback's check for a cancel and its feed of the player, and in the wait for the player at the
-end of an utterance.
+The tests of cancelling each hold the driver's thread where a cancel can slip past the driver's
+checks for one: between the callback's check and its feed of the player, and in the wait for the
+player at the end of an utterance.
 """
 
 import itertools
@@ -390,35 +390,50 @@ def test_theCharacterLocaleIsKept(tmp_path: Path):
 
 
 def test_noCancelledAudioPlaysAfterTheCancel(tmp_path: Path):
-	# The callback checks for a cancel and then feeds the player. A cancel between the two used to
-	# leave the feed to restart the stopped player with up to 300 ms of the cancelled speech, and with
-	# a mark's callback that then reported speech NVDA had silenced. Holding the driver's thread just
-	# before the feed makes the window as wide as the test needs, in every round.
+	# The callback checks for a cancel and then feeds the player, a chunk that ends at a mark with that
+	# mark's callback, or the rest of what eSpeak gave it. A cancel between the check and either feed
+	# must not let the feed restart the stopped player: the cancelled speech it carries would be heard,
+	# and a mark's callback would report speech NVDA silenced. Holding the driver's thread just before
+	# a feed makes the window as wide as the test needs, in every round. A chunk with a mark is rare,
+	# so half the rounds hold only a feed with a mark's callback. The player calls a callback only when
+	# it is next fed or synced, so half the rounds speak the next utterance before the held feed goes
+	# on, as NVDA does when a key interrupts speech.
 	done = runEspeak(
 		tmp_path,
 		"""
-		gate = {"armed": False, "inWindow": threading.Event(), "proceed": threading.Event()}
+		gate = {"armed": None, "inWindow": threading.Event(), "proceed": threading.Event()}
 		_feed = wasapi.wasPlay_feed
 
 
-		def feed(*args):
-			if gate["armed"] and threading.current_thread() is _espeak.bgThread:
-				gate["armed"] = False
+		def feed(player, data, size, feedId):
+			armed = gate["armed"]
+			if armed and threading.current_thread() is _espeak.bgThread and (armed == "any" or feedId is not None):
+				gate["armed"] = None
 				gate["inWindow"].set()
 				gate["proceed"].wait(1.0)
-			return _feed(*args)
+			return _feed(player, data, size, feedId)
 
 
 		wasapi.wasPlay_feed = feed
+		NEXT = "OK button"
+		synth.cancel()
+		start = now()
+		speakAndWait([NEXT, IndexCommand(30000)])
+		synth.cancel()
+		nextFrames = len(heardSince(start))
+		words = LONG.split()
 		random.seed(7)
 		rounds = []
 		for number in range(100):
-			if number % 2:
-				# Marks between the clauses, so that the feed held is sometimes one with a mark's callback.
-				clauses = LONG.split(" and ")
-				sequence = [part for i, clause in enumerate(clauses) for part in (clause, IndexCommand(number * 10 + i))]
+			heldFeed = ("any", "marked")[number % 2]
+			speakNext = number % 4 >= 2
+			if heldFeed == "marked":
+				# A mark every few words, so that a feed with a mark's callback comes soon.
+				sequence = []
+				for i in range(0, len(words), 4):
+					sequence += [" ".join(words[i : i + 4]), IndexCommand(number * 100 + i // 4)]
 			else:
-				sequence = [LONG, IndexCommand(number * 10)]
+				sequence = [LONG, IndexCommand(number * 100)]
 			cancelledMarks = {command.index for command in sequence if isinstance(command, IndexCommand)}
 			start = now()
 			synth.speak(sequence)
@@ -426,36 +441,62 @@ def test_noCancelledAudioPlaysAfterTheCancel(tmp_path: Path):
 			time.sleep(random.uniform(0, 0.4))
 			gate["inWindow"].clear()
 			gate["proceed"].clear()
-			gate["armed"] = True
-			assert gate["inWindow"].wait(2.0), "the driver never fed the player"
+			gate["armed"] = heldFeed
+			assert gate["inWindow"].wait(5.0), f"the driver never made a feed of the kind {heldFeed}"
 			synth.cancel()
 			mark = now()
+			if speakNext:
+				nextIndex = 20000 + number
+				synth.speak([NEXT, IndexCommand(nextIndex)])
 			gate["proceed"].set()
-			pump(0.35)
+			if speakNext:
+				assert waitFor(lambda: ("done", None) in heard.since(mark)), "the next utterance never finished"
+			else:
+				pump(0.35)
 			# Stopped again, so that whatever played since is written down too.
 			synth.cancel()
+			events = heard.since(mark)
 			rounds.append({
+				"heldFeed": heldFeed,
+				"speakNext": speakNext,
+				# All of it the next utterance's, when there is one.
 				"heardFrames": len(heardSince(mark)),
-				"lateMarks": [index for kind, index in heard.since(mark) if index in cancelledMarks],
-				"lateDone": ("done", None) in heard.since(mark),
+				"lateMarks": [index for kind, index in events if index in cancelledMarks],
+				"events": events,
 			})
 			pump(0.05)
 		wasapi.wasPlay_feed = _feed
 		after = speakAndWait(["OK button", IndexCommand(9999)])
-		result = {"rounds": rounds, "after": after}
+		result = {"nextFrames": nextFrames, "rounds": rounds, "after": after}
 		""",
 	)
 	rounds = done.value["rounds"]
+	nextFrames = done.value["nextFrames"]
+	assert nextFrames > 22050 // 4, nextFrames
 	oneMillisecond = 22050 // 1000
-	assert all(r["heardFrames"] <= oneMillisecond for r in rounds), [r["heardFrames"] for r in rounds]
-	assert not any(r["lateMarks"] or r["lateDone"] for r in rounds), rounds
+	alone = [r for r in rounds if not r["speakNext"]]
+	followed = [r for r in rounds if r["speakNext"]]
+	assert all(r["heardFrames"] <= oneMillisecond for r in alone), [r["heardFrames"] for r in alone]
+	assert not any(r["lateMarks"] or r["events"] for r in alone), alone
+	# The next utterance is heard as it is heard alone, give or take how its silence is trimmed, and
+	# reports its own mark and nothing of the cancelled one's.
+	assert all(abs(r["heardFrames"] - nextFrames) <= 5 * oneMillisecond for r in followed), (
+		nextFrames,
+		[r["heardFrames"] for r in followed],
+	)
+	assert not any(r["lateMarks"] for r in followed), followed
+	assert all(
+		r["events"] == [["index", 20000 + number], ["done", None]]
+		for number, r in enumerate(rounds)
+		if r["speakNext"]
+	), followed
 	assert done.value["after"] == [["index", 9999], ["done", None]]
 
 
 def test_noDoneAfterACancelInTheLastWait(tmp_path: Path):
 	# At the end of synthesis the driver waits for the player to finish the utterance and then reports
-	# it done. A cancel during that wait releases it, and used to be followed by that report all the
-	# same, for speech NVDA had cancelled.
+	# it done. A cancel during that wait releases it, and must not be followed by that report: the
+	# speech it would report done is speech NVDA cancelled.
 	done = runEspeak(
 		tmp_path,
 		"""
