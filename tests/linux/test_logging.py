@@ -136,6 +136,77 @@ def test_failingHandlerDoesNotRecurse(tmp_path: Path):
 	assert "RecursionError" not in done.stderr
 
 
+def test_unwritableRecordIsNotReportedWhenLoggingSaysNotOrHasNowhereTo(tmp_path: Path):
+	done = harness.runChild(
+		tmp_path,
+		startLog(tmp_path / "nvda.log")
+		+ """
+		import logging
+		import sys
+
+		def brokenFormatTime(self, record, datefmt=None):
+			raise ValueError("formatting broken by the test")
+
+		logHandler.Formatter.formatTime = brokenFormatTime
+		logging.raiseExceptions = False
+		log.info("not reported, as logging is told not to")
+		logging.raiseExceptions = True
+		realStderr = sys.__stderr__
+		sys.__stderr__ = None
+		try:
+			log.info("not reported, as there is no standard error")
+		finally:
+			sys.__stderr__ = realStderr
+		log.info("reported")
+		result = "returned"
+		""",
+	)
+	done.assertClean()
+	assert done.value == "returned"
+	assert done.stderr.count("--- Logging error") == 1, done.stderr
+
+
+def test_errorSoundThreadThatCannotStartIsTriedAgain(tmp_path: Path):
+	done = harness.runChild(
+		tmp_path,
+		startLog(tmp_path / "nvda.log")
+		+ """
+		import threading
+		import config
+
+		config.conf["featureFlag"]["playErrorSound"] = 1
+		played = threading.Event()
+
+		def player():
+			played.set()
+
+		logHandler.getOnErrorSoundRequested().register(player)
+		realStart = threading.Thread.start
+
+		def startRefused(self, *args, **kwargs):
+			# What threading does once the interpreter is shutting down.
+			if self.name == "logHandler.errorSound":
+				raise RuntimeError("can't create new thread at interpreter shutdown")
+			return realStart(self, *args, **kwargs)
+
+		threading.Thread.start = startRefused
+		try:
+			log.error("logged while no thread can start")
+		finally:
+			threading.Thread.start = realStart
+		refused = {"played": played.is_set(), "logged": "logged while no thread can start" in logText()}
+		log.error("logged once threads start again")
+		result = {"refused": refused, "played": played.wait(60)}
+		""",
+	)
+	assert done.error is None, done.error
+	assert done.logErrors == [
+		"ERROR: logged while no thread can start",
+		"ERROR: logged once threads start again",
+	]
+	assert done.value == {"refused": {"played": False, "logged": True}, "played": True}
+
+
 def test_errorSoundCannotRecurseOrBlock(tmp_path: Path):
 	done = harness.runChild(
 		tmp_path,
@@ -583,7 +654,17 @@ def test_crashDumpBesideLog(tmp_path: Path):
 		with open(os.path.join(os.path.dirname(globalVars.appArgs.logFileName), "nvda_crash.log")) as f:
 			dump = f.read()
 		logSupport.enableCrashDump(globalVars.appArgs.logFileName)
-		result = {"crashed": crashed, "dump": dump, "enabled": faulthandler.is_enabled()}
+		with open(os.path.join(os.path.dirname(globalVars.appArgs.logFileName), "nvda_crash-old.log")) as f:
+			oldAfterNextStart = f.read()
+		# A start after that, with no crash in between, must not replace the old dump with an empty one.
+		logSupport.enableCrashDump(globalVars.appArgs.logFileName)
+		result = {
+			"crashed": crashed,
+			"dump": dump,
+			"oldAfterNextStart": oldAfterNextStart,
+			"enabled": faulthandler.is_enabled(),
+			"dumpFileOpen": not logSupport._crashDumpFile.closed,
+		}
 		""",
 	)
 	done.assertClean()
@@ -594,9 +675,67 @@ def test_crashDumpBesideLog(tmp_path: Path):
 		r"Current thread 0x[0-9a-f]+ .*\n(  File .*\n)*  File .*, line \d+ in crashHere\n", dump
 	), dump
 	assert done.value["enabled"]
-	# The next start keeps the dump as the old one and starts an empty file.
+	assert done.value["dumpFileOpen"]
+	# The next start keeps the dump as the old one and starts an empty file, and so does every start
+	# after it until the next crash.
+	assert done.value["oldAfterNextStart"] == dump
 	assert (logDir / "nvda_crash-old.log").read_text() == dump
 	assert (logDir / "nvda_crash.log").read_text() == ""
+
+
+def test_emptyCrashDumpLeavesTheOldOneAlone(tmp_path: Path):
+	logDir = tmp_path / "logs"
+	logDir.mkdir()
+	(logDir / "nvda_crash.log").write_text("")
+	(logDir / "nvda_crash-old.log").write_text("the last crash\n")
+	done = harness.runChild(
+		tmp_path,
+		startLog(logDir / "nvda.log")
+		+ """
+		import faulthandler
+
+		result = faulthandler.is_enabled()
+		""",
+	)
+	done.assertClean()
+	assert done.value is True
+	assert (logDir / "nvda_crash-old.log").read_text() == "the last crash\n"
+	assert (logDir / "nvda_crash.log").read_text() == ""
+
+
+def test_crashDumpsOffWhenNothingCanTakeThem(tmp_path: Path):
+	logDir = tmp_path / "logs"
+	logDir.mkdir()
+	for name in ("nvda_crash.log", "nvda_crash-old.log"):
+		(logDir / name).mkdir()
+		(logDir / name / "occupied").write_text("")
+	done = harness.runChild(
+		tmp_path,
+		startLog(logDir / "nvda.log")
+		+ """
+		import faulthandler
+		import sys
+		from linuxPlatform import logSupport
+
+		faulthandler.disable()
+		# As under a service manager that gives the process no standard error.
+		realStderr = sys.__stderr__
+		sys.__stderr__ = None
+		try:
+			logSupport.enableCrashDump(globalVars.appArgs.logFileName)
+		finally:
+			sys.__stderr__ = realStderr
+		result = {"enabled": faulthandler.is_enabled(), "log": logText()}
+		""",
+	)
+	done.assertClean()
+	assert done.value["enabled"] is False
+	assert re.search(
+		r"^WARNING - linuxPlatform\.logSupport\.enableCrashDump .*\n"
+		r"Crash dumps are off: there is no standard error$",
+		done.value["log"],
+		re.MULTILINE,
+	), done.value["log"]
 
 
 def test_crashDumpKeptWhenItCannotBeMoved(tmp_path: Path):
