@@ -8,7 +8,7 @@ UTF-16 code units through linuxPlatform.utf16, because c_wchar_p is UTF-32 on Li
 
 The ``ubrk_*`` functions are defined only when :data:`ICU_AVAILABLE` is True, as upstream's are.
 Reaching for one that is not defined, or for any other name this module lacks, raises
-NoLinuxImplementation naming it.
+:class:`NoLinuxAttribute` naming it, which is both NoLinuxImplementation and AttributeError.
 """
 
 import os
@@ -69,14 +69,37 @@ def U_FAILURE(code: int) -> bool:
 	return code > 0
 
 
-def __getattr__(name: str) -> NoReturn:
-	# The import system and other tools probe modules for optional names such as __path__ and
-	# expect AttributeError when one is absent.
+class NoLinuxAttribute(NoLinuxImplementation, AttributeError):
+	"""Raised by a Linux replacement module's ``__getattr__`` for a name of upstream's module that it
+	lacks.
+
+	As NoLinuxImplementation it is audited and taken by NVDA's handlers for an absent feature. As
+	AttributeError it keeps Python's rules for an absent name: hasattr gives False, getattr gives
+	its default, ``mock.patch(..., create=True)`` creates the name, and ``from module import name``
+	raises ImportError. Each of those still raises the audit event, once for every lookup.
+	"""
+
+	def __init__(self, module: str, name: str, message: str | None = None):
+		super().__init__(f"{module}.{name}", message)
+		self.name = name
+
+
+def missingAttribute(module: str, name: str, message: str | None = None) -> NoReturn:
+	"""The body of a replacement module's ``__getattr__``.
+
+	Dunder names raise a plain AttributeError: the import system, copy, pickle and inspect probe
+	every module for optional ones such as ``__path__``, and those probes are not missing features.
+	"""
 	if name.startswith("__"):
-		raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-	what = f"{__name__}.{name}"
-	raise NoLinuxImplementation(
-		what, None if ICU_AVAILABLE else f"{what}: ICU did not load from {LIB_DIR_VARIABLE}"
+		raise AttributeError(f"module {module!r} has no attribute {name!r}", name=name)
+	raise NoLinuxAttribute(module, name, message)
+
+
+def __getattr__(name: str) -> NoReturn:
+	missingAttribute(
+		__name__,
+		name,
+		None if ICU_AVAILABLE else f"{__name__}.{name}: ICU did not load from {LIB_DIR_VARIABLE}",
 	)
 
 

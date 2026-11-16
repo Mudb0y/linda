@@ -595,7 +595,7 @@ def test_namesUpstreamHasAndLinuxLacksRaise(tmp_path: Path):
 			try:
 				attempt()
 			except NoLinuxImplementation as e:
-				return ["NoLinuxImplementation", e.what]
+				return ["NoLinuxImplementation", e.what, isinstance(e, AttributeError), getattr(e, "name", None)]
 			except Exception as e:
 				return [type(e).__name__]
 			return ["returned"]
@@ -605,9 +605,8 @@ def test_namesUpstreamHasAndLinuxLacksRaise(tmp_path: Path):
 				outcome(lambda: NVDAHelper._setDllFuncPointer),
 				outcome(lambda: NVDAHelper.localLib.dll),
 				outcome(lambda: icu.ucol_open),
-				outcome(NVDAHelper.getHelperLocalWin10Dll),
 			],
-			"fromImport": outcome(lambda: exec("from NVDAHelper.localLib import EXCEL_CELLINFO", {})),
+			"defined": outcome(NVDAHelper.getHelperLocalWin10Dll),
 			"submodule": outcome(lambda: importlib.import_module("NVDAHelper.localWin10")),
 			"dunders": [
 				hasattr(module, "__path__")
@@ -620,12 +619,11 @@ def test_namesUpstreamHasAndLinuxLacksRaise(tmp_path: Path):
 	assert done.error is None, done.error
 	assert done.value == {
 		"attribute": [
-			["NoLinuxImplementation", "NVDAHelper._setDllFuncPointer"],
-			["NoLinuxImplementation", "NVDAHelper.localLib.dll"],
-			["NoLinuxImplementation", "winBindings.icu.ucol_open"],
-			["NoLinuxImplementation", "NVDAHelper.getHelperLocalWin10Dll"],
+			["NoLinuxImplementation", "NVDAHelper._setDllFuncPointer", True, "_setDllFuncPointer"],
+			["NoLinuxImplementation", "NVDAHelper.localLib.dll", True, "dll"],
+			["NoLinuxImplementation", "winBindings.icu.ucol_open", True, "ucol_open"],
 		],
-		"fromImport": ["NoLinuxImplementation", "NVDAHelper.localLib.EXCEL_CELLINFO"],
+		"defined": ["NoLinuxImplementation", "NVDAHelper.getHelperLocalWin10Dll", False, None],
 		"submodule": ["ModuleNotFoundError"],
 		"dunders": [True, False, False],
 		"present": ["returned"],
@@ -635,6 +633,59 @@ def test_namesUpstreamHasAndLinuxLacksRaise(tmp_path: Path):
 		"NVDAHelper.localLib.dll",
 		"winBindings.icu.ucol_open",
 		"NVDAHelper.getHelperLocalWin10Dll",
+	]
+	assert not done.logErrors
+
+
+def test_probingForAMissingNameKeepsPythonsRules(tmp_path: Path):
+	"""hasattr, getattr with a default, mock.patch with create and ``from module import name`` treat
+	a name the replacement lacks as absent, as they would on any module, and each lookup is still
+	reported as a missing feature."""
+	done = harness.runChild(
+		tmp_path,
+		"""
+		from unittest import mock
+		import NVDAHelper
+		from winBindings import icu
+
+		def outcome(attempt):
+			try:
+				return ["returned", attempt()]
+			except Exception as e:
+				# ImportError's message ends with the module's location in parentheses.
+				return [type(e).__name__, str(e).partition(" (")[0]]
+
+		def patchWithCreate():
+			with mock.patch("NVDAHelper.localLib.newThing", create=True, new="patched"):
+				return NVDAHelper.localLib.newThing
+
+		result = {
+			"hasattr": outcome(lambda: hasattr(NVDAHelper, "whatever")),
+			"getattrDefault": outcome(lambda: getattr(NVDAHelper.localLib, "whatever", "default")),
+			"icuGetattrDefault": outcome(lambda: getattr(icu, "ucol_open", "default")),
+			"patchWithCreate": outcome(patchWithCreate),
+			"fromPackage": outcome(lambda: exec("from NVDAHelper import localWin10", {})),
+			"fromModule": outcome(lambda: exec("from NVDAHelper.localLib import EXCEL_CELLINFO", {})),
+		}
+		""",
+	)
+	assert done.error is None, done.error
+	assert done.value == {
+		"hasattr": ["returned", False],
+		"getattrDefault": ["returned", "default"],
+		"icuGetattrDefault": ["returned", "default"],
+		"patchWithCreate": ["returned", "patched"],
+		"fromPackage": ["ImportError", "cannot import name 'localWin10' from 'NVDAHelper'"],
+		"fromModule": ["ImportError", "cannot import name 'EXCEL_CELLINFO' from 'NVDAHelper.localLib'"],
+	}
+	# The import system looks the name up once in hasattr and again to bind it.
+	assert done.noLinuxImplementation == [
+		"NVDAHelper.whatever",
+		"NVDAHelper.localLib.whatever",
+		"winBindings.icu.ucol_open",
+		"NVDAHelper.localLib.newThing",
+		"NVDAHelper.localWin10",
+		"NVDAHelper.localWin10",
 		"NVDAHelper.localLib.EXCEL_CELLINFO",
 	]
 	assert not done.logErrors

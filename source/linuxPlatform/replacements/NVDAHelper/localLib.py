@@ -5,7 +5,9 @@ The beep generator and the three text boundary functions are implemented here, w
 calling convention, so their callers work unchanged; the others raise NoLinuxImplementation.
 Entry points that only Windows-only modules call (in-process helpers for Office, SysListView32,
 IAccessible2 and UI Automation) are left out, and reaching for one, or for any other name upstream's
-module has and this one lacks, raises NoLinuxImplementation naming it.
+module has and this one lacks, raises winBindings.icu.NoLinuxAttribute naming it: audited as
+NoLinuxImplementation, and an AttributeError to hasattr, getattr with a default and
+``from NVDAHelper.localLib import name``, which then raises ImportError.
 
 The text functions count in UTF-16 code units, as NVDA does everywhere: textLength, offsets and
 results are code units of the text encoded as UTF-16, whatever form the text is passed in.
@@ -65,11 +67,7 @@ writeCrashDump = _notImplemented("writeCrashDump")
 
 
 def __getattr__(name: str) -> NoReturn:
-	# The import system and other tools probe modules for optional names such as __path__ and
-	# expect AttributeError when one is absent.
-	if name.startswith("__"):
-		raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-	raise NoLinuxImplementation(f"{__name__}.{name}")
+	icu.missingAttribute(__name__, name)
 
 
 # The beep generator is nvdaHelper/local/beeps.cpp, statement for statement. hz arrives as a C float
