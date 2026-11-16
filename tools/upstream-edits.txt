@@ -193,9 +193,7 @@ source/languageHandler.py
   to a Windows locale identifier gives LCID_NONE and the reverse uses
   Python's table. The English names of a locale's language and country come
   from ICU; asking for its ANSI code page raises NoLinuxImplementation, as
-  the code page only names a Windows C runtime locale, which Linux never sets.
-  every platform: the catalogue directory is absolute under appDir, so
-  translations no longer depend on the working directory
+  the code page only names a Windows C runtime locale, which Linux never sets
 source/logHandler.py
   Linux runtime: the time comes from logging's own formatTime, not Win32
   time conversion; log.exception reads comtypes only on Windows; a record
