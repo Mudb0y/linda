@@ -8,7 +8,6 @@ and its runtime directory, where the single-instance lock is:
 	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_boot.py
 """
 
-import json
 import os
 import re
 import select
@@ -528,31 +527,6 @@ def test_configuredDriverFromOutsideTheTreeLoads(start: Start, tmp_path: Path):
 	assert nvda.waitForExit(STARTUP_BOUND + SHUTDOWN_BOUND) == 0, nvda.describe()
 	nvda.assertClean(logNames=("nvda.log",))
 	assert "Loaded synthDriver openevv" in nvda.text("nvda.log")
-
-
-def test_recordSeesNoLinuxImplementationThatUpstreamCaught(tmp_path: Path):
-	recordPath = tmp_path / "noLinuxImplementation.jsonl"
-	done = harness.runChild(
-		tmp_path,
-		f"""
-		import ctypes
-		import basedreader
-		basedreader._recordNoLinuxImplementation({str(recordPath)!r})
-		try:
-			ctypes.windll.user32.GetForegroundWindow()
-		except NotImplementedError:
-			pass
-		""",
-		prepare="bootstrap",
-	)
-	done.assertClean(ignoring={"noLinuxImplementation"})
-	assert done.noLinuxImplementation == ["user32.GetForegroundWindow"]
-	records = [json.loads(line) for line in recordPath.read_text(encoding="utf-8").splitlines()]
-	assert [r["what"] for r in records] == ["user32.GetForegroundWindow"]
-	assert records[0]["thread"] == "MainThread"
-	stack = records[0]["stack"]
-	assert "windowsCtypes.py" in stack[-1]
-	assert "GetForegroundWindow()" in stack[-2]
 
 
 def test_findingTheCallersModuleReadsNoSource(tmp_path: Path):

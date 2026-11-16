@@ -15,35 +15,8 @@ appDir = os.path.dirname(os.path.abspath(__file__))
 if appDir not in sys.path:
 	sys.path.insert(0, appDir)
 
-#: Names a file that receives a JSON line for every NoLinuxImplementation raised in this process,
-#: including those upstream catches and treats as a feature being absent.
-NO_LINUX_IMPLEMENTATION_FILE_VARIABLE = "BASEDREADER_NO_LINUX_IMPLEMENTATION_FILE"
 #: As the first argument, runs linuxPlatform.say instead of the screen reader.
 SAY_COMMAND = "say"
-
-
-def _recordNoLinuxImplementation(path: str) -> None:
-	import json
-	import threading
-	import traceback
-
-	from linuxPlatform import noLinuxImplementationEvent
-
-	# Line buffered, so that each record is on disk however the process ends.
-	recordFile = open(path, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
-
-	def onAudit(event: str, args: tuple) -> None:
-		if event != noLinuxImplementationEvent:
-			return
-		record = {
-			"what": str(args[0]),
-			"thread": threading.current_thread().name,
-			# The frames that raised it, without this hook's and NoLinuxImplementation's own.
-			"stack": traceback.format_stack(limit=14)[:-2],
-		}
-		recordFile.write(json.dumps(record) + "\n")
-
-	sys.addaudithook(onAudit)
 
 
 def _tell(message: str) -> None:
@@ -75,9 +48,6 @@ def main() -> NoReturn:
 			f"the word {SAY_COMMAND} starts the say mode only as the first argument, so nothing was started"
 		)
 		sys.exit(2)
-	recordPath = os.environ.get(NO_LINUX_IMPLEMENTATION_FILE_VARIABLE)
-	if recordPath:
-		_recordNoLinuxImplementation(recordPath)
 	from linuxPlatform import bootstrap
 
 	bootstrap.install()
