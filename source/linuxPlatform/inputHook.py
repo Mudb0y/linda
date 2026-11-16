@@ -132,9 +132,11 @@ def _onKey(event: KeyEvent) -> None:
 		passed = deliverKey(event.vkCode, event.scanCode, event.extended, event.injected, event.isUp)
 	finally:
 		_delivering.event = None
-	if event.vkCode == VK_CAPITAL and not event.reachedApplication and _source is not None:
+	if event.vkCode == VK_CAPITAL and _source is not None:
 		if not event.isUp and not event.repeat:
-			_capsLockUsedAsNVDAKey = not passed
+			_capsLockUsedAsNVDAKey = not event.reachedApplication and not passed
+		# The release reaches the application when input help let the keyboard go while the key was
+		# held, and the lock is toggled all the same.
 		elif event.isUp and _capsLockUsedAsNVDAKey:
 			# The X server toggles the lock whatever the grab does, and the key was the NVDA key.
 			_capsLockUsedAsNVDAKey = False
