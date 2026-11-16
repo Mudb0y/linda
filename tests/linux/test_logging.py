@@ -1245,8 +1245,8 @@ def test_watchdogRunsCallsWhileSuspended(tmp_path: Path):
 		try:
 			watchdog.noSuchAttribute
 			missing = "found"
-		except AttributeError:
-			missing = "AttributeError"
+		except AttributeError as e:
+			missing = [type(e).__name__, isinstance(e, NotImplementedError)]
 		result = {
 			"again": again,
 			"cancelling": cancelling,
@@ -1258,14 +1258,16 @@ def test_watchdogRunsCallsWhileSuspended(tmp_path: Path):
 		}
 		""",
 	)
-	done.assertClean()
+	# A name the replacement lacks is a missing feature, which hasattr still reads as absent.
+	assert done.noLinuxImplementation == ["watchdog.noSuchAttribute"]
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert {key: value for key, value in done.value.items() if key != "log"} == {
 		"again": "already running",
 		"cancelling": True,
 		"suspended": "ran",
 		"cancellingAfter": False,
 		"moved": True,
-		"missing": "AttributeError",
+		"missing": ["NoLinuxAttribute", True],
 	}
 	assert "Importing getFormattedStacksForAllThreads from here is deprecated" in done.value["log"]
 
