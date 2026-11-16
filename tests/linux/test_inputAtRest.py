@@ -1,7 +1,8 @@
 """Keyboard, mouse, touch and braille initialise, idle and terminate on Linux, touching no device.
 
 What is held here is that each of these starts and stops cleanly, that keyboard gestures keep working
-as values, that whatever needs the live keyboard raises NoLinuxImplementation, and that synthetic key
+as values, that with no key source whatever needs the live keyboard raises NoLinuxImplementation
+(test_keys.py has the source the rig's display gives), and that synthetic key
 events handed to linuxPlatform.inputHook, which takes the place of the Windows hooks, reach a script
 through inputCore. Run under the rig:
 
@@ -89,7 +90,8 @@ def run(
 	:param recordLevel: As for harness.runChild.
 	"""
 	code = PRELUDE + (OBJECTS if objects else "") + "".join(textwrap.dedent(p) for p in pieces)
-	done = harness.runChild(tmpPath, code, recordLevel=recordLevel)
+	# The rig's display is there, but these tests hand keys to inputHook themselves.
+	done = harness.runChild(tmpPath, code, recordLevel=recordLevel, env={"BASEDREADER_KEYS": "off"})
 	assert done.error is None, done.error
 	reached = reachedPastTheProcess(done)
 	assert not reached, f"reached past the process: {reached}"
@@ -373,8 +375,8 @@ def test_gestureModifierLogic(tmp_path: Path):
 		("KeyboardInputGesture.fromName('numpadPlus')", "keyboard state"),
 		# A key with no name of its own is named after what it types.
 		("KeyboardInputGesture(set(), 0xBA, 0x27, False).mainKeyName", "keyboard layout lookup"),
-		("KeyboardInputGesture.fromName('a').character", "user32.GetKeyboardLayout"),
-		("KeyboardInputGesture.fromName('control+a').send()", "user32.GetKeyState"),
+		# Sending a key reads the key states first, and with no key source there are none.
+		("KeyboardInputGesture.fromName('control+a').send()", "keyboard state"),
 		("keyboardHandler.injectRawKeyboardInput(True, 0x1E, False)", "user32.GetKeyboardLayout"),
 	),
 )
@@ -604,13 +606,11 @@ def test_captureLayerAnswersCompleteTheSeam(tmp_path: Path):
 	}
 
 
-def test_scriptWithAltNeedsKeyInjection(tmp_path: Path):
+def test_scriptWithAltRuns(tmp_path: Path):
 	done, value = run(
 		tmp_path,
 		SEAM,
 		"""
-		from linuxPlatform import NoLinuxImplementation
-
 		CONTROL = (0xA2, 0x1D, False)
 		ALT = (0xA4, 0x38, False)
 		N = (0x4E, 0x31, False)
@@ -625,23 +625,18 @@ def test_scriptWithAltNeedsKeyInjection(tmp_path: Path):
 
 		globalPluginHandler.runningPlugins.add(Plugin2())
 		passed = [press(CONTROL), press(ALT), press(N), release(N), release(ALT), release(CONTROL)]
-		# Alt pressed and released alone would open a menu, so before the script runs keyboardHandler
-		# injects a key the application ignores, which needs key injection.
-		try:
-			drain()
-		except NoLinuxImplementation as e:
-			missing = e.what
-		result = {"passed": passed, "ran": ran, "missing": missing}
+		# Alt pressed and released alone would open a menu on Windows, so before the script runs
+		# keyboardHandler injects a key the application ignores, which no X key is.
+		drain()
+		result = {"passed": passed, "ran": ran}
 		keyboardHandler.terminate()
 		""",
 		objects=True,
 	)
-	done.assertClean(ignoring={"noLinuxImplementation"})
-	assert done.noLinuxImplementation == ["user32.keybd_event"]
+	done.assertClean()
 	assert value == {
 		"passed": [True, True, False, False, True, True],
-		"ran": [],
-		"missing": "user32.keybd_event",
+		"ran": ["alt"],
 	}
 
 

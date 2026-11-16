@@ -543,6 +543,10 @@ class KeyboardInputGesture(inputCore.InputGesture):
 		self.scanCode = scanCode
 		self.isExtended = isExtended
 		super().__init__()
+		if sys.platform != "win32":
+			#: The key event the gesture was made from, when the keyboard delivered it; None for an
+			#: emulated gesture.
+			self._linuxKeyEvent = _linuxInputHook.deliveringKey()
 
 	@classmethod
 	def _generalizeModifiers(cls, modifiers: _ModifierT) -> _ModifierT:
@@ -626,6 +630,10 @@ class KeyboardInputGesture(inputCore.InputGesture):
 		For dead keys, returns the dead key character itself.
 		Returns None for unprintable characters or when Windows key is pressed.
 		"""
+		if sys.platform != "win32":
+			# The key source worked out what the key typed as it arrived, in the state it arrived in.
+			event = getattr(self, "_linuxKeyEvent", None)
+			return event.text if event is not None and event.typing else None
 		try:
 			threadID = api.getFocusObject().windowThreadID
 		except AttributeError:
@@ -789,6 +797,11 @@ class KeyboardInputGesture(inputCore.InputGesture):
 
 	def send(self):
 		global _lastInjectedKeyUp, _injectionDoneEvent
+		if sys.platform != "win32":
+			event = getattr(self, "_linuxKeyEvent", None)
+			if event is not None and event.reachedApplication:
+				# The application received the key when NVDA did; sending it would give it twice.
+				return
 		keys = []
 		for vk, ext in self.generalizedModifiers:
 			if vk == VK_WIN:
@@ -810,6 +823,9 @@ class KeyboardInputGesture(inputCore.InputGesture):
 
 		with ignoreInjection():
 			handleInjectedKeys = config.conf["keyboard"]["handleInjectedKeys"]
+			if sys.platform != "win32":
+				# The key source drops the echo of the keys it sends, so no key up would end the wait.
+				handleInjectedKeys = False
 			if handleInjectedKeys:
 				_lastInjectedKeyUp = (keys[0][0], keys[0][2])
 				if not _injectionDoneEvent:

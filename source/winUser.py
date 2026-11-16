@@ -11,6 +11,7 @@ When working on this file, consider moving to winAPI.
 
 import contextlib  # noqa: I001
 import ctypes
+import sys
 from ctypes import (
 	byref,
 	WinError,
@@ -532,6 +533,10 @@ def getAsyncKeyState(v):
 
 
 def getKeyState(v):
+	if sys.platform != "win32":
+		from linuxPlatform import inputHook
+
+		return inputHook.getKeyState(v)
 	return _user32.GetKeyState(v)
 
 
@@ -612,6 +617,10 @@ def getClassName(window: HWNDVal) -> str:
 
 
 def keybd_event(*args):
+	if sys.platform != "win32":
+		from linuxPlatform import inputHook
+
+		return inputHook.keybdEvent(*args)
 	return _user32.keybd_event(*args)
 
 
@@ -707,6 +716,10 @@ def RedrawWindow(hwnd, rcUpdate, rgnUpdate, flags):
 
 
 def getKeyNameText(scanCode, extended):
+	if sys.platform != "win32":
+		from linuxPlatform import inputHook
+
+		return inputHook.getKeyNameText(scanCode, extended)
 	buf = create_unicode_buffer(32)
 	_user32.GetKeyNameText((scanCode << 16) | (extended << 24), buf, 31)
 	return buf.value

@@ -236,9 +236,15 @@ source/keyboardHandler.py
   linuxPlatform.inputHook instead of user32: the sticky keys flags, whether
   num lock is on for a numpad operator key, and the character that names a
   key with no name of its own. A single character in a key name is looked
-  up there too, which answers for the ASCII letters as VkKeyScanEx does on
-  Latin layouts, shift for upper case. inputHook reads no layout or key
-  state, so the rest raise NoLinuxImplementation
+  up there too. inputHook asks the X key source, and with none, as without
+  a display, answers for the ASCII letters as VkKeyScanEx does on Latin
+  layouts and raises NoLinuxImplementation for the rest. A gesture keeps
+  the key event inputHook was delivering when it was made: its character
+  is what that key typed, as the key source worked it out, and send() does
+  nothing when the key also reached the application, which on X every key
+  but the NVDA keys and the numpad review keys does, so that a caret script
+  does not type its key twice. send() does not wait for the echo of the
+  keys it sends, which the key source drops
 source/languageHandler.py
   Linux runtime: the interface language, the C locale, language names and the
   measurement system come from linuxPlatform.posixLocale, which reads the
@@ -404,6 +410,12 @@ source/winInputHook.py
   Linux runtime: initialize and terminate go to linuxPlatform.inputHook,
   which installs no hook; its deliverKey and deliverMouse hand events to
   the callbacks set here, as the hook procedures do on Windows
+source/winUser.py
+  Linux runtime: getKeyState, keybd_event and getKeyNameText go to
+  linuxPlatform.inputHook, which answers from the X key source and sends
+  keys through XTEST. Through them work keyboardHandler's toggle key report
+  and send(), the lower case with caps lock beep and executeScript's
+  VK_NONE, which on Linux sends nothing
 source/winVersion.py
   every platform: winreg comes from linuxPlatform.windowsOnly, which on
   Windows is the real module.
