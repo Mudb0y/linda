@@ -51,8 +51,13 @@
         pygobject3
         pymdown-extensions
         pyphen
+        # The Qt 6 fixture's toolkit.
+        pyqt6
         pyserial
         pytest
+        # The X key source: XI2 events and grabs, and the XKB keymap that turns
+        # them into characters.
+        python-xlib
         regex
         requests
         rpyc
@@ -60,6 +65,7 @@
         unittest-xml-reporting
         url-normalize
         wxpython_4_3
+        xkbcommon
       ]);
 
       louisTables = pkgs.callPackage ./nix/louis-tables.nix { };
@@ -166,6 +172,20 @@
           xvfb
           xprop
           firefox
+          # The desktop the tests drive: a window manager, the programs that
+          # put windows, keys and layouts on the rig's display, and MATE's own
+          # programs and a Qt editor to read.
+          marco
+          xdotool
+          wmctrl
+          setxkbmap
+          caja
+          pluma
+          mate-terminal
+          mate-panel
+          mate-notification-daemon
+          libnotify
+          featherpad
           # tests/linux/rig builds its sandbox with this.
           bubblewrap
           git
@@ -196,6 +216,9 @@
         buildInputs = with pkgs; [
           at-spi2-core
           gtk3
+          gtk4
+          # Gtk-4.0's typelib imports Graphene's, which gtk4 does not bring.
+          graphene
           # Its gdk-pixbuf loader is how GTK draws its own symbolic icons.
           librsvg
         ];
@@ -216,6 +239,10 @@
         # .#basedreader-bench has built it. Stripped of its dependency on the
         # package, so that entering the shell never builds the engine.
         BASEDREADER_BENCH_BIN = builtins.unsafeDiscardStringContext "${bench}/bin/basedreader-bench";
+
+        # The Qt fixture sets QT_PLUGIN_PATH from it, so that a test needs no
+        # rig env to give Qt its X platform plugin. PyQt6's own Qt.
+        BASEDREADER_QT6_PLUGIN_PATH = "${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}";
 
         # Every locale, so that which ones the tests can set does not depend
         # on the ones the host happens to have built.

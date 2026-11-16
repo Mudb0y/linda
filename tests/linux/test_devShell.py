@@ -153,6 +153,11 @@ def _wireplumberBin(value: str) -> None:
 	_program(_directory(value), "wireplumber")
 
 
+def _qt6PluginPath(value: str) -> None:
+	# Without the xcb platform plugin a Qt program aborts before it opens a window.
+	_holds(_directory(value), "platforms/libqxcb.so")
+
+
 def _benchBin(value: str) -> None:
 	# Named without depending on the bench, so that entering the shell never builds the engine: it
 	# exists once nix build .#basedreader-bench has built it.
@@ -174,6 +179,7 @@ SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
 	"BASEDREADER_PIPEWIRE_BIN": _pipewireBin,
 	"BASEDREADER_WIREPLUMBER_BIN": _wireplumberBin,
 	"BASEDREADER_BENCH_BIN": _benchBin,
+	"BASEDREADER_QT6_PLUGIN_PATH": _qt6PluginPath,
 	"BASEDREADER_RIG_PATH": _searchPath,
 	"BASEDREADER_RIG_XDG_DATA_DIRS": _searchPath,
 }
