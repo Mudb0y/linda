@@ -135,7 +135,7 @@ def hookThreadFunc():
 def initialize():
 	global hookThread, hookThreadRefCount
 	if sys.platform != "win32":
-		# A capture layer takes the hooks' place on Linux, delivering events to the same callbacks.
+		# Linux has no hooks to install; linuxPlatform.inputHook delivers events to the same callbacks.
 		_linuxInputHook.initialize()
 		return
 	hookThreadRefCount += 1
