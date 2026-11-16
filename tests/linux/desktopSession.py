@@ -48,6 +48,17 @@ def windowManagerIsRunning() -> bool:
 	return subprocess.run(["xprop", "-id", checkWindow[1]], capture_output=True, check=False).returncode == 0
 
 
+def capsLockIsOn() -> bool:
+	"""Whether the rig's display has Caps Lock on."""
+	from Xlib import display
+
+	connection = display.Display()
+	try:
+		return bool(connection.get_keyboard_control().led_mask & 1)
+	finally:
+		connection.close()
+
+
 def _atspi():
 	import gi
 
@@ -158,6 +169,10 @@ class DesktopSession:
 		self._windowManager: subprocess.Popen | None = None
 		if windowManager and not windowManagerIsRunning():
 			self._startWindowManager()
+		# The rig's display outlives a test, and a test that failed with Caps Lock on would leave
+		# every later one typing capitals.
+		if capsLockIsOn():
+			subprocess.run(["xdotool", "key", "Caps_Lock"], check=True)
 
 	def __enter__(self) -> Self:
 		return self

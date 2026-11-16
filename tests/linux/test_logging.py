@@ -1099,7 +1099,9 @@ def test_watchdogLogsStackOfFrozenCore(tmp_path: Path):
 		}
 		""",
 	)
-	done.assertClean(ignoring={"logErrors"})
+	# The freeze is what this test makes.
+	done.assertClean(ignoring={"logErrors", "freeze"})
+	assert done.freezes, "the watchdog did not start recovering"
 	assert done.logErrors, "no frozen core was reported"
 	assert all(record.startswith("ERROR: Core frozen in stack!") for record in done.logErrors), done.logErrors
 	assert done.value["before"] == {"cancelling": False, "readable": False}
