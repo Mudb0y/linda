@@ -121,11 +121,10 @@ source/config/registry.py
   import safety: winreg imported only on Windows, after the module's other
   imports; on Linux winreg is absent, so its registry helpers raise NameError
 source/core.py
-  boot on Linux: the desktop object is linuxPlatform.desktop's placeholder,
-  which belongs to no process and finds no object with focus, in the
-  foreground or under a point, until the AT-SPI backend provides the real
-  desktop; and wx.App leaves SIGINT alone, which wxPython otherwise puts
-  back to its default action over the launcher's GLib handler, so that
+  boot on Linux: the desktop object is linuxPlatform.desktop's, which
+  belongs to no process and finds no object with focus, in the foreground
+  or under a point; and wx.App leaves SIGINT alone, which wxPython otherwise
+  puts back to its default action over the launcher's GLib handler, so that
   Ctrl+C would end NVDA without shutting it down. A restart starts the new
   copy through linuxPlatform.singleInstance, as a child process, instead of
   through ShellExecute. On every platform, doStartupDialogs() shows nothing

@@ -186,8 +186,9 @@ class MainFrame(wx.Frame):
 			self.prevFocus = focus
 			self.prevFocusAncestors = api.getFocusAncestors()
 		if sys.platform != "win32":
-			# Which application is in the foreground is known only through the AT-SPI backend, which does
-			# not exist yet; and on GTK raising this hidden frame would show it.
+			# Windows' foreground window has no counterpart for this process to ask about or take: only
+			# AT-SPI can tell which application is in the foreground, and on GTK raising this hidden frame
+			# would show it.
 			return
 		if winUser.getWindowThreadProcessID(winUser.getForegroundWindow())[0] != globalVars.appPid:
 			# This process is not the foreground process, so bring it to the foreground.
