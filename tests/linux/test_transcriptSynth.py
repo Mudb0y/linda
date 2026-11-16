@@ -32,6 +32,7 @@ from linuxPlatform import testHooks
 testHooks.install()
 import characterProcessing
 import config
+import nvwave
 import queueHandler
 import speech
 import speechDictHandler
@@ -39,6 +40,7 @@ import synthDriverHandler
 from speech.commands import *
 from speech.priorities import Spri
 
+nvwave.initialize()
 speechDictHandler.initialize()
 characterProcessing.initialize()
 config.conf["speech"]["synth"] = "transcript"
@@ -79,6 +81,17 @@ class Heard:
 
 	def plain(self):
 		return [(kind, index) for kind, index, _thread in self.notifications]
+
+
+def waitUntilSilent(timeout=10):
+	import time
+
+	deadline = time.monotonic() + timeout
+	while speech.isSpeaking() and time.monotonic() < deadline:
+		pump()
+		time.sleep(0.01)
+	pump()
+	return not speech.isSpeaking()
 """
 
 END = """
@@ -689,6 +702,141 @@ def test_speakingWhilePausedCancelsFirst(tmp_path: Path):
 	assert [kind for kind, _data in done.value["events"]] == ["speak", "pause", "cancel", "speak"]
 	assert done.value["events"][1] == ["pause", True]
 	assert done.value["sent"] == ["one", "two"]
+
+
+def test_playerModeQueuesUtterancesAndReportsFromTheFeedingThread(tmp_path: Path):
+	done = runSpeech(
+		tmp_path,
+		"""
+		import time
+
+		heard = Heard()
+		started = time.monotonic()
+		for text in ("one", "two", "three"):
+			speech.speakMessage(text)
+		result = {
+			"silent": waitUntilSilent(),
+			"elapsed": time.monotonic() - started,
+			"sent": spoken(),
+			"heard": heard.plain(),
+			"threads": sorted({thread for _kind, _index, thread in heard.notifications}),
+		}
+		""",
+		mode="player",
+	)
+	done.assertClean()
+	value = done.value
+	assert value["silent"]
+	assert value["sent"] == ["one", "two", "three"]
+	assert value["heard"] == [
+		["index", 1],
+		["done", None],
+		["index", 2],
+		["done", None],
+		["index", 3],
+		["done", None],
+	]
+	# Completion callbacks run on the thread that feeds the player.
+	assert value["threads"] == ["transcriptSynth"]
+	# Each utterance is its word and the chunk separator, five characters at 10 ms each, played in turn.
+	assert value["elapsed"] >= 0.15
+
+
+def test_playerModeNowInterruptsAndTheInterruptedUtteranceResumes(tmp_path: Path):
+	done = runSpeech(
+		tmp_path,
+		"""
+		heard = Heard()
+		speech.speakMessage("normal one")
+		speech.speakMessage("normal two")
+		speech.speakMessage("urgent", priority=Spri.NOW)
+		result = {"silent": waitUntilSilent(), "kinds": kinds(), "sent": spoken(), "heard": heard.plain()}
+		""",
+		mode="player",
+	)
+	done.assertClean()
+	value = done.value
+	assert value["silent"]
+	assert value["kinds"] == ["speak", "cancel", "speak", "speak", "speak"]
+	assert value["sent"] == ["normal one", "urgent", "normal one", "normal two"]
+	# The first "normal one" was stopped before its end, so its index never came.
+	assert value["heard"] == [
+		["index", 3],
+		["done", None],
+		["index", 1],
+		["done", None],
+		["index", 2],
+		["done", None],
+	]
+
+
+def test_playerModeCancelDiscardsWhatThePlayerHeld(tmp_path: Path):
+	done = runSpeech(
+		tmp_path,
+		"""
+		import time
+
+		heard = Heard()
+		# A second of audio, more than the player's buffer, so that the feeder is blocked in feed.
+		speech.speak(["x" * 100])
+		speech.speakMessage("two")
+		time.sleep(0.1)
+		speech.cancelSpeech()
+		# Past the end the cancelled audio would have had.
+		time.sleep(1.2)
+		heardAfterCancel = heard.plain()
+		speech.speakMessage("three")
+		result = {
+			"heardAfterCancel": heardAfterCancel,
+			"silent": waitUntilSilent(),
+			"sent": spoken(),
+			"heard": heard.plain(),
+		}
+		""",
+		mode="player",
+	)
+	done.assertClean()
+	value = done.value
+	assert value["heardAfterCancel"] == []
+	assert value["silent"]
+	assert value["sent"] == ["x" * 100, "three"]
+	assert value["heard"] == [["index", 3], ["done", None]]
+
+
+def test_playerModePauseHoldsTheAudioAndItsIndex(tmp_path: Path):
+	done = runSpeech(
+		tmp_path,
+		"""
+		import time
+
+		heard = Heard()
+		# 600 ms of audio; paused once it is playing.
+		speech.speak(["x" * 58])
+		time.sleep(0.1)
+		speech.pauseSpeech(True)
+		time.sleep(0.8)
+		heardWhilePaused = heard.plain()
+		resumed = time.monotonic()
+		speech.pauseSpeech(False)
+		silent = waitUntilSilent()
+		result = {
+			"heardWhilePaused": heardWhilePaused,
+			"silent": silent,
+			"afterResume": time.monotonic() - resumed,
+			"heard": heard.plain(),
+			"kinds": kinds(),
+		}
+		""",
+		mode="player",
+	)
+	done.assertClean()
+	value = done.value
+	assert value["heardWhilePaused"] == []
+	assert value["silent"]
+	assert value["heard"] == [["index", 1], ["done", None]]
+	# What was left when it paused, about half a second, played only after the resume.
+	assert value["afterResume"] >= 0.35
+	assert value["kinds"] == ["speak", "pause", "pause"]
 
 
 def test_synthListOnLinuxHasNoWindowsDriver(tmp_path: Path):
