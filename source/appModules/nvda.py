@@ -55,6 +55,32 @@ class NvdaDialogEmptyDescription(IAccessible):
 		return ""
 
 
+if sys.platform != "win32":
+	import wx
+	from NVDAObjects import NVDAObject
+	from NVDAObjects.behaviors import Dialog
+
+	class NvdaGtkDialog(NVDAObject):
+		"""One of NVDA's own wx dialogs, which wxGTK shows as a frame, so that its text is read as a
+		dialog's is on Windows."""
+
+		def _get_role(self):
+			return controlTypes.Role.DIALOG
+
+	class NvdaGtkSettingsDialog(NVDAObject):
+		"""A settings dialog, whose panel descriptions would be read twice, as NvdaDialogEmptyDescription
+		says."""
+
+		def _get_description(self):
+			return ""
+
+	def _shownWxDialog(title: str) -> wx.Dialog | None:
+		for window in wx.GetTopLevelWindows():
+			if isinstance(window, wx.Dialog) and window.IsShown() and window.GetTitle() == title:
+				return window
+		return None
+
+
 # Translators: The name of a category of NVDA commands.
 SCRCAT_PYTHON_CONSOLE = _("Python Console")
 
@@ -260,6 +286,11 @@ class AppModule(appModuleHandler.AppModule):
 	def chooseNVDAObjectOverlayClasses(self, obj, clsList):
 		if sys.platform != "win32":
 			# An AT-SPI object, which has no window class to tell NVDA's own dialogs apart by.
+			if obj.role == controlTypes.Role.FRAME and (dialog := _shownWxDialog(obj.name)) is not None:
+				clsList.insert(0, Dialog)
+				clsList.insert(0, NvdaGtkDialog)
+				if isinstance(dialog, gui.settingsDialogs.SettingsDialog):
+					clsList.insert(0, NvdaGtkSettingsDialog)
 			return
 		if obj.windowClassName == "#32770" and obj.role == controlTypes.Role.DIALOG:
 			clsList.insert(0, NvdaDialog)

@@ -83,6 +83,11 @@ import NVDAState
 import sys
 from linuxPlatform.windowsOnly import startfile
 
+if sys.platform != "win32":
+	from linuxPlatform import ownGui
+
+	ownGui.install()
+
 
 if NVDAState._allowDeprecatedAPI():
 
@@ -794,9 +799,7 @@ class SysTrayIcon(wx.adv.TaskBarIcon):
 			appModules.nvda.nvdaMenuIaIdentity = True
 		if sys.platform != "win32":
 			global _isNvdaMenuOpen
-			from linuxPlatform import gtkMenus
-
-			gtkMenus.selectFirstItemWhenShown()
+			ownGui.selectFirstMenuItemWhenShown()
 			# PopupMenu returns once the menu has closed, whichever way it closed.
 			_isNvdaMenuOpen = True
 			try:

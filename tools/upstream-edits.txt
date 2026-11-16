@@ -86,7 +86,10 @@ source/appModules/nvda.py
   menu directly in a window while gui says the menu is open, as it has no
   IAccessible identity there, so the menu is named NVDA as on Windows; and
   the focus on the unnamed window GTK puts that menu in is not spoken, as it
-  passes to the first item at once
+  passes to the first item at once. A frame of NVDA's own titled as a shown
+  wx.Dialog is a dialog, whose text is read as on Windows, since wxGTK shows
+  every wx dialog as a frame; a settings dialog's description is empty, as
+  NvdaDialogEmptyDescription makes it on Windows
 source/argsParsing.py
   Linux runtime: help goes to standard output and a command-line error to standard
   error with exit status 2, as argparse does, instead of a Windows message
@@ -177,7 +180,11 @@ source/gui/__init__.py
   for a flag SysTrayIcon.onActivate sets while its PopupMenu runs. showGui
   does not move the pointer to the middle of the screen before the NVDA
   menu opens, and onActivate has GTK select the menu's first item once it
-  is shown, as wx pops it up for the pointer with nothing selected
+  is shown, as wx pops it up for the pointer with nothing selected. On
+  import, linuxPlatform.ownGui takes out the MSAA repairs of NVDA's own
+  controls, whose wx.Accessible wxGTK cannot construct, so that the settings
+  dialog opens, and defers a settings dialog's first focus until GTK has
+  shown it
   every platform: the help menu's web pages, the donation page and the
   documentation open through startfile from linuxPlatform.windowsOnly,
   which is os.startfile on Windows and on Linux opens them with the
