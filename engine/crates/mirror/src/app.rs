@@ -193,7 +193,7 @@ pub async fn find_document(client: &Client, title: &str) -> Result<Option<String
         stack.extend(
             kids.into_iter()
                 .rev()
-                .filter(|k| !k.is_null() && k.bus == client.app_bus && !seen.contains(&k.path))
+                .filter(|k| !k.is_null() && k.bus == client.app_bus)
                 .map(|k| k.path),
         );
     }
