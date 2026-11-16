@@ -493,6 +493,62 @@ def runHazard(name: str) -> dict:
 			"UIAHandler.handler": _outcome(lambda: UIAHandler.handler),
 		}
 		return {"outcomes": outcomes, "audited": audited}
+	if name == "uiaGuards":
+		# Code that on Windows asks whether a TextInfo or tree interceptor is a UI Automation or
+		# Word one, which Linux never makes.
+		import types
+
+		import controlTypes
+		import textInfos
+		from browseMode import BrowseModeDocumentTreeInterceptor
+		from documentNavigation import paragraphHelper
+		from textInfos.offsets import OffsetsTextInfo
+
+		class Document:
+			text = "first\nsecond\n\nthird\n"
+			caret = 0
+
+		class DocumentText(OffsetsTextInfo):
+			encoding = None
+
+			def _getStoryText(self) -> str:
+				return self.obj.text
+
+			def _getStoryLength(self) -> int:
+				return len(self.obj.text)
+
+			def _getCaretOffset(self) -> int:
+				return self.obj.caret
+
+			def _setCaretOffset(self, offset: int) -> None:
+				self.obj.caret = offset
+
+		paragraphs = {}
+		for move in ("moveToSingleLineBreakParagraph", "moveToMultiLineBreakParagraph"):
+			document = Document()
+			paragraphs[move] = {
+				**_outcome(
+					lambda move=move, document=document: getattr(paragraphHelper, move)(
+						True,
+						False,
+						DocumentText(document, textInfos.POSITION_CARET),
+					),
+				),
+				"caret": document.caret,
+			}
+		fields = [
+			textInfos.FieldCommand("controlStart", textInfos.ControlField(role=controlTypes.Role.LINK)),
+			textInfos.FieldCommand("formatChange", textInfos.FormatField(color="blue")),
+			"a link",
+			textInfos.FieldCommand("controlEnd", None),
+		]
+		info = types.SimpleNamespace(getTextWithFields=lambda formatConfig: fields)
+		document = types.SimpleNamespace(STYLE_ATTRIBUTES=BrowseModeDocumentTreeInterceptor.STYLE_ATTRIBUTES)
+		styles = BrowseModeDocumentTreeInterceptor._extractStyles(document, info)
+		return {
+			"paragraphs": paragraphs,
+			"linkStyle": [dict(f.field) for f in styles if isinstance(f, textInfos.FieldCommand)],
+		}
 	if name == "guid":
 		from comtypes import GUID
 

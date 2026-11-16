@@ -583,6 +583,18 @@ def test_replacedModulesAnswerMissingNamesLoudly(tmp_path: Path):
 	]
 
 
+def test_uiaGuardsTakeTheLinuxBranch(tmp_path: Path):
+	"""Paragraph navigation and browse mode's style extraction, which on Windows check for UI
+	Automation and Word objects, run on Linux and treat every object as neither."""
+	hazard = runProbe(tmp_path, "hazard", "uiaGuards")["hazard"]
+	assert hazard["paragraphs"] == {
+		"moveToSingleLineBreakParagraph": {"raised": None, "returned": "(False, True)", "caret": 6},
+		"moveToMultiLineBreakParagraph": {"raised": None, "returned": "(False, True)", "caret": 14},
+	}
+	# Word reports link colours wrongly, so in Word they are replaced; nowhere else.
+	assert hazard["linkStyle"] == [{"color": "blue"}]
+
+
 def test_guidIsAValue(tmp_path: Path):
 	"""A GUID is data, not a call into Windows, so it compares, hashes and prints as on Windows."""
 	assert runProbe(tmp_path, "hazard", "guid")["hazard"] == {
