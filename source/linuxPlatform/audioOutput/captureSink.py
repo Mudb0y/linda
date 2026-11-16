@@ -12,11 +12,12 @@ import itertools
 import os
 import threading
 import wave
+import weakref
 from collections.abc import Callable
 
 from linuxPlatform import NoLinuxImplementation
 
-from . import WAVE_FORMAT_PCM, SinkStream, StreamFormat, pcm
+from . import WAVE_FORMAT_PCM, SinkStream, StreamFormat, checkGain, pcm
 from .nullSink import NullSink, NullStream
 
 
@@ -30,6 +31,7 @@ class CaptureStream(NullStream):
 		self._heardFrames = 0
 		self._stretchNumber: int | None = None
 		self._file: wave.Wave_write | None = None
+		self._closed = False
 
 	def _keepHeard(self) -> None:
 		heard = self._taken()
@@ -37,13 +39,20 @@ class CaptureStream(NullStream):
 		if frames <= 0:
 			return
 		size = frames * self.format.blockAlign
-		data = pcm.applyGain(self.format, bytes(self._unheard[:size]), self.volumes)
+		gain = self._sink.gain
+		data = pcm.applyGain(self.format, bytes(self._unheard[:size]), [v * gain for v in self.volumes])
 		del self._unheard[:size]
 		self._heardFrames = heard
 		if self._file is None:
 			self._file = self._sink._openFile(self._stretchNumber, self._streamNumber, self.format)
 		# wave rewrites the header after every write, so the file is complete at every step.
 		self._file.writeframes(data)
+		self._sink._noteDelivered(frames)
+
+	def keepHeard(self) -> None:
+		"""Write out everything heard so far."""
+		if not self._closed:
+			self._keepHeard()
 
 	def _endStretch(self) -> None:
 		self._keepHeard()
@@ -81,12 +90,17 @@ class CaptureStream(NullStream):
 		super().setChannelVolume(channel, level)
 
 	def close(self) -> None:
+		self._sink._forget(self)
 		super().close()
 		self._endStretch()
+		self._closed = True
 
 
 class CaptureSink(NullSink):
+	kind = "capture"
+
 	def __init__(self, directory: str) -> None:
+		super().__init__()
 		if not os.path.isdir(directory):
 			raise NotADirectoryError(errno.ENOTDIR, "the audio capture directory does not exist", directory)
 		self.directory = directory
@@ -94,6 +108,11 @@ class CaptureSink(NullSink):
 		self._lock = threading.Lock()
 		self._streamNumbers = itertools.count(1)
 		self._stretchNumbers = itertools.count(1)
+		self._streams: weakref.WeakSet[CaptureStream] = weakref.WeakSet()
+		self._delivered = 0
+		# Held while the gain changes, so that what was heard before it is kept at the gain it was
+		# heard at.
+		self._gainLock = threading.Lock()
 
 	def openStream(self, deviceId: str, fmt: StreamFormat, wake: Callable[[], None]) -> SinkStream:
 		if fmt.formatTag != WAVE_FORMAT_PCM:
@@ -103,8 +122,35 @@ class CaptureSink(NullSink):
 				f"the capture sink keeps integer PCM only, not wave format {fmt.formatTag}",
 			)
 		with self._lock:
-			streamNumber = next(self._streamNumbers)
-		return CaptureStream(self, streamNumber, fmt)
+			stream = CaptureStream(self, next(self._streamNumbers), fmt)
+			self._streams.add(stream)
+		return stream
+
+	def _openStreams(self) -> list[CaptureStream]:
+		with self._lock:
+			return list(self._streams)
+
+	def _forget(self, stream: CaptureStream) -> None:
+		with self._lock:
+			self._streams.discard(stream)
+
+	def setGain(self, level: float) -> None:
+		checkGain(level)
+		with self._gainLock:
+			for stream in self._openStreams():
+				stream.keepHeard()
+			self.gain = level
+
+	def deliveredFrames(self) -> int:
+		"""The frames written to the files, counting all that has been heard by now."""
+		for stream in self._openStreams():
+			stream.keepHeard()
+		with self._lock:
+			return self._delivered
+
+	def _noteDelivered(self, frames: int) -> None:
+		with self._lock:
+			self._delivered += frames
 
 	def _nextStretchNumber(self) -> int:
 		with self._lock:

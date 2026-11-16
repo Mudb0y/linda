@@ -9,6 +9,7 @@ timings asserted are loose enough for a loaded machine but tight enough to tell 
 its feeders from one that does not.
 """
 
+import math
 import textwrap
 import wave
 from pathlib import Path
@@ -62,7 +63,10 @@ def runAudio(tmpPath: Path, code: str, *, captureDir: Path | None = None, extra:
 		+ textwrap.dedent(ISOLATION)
 		+ "result = {'value': result, 'isolation': isolation}\n"
 	)
-	env = {"BASEDREADER_AUDIO_CAPTURE_DIR": str(captureDir) if captureDir else ""}
+	env = {
+		"BASEDREADER_AUDIO_SINK": None,
+		"BASEDREADER_AUDIO_CAPTURE_DIR": str(captureDir) if captureDir else "",
+	}
 	done = harness.runChild(tmpPath, "result = None\n" + body, env=env)
 	done.assertClean()
 	isolation = done.value["isolation"]
@@ -116,7 +120,10 @@ def test_backEndAloneMapsNothingThatCouldSound(tmp_path: Path):
 			"wx": "wx" in sys.modules,
 		}
 		"""
-	for env in ({"BASEDREADER_AUDIO_CAPTURE_DIR": ""}, {"BASEDREADER_AUDIO_CAPTURE_DIR": str(captureDir)}):
+	for env in (
+		{"BASEDREADER_AUDIO_SINK": None, "BASEDREADER_AUDIO_CAPTURE_DIR": ""},
+		{"BASEDREADER_AUDIO_SINK": None, "BASEDREADER_AUDIO_CAPTURE_DIR": str(captureDir)},
+	):
 		done = harness.runChild(
 			tmp_path, "import sys\n" + textwrap.dedent(code), prepare="bootstrap", env=env
 		)
@@ -822,6 +829,7 @@ def test_wakeFromASinkThreadEndsWaitsEarly(tmp_path: Path):
 				self._closed.set()
 
 		class RushingSink(audioOutput.Sink):
+			kind = "rushing"
 			description = "a sink whose device runs ahead"
 
 			def openStream(self, deviceId, fmt, wake):
@@ -835,6 +843,12 @@ def test_wakeFromASinkThreadEndsWaitsEarly(tmp_path: Path):
 
 			def stopKeepingAwake(self):
 				pass
+
+			def setGain(self, level):
+				pass
+
+			def deliveredFrames(self):
+				return 0
 
 		wakes = []
 		audioOutput._sink = RushingSink()
@@ -1299,10 +1313,250 @@ def test_missingCaptureDirectoryFailsAtStart(tmp_path: Path):
 
 		nvwave.initialize()
 		""",
-		env={"BASEDREADER_AUDIO_CAPTURE_DIR": str(tmp_path / "absent")},
+		env={"BASEDREADER_AUDIO_SINK": None, "BASEDREADER_AUDIO_CAPTURE_DIR": str(tmp_path / "absent")},
 	)
 	assert done.error is not None and "NotADirectoryError" in done.error
 	done.assertClean(ignoring={"error"})
+
+
+def test_theEnvironmentChoosesTheSink(tmp_path: Path):
+	"""BASEDREADER_AUDIO_SINK names the sink, unset it falls back to the capture directory, and any
+	other value, or the capture sink with nowhere to capture to, fails at the first getSink with the
+	variable named. The PipeWire sink is reached by importing its module, which a stand-in replaces
+	here so that nothing is loaded that could sound."""
+	captureDir = tmp_path / "capture"
+	captureDir.mkdir()
+	done = harness.runChild(
+		tmp_path,
+		f"""
+		import os
+		import sys
+		import types
+
+		from linuxPlatform import audioOutput
+
+		class StandIn:
+			kind = "pipewire"
+
+		standIn = types.ModuleType("linuxPlatform.audioOutput.pipewireSink")
+		standIn.PipewireSink = StandIn
+		sys.modules[standIn.__name__] = standIn
+		captureDir = {str(captureDir)!r}
+		chosen = {{}}
+		for sinkName in (None, "", "null", "capture", "pipewire", "alsa", "Null"):
+			for directory in (None, captureDir):
+				for name, value in (("BASEDREADER_AUDIO_SINK", sinkName), ("BASEDREADER_AUDIO_CAPTURE_DIR", directory)):
+					if value is None:
+						os.environ.pop(name, None)
+					else:
+						os.environ[name] = value
+				audioOutput._sink = None
+				try:
+					sink = audioOutput.getSink()
+					outcome = [type(sink).__name__, sink.kind, getattr(sink, "directory", None)]
+				except OSError as e:
+					outcome = [type(e).__name__, str(e)]
+				chosen[f"{{sinkName}} {{'with' if directory else 'without'}} directory"] = outcome
+		import wasapi
+
+		os.environ["BASEDREADER_AUDIO_SINK"] = "alsa"
+		audioOutput._sink = None
+		try:
+			wasapi.wasPlay_startup()
+			startup = None
+		except OSError as e:
+			startup = [type(e).__name__, e.winerror, str(e)]
+		result = {{"chosen": chosen, "startup": startup}}
+		""",
+		prepare="bootstrap",
+		env={"BASEDREADER_AUDIO_SINK": None, "BASEDREADER_AUDIO_CAPTURE_DIR": None},
+	)
+	done.assertClean()
+	null = ["NullSink", "null", None]
+	capture = ["CaptureSink", "capture", str(captureDir)]
+	noDirectory = [
+		"FileNotFoundError",
+		(
+			"[Errno 2] BASEDREADER_AUDIO_SINK is capture, but BASEDREADER_AUDIO_CAPTURE_DIR names no "
+			"directory to capture to"
+		),
+	]
+
+	def unknown(name: str) -> list:
+		return [
+			"OSError",
+			f"[Errno 22] BASEDREADER_AUDIO_SINK must be null, capture or pipewire, not {name!r}",
+		]
+
+	assert done.value["chosen"] == {
+		"None without directory": null,
+		"None with directory": capture,
+		" without directory": null,
+		" with directory": capture,
+		"null without directory": null,
+		"null with directory": null,
+		"capture without directory": noDirectory,
+		"capture with directory": capture,
+		"pipewire without directory": ["StandIn", "pipewire", None],
+		"pipewire with directory": ["StandIn", "pipewire", None],
+		"alsa without directory": unknown("alsa"),
+		"alsa with directory": unknown("alsa"),
+		"Null without directory": unknown("Null"),
+		"Null with directory": unknown("Null"),
+	}
+	assert done.value["startup"] == [
+		"WindowsError",
+		-2147467259,
+		"[Errno 22] BASEDREADER_AUDIO_SINK must be null, capture or pipewire, not 'alsa'",
+	]
+
+
+def test_captureSinkKeepsAudioAtTheProcessGain(tmp_path: Path):
+	"""Sink.setGain on the capture sink: 0.5 is -6.0 dB on 16- and 24-bit audio, full scale stays
+	in range, audio heard before a change keeps the gain it was heard at, and a gain outside 0 to 1
+	is refused by both sinks."""
+	captureDir = tmp_path / "capture"
+	captureDir.mkdir()
+	value = runAudio(
+		tmp_path,
+		"""
+		import math
+		import struct
+
+		from linuxPlatform import audioOutput
+		from linuxPlatform.audioOutput.nullSink import NullSink
+
+		def tone(bits, frames):
+			peak = 2 ** (bits - 1) - 1
+			samples = [round(0.5 * peak * math.sin(2 * math.pi * 440 * i / 8000)) for i in range(frames)]
+			return b"".join(s.to_bytes(bits // 8, "little", signed=True) for s in samples)
+
+		def fullScale(bits):
+			return b"".join(
+				s.to_bytes(bits // 8, "little", signed=True)
+				for s in (2 ** (bits - 1) - 1, -(2 ** (bits - 1))) * 400
+			)
+
+		def play(bits, data):
+			player = nvwave.WavePlayer(1, 8000, bits, wantDucking=False)
+			player.enableTrimmingLeadingSilence(False)
+			player.feed(data)
+			player.sync()
+			del player
+			gc.collect()
+
+		sink = audioOutput.getSink()
+		gainAtStart = sink.gain
+		sources = []
+		for gain in (1.0, 0.5):
+			sink.setGain(gain)
+			for bits in (16, 24):
+				for data in (tone(bits, 4000), fullScale(bits)):
+					play(bits, data)
+					sources.append([gain, bits, data.hex()])
+		# A second at gain 1, which halves while the end of it is still to be heard.
+		sink.setGain(1.0)
+		player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False)
+		player.enableTrimmingLeadingSilence(False)
+		started = time.monotonic()
+		# Returns with 400 ms still to be heard.
+		player.feed(struct.pack("<8000h", *([10000] * 8000)))
+		time.sleep(0.05)
+		sink.setGain(0.5)
+		changedAt = time.monotonic() - started
+		player.sync()
+		del player
+		gc.collect()
+		refused = []
+		for refusing in (sink, NullSink()):
+			for level in (-0.01, 1.01, float("nan")):
+				try:
+					refusing.setGain(level)
+				except ValueError as e:
+					refused.append(str(e))
+		result = {"gainAtStart": gainAtStart, "sources": sources, "changedAt": changedAt, "refused": refused}
+		""",
+		captureDir=captureDir,
+	)
+	assert value["gainAtStart"] == 1.0
+	files = captured(captureDir)
+	assert len(files) == len(value["sources"]) + 1
+
+	def samples(data: bytes, width: int) -> list[int]:
+		return [
+			int.from_bytes(data[i : i + width], "little", signed=True) for i in range(0, len(data), width)
+		]
+
+	def rms(values: list[int]) -> float:
+		return math.sqrt(sum(v * v for v in values) / len(values))
+
+	levels = {}
+	for (gain, bits, source), got in zip(value["sources"], files):
+		assert (got["channels"], got["width"]) == (1, bits // 8)
+		heard, written = samples(got["frames"], bits // 8), samples(bytes.fromhex(source), bits // 8)
+		assert len(heard) == len(written)
+		limit = 2 ** (bits - 1)
+		assert all(-limit <= s < limit for s in heard)
+		if gain == 1.0:
+			assert heard == written
+		levels.setdefault(bits, []).append(rms(heard))
+	for bits, (tone, fullScale, halfTone, halfFullScale) in levels.items():
+		assert abs(20 * math.log10(halfTone / tone) + 6.0) < 0.1, bits
+		assert abs(20 * math.log10(halfFullScale / fullScale) + 6.0) < 0.1, bits
+	changed = samples(files[-1]["frames"], 2)
+	assert len(changed) == 8000
+	firstHalved = changed.index(5000)
+	assert set(changed[:firstHalved]) == {10000} and set(changed[firstHalved:]) == {5000}
+	# The clock says when each frame was heard; the call was made within a few milliseconds.
+	assert abs(firstHalved / 8000 - value["changedAt"]) < 0.02
+	assert (
+		value["refused"]
+		== [f"a gain of {level} is not between 0 and 1" for level in ("-0.01", "1.01", "nan")] * 2
+	)
+
+
+def test_deliveredFramesCountWhatReachedAnOutput(tmp_path: Path):
+	"""The capture sink counts the frames it kept, as they are heard, and only those; the null sink,
+	which keeps nothing, counts none."""
+	captureDir = tmp_path / "capture"
+	captureDir.mkdir()
+	code = """
+		from linuxPlatform import audioOutput
+
+		sink = audioOutput.getSink()
+		counts = {"atStart": sink.deliveredFrames()}
+		player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+		player.feed(bytes(1600))  # 100 ms
+		player.sync()
+		counts["afterOne"] = sink.deliveredFrames()
+		started = time.monotonic()
+		# 1 s, which returns with 400 ms still to be heard, cut off by the stop.
+		player.feed(bytes(16000))
+		time.sleep(0.05)
+		counts["whilePlaying"] = sink.deliveredFrames()
+		counts["playingFor"] = time.monotonic() - started
+		player.stop()
+		counts["afterStop"] = sink.deliveredFrames()
+		del player
+		gc.collect()
+		counts["atEnd"] = sink.deliveredFrames()
+		result = {"kind": sink.kind, "counts": counts}
+		"""
+	null = runAudio(tmp_path, code)
+	assert null == {
+		"kind": "null",
+		"counts": dict.fromkeys(("atStart", "afterOne", "whilePlaying", "afterStop", "atEnd"), 0)
+		| {"playingFor": null["counts"]["playingFor"]},
+	}
+	capture = runAudio(tmp_path, code, captureDir=captureDir)
+	assert capture["kind"] == "capture"
+	counts = capture["counts"]
+	keptFrames = sum(len(f["frames"]) // 2 for f in captured(captureDir))
+	assert counts["atStart"] == 0
+	assert counts["afterOne"] == 800
+	playedFor = counts["playingFor"]
+	assert 800 + (playedFor - 0.05) * 8000 <= counts["whilePlaying"] <= 800 + (playedFor + 0.01) * 8000
+	assert counts["whilePlaying"] <= counts["afterStop"] == counts["atEnd"] == keptFrames < 800 + 8000
 
 
 def test_duckingReportsUnsupported(tmp_path: Path):

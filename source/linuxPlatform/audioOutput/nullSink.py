@@ -8,7 +8,7 @@ of a device.
 import time
 from collections.abc import Callable
 
-from . import BUFFER_MS, Sink, SinkStream, StreamFormat
+from . import BUFFER_MS, Sink, SinkStream, StreamFormat, checkGain
 
 
 class NullStream(SinkStream):
@@ -82,7 +82,19 @@ class NullStream(SinkStream):
 
 
 class NullSink(Sink):
+	kind = "null"
 	description = "null sink: audio is timed as a device would play it, then discarded"
+
+	def __init__(self) -> None:
+		self.gain = 1.0
+
+	def setGain(self, level: float) -> None:
+		checkGain(level)
+		self.gain = level
+
+	def deliveredFrames(self) -> int:
+		# Nothing reaches an output.
+		return 0
 
 	def openStream(self, deviceId: str, fmt: StreamFormat, wake: Callable[[], None]) -> SinkStream:
 		return NullStream(fmt)

@@ -5,19 +5,23 @@ silence) lives in the wasapi replacement and is the same for every sink. A sink 
 consume frames the way a sound device does and say how far it has got, much as WASAPI's
 IAudioClient, IAudioRenderClient and IAudioClock do for upstream's player.
 
-Which sink is used is decided once per process, and only by the environment. With
-BASEDREADER_AUDIO_CAPTURE_DIR naming a directory, the capture sink also writes what was played
-there. Otherwise the null sink is used. Neither opens a sound device or loads a sound library, and
-there is no fallback from one sink to another: a sink that cannot be used fails.
+Which sink is used is decided once per process, and only by the environment. BASEDREADER_AUDIO_SINK
+names it: null, capture or pipewire. Unset or empty, the capture sink is used when
+BASEDREADER_AUDIO_CAPTURE_DIR names a directory, and the null sink otherwise. The capture sink writes
+what was played to that directory; neither it nor the null sink opens a sound device or loads a
+sound library. There is no fallback from one sink to another: a sink that cannot be used fails.
 """
 
+import errno
 import os
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 
-#: Names the directory the capture sink writes to; when unset or empty the null sink is used.
+#: Names the sink: null, capture or pipewire.
+SINK_VARIABLE = "BASEDREADER_AUDIO_SINK"
+#: Names the directory the capture sink writes to.
 CAPTURE_DIR_VARIABLE = "BASEDREADER_AUDIO_CAPTURE_DIR"
 
 #: The length of the queue a stream holds ahead of the listener, as WASAPI's shared-mode buffer
@@ -111,7 +115,10 @@ class SinkStream(ABC):
 	def playedFrames(self) -> int:
 		"""Frames the listener has heard since the stream was opened or last reset.
 
-		Never more than the frames written. May raise StreamLost, after which the player takes every
+		Never more than the frames written. Keeps advancing in real time while the stream is started
+		and holds frames, even when the device or server stops consuming them: a sink whose output
+		stalls discards in real time, so that feeds, syncs and the callbacks of NVDA's speech never
+		wait on a device that is not there. May raise StreamLost, after which the player takes every
 		frame written as played, or another OSError.
 		"""
 
@@ -121,7 +128,10 @@ class SinkStream(ABC):
 
 	@abstractmethod
 	def stop(self) -> None:
-		"""Stop playing at once, keeping what is queued and the position."""
+		"""Stop playing at once, keeping what is queued and the position.
+
+		Takes effect within one device period, and never waits on anything a real-time thread holds.
+		"""
 
 	@abstractmethod
 	def reset(self) -> None:
@@ -146,6 +156,8 @@ class SinkStream(ABC):
 class Sink(ABC):
 	"""Where every stream of the process goes."""
 
+	#: Which sink this is: "null", "capture" or "pipewire".
+	kind: str
 	#: Says in the log which sink is in use.
 	description: str
 
@@ -172,6 +184,26 @@ class Sink(ABC):
 	def stopKeepingAwake(self) -> None:
 		"""Stop whatever keepAwakeFor started."""
 
+	@abstractmethod
+	def setGain(self, level: float) -> None:
+		"""Set a gain from 0 to 1 for every stream of the process, applied to audio not yet played,
+		after each stream's channel volumes and before samples are clamped to their range. It is 1
+		until set. Applied by the sink, never as a volume of the sound server.
+
+		:raise ValueError: When level is outside 0 to 1.
+		"""
+
+	@abstractmethod
+	def deliveredFrames(self) -> int:
+		"""The frames, summed over all streams, that have reached a real output since the sink was
+		made, which tells audio that was heard from audio that was only timed."""
+
+
+def checkGain(level: float) -> None:
+	"""Refuse a process gain outside 0 to 1, as Sink.setGain promises."""
+	if not 0.0 <= level <= 1.0:
+		raise ValueError(f"a gain of {level} is not between 0 and 1")
+
 
 _sink: Sink | None = None
 _sinkLock = threading.Lock()
@@ -187,11 +219,25 @@ def getSink() -> Sink:
 
 
 def _selectSink() -> Sink:
-	captureDir = os.environ.get(CAPTURE_DIR_VARIABLE)
-	if captureDir:
+	kind = os.environ.get(SINK_VARIABLE, "")
+	captureDir = os.environ.get(CAPTURE_DIR_VARIABLE, "")
+	if kind == "":
+		kind = "capture" if captureDir else "null"
+	if kind == "null":
+		from .nullSink import NullSink
+
+		return NullSink()
+	if kind == "capture":
+		if not captureDir:
+			raise OSError(
+				errno.ENOENT,
+				f"{SINK_VARIABLE} is capture, but {CAPTURE_DIR_VARIABLE} names no directory to capture to",
+			)
 		from .captureSink import CaptureSink
 
 		return CaptureSink(captureDir)
-	from .nullSink import NullSink
+	if kind == "pipewire":
+		from .pipewireSink import PipewireSink
 
-	return NullSink()
+		return PipewireSink()
+	raise OSError(errno.EINVAL, f"{SINK_VARIABLE} must be null, capture or pipewire, not {kind!r}")
