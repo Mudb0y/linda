@@ -318,3 +318,9 @@ source/windowUtils.py
   that GTK scales for the display itself; every message box and settings
   panel asks for it, and the dialogs that scale their sizes through
   gui.dpiScalingHelper would otherwise fail on GetDC
+tests/unit/__init__.py
+  unit tests on Linux: linuxPlatform.bootstrap.install() runs first; the
+  comtypes monkey patches and the load of nvdaHelperLocal.dll run only on
+  Windows, and on Linux NVDAHelper.localLib stays the Linux replacement; the
+  configuration directory is a temporary one, holding a copy of the test
+  braille tables, so that nothing is written under tests/unit

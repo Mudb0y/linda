@@ -14,6 +14,9 @@ Methods in test classes should have a C{test_} prefix.
 ### Ugly bootstrapping code.
 
 import os
+import shutil
+import sys
+import tempfile
 
 # The path to the unit tests.
 UNIT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -21,6 +24,10 @@ UNIT_DIR = os.path.dirname(os.path.abspath(__file__))
 TOP_DIR = os.path.dirname(os.path.dirname(UNIT_DIR))
 # The path to the NVDA "source" directory.
 SOURCE_DIR = os.path.join(TOP_DIR, "source")
+if sys.platform == "linux":
+	from linuxPlatform import bootstrap
+
+	bootstrap.install()
 
 # Apply several monkey patches to comtypes to make sure that it would search for generated interfaces
 # rather than creating them on the fly. Also stop module being never than typelib error, seen when
@@ -29,8 +36,9 @@ SOURCE_DIR = os.path.join(TOP_DIR, "source")
 # directory is appended to python path.
 import monkeyPatches.comtypesMonkeyPatches
 
-monkeyPatches.comtypesMonkeyPatches.replace_check_version()
-monkeyPatches.comtypesMonkeyPatches.appendComInterfacesToGenSearchPath()
+if sys.platform == "win32":
+	monkeyPatches.comtypesMonkeyPatches.replace_check_version()
+	monkeyPatches.comtypesMonkeyPatches.appendComInterfacesToGenSearchPath()
 import globalVars  # noqa: I001
 
 
@@ -43,6 +51,12 @@ globalVars.appDir = SOURCE_DIR
 # However, config currently requires a path.
 # We use the unit test directory, since we want a clean config.
 globalVars.appArgs.configPath = UNIT_DIR
+if sys.platform == "linux":
+	# Nothing may be written under tests/unit at run time: runs share the checkout, which may be read-only.
+	_configDir = tempfile.TemporaryDirectory(prefix="nvda-unit-config-")
+	globalVars.appArgs.configPath = _configDir.name
+	# test_louisHelper reads its custom tables from the configuration directory.
+	shutil.copytree(os.path.join(UNIT_DIR, "brailleTables"), os.path.join(_configDir.name, "brailleTables"))
 globalVars.appArgs.disableAddons = True
 
 
@@ -138,7 +152,8 @@ import ctypes  # noqa: I001
 import NVDAHelper
 import NVDAState
 
-NVDAHelper.localLib = ctypes.cdll.LoadLibrary(NVDAState.ReadPaths.nvdaHelperLocalDll)
+if sys.platform == "win32":
+	NVDAHelper.localLib = ctypes.cdll.LoadLibrary(NVDAState.ReadPaths.nvdaHelperLocalDll)
 # The focus and navigator objects need to be initialized to something.
 from .objectProvider import PlaceholderNVDAObject, NVDAObjectWithRole  # noqa: F401, I001
 
