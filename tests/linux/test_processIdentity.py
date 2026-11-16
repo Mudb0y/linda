@@ -298,8 +298,11 @@ except NoLinuxImplementation:
 def test_otherUsersProcess(tmp_path: Path):
 	# The kernel denies another user's /proc/PID/exe to anyone without the right to trace the process,
 	# and it denies it in the same way for this user's own process when that process is undumpable,
-	# which a process becomes by executing a file it may not read. The rig maps only this user, so the
-	# process's owner is the one fact the test cannot make real, and it changes whom NVDA runs as instead.
+	# which a process becomes by executing a file it may not read, unless fs.suid_dumpable is 1 and keeps
+	# it dumpable. The rig maps only this user, so the process's owner is the one fact the test cannot
+	# make real, and it changes whom NVDA runs as instead.
+	suidDumpable = Path("/proc/sys/fs/suid_dumpable").read_text().strip()
+	assert suidDumpable != "1", "fs.suid_dumpable is 1, so no process of this user can be made undumpable"
 	path = copyAs(tmp_path, "otherapp")
 	os.chmod(path, 0o111)
 	done = harness.runChild(
