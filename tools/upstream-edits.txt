@@ -99,9 +99,9 @@ source/config/__init__.py
   every platform: winreg comes from linuxPlatform.windowsOnly, which on
   Windows is the real module.
   Linux runtime: nothing installs NVDA, so isInstalledCopy() is False and
-  getInstalledUserConfigPath() is None; that also turns off the
-  installed-only settings, parts of the update check and part of the remote
-  client. getUserDefaultConfigPath() is the XDG configuration directory,
+  getInstalledUserConfigPath() is None; that also turns off touch support,
+  the installed-only settings, parts of the update check and part of the
+  remote client. getUserDefaultConfigPath() is the XDG configuration directory,
   XDG_CONFIG_HOME/basedreader, never a directory under appDir
 source/config/registry.py
   every platform: winreg comes from linuxPlatform.windowsOnly, so
@@ -287,12 +287,14 @@ source/systemUtils.py
   every platform: winreg comes from linuxPlatform.windowsOnly, which on
   Windows is the real module.
   Linux runtime: hasUiAccess() is True, as X11 isolates no client from
-  another; it answers for X11 in a Wayland session too. Its consumers then do this: gui's
-  MainFrame skips the Show and Hide trick, which is wanted; touch, audio
-  ducking, the remote client's _canSendSAS and
+  another; it answers for X11 in a Wayland session too. Its consumers then
+  do this: gui's MainFrame skips the Show and Hide trick, which is wanted;
+  audio ducking, the remote client's _canSendSAS and
   utils.security._isObjectBelowLockScreen answer through their own Linux
-  guards; the full-screen magnifier, which would take it to mean input
-  transforms are supported, is never built on Linux. hasSyswow64Dir() and
+  guards; touchHandler.touchSupported() answers False before it asks,
+  because isInstalledCopy() is False; the full-screen magnifier, which
+  would take it to mean input transforms are supported, is never built on
+  Linux. hasSyswow64Dir() and
   _isSystemClockSecondsVisible() are False; the configuration directory
   opens through xdg-open; preventSystemIdle() warns once that the session may
   still go idle and returns, as say all and braille keys call it, and
