@@ -125,7 +125,7 @@ class _Player:
 		self._state = _PlayState.stopped
 		# Set by stop for the thread that next feeds, syncs or idles to finish the job.
 		self._isStopRequested = False
-		# The stream, when a call that cannot replace it found it lost; the next feed replaces it.
+		# The stream, once a call has found it lost; the next feed replaces it.
 		self._lostStream: SinkStream | None = None
 		# Each pending callback's feed id and the frame its audio ends at.
 		self._feedEnds: list[tuple[int, int]] = []
@@ -190,14 +190,20 @@ class _Player:
 				errno.EINVAL, f"unsupported format {self.format}", None, _AUDCLNT_E_UNSUPPORTED_FORMAT
 			)
 		stream = audioOutput.getSink().openStream(self.deviceId, self.format, self._wake)
+		isLost = False
 		try:
 			for channel, level in enumerate(self._volumes):
 				stream.setChannelVolume(channel, level)
+		except StreamLost:
+			# Kept, for a feed to replace as it replaces any lost stream.
+			isLost = True
 		except OSError:
 			# The open failed, so the next feed opens a new stream; this one would never be closed.
 			with contextlib.suppress(OSError):
 				stream.close()
 			raise
+		# Marked lost before stop can reach it.
+		self._lostStream = stream if isLost else None
 		self._state = _PlayState.stopped
 		self._stream = stream
 
@@ -235,20 +241,12 @@ class _Player:
 		return self._lostStream is not None and self._lostStream is self._stream
 
 	def _bufferedFrames(self) -> int | None:
-		"""The frames still to be played, or None when the stream was lost and the player has none.
-
-		That happens at interpreter exit, when no new stream is opened, or when the exit hook closed
-		the new one while a stranded callback had the lock released.
-		"""
+		"""The frames still to be played, or None when the stream is found lost."""
 		try:
-			if self._isLost():
-				raise StreamLost(errno.EIO, "the stream was lost")
 			return self._stream.bufferedFrames()
 		except StreamLost:
-			self._reopenAfterLoss()
-			if self._stream is None:
-				return None
-			return self._stream.bufferedFrames()
+			self._noteLost(self._stream)
+			return None
 
 	def _playPos(self) -> int:
 		if not self._isLost():
@@ -336,6 +334,13 @@ class _Player:
 			self._state = _PlayState.playing
 		return self._continueUnlessStopping()
 
+	def _takeAsPlayed(self, frames: int) -> None:
+		"""Count frames as sent and played on a stream that is lost, so that the callbacks of what
+		was fed run at the next feed, sync or idle rather than being stranded."""
+		self._sentFrames += frames
+		# A lost stream's position is what was sent, so sync finds everything due at once.
+		self._state = _PlayState.playing
+
 	def open(self) -> None:
 		with self._locked():
 			self._open()
@@ -369,22 +374,32 @@ class _Player:
 					# (NVDA discussion 17697).
 					shouldInsertSilentFrame = True
 					remainingFrames += 1
-			isRetry = False
+			mayReplace = True
 			while remainingFrames > 0:
 				if not self._continueUnlessStopping():
 					return
+				if self._isLost():
+					if not mayReplace:
+						# The stream that replaced a lost one was lost before it took anything.
+						self._takeAsPlayed(remainingFrames)
+						break
+					mayReplace = False
+					self._reopenAfterLoss()
+					if self._stream is None:
+						# The interpreter is exiting.
+						return
+					continue
 				wakesSeen = self._wakeCount
 				paddingFrames = self._bufferedFrames()
 				if paddingFrames is None:
-					return
+					continue
 				bufferFrames = self._stream.bufferFrames
 				if paddingFrames > bufferFrames // 2:
 					self._waitUntilNeeded(fmt.framesToSeconds(paddingFrames - bufferFrames // 2), wakesSeen)
 					if not self._continueUnlessStopping():
 						return
-					paddingFrames = self._bufferedFrames()
-					if paddingFrames is None:
-						return
+					if self._isLost() or (paddingFrames := self._bufferedFrames()) is None:
+						continue
 				sendFrames = min(remainingFrames, bufferFrames - paddingFrames)
 				if sendFrames <= 0:
 					continue
@@ -400,16 +415,10 @@ class _Player:
 					if not self._startUnlessStopping():
 						return
 				except StreamLost:
-					if isRetry:
-						# A new stream lost before it took anything: the sink cannot play now.
-						raise
-					isRetry = True
 					# The chunk goes again, whole, to the stream that replaces this one.
-					self._reopenAfterLoss()
-					if self._stream is None:
-						return
+					self._noteLost(self._stream)
 					continue
-				isRetry = False
+				mayReplace = True
 				shouldInsertSilentFrame = False
 				self._maybeFireCallbacks()
 				if view is not None:
@@ -508,10 +517,17 @@ class _Player:
 
 	def destroy(self) -> None:
 		with self._locked():
+			wasLost = self._isLost()
 			stream = self._takeStream()
-			if stream is not None:
-				with contextlib.suppress(StreamLost):
-					stream.close()
+			if stream is None:
+				return
+			try:
+				stream.close()
+			except OSError:
+				# Raised here it would reach WavePlayer.__del__, which can only print it. A lost stream
+				# failing to close is expected; any other is worth a note.
+				if not wasLost:
+					log.debugWarning("Couldn't close the stream", exc_info=True)
 
 	def closeForExit(self) -> None:
 		"""Close the stream and leave any waiting feed or sync to return, without waiting for long.

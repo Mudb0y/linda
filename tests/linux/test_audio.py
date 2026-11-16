@@ -1307,6 +1307,147 @@ def test_aLostStreamIsReplacedWhicheverCallFindsIt(tmp_path: Path):
 		assert outcome == expected, case
 
 
+def test_aStreamLostAgainOnceReplacedTakesTheFeedAsPlayed(tmp_path: Path):
+	"""A sink that loses every stream it opens, from whichever method, the volumes set as a stream
+	opens among them: no feed fails, each feed tries one new stream, and every callback still runs,
+	since nvwave drops the callback of a feed that fails and a stranded end of utterance stalls
+	speech."""
+	value = runAudio(
+		tmp_path,
+		"""
+		from linuxPlatform import audioOutput
+		from linuxPlatform.audioOutput.nullSink import NullSink, NullStream
+
+		losing = {"method": None}
+
+		def losable(name):
+			base = getattr(NullStream, name)
+
+			def method(self, *args):
+				if losing["method"] == name:
+					raise audioOutput.StreamLost(5, "no device to play to")
+				return base(self, *args)
+
+			return method
+
+		class LosingStream(NullStream):
+			pass
+
+		for name in ("write", "bufferedFrames", "start", "setChannelVolume"):
+			setattr(LosingStream, name, losable(name))
+
+		class LosingSink(NullSink):
+			def __init__(self):
+				super().__init__()
+				self.opened = 0
+
+			def openStream(self, deviceId, fmt, wake):
+				self.opened += 1
+				return LosingStream(fmt)
+
+		outcomes = {}
+		for method in ("write", "bufferedFrames", "start", "setChannelVolume"):
+			for purpose in (nvwave.AudioPurpose.SPEECH, nvwave.AudioPurpose.SOUNDS):
+				sink = audioOutput._sink = LosingSink()
+				losing["method"] = method
+				events.clear()
+				raised = []
+
+				def attempt(name, call):
+					try:
+						call()
+					except Exception as e:
+						raised.append((name, repr(e)))
+
+				started = time.monotonic()
+				player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=purpose)
+				player.enableTrimmingLeadingSilence(False)
+				attempt("lost", lambda: player.feed(bytes(1600), onDone=done("lost")))  # 100 ms
+				attempt("again", lambda: player.feed(bytes(1600), onDone=done("again")))
+				syncer = threading.Thread(target=lambda: attempt("sync", player.sync), daemon=True)
+				syncer.start()
+				syncer.join(3)
+				outcomes[f"{method} {purpose.name}"] = {
+					"opened": sink.opened,
+					"calls": [tag for tag, _thread, _at in events],
+					"raised": raised,
+					"hung": syncer.is_alive(),
+					"took": time.monotonic() - started,
+				}
+				losing["method"] = None
+				del player
+				gc.collect()
+		result = outcomes
+		""",
+	)
+	assert len(value) == 8
+	for case, outcome in value.items():
+		took = outcome.pop("took")
+		expected = {"opened": 3, "calls": ["lost", "again"], "raised": [], "hung": False}
+		assert outcome == expected, case
+		# Nothing waited on a stream that cannot play.
+		assert took < 0.1, case
+
+
+def test_aStreamThatFailsToCloseNeverReachesTheCollector(tmp_path: Path):
+	"""nvwave destroys a player from WavePlayer.__del__, where an exception can only be printed, so a
+	close that fails is never raised: it is noted at debug level for a healthy stream, and passed
+	over for one that was lost."""
+	value = runAudio(
+		tmp_path,
+		"""
+		from linuxPlatform import audioOutput
+		from linuxPlatform.audioOutput.nullSink import NullSink, NullStream
+
+		class FailingStream(NullStream):
+			lost = False
+
+			def playedFrames(self):
+				if self.lost:
+					raise audioOutput.StreamLost(5, "device went away")
+				return super().playedFrames()
+
+			def close(self):
+				super().close()
+				raise OSError(5, "Input/output error")
+
+		class FailingSink(NullSink):
+			def openStream(self, deviceId, fmt, wake):
+				return FailingStream(fmt)
+
+		notes = []
+		debugWarning = wasapi.log.debugWarning
+
+		def noting(message, *args, **kwargs):
+			notes.append(message)
+			debugWarning(message, *args, **kwargs)
+
+		wasapi.log.debugWarning = noting
+		audioOutput._sink = FailingSink()
+		outcomes = {}
+		for case in ("healthy", "lost"):
+			notes.clear()
+			player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+			player.feed(bytes(1600), onDone=done(case))
+			handle = player._player
+			wasapi._players[handle]._stream.lost = case == "lost"
+			player.sync()
+			player.cycle = player
+			del player
+			gc.collect()
+			outcomes[case] = {"destroyed": handle not in wasapi._players, "notes": list(notes)}
+		result = {"outcomes": outcomes, "calls": [tag for tag, _thread, _at in events]}
+		""",
+	)
+	assert value == {
+		"outcomes": {
+			"healthy": {"destroyed": True, "notes": ["Couldn't close the stream"]},
+			"lost": {"destroyed": True, "notes": []},
+		},
+		"calls": ["healthy", "lost"],
+	}
+
+
 #: Stand-in sinks for the stop tests: each stream records when an abort reached it on the main
 #: thread, which is where nvwave stops speech on a key press. Other threads keep the GIL busy.
 TIMED_SINKS = """

@@ -39,14 +39,17 @@ class NoDevice(OSError):
 class StreamLost(OSError):
 	"""The stream stopped working while open, as when a device goes away.
 
-	Any method of SinkStream but close may raise it, and the player never passes it on to nvwave.
-	Until the stream is replaced, the player takes every frame written to it as played, so that
-	nothing waits on a clock that has stopped. Raised from write, start or bufferedFrames, which only a
-	feed calls, it closes the stream at once, opens another, completes every pending callback, because
-	a stranded end-of-utterance callback stalls speech, and plays the rest of the feed on the new
-	stream, the frames of a failed write included. Raised from any other method, it leaves the
-	replacing to the next feed, so that callbacks still run only where nvwave expects them. A stop
-	that finds the stream lost has nothing left to silence.
+	Any method of SinkStream may raise it, and the player never passes it on to nvwave. From then on
+	the player calls nothing on that stream but close, and takes every frame written to it as played,
+	so that nothing waits on a clock that has stopped. The next feed to find the stream lost, which is
+	the feed in progress when write, start or bufferedFrames raised it, closes it, opens another,
+	completes every pending callback, because a stranded end-of-utterance callback stalls speech, and
+	plays the rest of the feed on the new stream, the frames of a failed write included. A loss found
+	anywhere else waits for that next feed, so that callbacks still run only where nvwave expects
+	them. When the stream that replaced a lost one is lost too before it has taken anything, the sink
+	cannot play for now: the rest of that feed is taken as played, so that its callback still runs,
+	and the feed after it tries a new stream again. A stop that finds the stream lost has nothing left
+	to silence.
 	"""
 
 
@@ -100,9 +103,9 @@ class SinkStream(ABC):
 	callback hands the event to a helper thread instead, through an eventfd or a pipe. wake is
 	harmless after close.
 
-	Any method may raise OSError when the sink fails; the player reports it to nvwave as a failed
-	HRESULT, E_FAIL for most errors and HRESULT_FROM_WIN32(ERROR_NOT_FOUND) for NoDevice. StreamLost
-	is handled by the player itself.
+	Any method may raise OSError when the sink fails. The player reports it to nvwave as a failed
+	HRESULT, E_FAIL for most errors and HRESULT_FROM_WIN32(ERROR_NOT_FOUND) for NoDevice, except from
+	close, which nvwave has no way to be told of. StreamLost is handled by the player itself.
 	"""
 
 	#: How many frames the stream holds before write would overrun it.
@@ -167,10 +170,7 @@ class SinkStream(ABC):
 
 	@abstractmethod
 	def close(self) -> None:
-		"""Stop and release the stream. Nothing else is called on it afterwards.
-
-		An OSError from closing a stream that has raised StreamLost is ignored.
-		"""
+		"""Stop and release the stream. Nothing else is called on it afterwards."""
 
 
 class Sink(ABC):
