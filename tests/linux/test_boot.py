@@ -358,7 +358,7 @@ def _holdLock(lockPath: str, record: str, ignoreTerm: bool = False) -> subproces
 				"import fcntl, os, signal, sys\n"
 				f"if {ignoreTerm!r}:\n"
 				"	signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-				f"fd = os.open({lockPath!r}, os.O_RDWR)\n"
+				f"fd = os.open({lockPath!r}, os.O_RDWR | os.O_CREAT, 0o600)\n"
 				"fcntl.lockf(fd, fcntl.LOCK_EX)\n"
 				f"if {record!r}:\n"
 				"	os.ftruncate(fd, 0)\n"
@@ -1033,6 +1033,19 @@ def test_exitsWithModalDialogsOpen(
 	assert nvda.answers() == answers
 	assert nvda.savedSetting() == CHANGED_SETTING[2]
 	assert "NVDA exit" in nvda.log()
+
+
+def test_dialogReopenedForEverIsGivenUpOn(launcher):
+	# Code that shows its dialog again each time it is ended would otherwise keep the exit busy for ever.
+	nvda = launcher("reopening", "reopening", welcome=False)
+	nvda.waitForSentence(text=DIALOG_SENTENCE)
+	nvda.process.send_signal(signal.SIGTERM)
+	nvda.waitForLog("Gave up ending modal dialogs")
+	log = nvda.log()
+	given = re.search(r"^Gave up ending modal dialogs after ending (\d+);", log, re.MULTILINE)
+	assert given, log[-4000:]
+	assert log.count("ending modal <Gtk.MessageDialog") == int(given[1])
+	assert nvda.savedSetting() == CHANGED_SETTING[2]
 
 
 def test_magnifierToggleSaysItCannotStart(launcher):

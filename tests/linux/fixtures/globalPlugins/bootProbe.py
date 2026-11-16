@@ -26,6 +26,7 @@ the innermost is open. Each call that showed a dialog logs the answer it got, as
 - "fileDialog" opens wx.FileDialog, which wxGTK shows with GTK's own file chooser.
 - "nestedDialogs" opens a wx dialog, and another inside it.
 - "dialogInWelcome" opens a wx dialog inside the welcome dialog of a first start.
+- "reopening" opens wx.MessageBox again each time it is answered, for ever.
 Those that wait, wait for something to signal NVDA, or with "+exit" appended ask NVDA to exit through
 core.triggerNVDAExit once they are ready, from inside the innermost dialog where there is one.
 Unset, the plugin does nothing, so that other tests which add this directory to globalPlugins
@@ -55,6 +56,7 @@ dialogModes = (
 	"fileDialog",
 	"nestedDialogs",
 	"dialogInWelcome",
+	"reopening",
 )
 otherModes = (
 	"exit",
@@ -189,6 +191,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		self._whenOpen(_isNativeDialogOpen)
 		answer = wx.MessageBox("Opened by the boot probe.", "Boot probe", wx.OK | wx.CANCEL, gui.mainFrame)
 		self._answered(self._mode, answer)
+
+	def _reopening(self) -> None:
+		import gui
+
+		self._whenOpen(_isNativeDialogOpen)
+		while True:
+			wx.MessageBox("Opened by the boot probe again.", "Boot probe", wx.OK | wx.CANCEL, gui.mainFrame)
 
 	def _fileDialog(self) -> None:
 		import gui

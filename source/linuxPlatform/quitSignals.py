@@ -69,7 +69,8 @@ def _triggerExit() -> None:
 
 	global _isExiting
 	core.triggerNVDAExit()
-	# Not triggered when a message box outlived the attempt to end it; the next quit signal tries again.
+	# Refused while a message box is being shown that was not yet open to be ended; the next quit
+	# signal tries again.
 	_isExiting = core._hasShutdownBeenTriggered
 
 
