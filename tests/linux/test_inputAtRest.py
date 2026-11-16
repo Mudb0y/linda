@@ -8,39 +8,16 @@ through inputCore. Run under the rig:
 	nix develop . -c tests/linux/rig python3 -m pytest -p no:cacheprovider tests/linux/test_inputAtRest.py
 """
 
+import logging
+import os
 import textwrap
 from pathlib import Path
 
 import harness
 import pytest
 
-#: Enters NVDA's import cycle where core.main does, and watches for anything that reaches past the
-#: process: device and system files, sockets, native libraries and child processes. The one native
-#: library expected is the dev shell's ICU, which textUtils loads at import for segmentation, as
-#: upstream loads Windows' ICU.
+#: Enters NVDA's import cycle where core.main does.
 PRELUDE = """
-import os
-import sys
-
-_touched = []
-_icuDir = os.environ.get("BASEDREADER_ICU_LIB_DIR")
-
-
-def _isIcu(args):
-	return bool(_icuDir) and isinstance(args[0], str) and os.path.dirname(args[0]) == _icuDir
-
-
-def _watch(event, args):
-	if event == "ctypes.dlopen" and _isIcu(args):
-		return
-	if event in ("socket.connect", "ctypes.dlopen", "subprocess.Popen", "os.system"):
-		_touched.append(f"{event} {args!r}")
-	elif event == "open" and isinstance(args[0], str) and args[0].startswith(("/dev/", "/sys/", "/run/")):
-		_touched.append(f"{event} {args[0]}")
-
-
-sys.addaudithook(_watch)
-
 import NVDAHelper  # noqa: F401
 import languageHandler
 
@@ -48,9 +25,10 @@ import languageHandler
 languageHandler.setLanguage("en")
 """
 
-EPILOGUE = """
-result = {"value": result, "touched": _touched}
-"""
+#: The dev shell's ICU, which textUtils loads at import for segmentation, as upstream loads Windows'.
+ICU_DIRECTORY = os.environ.get("BASEDREADER_ICU_LIB_DIR")
+#: The file name of liblouis, which linuxPlatform.bootstrap has louis load before anything else.
+LIBLOUIS = "liblouis.so"
 
 #: A placeholder focus and desktop, as upstream's unit tests use, and the watchdog observer that
 #: keyboardHandler.initialize receives from core.main.
@@ -87,13 +65,35 @@ speech.sayAllInitialize(speech.speak, speech.speakObject, speech.getTextInfoSpee
 """
 
 
-def run(tmpPath: Path, *pieces: str, objects: bool = False) -> tuple[harness.ChildResult, object]:
-	"""Run the pieces after the prelude; return the child's result and the value they left in result."""
-	code = PRELUDE + (OBJECTS if objects else "") + "".join(textwrap.dedent(p) for p in pieces) + EPILOGUE
-	done = harness.runChild(tmpPath, code)
+def isExpectedLibrary(reach: str) -> bool:
+	if not reach.startswith("ctypes.dlopen "):
+		return False
+	path = reach.removeprefix("ctypes.dlopen ")
+	return os.path.basename(path) == LIBLOUIS or bool(
+		ICU_DIRECTORY and os.path.dirname(path) == ICU_DIRECTORY
+	)
+
+
+def reachedPastTheProcess(done: harness.ChildResult) -> list[str]:
+	"""What the run reached past its process, from the harness's record of it from the child's start:
+	device and system files, sockets, native libraries other than ICU and liblouis, and child
+	processes."""
+	return [reach for reach in done.reached if not isExpectedLibrary(reach)]
+
+
+def run(
+	tmpPath: Path, *pieces: str, objects: bool = False, recordLevel: int = logging.ERROR
+) -> tuple[harness.ChildResult, object]:
+	"""Run the pieces after the prelude; return the child's result and the value they left in result.
+
+	:param recordLevel: As for harness.runChild.
+	"""
+	code = PRELUDE + (OBJECTS if objects else "") + "".join(textwrap.dedent(p) for p in pieces)
+	done = harness.runChild(tmpPath, code, recordLevel=recordLevel)
 	assert done.error is None, done.error
-	assert not done.value["touched"], f"reached past the process: {done.value['touched']}"
-	return done, done.value["value"]
+	reached = reachedPastTheProcess(done)
+	assert not reached, f"reached past the process: {reached}"
+	return done, done.value
 
 
 def test_keyboardInitializesAndTerminates(tmp_path: Path):
@@ -885,24 +885,14 @@ def test_brailleAutomaticDetectionFindsNothing(tmp_path: Path):
 
 
 ACK_DISPLAY = """
-import logging
 import threading
 import time
 
 from braille.display.driver import BrailleDisplayDriver
 from logHandler import log
 
-timedOut = []
-
-
-class Collector(logging.Handler):
-	def emit(self, record):
-		if "ACK packet timed out" in record.getMessage():
-			timedOut.append(record.getMessage())
-
-
+# The timeout is logged at DEBUG, and a record below its logger's level is never made.
 log.setLevel(log.DEBUG)
-log.addHandler(Collector())
 
 
 class AckDisplay(BrailleDisplayDriver):
@@ -975,7 +965,6 @@ def test_brailleAckTimer(tmp_path: Path, acknowledged: bool):
 			"awaitingAfterWrite": awaiting,
 			"awaitingNow": display._awaitingAck,
 			"timerRan": len(resetterCalls),
-			"timedOut": len(timedOut),
 		}}
 		# The test's display has no configuration section for terminate to save its settings to.
 		handler.display = None
@@ -984,13 +973,15 @@ def test_brailleAckTimer(tmp_path: Path, acknowledged: bool):
 		"""
 		result = up
 		""",
+		recordLevel=logging.DEBUG,
 	)
 	done.assertClean()
+	timedOut = [record for record in done.logRecords if "ACK packet timed out" in record]
+	assert len(timedOut) == (0 if acknowledged else 1), timedOut
 	assert value == {
 		"written": [[1, 2, 3, 4]],
 		"armed": True,
 		"awaitingAfterWrite": True,
 		"awaitingNow": False,
 		"timerRan": 0 if acknowledged else 1,
-		"timedOut": 0 if acknowledged else 1,
 	}
