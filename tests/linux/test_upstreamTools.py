@@ -100,3 +100,49 @@ def test_remoteNamedUpstreamIsNeverTheBase(repo: Repo):
 		done = repo.tool(tool)
 		assert done.returncode != 0, tool
 		assert "git fetch origin upstream:upstream" in done.stderr, tool
+
+
+@pytest.fixture
+def nvda(tmp_path: Path) -> Repo:
+	"""NVDA's repository: a release tag, and a beta branch already working towards the next."""
+	r = Repo(tmp_path / "nvda")
+	r.path.mkdir()
+	r.git("init", "-q", "-b", "master")
+	r.write("source/buildVersion.py", "version_year = 2027\nversion_major = 1\nversion_minor = 0\n")
+	r.commit("Release", "source")
+	r.git("tag", "-a", "-m", "release", "release-2027.1")
+	r.git("checkout", "-q", "-b", "beta")
+	r.write("source/buildVersion.py", "version_year = 2027\nversion_major = 2\nversion_minor = 1\n")
+	r.commit("Next", "source")
+	return r
+
+
+def importUpstream(repo: Repo, nvda: Repo, name: str, parent: str) -> tuple[str, str]:
+	"""Imports name, checks what was recorded, and gives the commit's subject and body."""
+	before = repo.git("rev-parse", parent)
+	done = repo.tool("import-upstream", name, f"file://{nvda.path}")
+	assert done.returncode == 0, done.stdout + done.stderr
+	imported = repo.git("rev-parse", "refs/heads/upstream")
+	assert repo.git("rev-parse", f"{imported}^") == before
+	assert repo.git("rev-parse", f"{imported}^{{tree}}") == nvda.git("rev-parse", f"{name}^{{tree}}")
+	return repo.git("log", "-1", "--format=%s", imported), repo.git("log", "-1", "--format=%b", imported)
+
+
+def test_importOfATagNamesTheRelease(repo: Repo, nvda: Repo):
+	subject, body = importUpstream(repo, nvda, "release-2027.1", "refs/heads/upstream")
+	assert subject == "Import NVDA 2027.1"
+	assert nvda.git("rev-parse", "release-2027.1^{commit}") in body
+	assert "tag release-2027.1" in body
+
+
+def test_importOfABranchNamesTheBranchAndItsVersion(repo: Repo, nvda: Repo):
+	subject, body = importUpstream(repo, nvda, "beta", "refs/heads/upstream")
+	assert subject == "Import NVDA 2027.2.1 from branch beta"
+	assert nvda.git("rev-parse", "beta") in body
+	assert "branch beta" in body and "tag" not in body
+
+
+def test_importInAFreshCloneBuildsOnOriginUpstream(repo: Repo, nvda: Repo, tmp_path: Path):
+	clone = Repo(tmp_path / "clone")
+	repo.run("git", "clone", "-q", "--branch", "main", repo.path, clone.path)
+	importUpstream(clone, nvda, "release-2027.1", "refs/remotes/origin/upstream")

@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
-# Records an NVDA release on the upstream branch as one commit holding its
-# untouched tree, so that main can merge it three-way against the release
-# imported before it.
+# Records an NVDA release, or the tip of one of NVDA's branches, on the
+# upstream branch as one commit holding its untouched tree, so that main can
+# merge it three-way against the tree imported before it.
 set -euo pipefail
 
-if [ $# -ne 1 ]; then
-	echo "usage: import-upstream tag, for example release-2026.4" >&2
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+	echo "usage: import-upstream TAG|BRANCH [REPOSITORY], for example release-2026.4 or beta" >&2
 	exit 2
 fi
-tag=$1
-version=${tag#release-}
-url=https://github.com/nvaccess/nvda.git
+name=$1
+url=${2:-https://github.com/nvaccess/nvda.git}
 
 tools=$(cd "$(dirname "$0")" && pwd)
 cd "$(git rev-parse --show-toplevel)"
 base=$("$tools/upstream-ref")
-echo "importing NVDA $version from $url"
+echo "importing NVDA $name from $url"
 
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
@@ -24,14 +23,32 @@ trap 'rm -rf "$scratch"' EXIT
 # mark it shallow, and a shallow repository cannot be pushed to a new remote.
 # A parentless copy of the tree, made in a throwaway clone, has no history to
 # be shallow about.
-git clone --quiet --depth 1 --branch "$tag" "$url" "$scratch/nvda"
+git clone --quiet --depth 1 --branch "$name" "$url" "$scratch/nvda"
 commit=$(git -C "$scratch/nvda" rev-parse 'HEAD^{commit}')
 snapshot=$(git -C "$scratch/nvda" commit-tree 'HEAD^{tree}' -m snapshot)
 git -C "$scratch/nvda" update-ref refs/heads/snapshot "$snapshot"
 git fetch --quiet "$scratch/nvda" snapshot
 
+if git -C "$scratch/nvda" rev-parse -q --verify "refs/tags/$name" >/dev/null; then
+	version=${name#release-}
+	subject="Import NVDA $version"
+	origin="tag $name"
+else
+	# A branch carries no release name, only the version it is working towards.
+	field() {
+		sed -n "s/^version_$1 = \([0-9][0-9]*\).*/\1/p" "$scratch/nvda/source/buildVersion.py"
+	}
+	version="$(field year).$(field major)"
+	minor=$(field minor)
+	if [ "${minor:-0}" != 0 ]; then
+		version="$version.$minor"
+	fi
+	subject="Import NVDA $version from branch $name"
+	origin="the tip of branch $name, committed $(git -C "$scratch/nvda" log -1 --format=%cs)"
+fi
+
 new=$(git commit-tree 'FETCH_HEAD^{tree}' -p "$base" \
-	-m "Import NVDA $version" \
-	-m "Pristine tree of upstream commit $commit, tag $tag of ${url%.git}.")
+	-m "$subject" \
+	-m "Pristine tree of upstream commit $commit, $origin of ${url%.git}.")
 git update-ref refs/heads/upstream "$new"
 echo "upstream now holds NVDA $version as $new; merge it with: git merge upstream"
