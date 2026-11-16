@@ -28,7 +28,7 @@ from typing import Self
 
 import harness
 import pytest
-from pipewireFixture import RATE, PipewireFixture, runningPipewire  # noqa: F401
+from pipewireFixture import RATE, PipewireFixture, assertCleanThroughPipewire, runningPipewire  # noqa: F401
 
 CRATE = harness.ROOT / "engine" / "crates" / "pwsink"
 WAVES = harness.SOURCE / "waves"
@@ -117,20 +117,15 @@ def runPipewireChild(
 	params: dict | None = None,
 	timeout: float = 90,
 ) -> object:
-	"""Runs code after PRELUDE in a harness child, requires it to have been clean, and returns its
-	result.
-
-	The one place a child that maps libpipewire-0.3 is started, so that a harness that refuses sound
-	libraries in children is told here that this one is expected.
-	"""
+	"""Runs code after PRELUDE in a harness child, requires it to have been clean, with PipeWire's
+	client the only sound library it mapped, and returns its result."""
 	done = harness.runChild(
 		tmpPath,
 		PRELUDE + textwrap.dedent(code),
 		env={**env, "TEST_PARAMS": json.dumps(params or {})},
 		timeout=timeout,
 	)
-	done.assertClean()
-	assert done.returnCode == 0, done.stderr[-3000:]
+	assertCleanThroughPipewire(done)
 	return done.value
 
 

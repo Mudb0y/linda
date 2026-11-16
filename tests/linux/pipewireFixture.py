@@ -9,6 +9,7 @@ signals only processes it started itself.
 	with PipewireFixture(tmp_path / "pipewire") as pipewire:
 		monitor = pipewire.monitor()
 		done = harness.runChild(tmp_path, code, env=pipewire.childEnv())
+		assertCleanThroughPipewire(done)
 
 or, as a pytest fixture, import runningPipewire from here and take a parameter named pipewire.
 """
@@ -21,7 +22,7 @@ import subprocess
 import threading
 import time
 from array import array
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from pathlib import Path
 from typing import Self
 
@@ -62,6 +63,28 @@ def requireVariables() -> None:
 	missing = missingVariables()
 	if missing:
 		pytest.fail(missing, pytrace=False)
+
+
+def assertCleanThroughPipewire(done: harness.ChildResult, *, ignoring: Collection[str] = ()) -> None:
+	"""A child that played through the PipeWire sink was clean, apart from the checks in ignoring.
+
+	Playing maps PipeWire's client library and the modules and plugins it loads, which the harness's
+	sound check counts. That check is replaced here by a narrower one: the only sound libraries mapped
+	are libpwsink and files of the PipeWire package the fixture's daemon comes from, and nothing was
+	loaded as a sound library from Python, opened as a sound device or connected to as a sound server.
+	"""
+	done.assertClean(ignoring={"audio", *ignoring})
+	library = os.path.realpath(os.environ["BASEDREADER_PWSINK_LIB"])
+	pipewireLib = Path(os.path.realpath(os.environ["BASEDREADER_PIPEWIRE_BIN"])).parent / "lib"
+	unexpected = []
+	for what in done.audio:
+		how, _, path = what.partition(" ")
+		if how == "mapped" and (path == library or Path(path).is_relative_to(pipewireLib)):
+			continue
+		unexpected.append(what)
+	assert not unexpected, "sound reached other than through libpwsink and PipeWire's client:\n" + "\n".join(
+		unexpected,
+	)
 
 
 def _refuseOutsideTheRig() -> None:
