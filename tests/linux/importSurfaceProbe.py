@@ -18,10 +18,10 @@ import signal
 import sys
 import tempfile
 import traceback
+import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SOURCE = os.path.join(ROOT, "source")
-_protected = (os.path.join(SOURCE, ""), os.path.join(ROOT, "tests", "unit", ""))
 writeViolations: list[str] = []
 configDir: str | None = None
 #: The standard library changes behaviour when any of these imports.
@@ -32,62 +32,33 @@ notImported = {
 	"setup": "py2exe build script: importing it starts a build",
 }
 
-#: Audit events that write to a path, each with the argument positions of every path written and of
-#: the directory descriptor that path is relative to, where the event carries one. The "open" event
-#: carries none, so a write opened relative to a directory descriptor is missed here; the test's
-#: snapshot of the tree catches it, and writes made by child processes.
-_writeEvents: dict[str, tuple[tuple[int, int | None], ...]] = {
-	"os.mkdir": ((0, 2),),
-	"os.remove": ((0, 1),),
-	"os.rmdir": ((0, 1),),
-	"os.truncate": ((0, None),),
-	"os.chmod": ((0, 2),),
-	"os.chown": ((0, 3),),
-	"os.utime": ((0, 3),),
-	"os.rename": ((0, 2), (1, 3)),
-	"os.link": ((1, 3),),
-	"os.symlink": ((1, 2),),
-	"shutil.rmtree": ((0, 1),),
-	"shutil.move": ((0, None), (1, None)),
-	"shutil.copyfile": ((1, None),),
-}
+
+def _loadHarness() -> types.ModuleType:
+	# By its path, as this runs with -I and tests/linux stays off sys.path.
+	spec = importlib.util.spec_from_file_location(
+		"harness", os.path.join(os.path.dirname(os.path.abspath(__file__)), "harness.py")
+	)
+	module = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(module)
+	return module
 
 
-def _isProtected(path: object, dirFd: object = None) -> bool:
-	if isinstance(path, int):
-		return False
-	try:
-		path = os.fsdecode(path)
-		if isinstance(dirFd, int) and dirFd >= 0 and not os.path.isabs(path):
-			path = os.path.join(os.readlink(f"/proc/self/fd/{dirFd}"), path)
-		path = os.path.realpath(path)
-	except (TypeError, ValueError, OSError):
-		return False
-	return path.startswith(_protected)
+harness = _loadHarness()
 
 
-def _auditHook(event: str, args: tuple) -> None:
-	written: tuple[tuple[object, object], ...] = ()
-	if event == "open":
-		path, mode, flags = args
-		writeFlags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
-		if (isinstance(flags, int) and flags & writeFlags) or (
-			isinstance(mode, str) and any(c in mode for c in "wax+")
-		):
-			written = ((path, None),)
-	elif event in _writeEvents:
-		written = tuple((args[p], None if d is None else args[d]) for p, d in _writeEvents[event])
-	for path, dirFd in written:
-		if _isProtected(path, dirFd):
-			writeViolations.append(f"{event} {path!r} dir_fd={dirFd!r}")
-			raise PermissionError(f"nothing may write under source/ or tests/unit/ at run time: {path!r}")
+def _refuseWrites(event: str, args: tuple) -> None:
+	"""harness's check for writes under source/ and tests/unit, recording each here."""
+	for path in harness.writtenPaths(event, args):
+		if harness.isProtected(path):
+			writeViolations.append(f"{event} {path}")
+			raise PermissionError(f"nothing may write under source/ or tests/unit/ at run time: {path}")
 
 
 def prepare() -> None:
 	"""bootstrap.install() and the preconditions nvda.pyw and core.main establish before imports."""
 	global configDir
 	sys.dont_write_bytecode = True
-	sys.addaudithook(_auditHook)
+	sys.addaudithook(_refuseWrites)
 	sys.path.insert(0, SOURCE)
 	# nvda.pyw runs from appDir.
 	os.chdir(SOURCE)

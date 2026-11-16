@@ -15,31 +15,18 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import harness
 import pytest
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 PROBE = HERE / "importSurfaceProbe.py"
 ALLOWED_FAILURES = HERE / "importSurfaceAllowedFailures.txt"
-#: Nothing that runs NVDA code may write here.
-PROTECTED = (ROOT / "source", ROOT / "tests" / "unit")
-
-
-def treeState() -> dict[str, tuple]:
-	state: dict[str, tuple] = {}
-	for top in PROTECTED:
-		for dirPath, dirNames, fileNames in os.walk(top):
-			state[dirPath] = ("directory",)
-			for name in fileNames:
-				path = os.path.join(dirPath, name)
-				info = os.lstat(path)
-				state[path] = (info.st_size, info.st_mtime_ns)
-	return state
 
 
 def runProbe(tmpPath: Path, *args: str) -> dict:
 	resultPath = tmpPath / "result.json"
-	before = treeState()
+	before = harness.treeState()
 	done = subprocess.run(
 		[sys.executable, "-I", "-B", str(PROBE), str(resultPath), *args],
 		capture_output=True,
@@ -48,9 +35,8 @@ def runProbe(tmpPath: Path, *args: str) -> dict:
 		env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
 		check=False,
 	)
-	after = treeState()
 	# The probe's audit hook sees writes from its own process only; this also sees its children's.
-	changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
+	changed = harness.changedPaths(before, harness.treeState())
 	assert not changed, f"the probe changed the repository: {changed}"
 	assert resultPath.exists(), (
 		f"the probe wrote no result (exit status {done.returncode})\n{done.stdout[-3000:]}\n{done.stderr[-3000:]}"
@@ -355,7 +341,7 @@ def test_platformGuardsAreReadable():
 	"""Every platform test in source/ and tests/unit/ is one importedModules understands; any other
 	form would make it report imports Linux never reaches, or miss ones it does."""
 	unreadable = []
-	for top in PROTECTED:
+	for top in harness.PROTECTED:
 		for path in sorted(top.rglob("*.py")):
 			unreadable.extend(
 				f"{path.relative_to(ROOT)} {place}"
