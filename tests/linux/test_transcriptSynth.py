@@ -90,7 +90,7 @@ def runSpeech(tmpPath: Path, code: str, mode: str = "immediate", **env: str) -> 
 	return harness.runChild(
 		tmpPath,
 		SPEECH + textwrap.dedent(code) + END,
-		env={"BASEDREADER_TEST_HOOKS_DIR": str(HERE), "TRANSCRIPT_SYNTH_MODE": mode, **env},
+		env={"BASEDREADER_TEST_HOOKS_DIR": str(HERE), "BASEDREADER_TRANSCRIPT_MODE": mode, **env},
 	)
 
 
@@ -304,7 +304,7 @@ def test_eachCommandIsRecorded(tmp_path: Path):
 		])
 		result = {"events": synth.events, "heard": heard.plain()}
 		""",
-		TRANSCRIPT_SYNTH_FILE=str(transcript),
+		BASEDREADER_TRANSCRIPT_FILE=str(transcript),
 	)
 	done.assertClean()
 	expected = [
@@ -468,7 +468,7 @@ def test_timedModeReportsFromItsOwnThreadAndHonoursPause(tmp_path: Path):
 		result = steps
 		""",
 		mode="timed",
-		TRANSCRIPT_SYNTH_MS_PER_CHAR="10",
+		BASEDREADER_TRANSCRIPT_MS_PER_CHAR="10",
 	)
 	done.assertClean()
 	steps = done.value
@@ -540,7 +540,7 @@ def test_speechReachesTheDriver(tmp_path: Path):
 			"lastIndex": synth.events[-1]["data"][-1],
 		}
 		""",
-		TRANSCRIPT_SYNTH_FILE=str(transcript),
+		BASEDREADER_TRANSCRIPT_FILE=str(transcript),
 	)
 	done.assertClean()
 	speaks = [e["data"] for e in done.value["events"]]

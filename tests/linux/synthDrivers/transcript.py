@@ -1,13 +1,13 @@
 """A synth driver for tests: it records what the speech manager sends and reports indexes.
 
-The records go to synth.events and, when TRANSCRIPT_SYNTH_FILE names a file, to that file as JSON
-Lines; _transcriptRecords describes the format and reads it back. TRANSCRIPT_SYNTH_MODE chooses
-when indexes are reported:
+The records go to synth.events and, when BASEDREADER_TRANSCRIPT_FILE names a file, to that file as
+JSON Lines; _transcriptRecords describes the format and reads it back. BASEDREADER_TRANSCRIPT_MODE
+chooses when indexes are reported:
 - immediate, the default: every index and then done, inside speak().
 - manual: only when the test calls advance(); done counts as one step. Nothing is released while
 paused, as a real driver's player holds its callbacks.
-- timed: from a worker thread, each index after TRANSCRIPT_SYNTH_MS_PER_CHAR milliseconds for every
-character spoken before it, not counting time spent paused.
+- timed: from a worker thread, each index after BASEDREADER_TRANSCRIPT_MS_PER_CHAR milliseconds for
+every character spoken before it, not counting time spent paused.
 
 Notifications go through synthIndexReached and synthDoneSpeaking as a real driver's do, so the
 speech manager runs exactly the code it runs for one.
@@ -86,10 +86,10 @@ class SynthDriver(BaseSynthDriver):
 
 	def __init__(self) -> None:
 		super().__init__()
-		self.mode = os.environ.get("TRANSCRIPT_SYNTH_MODE") or "immediate"
+		self.mode = os.environ.get("BASEDREADER_TRANSCRIPT_MODE") or "immediate"
 		if self.mode not in modes:
-			raise ValueError(f"TRANSCRIPT_SYNTH_MODE is {self.mode!r}, not one of {modes}")
-		self.msPerChar = float(os.environ.get("TRANSCRIPT_SYNTH_MS_PER_CHAR") or 10)
+			raise ValueError(f"BASEDREADER_TRANSCRIPT_MODE is {self.mode!r}, not one of {modes}")
+		self.msPerChar = float(os.environ.get("BASEDREADER_TRANSCRIPT_MS_PER_CHAR") or 10)
 		self.events: list[dict] = []
 		self._settings = {setting.id: setting.defaultVal for setting in self.supportedSettings}
 		self._settings["voice"] = "transcript"
@@ -100,7 +100,7 @@ class SynthDriver(BaseSynthDriver):
 		self._terminated = False
 		# Reentrant, so that a handler of a notification may call cancel() on the same thread.
 		self._condition = threading.Condition(threading.RLock())
-		self._path = os.environ.get("TRANSCRIPT_SYNTH_FILE") or None
+		self._path = os.environ.get("BASEDREADER_TRANSCRIPT_FILE") or None
 		self._worker = None
 		if self.mode == "timed":
 			self._worker = threading.Thread(target=self._runTimed, name="transcriptSynth", daemon=True)
