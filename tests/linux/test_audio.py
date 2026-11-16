@@ -87,12 +87,6 @@ isolation = {
 }
 """
 
-#: Sound libraries the import graph maps before any audio is played, none of them through audio
-#: code: gui.message imports wx.html2, whose extension links WebKitGTK, which links GStreamer and,
-#: through it, libpulse. Nothing calls them. Any other sound library, or any of these mapped by
-#: playing, fails the test.
-IMPORTED_WITH_WEBVIEW = ("libgst", "libpulse")
-
 
 def runAudio(tmpPath: Path, code: str, *, captureDir: Path | None = None, extra: str = "") -> dict:
 	"""Run code after PRELUDE and return its result, with the isolation findings merged in."""
@@ -110,9 +104,7 @@ def runAudio(tmpPath: Path, code: str, *, captureDir: Path | None = None, extra:
 	assert isolation["mappedFiles"] > 0
 	assert isolation["opened"] == []
 	assert isolation["addedByAudio"] == []
-	for path in isolation["soundAtStart"]:
-		assert not path.startswith("/dev/snd"), path
-		assert Path(path).name.startswith(IMPORTED_WITH_WEBVIEW), path
+	assert isolation["soundAtStart"] == []
 	return done.value["value"]
 
 
