@@ -44,13 +44,50 @@ def _recordNoLinuxImplementation(path: str) -> None:
 	sys.addaudithook(onAudit)
 
 
-def _onQuitSignal(signalNumber: int) -> bool:
+#: Milliseconds between attempts to exit while message boxes are closing.
+_EXIT_RETRY_INTERVAL = 50
+_isExitPending = False
+
+
+def _exitOnceMessageBoxesClose() -> bool:
+	"""Exit through core.triggerNVDAExit, once every open message box has been cancelled.
+
+	triggerNVDAExit refuses to exit while a message box waits for an answer. On Windows the session's
+	end posts WM_QUIT, which ends every nested message loop and so every message box, and NVDA then
+	exits through its catch-all after the main loop. A signal ends no loop, so the modal dialogs are
+	cancelled instead, one each time this runs, and the exit waits until each call that showed a
+	message box has returned.
+	"""
+	global _isExitPending
 	import core
+	import wx
+	from gi.repository import GLib
+	from gui.message import isModalMessageBoxActive
+
+	if not isModalMessageBoxActive():
+		_isExitPending = False
+		core.triggerNVDAExit()
+		return GLib.SOURCE_REMOVE
+	modalDialogs = [w for w in wx.GetTopLevelWindows() if isinstance(w, wx.Dialog) and w.IsModal()]
+	if modalDialogs:
+		# Only the innermost, which is the last opened: a dialog further out cannot end its modal loop
+		# while another runs inside it. Cancelled, the answer gui.message.messageBox gives once shutdown
+		# has begun. Closing it instead would end a message box with no return code, which messageBox
+		# cannot translate, or be vetoed by a question with no answer to fall back on.
+		modalDialogs[-1].EndModal(wx.ID_CANCEL)
+	if not _isExitPending:
+		_isExitPending = True
+		GLib.timeout_add(_EXIT_RETRY_INTERVAL, _exitOnceMessageBoxesClose)
+	return GLib.SOURCE_CONTINUE
+
+
+def _onQuitSignal(signalNumber: int) -> bool:
 	from gi.repository import GLib
 	from logHandler import log
 
 	log.info(f"Exiting on {signal.Signals(signalNumber).name}")
-	core.triggerNVDAExit()
+	if not _isExitPending:
+		_exitOnceMessageBoxesClose()
 	# Kept rather than removed, so that a repeated signal reaches this handler again instead of the
 	# default action, which ends the process without saving anything.
 	return GLib.SOURCE_CONTINUE
@@ -115,9 +152,9 @@ def main() -> NoReturn:
 
 	try:
 		instanceLock = singleInstance.InstanceLock(singleInstance.lockFilePath())
+		isAlreadyRunning = instanceLock.holder() is not None
 	except OSError as e:
 		_fail(f"cannot open the lock that keeps one NVDA per display: {e}")
-	isAlreadyRunning = not instanceLock.tryAcquire()
 	if isAlreadyRunning and not appArgs.easeOfAccess:
 		if appArgs.check_running:
 			sys.exit(0)
@@ -130,6 +167,9 @@ def main() -> NoReturn:
 		sys.exit(0)
 	elif appArgs.check_running:
 		sys.exit(1)
+	# Before the lock is taken: from then on a copy replacing this one may send SIGTERM, which would
+	# otherwise end this one without letting go of anything it had started.
+	_exitOnQuitSignals()
 	if not instanceLock.acquire():
 		_fail(f"another NVDA still holds {instanceLock.path}")
 
@@ -159,9 +199,8 @@ def main() -> NoReturn:
 	# nvda.pyw sets Windows' screen reader flag here. Its AT-SPI counterpart, the bus's IsEnabled, turns
 	# on when NVDA registers for events, and setting it by hand would also write a GSettings key that the
 	# desktop's other screen reader shares. Nor does Linux need nvda.pyw's next steps: there are no
-	# window messages to let through, the end of the session comes as SIGTERM, handled here, and there
-	# is no Ease of Access Center to tell that NVDA is starting or stopping.
-	_exitOnQuitSignals()
+	# window messages to let through, the end of the session comes as SIGTERM, handled above, and
+	# there is no Ease of Access Center to tell that NVDA is starting or stopping.
 	# nvda.pyw applies its comtypes monkey patches first of all. comtypes does nothing on Linux, and
 	# its stand-in has none of the internals those patches replace.
 	try:
@@ -175,6 +214,10 @@ def main() -> NoReturn:
 	# The lock is never released by hand: the kernel drops it as the process ends, so a new copy waits
 	# for this one to be entirely gone, as it waits on the mutex on Windows.
 	log.info("NVDA exit")
+	# logHandler's hook writes to the log, which the interpreter takes apart before the objects whose
+	# finalisers fail as it exits, so its own hook failed instead and hid what went wrong. Python's
+	# hook writes to standard error, which on Linux is where the caller looks.
+	sys.unraisablehook = sys.__unraisablehook__
 	sys.exit(NVDAState._getExitCode())
 
 
