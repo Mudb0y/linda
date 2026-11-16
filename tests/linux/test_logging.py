@@ -25,6 +25,21 @@ def startLog(logFileName: Path | None, debugLogging: bool = True) -> str:
 			logHandler.logHandler.flush()
 			with open(globalVars.appArgs.logFileName, encoding="utf-8") as f:
 				return f.read()
+
+		# An event set once a record whose message begins with start has been logged.
+		def whenLogged(start):
+			import logging
+			import threading
+
+			logged = threading.Event()
+
+			class Watcher(logging.Handler):
+				def emit(self, record):
+					if record.getMessage().startswith(start):
+						logged.set()
+
+			log.addHandler(Watcher())
+			return logged
 	"""
 
 
@@ -215,7 +230,6 @@ def test_errorSoundCannotRecurseOrBlock(tmp_path: Path):
 		tmp_path,
 		startLog(tmp_path / "nvda.log")
 		+ """
-		import logging
 		import threading
 		import config
 		from linuxPlatform import logSupport
@@ -224,14 +238,7 @@ def test_errorSoundCannotRecurseOrBlock(tmp_path: Path):
 		calls = []
 		entered = threading.Event()
 		release = threading.Event()
-		playerFailureLogged = threading.Event()
-
-		class PlayerFailure(logging.Handler):
-			def emit(self, record):
-				if record.getMessage().startswith("Error running handler"):
-					playerFailureLogged.set()
-
-		log.addHandler(PlayerFailure(level=logging.ERROR))
+		playerFailureLogged = whenLogged("Error running handler")
 
 		def stuckFailingPlayer():
 			calls.append(threading.current_thread().name)
@@ -267,7 +274,6 @@ def test_errorSoundStopsWhenItsPlaybackLogsErrors(tmp_path: Path):
 		tmp_path,
 		startLog(tmp_path / "nvda.log")
 		+ """
-		import logging
 		import threading
 		import time
 		import config
@@ -279,15 +285,8 @@ def test_errorSoundStopsWhenItsPlaybackLogsErrors(tmp_path: Path):
 		logSupport.ERROR_SOUND_QUIET_PERIOD = 0.5
 		plays = []
 		failing = True
-		stopped = threading.Event()
+		stopped = whenLogged("Errors followed the error sound")
 		fourthPlay = threading.Event()
-
-		class StopWarning(logging.Handler):
-			def emit(self, record):
-				if record.getMessage().startswith("Errors followed the error sound"):
-					stopped.set()
-
-		log.addHandler(StopWarning(level=logging.WARNING))
 
 		def playerWhosePlaybackFails():
 			plays.append(time.perf_counter())
@@ -865,20 +864,12 @@ def test_watchdogLogsStackOfFrozenCore(tmp_path: Path):
 		startLog(tmp_path / "nvda.log")
 		+ WATCHDOG_FAST
 		+ """
-		import logging
 		import select
 		import threading
 
 		import exceptions
 
-		frozenReported = threading.Event()
-
-		class FrozenReport(logging.Handler):
-			def emit(self, record):
-				if record.getMessage().startswith("Core frozen in stack!"):
-					frozenReported.set()
-
-		log.addHandler(FrozenReport(level=logging.ERROR))
+		frozenReported = whenLogged("Core frozen in stack!")
 		watchdog.initialize()
 		fd = watchdog.cancelCallFd()
 
