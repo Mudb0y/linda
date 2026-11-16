@@ -11,7 +11,7 @@ noLinuxImplementationEvent = "linuxPlatform.noLinuxImplementation"
 
 
 class NoLinuxImplementation(NotImplementedError):
-	"""Raised by every Windows function, COM call and replacement skeleton that Linux does not implement.
+	"""Raised by every Windows function, COM call and replaced name that Linux does not implement.
 
 	Upstream has many handlers that read NotImplementedError or RuntimeError as "this feature is
 	absent" and carry on without logging. So each one raised is also announced through sys.audit,

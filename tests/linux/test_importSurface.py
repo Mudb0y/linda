@@ -371,6 +371,29 @@ def test_standInSurfaceNeverAnswers(tmp_path: Path):
 	assert {"comtypes.GUID.from_progid", "comtypes.automation.tagVARIANT.value"} <= surface.keys()
 
 
+def test_replacedModulesAnswerMissingNamesLoudly(tmp_path: Path):
+	"""Kept code that reads a name the IAccessibleHandler or UIAHandler replacement lacks gets
+	NoLinuxImplementation, which NVDA reads as the feature being absent and the audit hook records,
+	not an AttributeError that nothing reports; special names stay AttributeError, as Python's own
+	probes of a module expect."""
+	hazard = runProbe(tmp_path, "hazard", "replacedNames")["hazard"]
+	raised = {name: o["raised"] for name, o in hazard["outcomes"].items()}
+	assert raised == {
+		"IAccessibleHandler.NVDARoleFromAttr": "NoLinuxImplementation",
+		"UIAHandler.UIA_NativeWindowHandlePropertyId": "NoLinuxImplementation",
+		"from UIAHandler import getUIAUnitFromNVDAUnit": "NoLinuxImplementation",
+		"UIAHandler.__wrapped__": "AttributeError",
+		"from IAccessibleHandler import *": None,
+		"IAccessibleHandler.RelationType": None,
+		"UIAHandler.handler": None,
+	}
+	assert hazard["audited"] == [
+		"IAccessibleHandler.NVDARoleFromAttr",
+		"UIAHandler.UIA_NativeWindowHandlePropertyId",
+		"UIAHandler.getUIAUnitFromNVDAUnit",
+	]
+
+
 def test_guidIsAValue(tmp_path: Path):
 	"""A GUID is data, not a call into Windows, so it compares, hashes and prints as on Windows."""
 	assert runProbe(tmp_path, "hazard", "guid")["hazard"] == {

@@ -463,6 +463,36 @@ def runHazard(name: str) -> dict:
 		}
 	if name == "standInSurface":
 		return _standInSurface()
+	if name == "replacedNames":
+		import IAccessibleHandler
+		import linuxPlatform
+		import UIAHandler
+
+		audited: list[str] = []
+
+		def onAudit(event: str, args: tuple) -> None:
+			if event == linuxPlatform.noLinuxImplementationEvent:
+				audited.append(args[0])
+
+		sys.addaudithook(onAudit)
+
+		def fromImport() -> None:
+			from UIAHandler import getUIAUnitFromNVDAUnit  # noqa: F401
+
+		outcomes = {
+			"IAccessibleHandler.NVDARoleFromAttr": _outcome(lambda: IAccessibleHandler.NVDARoleFromAttr),
+			"UIAHandler.UIA_NativeWindowHandlePropertyId": _outcome(
+				lambda: UIAHandler.UIA_NativeWindowHandlePropertyId,
+			),
+			"from UIAHandler import getUIAUnitFromNVDAUnit": _outcome(fromImport),
+			"UIAHandler.__wrapped__": _outcome(lambda: UIAHandler.__wrapped__),
+			"from IAccessibleHandler import *": _outcome(
+				lambda: __import__("IAccessibleHandler", fromlist=["*"]),
+			),
+			"IAccessibleHandler.RelationType": _outcome(lambda: IAccessibleHandler.RelationType.__name__),
+			"UIAHandler.handler": _outcome(lambda: UIAHandler.handler),
+		}
+		return {"outcomes": outcomes, "audited": audited}
 	if name == "guid":
 		from comtypes import GUID
 
