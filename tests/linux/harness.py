@@ -1,55 +1,160 @@
-"""Runs a piece of NVDA code in a fresh interpreter and reports what it did.
+"""Runs NVDA code in a fresh interpreter, or starts the launcher, and reports what it did.
 
 NVDA's modules keep their state per process and import in one order only, so a test that needs
-them running starts a child for each case. The child reports the value the code left in
-``result``, any exception, every Windows or unfinished function that was called, and every log
-record at ERROR or above. Upstream swallows many exceptions, so a path that merely returns has
-proved little; a test should require it to be clean, with ChildResult.assertClean.
+them running starts a child for each case. Upstream swallows many exceptions, so a path that merely
+returns has proved little; the child therefore records, as it happens, everything that would make a
+run unclean, and ChildResult.assertClean holds a run to one definition of clean (see CLEAN_CHECKS).
+A test that expects one of those things opts out of that check alone, by name.
 
-From a test: harness.runChild(tmp_path, code).
-As the child: harness.py RESULT_JSON PREPARE CODE_FILE.
+The records go to a file a line at a time, so a child that kills itself or is killed still reports
+what it did up to then.
+
+From a test: harness.runChild(tmp_path, code), or harness.startLauncher(directory, *arguments).
+As the child: harness.py child RESULT_JSON EVENTS PREPARE CODE_FILE TIMEOUT RECORD_LEVEL.
+As the launcher: harness.py launch EVENTS RECORD_LEVEL LAUNCHER [ARGUMENT...].
+
+Only the standard library is imported here, so that a runner with reason to work otherwise, such as
+one started with -I or one running tests in its own process, can load this file by its path and share
+its checks, without putting tests/linux, whose synthDrivers would shadow NVDA's, on sys.path.
 """
 
+import faulthandler
+import importlib.util
 import json
+import logging
 import os
+import re
+import signal
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
+import time
 import traceback
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 SOURCE = ROOT / "source"
+LAUNCHER = SOURCE / "basedreader.py"
+#: Nothing that runs NVDA code may write here.
 PROTECTED = (SOURCE, ROOT / "tests" / "unit")
+#: Directories of the checkout that git and the development tools write to while other work goes on
+#: in the same checkout; treeState does not walk them.
+UNWATCHED = frozenset(str(ROOT / name) for name in (".git", ".claude", ".ruff_cache", "engine/target"))
 
-#: How much of NVDA the child sets up before the code runs.
+#: How much of NVDA the child sets up before the code runs, each level adding to the one before.
 #: "none": source/ on sys.path and nothing else.
-#: "bootstrap": also linuxPlatform.bootstrap.install().
-#: "config": also what nvda.pyw and core.main establish before their own imports, namely the
-#: gettext builtins, appDir, a temporary configuration directory and config.initialize().
-PREPARE_LEVELS = ("none", "bootstrap", "config")
+#: "bootstrap": linuxPlatform.bootstrap.install().
+#: "appDir": what nvda.pyw and basedreader.py establish before importing config: the gettext
+#: builtins, globalVars.appDir and appPid, and appDir as the working directory.
+#: "config": a configuration directory of the child's own and config.initialize().
+PREPARE_LEVELS = ("none", "bootstrap", "appDir", "config")
+
+#: What a clean run is: each check by the name a test gives to ChildResult.assertClean to opt out of
+#: it alone.
+CLEAN_CHECKS = {
+	"error": "the code returned, and the child reported",
+	"noLinuxImplementation": "nothing raised NoLinuxImplementation, even where upstream caught it",
+	"logErrors": "nothing was logged at ERROR or above, on any logger",
+	"threadExceptions": "no thread died of an exception",
+	"unraisable": "no finaliser or other unraisable call failed",
+	"returnCode": "the process exited with status 0",
+	"writes": "nothing tried to write under source/ or tests/unit",
+	"audio": "no audio library was loaded and no sound device opened",
+	"stderr": "standard error holds nothing outside ALLOWED_STANDARD_ERROR",
+}
+
+#: What standard error, or the report of an unraisable exception, may hold after a clean run, each
+#: with the reason it is allowed.
+ALLOWED_STANDARD_ERROR = (
+	# NVDAHighlighter keeps its settings in a class attribute and globalVars.settingsRing keeps the
+	# last synth, both for the life of the process, so AutoSettings.__del__ runs only as the
+	# interpreter takes config apart, and fails. Windows does the same, with no standard error to show
+	# it.
+	re.compile(
+		r"Exception ignored in: <function AutoSettings\.__del__ at 0x[0-9a-f]+>\n"
+		r"Traceback \(most recent call last\):\n"
+		r"(?:  File \"[^\"\n]*/autoSettingsUtils/autoSettings\.py\", line \d+, in \w+\n(?:    .*\n)*)+"
+		r"AttributeError: 'NoneType' object has no attribute 'unregister'\n",
+	),
+	# The development shell gives GTK no SVG image loader, so the theme's check marks and other
+	# symbolic icons are not drawn. Nothing NVDA says or does depends on them.
+	re.compile(
+		r"\n?\([^()\n:]+:\d+\): Gtk-WARNING \*\*: [\d:.]+: Could not load a pixbuf from "
+		r"/org/gtk/libgtk/theme/Adwaita/assets/[\w-]+\.svg\.\n"
+		r"This may indicate that pixbuf loaders or the mime database could not be found\.\n",
+	),
+)
+
+#: Libraries that can reach a sound server or a sound card, by the start of their file name with any
+#: "lib" taken off.
+AUDIO_LIBRARIES = (
+	"asound",
+	"pulse",
+	"pipewire",
+	"jack",
+	"portaudio",
+	"pcaudio",
+	"openal",
+	"sdl",
+	"canberra",
+	"ao.",
+	"sndio",
+	"espeak",
+	"gst",
+)
+#: Audio libraries that importing gui maps without anything loading them for sound: gui.message
+#: imports wx.html2, whose extension links WebKitGTK, which links GStreamer and, through it, libpulse.
+#: Loading either through ctypes is still counted.
+LINKED_WITHOUT_SOUND = ("libgst", "libpulse")
+SOUND_DEVICES = "/dev/snd"
+#: Words in the path of a Unix socket that belongs to a sound server.
+SOUND_SERVER_SOCKETS = ("pulse", "pipewire")
+
+NO_LINUX_IMPLEMENTATION_EVENT = "linuxPlatform.noLinuxImplementation"
+LOG_ERROR = 40
+
+_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+#: Audit events that change the file system: for each path an event changes, the position of the
+#: path, of the directory descriptor it is relative to or None, and whether the event acts on what a
+#: symbolic link there points to rather than on the link.
+WRITE_EVENTS: dict[str, tuple[tuple[int, int | None, bool], ...]] = {
+	"os.mkdir": ((0, 2, False),),
+	"os.mkfifo": ((0, 2, False),),
+	"os.mknod": ((0, 3, False),),
+	"os.remove": ((0, 1, False),),
+	"os.rmdir": ((0, 1, False),),
+	"os.rename": ((0, 2, False), (1, 3, False)),
+	# A hard link to a file is a way to write the file.
+	"os.link": ((0, 2, True), (1, 3, False)),
+	"os.symlink": ((1, 2, False),),
+	"os.truncate": ((0, None, True),),
+	"os.chmod": ((0, 2, True),),
+	"os.chown": ((0, 3, True),),
+	"os.utime": ((0, 3, True),),
+	"os.setxattr": ((0, None, True),),
+	"os.removexattr": ((0, None, True),),
+	"shutil.rmtree": ((0, 1, False),),
+	"shutil.move": ((0, None, False), (1, None, False)),
+	"shutil.copyfile": ((1, None, True),),
+	"shutil.unpack_archive": ((1, None, True),),
+}
+#: Events that act on a path that must exist already; one aimed at nothing changes nothing.
+_ON_EXISTING = frozenset(
+	{"os.remove", "os.rmdir", "os.rename", "os.link", "os.truncate", "os.chmod", "os.chown", "os.utime"},
+)
 
 
-@dataclass
-class ChildResult:
-	returnCode: int
-	value: object = None
-	error: str | None = None
-	noLinuxImplementation: list[str] = field(default_factory=list)
-	logErrors: list[str] = field(default_factory=list)
-	stdout: str = ""
-	stderr: str = ""
-
-	def assertClean(self) -> None:
-		"""The code returned, called nothing that Linux lacks, and logged no error."""
-		assert self.error is None, self.error
-		assert not self.noLinuxImplementation, (
-			f"called without a Linux implementation: {self.noLinuxImplementation}"
-		)
-		assert not self.logErrors, f"logged at ERROR or above: {self.logErrors}"
+#: The three signs whyNotInRig reads: a variable the rig sets, the name of process 1, and a
+#: directory that exists outside the sandbox only.
+RIG_VARIABLE = "BASEDREADER_RIG"
+FIRST_PROCESS_NAME = Path("/proc/1/comm")
+LIVE_RUNTIME_DIRECTORY = Path("/run/user")
 
 
 def whyNotInRig() -> str | None:
@@ -59,16 +164,16 @@ def whyNotInRig() -> str | None:
 	the rig's sandbox none of that can reach the desktop the machine's owner is using; outside it,
 	all of it would.
 	"""
-	if os.environ.get("BASEDREADER_RIG") != "1":
-		return "BASEDREADER_RIG is not set"
+	if os.environ.get(RIG_VARIABLE) != "1":
+		return f"{RIG_VARIABLE} is not set"
 	# The variable alone could have been copied into another shell. These hold only in the sandbox.
 	try:
-		firstProcess = Path("/proc/1/comm").read_text(encoding="ascii").strip()
+		firstProcess = FIRST_PROCESS_NAME.read_text(encoding="ascii").strip()
 	except OSError:
 		firstProcess = ""
 	if firstProcess != "bwrap":
 		return "process 1 is not the sandbox's"
-	if os.path.exists("/run/user"):
+	if LIVE_RUNTIME_DIRECTORY.exists():
 		return "the live session's runtime directory is visible"
 	return None
 
@@ -81,16 +186,374 @@ def requireRig() -> None:
 		)
 
 
-def treeState() -> dict[str, tuple]:
+def treeState(*tops: Path | str) -> dict[str, tuple]:
+	"""A snapshot of the trees under tops, PROTECTED by default, to compare with changedPaths.
+
+	A directory's modification time changes whenever an entry is made or removed in it, so this
+	also shows a file that was written and deleted again.
+	"""
 	state: dict[str, tuple] = {}
-	for top in PROTECTED:
-		for dirPath, _dirNames, fileNames in os.walk(top):
-			state[dirPath] = ("directory",)
-			for name in fileNames:
+	for top in tops or PROTECTED:
+		for dirPath, dirNames, fileNames in os.walk(top):
+			dirNames[:] = [d for d in dirNames if os.path.join(dirPath, d) not in UNWATCHED]
+			state[dirPath] = ("directory", os.lstat(dirPath).st_mtime_ns)
+			# os.walk lists a symbolic link to a directory among the directories, and does not enter it.
+			for name in fileNames + [d for d in dirNames if os.path.islink(os.path.join(dirPath, d))]:
 				path = os.path.join(dirPath, name)
 				info = os.lstat(path)
 				state[path] = (info.st_size, info.st_mtime_ns)
 	return state
+
+
+def changedPaths(before: dict[str, tuple], after: dict[str, tuple]) -> list[str]:
+	return sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
+
+
+def _absolutePath(path: object, dirFd: object, followsLink: bool) -> str | None:
+	if isinstance(path, int):
+		return None
+	path = os.fsdecode(path)
+	if not os.path.isabs(path):
+		# The events give -1 for "no directory descriptor".
+		useFd = isinstance(dirFd, int) and dirFd >= 0
+		path = os.path.join(os.readlink(f"/proc/self/fd/{dirFd}") if useFd else os.getcwd(), path)
+	parent, name = os.path.split(path.rstrip(os.sep) or os.sep)
+	if followsLink or name in ("", ".", ".."):
+		return os.path.realpath(path)
+	# The entry itself is what changes, wherever its directory is reached through.
+	return os.path.join(os.path.realpath(parent), name)
+
+
+def writtenPaths(event: str, args: tuple) -> list[str]:
+	"""The paths an audit event is about to change, absolute and with symbolic links resolved."""
+	try:
+		if event == "open":
+			path, mode, flags = args
+			if isinstance(mode, str):
+				writes = any(letter in mode for letter in "wax+")
+			else:
+				writes = isinstance(flags, int) and bool(flags & _WRITE_FLAGS)
+			paths = [_absolutePath(path, None, True)] if writes else []
+		else:
+			changed = WRITE_EVENTS.get(event, ())
+			if event in _ON_EXISTING:
+				pathAt, fdAt, _followsLink = changed[0]
+				first = _absolutePath(args[pathAt], None if fdAt is None else args[fdAt], False)
+				if first is None or not os.path.lexists(first):
+					return []
+			paths = [
+				_absolutePath(args[pathAt], None if fdAt is None else args[fdAt], follows)
+				for pathAt, fdAt, follows in changed
+			]
+	except (TypeError, ValueError, IndexError, OSError):
+		return []
+	return [path for path in paths if path is not None]
+
+
+def isProtected(path: str, tops: Collection[Path] = PROTECTED) -> bool:
+	return any(path == str(top) or path.startswith(str(top) + os.sep) for top in tops)
+
+
+def isAudioLibrary(path: str | bytes) -> bool:
+	name = os.path.basename(os.fsdecode(path)).lower()
+	return name.removeprefix("lib").startswith(AUDIO_LIBRARIES)
+
+
+def soundReachedAtExit() -> list[str]:
+	"""Audio libraries mapped into this process and sound devices it holds open, now."""
+	found = []
+	with open("/proc/self/maps", encoding="utf-8") as maps:
+		mapped = {fields[5].strip() for line in maps if len(fields := line.split(None, 5)) == 6}
+	for path in sorted(mapped):
+		name = os.path.basename(path)
+		if path.startswith("/") and isAudioLibrary(name) and not name.startswith(LINKED_WITHOUT_SOUND):
+			found.append(f"mapped {path}")
+	for fd in os.listdir("/proc/self/fd"):
+		try:
+			target = os.readlink(f"/proc/self/fd/{fd}")
+		except OSError:
+			continue
+		if target.startswith(SOUND_DEVICES):
+			found.append(f"holds {target} open")
+	return found
+
+
+#: Called by the checks with the kind of record and its fields.
+Recorder = Callable[..., None]
+
+
+class EventFile:
+	"""A Recorder that writes each record to a file as one JSON line, as it happens."""
+
+	def __init__(self, path: Path | str) -> None:
+		# Line buffered, so that each record is on disk however the process ends.
+		self._file = open(path, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
+		self._lock = threading.RLock()
+
+	def __call__(self, kind: str, **fields: object) -> None:
+		line = json.dumps({"kind": kind, "pid": os.getpid(), **fields}, default=repr)
+		try:
+			with self._lock:
+				self._file.write(line + "\n")
+		except (OSError, ValueError):
+			# Closed as the interpreter ends; the standard error check still sees it.
+			print(f"harness: {line}", file=sys.__stderr__, flush=True)
+
+
+class Checks:
+	"""Everything that makes a run unclean, recorded as it happens.
+
+	The thread and unraisable hooks stand in for the interpreter's own, which would only print. Once
+	logHandler.initialize replaces them with NVDA's, a failure is logged as an ERROR record instead,
+	which the log check counts, so nothing is counted twice; and where some other hook was already in
+	place, that hook is called in their stead.
+	"""
+
+	def __init__(self, record: Recorder, *, recordLevel: int = LOG_ERROR) -> None:
+		self.record = record
+		self._previousThreadHook = threading.excepthook
+		self._previousUnraisableHook = sys.unraisablehook
+
+		checks = self
+
+		class Collector(logging.Handler):
+			def emit(self, record: logging.LogRecord) -> None:
+				checks._onLogRecord(record)
+
+		self._collector = Collector(level=recordLevel)
+		sys.addaudithook(self._onAudit)
+		threading.excepthook = self._onThreadException
+		sys.unraisablehook = self._onUnraisable
+		# On the root logger, which every logger's records reach, NVDA's among them.
+		logging.getLogger().addHandler(self._collector)
+
+	def _onAudit(self, event: str, args: tuple) -> None:
+		if event == NO_LINUX_IMPLEMENTATION_EVENT:
+			self.record(
+				"noLinuxImplementation",
+				what=str(args[0]),
+				thread=threading.current_thread().name,
+				# The frames that raised it, without this hook's and NoLinuxImplementation's own.
+				stack=traceback.format_stack(limit=14)[:-2],
+			)
+		elif event == "ctypes.dlopen":
+			if isinstance(args[0], (str, bytes)) and isAudioLibrary(args[0]):
+				self.record("audio", what=f"loaded {os.fsdecode(args[0])}")
+		elif event == "socket.connect":
+			address = args[1]
+			if isinstance(address, (str, bytes)) and any(
+				word in os.fsdecode(address) for word in SOUND_SERVER_SOCKETS
+			):
+				self.record("audio", what=f"connected to {os.fsdecode(address)}")
+		elif event == "open" or event in WRITE_EVENTS:
+			if event == "open" and isinstance(args[0], str) and args[0].startswith(SOUND_DEVICES):
+				self.record("audio", what=f"opened {args[0]}")
+			for path in writtenPaths(event, args):
+				if isProtected(path):
+					self.record("write", event=event, path=path, stack=traceback.format_stack(limit=8)[:-1])
+					raise PermissionError(
+						f"nothing may write under source/ or tests/unit at run time: {path}"
+					)
+
+	def _onLogRecord(self, record: logging.LogRecord) -> None:
+		try:
+			message = record.getMessage()
+		except Exception as e:  # noqa: BLE001
+			# A record whose own formatting fails; logging reports that through its handlers too.
+			message = f"{record.msg!r} (unformattable: {e!r})"
+		exception = None
+		if record.exc_info and record.exc_info[1] is not None:
+			exception = "".join(traceback.format_exception(*record.exc_info))
+		self.record(
+			"log",
+			levelno=record.levelno,
+			level=record.levelname,
+			logger=record.name,
+			message=message,
+			exception=exception,
+		)
+
+	def _onThreadException(self, args: object) -> None:
+		if self._previousThreadHook is not threading.__excepthook__:
+			self._previousThreadHook(args)
+			return
+		if args.exc_type is SystemExit:
+			# Python ignores SystemExit in a thread, and so does NVDA's hook.
+			return
+		self.record(
+			"threadException",
+			thread=getattr(args.thread, "name", None),
+			traceback="".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)),
+		)
+
+	def _onUnraisable(self, unraisable: object) -> None:
+		if self._previousUnraisableHook is not sys.__unraisablehook__:
+			self._previousUnraisableHook(unraisable)
+			return
+		where = unraisable.err_msg or "Exception ignored in"
+		self.record(
+			"unraisable",
+			message=f"{where}: {unraisable.object!r}",
+			traceback="".join(
+				traceback.format_exception(
+					unraisable.exc_type, unraisable.exc_value, unraisable.exc_traceback
+				),
+			),
+		)
+
+	def finish(self) -> None:
+		"""Record what can be seen only at the end."""
+		for what in soundReachedAtExit():
+			self.record("audio", what=what)
+
+
+def prepareChild(level: str, workDir: Path) -> None:
+	"""Establish in this process what the level in PREPARE_LEVELS names."""
+	assert level in PREPARE_LEVELS, level
+	sys.dont_write_bytecode = True
+	sys.path.insert(0, str(SOURCE))
+	if level == "none":
+		return
+	from linuxPlatform import bootstrap
+
+	bootstrap.install()
+	if level == "bootstrap":
+		return
+	import gettext
+
+	gettext.NullTranslations().install(names=["pgettext", "npgettext", "ngettext"])
+	import globalVars
+
+	# As nvda.pyw does: upstream finds its locale directory, among others, relative to it.
+	os.chdir(SOURCE)
+	globalVars.appDir = str(SOURCE)
+	globalVars.appPid = os.getpid()
+	if level == "appDir":
+		return
+	configDir = workDir / "config"
+	configDir.mkdir()
+	globalVars.appArgs.configPath = str(configDir)
+	import config
+
+	config.initialize()
+
+
+def unexpectedStandardError(text: str) -> str:
+	"""What is left of standard error once the allowed lines are taken out."""
+	for pattern in ALLOWED_STANDARD_ERROR:
+		text = pattern.sub("", text)
+	return text
+
+
+@dataclass
+class ChildResult:
+	returnCode: int | None
+	value: object = None
+	#: Why the code did not return: its traceback, or how the child ended without reporting.
+	error: str | None = None
+	noLinuxImplementation: list[str] = field(default_factory=list)
+	#: "LEVEL: message" for each record at ERROR or above.
+	logErrors: list[str] = field(default_factory=list)
+	#: "LEVEL: message" for each record at or above the level runChild was given.
+	logRecords: list[str] = field(default_factory=list)
+	threadExceptions: list[str] = field(default_factory=list)
+	unraisable: list[str] = field(default_factory=list)
+	writes: list[str] = field(default_factory=list)
+	audio: list[str] = field(default_factory=list)
+	stdout: str = ""
+	stderr: str = ""
+	#: Every record the child made, as written.
+	events: list[dict] = field(default_factory=list)
+
+	@classmethod
+	def fromEvents(cls, events: list[dict], **fields: object) -> "ChildResult":
+		result = cls(events=events, **fields)
+		for event in events:
+			kind = event["kind"]
+			if kind == "noLinuxImplementation":
+				result.noLinuxImplementation.append(event["what"])
+			elif kind == "log":
+				text = f"{event['level']}: {event['message']}"
+				result.logRecords.append(text)
+				if event["levelno"] >= LOG_ERROR:
+					result.logErrors.append(text)
+			elif kind == "threadException":
+				result.threadExceptions.append(f"in thread {event['thread']}:\n{event['traceback']}")
+			elif kind == "unraisable":
+				result.unraisable.append(f"{event['message']}\n{event['traceback']}")
+			elif kind == "write":
+				result.writes.append(f"{event['event']} {event['path']}")
+			elif kind == "audio":
+				result.audio.append(event["what"])
+		return result
+
+	def _detail(self, kind: str) -> str:
+		parts = []
+		for event in self.events:
+			if event["kind"] != kind:
+				continue
+			if kind == "noLinuxImplementation":
+				parts.append(f"{event['what']}, from:\n{''.join(event['stack'])}")
+			elif kind == "log" and event["levelno"] >= LOG_ERROR:
+				parts.append(
+					f"{event['level']} on {event['logger']}: {event['message']}\n{event['exception'] or ''}"
+				)
+			elif kind == "write":
+				parts.append(f"{event['event']} {event['path']}, from:\n{''.join(event['stack'])}")
+		return "\n".join(parts)
+
+	def problems(self, ignoring: Collection[str] = ()) -> list[str]:
+		"""What keeps this run from being clean, leaving out the checks named in ignoring."""
+		unknown = set(ignoring) - CLEAN_CHECKS.keys()
+		assert not unknown, f"no such check: {sorted(unknown)}; the checks are {list(CLEAN_CHECKS)}"
+		found = {
+			"error": self.error,
+			"noLinuxImplementation": self.noLinuxImplementation and self._detail("noLinuxImplementation"),
+			"logErrors": self.logErrors and self._detail("log"),
+			"threadExceptions": "\n".join(self.threadExceptions),
+			"unraisable": "\n".join(u for u in self.unraisable if unexpectedStandardError(u)),
+			"returnCode": self.returnCode != 0 and describeExit(self.returnCode),
+			"writes": self.writes and self._detail("write"),
+			"audio": "\n".join(self.audio),
+			"stderr": unexpectedStandardError(self.stderr)[-4000:],
+		}
+		return [
+			f"not clean: {CLEAN_CHECKS[name]} does not hold:\n{detail}"
+			for name, detail in found.items()
+			if detail and name not in ignoring
+		]
+
+	def assertClean(self, *, ignoring: Collection[str] = ()) -> None:
+		"""Every check in CLEAN_CHECKS holds, apart from those named in ignoring, which a test names
+		because it expects what that check would find."""
+		problems = self.problems(ignoring)
+		assert not problems, "\n\n".join(problems)
+
+
+def readEvents(path: Path) -> list[dict]:
+	if not path.exists():
+		return []
+	events = []
+	for line in path.read_text(encoding="utf-8").splitlines():
+		try:
+			events.append(json.loads(line))
+		except json.JSONDecodeError:
+			# The last line of a process killed while writing it.
+			events.append({"kind": "unreadable", "line": line})
+	return events
+
+
+def describeExit(returnCode: int | None) -> str:
+	if returnCode is None:
+		return "still running"
+	if returnCode < 0:
+		return f"killed by {signal.Signals(-returnCode).name}"
+	return f"exit status {returnCode}"
+
+
+def _environment(env: dict[str, str | None] | None) -> dict[str, str]:
+	merged = {**os.environ, **(env or {})}
+	return {name: value for name, value in merged.items() if value is not None}
 
 
 def runChild(
@@ -98,13 +561,19 @@ def runChild(
 	code: str,
 	*,
 	prepare: str = "config",
-	env: dict[str, str] | None = None,
+	env: dict[str, str | None] | None = None,
 	timeout: float = 300,
+	recordLevel: int = LOG_ERROR,
 ) -> ChildResult:
-	"""Run code in a fresh interpreter and fail if it changed source/ or tests/unit/.
+	"""Run code in a fresh interpreter, after the preparation PREPARE_LEVELS names, and report.
 
 	The code runs as a module body. Whatever it leaves in the name ``result`` comes back as
 	ChildResult.value and has to survive JSON.
+
+	:param env: Variables to set for the child, over this process's; None unsets one.
+	:param timeout: Seconds after which the child prints every thread's stack and ends.
+	:param recordLevel: The level from which records are kept in ChildResult.logRecords. A record
+		below its logger's level is never made, so a test that wants those sets the level itself.
 	"""
 	requireRig()
 	assert prepare in PREPARE_LEVELS, prepare
@@ -112,60 +581,61 @@ def runChild(
 	codePath = work / "code.py"
 	codePath.write_text(textwrap.dedent(code), encoding="utf-8")
 	resultPath = work / "result.json"
+	eventsPath = work / "events.jsonl"
 	before = treeState()
-	done = subprocess.run(
-		[sys.executable, "-I", "-B", str(Path(__file__).resolve()), str(resultPath), prepare, str(codePath)],
-		capture_output=True,
+	command = [
+		sys.executable,
+		"-I",
+		"-B",
+		str(Path(__file__).resolve()),
+		"child",
+		str(resultPath),
+		str(eventsPath),
+		prepare,
+		str(codePath),
+		str(timeout),
+		str(recordLevel),
+	]
+	with subprocess.Popen(
+		command,
+		stdout=subprocess.PIPE,
+		stderr=subprocess.PIPE,
 		text=True,
-		timeout=timeout,
-		env={**os.environ, **(env or {})},
+		env=_environment(env),
 		cwd=work,
-		check=False,
-	)
-	after = treeState()
-	changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
+	) as process:
+		try:
+			# The child ends itself at the timeout, with its stacks; this is for one that cannot.
+			stdout, stderr = process.communicate(timeout=timeout + 30)
+		except subprocess.TimeoutExpired:
+			process.kill()
+			stdout, stderr = process.communicate()
+	changed = changedPaths(before, treeState())
 	assert not changed, f"the child changed the repository: {changed}"
-	assert resultPath.exists(), (
-		f"the child wrote no result (exit status {done.returncode})\n{done.stdout[-3000:]}\n{done.stderr[-3000:]}"
+	reported = {"value": None, "error": None}
+	if resultPath.exists():
+		reported = json.loads(resultPath.read_text(encoding="utf-8"))
+	else:
+		reported["error"] = f"the child ended without reporting a result: {describeExit(process.returncode)}"
+	return ChildResult.fromEvents(
+		readEvents(eventsPath),
+		returnCode=process.returncode,
+		stdout=stdout,
+		stderr=stderr,
+		**reported,
 	)
-	outcome = json.loads(resultPath.read_text(encoding="utf-8"))
-	return ChildResult(returnCode=done.returncode, stdout=done.stdout, stderr=done.stderr, **outcome)
 
 
-def _child(resultPath: str, prepare: str, codePath: str) -> None:
+def _child(
+	resultPath: str, eventsPath: str, prepare: str, codePath: str, timeout: str, recordLevel: str
+) -> None:
 	requireRig()
-	called: list[str] = []
-	logErrors: list[str] = []
-	outcome: dict = {"value": None, "error": None, "noLinuxImplementation": called, "logErrors": logErrors}
-
-	def onAudit(event: str, args: tuple) -> None:
-		if event == "linuxPlatform.noLinuxImplementation":
-			called.append(str(args[0]))
-
-	sys.addaudithook(onAudit)
-	sys.dont_write_bytecode = True
+	checks = Checks(EventFile(eventsPath), recordLevel=int(recordLevel))
+	# For a hang, every thread's stack, then exit status 1.
+	faulthandler.dump_traceback_later(float(timeout), exit=True)
+	outcome: dict = {"value": None, "error": None}
 	try:
-		if prepare == "config":
-			# -I keeps the script's directory off sys.path.
-			sys.path.insert(0, str(HERE))
-			import importSurfaceProbe
-
-			importSurfaceProbe.prepare()
-			import logging
-
-			from logHandler import log
-
-			class Collector(logging.Handler):
-				def emit(self, record: logging.LogRecord) -> None:
-					logErrors.append(f"{record.levelname}: {record.getMessage()}")
-
-			log.addHandler(Collector(level=logging.ERROR))
-		else:
-			sys.path.insert(0, str(SOURCE))
-			if prepare == "bootstrap":
-				from linuxPlatform import bootstrap
-
-				bootstrap.install()
+		prepareChild(prepare, Path(resultPath).parent)
 		namespace: dict = {"__name__": "__harness__", "result": None}
 		with open(codePath, encoding="utf-8") as f:
 			# The code is the test's own, written beside the call to runChild.
@@ -174,9 +644,260 @@ def _child(resultPath: str, prepare: str, codePath: str) -> None:
 	# SystemExit and KeyboardInterrupt included: whatever ended the code is the result to report.
 	except BaseException:  # noqa: BLE001
 		outcome["error"] = traceback.format_exc()
+	checks.finish()
+	faulthandler.cancel_dump_traceback_later()
 	with open(resultPath, "w", encoding="utf-8") as f:
 		json.dump(outcome, f, default=repr)
 
 
+def _launch(eventsPath: str, recordLevel: str, launcher: str, *arguments: str) -> None:
+	"""Run the launcher as the main program of this process, with the checks in place.
+
+	The launcher's path stays as given, after this file's own arguments, so that a copy NVDA starts
+	to restart itself carries them over with the interpreter's options, and runs checked too.
+	"""
+	requireRig()
+	record = EventFile(eventsPath)
+	checks = Checks(record, recordLevel=int(recordLevel))
+	record("start", launcher=launcher, arguments=list(arguments))
+	# The rig starts its command as a background job, with SIGINT ignored, which a program inherits.
+	# NVDA started from a terminal has Python's handler.
+	if signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
+		signal.signal(signal.SIGINT, signal.default_int_handler)
+	import atexit
+	import runpy
+
+	# The first registered runs last, after NVDA's own.
+	atexit.register(checks.finish)
+	sys.argv[:] = [launcher, *arguments]
+	runpy.run_path(launcher, run_name="__main__")
+
+
+def _loadFile(name: str, path: Path) -> ModuleType:
+	spec = importlib.util.spec_from_file_location(name, path)
+	module = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(module)
+	return module
+
+
+_loaded: dict[str, ModuleType] = {}
+
+
+def transcriptRecords() -> ModuleType:
+	"""tests/linux/synthDrivers/_transcriptRecords.py, which reads what the transcript synth wrote."""
+	if "transcriptRecords" not in _loaded:
+		_loaded["transcriptRecords"] = _loadFile(
+			"_transcriptRecords",
+			HERE / "synthDrivers" / "_transcriptRecords.py",
+		)
+	return _loaded["transcriptRecords"]
+
+
+def singleInstance() -> ModuleType:
+	"""source/linuxPlatform/singleInstance.py, loaded alone, as it needs only the standard library."""
+	if "singleInstance" not in _loaded:
+		_loaded["singleInstance"] = _loadFile(
+			"singleInstance", SOURCE / "linuxPlatform" / "singleInstance.py"
+		)
+	return _loaded["singleInstance"]
+
+
+#: The first line of each NVDA log record: level, code path, time, thread. The code path can hold
+#: spaces: logHandler writes "unhandled exception", "Exception ignored in: <...>" and "Python warning"
+#: there.
+NVDA_LOG_RECORD_HEADER = re.compile(
+	r"^(?P<level>[A-Z_]+) - .+? \(\d\d:\d\d:\d\d\.\d{3}\) - .*:$", re.MULTILINE
+)
+#: Any line that starts as a record at ERROR or above does, whatever follows it.
+_nvdaLogErrorRecord = re.compile(r"^(?:ERROR|CRITICAL) - .*$", re.MULTILINE)
+
+
+def nvdaLogErrorRecords(text: str) -> list[str]:
+	"""The records at ERROR or above in an NVDA log file, or lines that look like one."""
+	return _nvdaLogErrorRecord.findall(text)
+
+
+class Launch:
+	"""One run of the launcher, as a process of its own, and what it recorded and spoke."""
+
+	def __init__(self, directory: Path, process: subprocess.Popen, started: float) -> None:
+		self.directory = directory
+		self.process = process
+		#: time.monotonic() as the process was started; the transcript synth stamps its records with
+		#: the same clock, which is system wide.
+		self.started = started
+
+	@property
+	def eventsPath(self) -> Path:
+		return self.directory / "events.jsonl"
+
+	def text(self, name: str) -> str:
+		"""A file in the launch's directory, such as nvda.log or stderr.txt, or "" if there is none."""
+		path = self.directory / name
+		return path.read_text(encoding="utf-8") if path.exists() else ""
+
+	def spoken(self) -> list[dict]:
+		"""The transcript synth's speak records."""
+		path = self.directory / "transcript.jsonl"
+		if not path.exists():
+			return []
+		return [r for r in transcriptRecords().readRecords(path) if r["kind"] == "speak"]
+
+	def spokenTexts(self) -> list[str]:
+		return [transcriptRecords().spokenText(r) for r in self.spoken()]
+
+	def describe(self) -> str:
+		parts = [describeExit(self.process.poll())]
+		for name in ("stdout.txt", "stderr.txt"):
+			if text := self.text(name):
+				parts.append(f"{name}:\n{text[-3000:]}")
+		problems = self.result().problems(ignoring={"returnCode", "stderr"})
+		if problems:
+			parts.append("\n".join(problems)[-6000:])
+		if log := self.text("nvda.log"):
+			parts.append(f"log tail:\n{log[-6000:]}")
+		return "\n".join(parts)
+
+	def waitForSpeech(self, text: str, timeout: float) -> float:
+		"""Seconds from starting the process to text being spoken, as a whole speak record."""
+		deadline = self.started + timeout
+		while time.monotonic() < deadline:
+			for record in self.spoken():
+				if transcriptRecords().spokenText(record) == text:
+					return record["t"] - self.started
+			if self.process.poll() is not None:
+				break
+			time.sleep(0.05)
+		raise AssertionError(f"{text!r} was not spoken within {timeout} s\n{self.describe()}")
+
+	def waitForExit(self, timeout: float) -> int:
+		try:
+			return self.process.wait(timeout)
+		except subprocess.TimeoutExpired:
+			raise AssertionError(f"NVDA did not exit within {timeout} s\n{self.describe()}") from None
+
+	def stop(self) -> None:
+		"""Kill the process if it is still running."""
+		if self.process.poll() is None:
+			self.process.kill()
+		self.process.wait()
+
+	def result(self) -> ChildResult:
+		"""What the launch recorded so far, with the copies it started to restart itself."""
+		events = readEvents(self.eventsPath)
+		returnCode = self.process.poll()
+		return ChildResult.fromEvents(
+			events,
+			returnCode=returnCode,
+			error=None if any(e["kind"] == "start" for e in events) else "the launch recorded nothing",
+			stdout=self.text("stdout.txt"),
+			stderr=self.text("stderr.txt"),
+		)
+
+	def assertClean(self, *, ignoring: Collection[str] = (), logNames: Collection[str] = ()) -> None:
+		"""The launch has exited and every check in CLEAN_CHECKS holds, apart from those in ignoring.
+
+		:param logNames: NVDA log files in the launch's directory that must hold records, none of them
+			at ERROR or above, unless logErrors is ignored.
+		"""
+		problems = self.result().problems(ignoring)
+		for name in logNames:
+			log = self.text(name)
+			if not NVDA_LOG_RECORD_HEADER.search(log):
+				problems.append(f"{name} holds no records")
+			elif "logErrors" not in ignoring and (errors := nvdaLogErrorRecords(log)):
+				problems.append(f"{name} holds {len(errors)} records at ERROR or above\n{log[-8000:]}")
+		assert not problems, "\n\n".join(problems)
+
+
+def startLauncher(
+	directory: Path,
+	*arguments: str,
+	env: dict[str, str | None] | None = None,
+	recordLevel: int = LOG_ERROR,
+) -> Launch:
+	"""Start source/basedreader.py with arguments, in directory, under the checks runChild makes.
+
+	directory receives stdout.txt, stderr.txt, the checks' records and the transcript synth's
+	transcript.jsonl. The test hooks give NVDA tests/linux/synthDrivers and
+	tests/linux/fixtures/globalPlugins; env can change any of that, and None unsets a variable.
+	"""
+	requireRig()
+	directory.mkdir(parents=True, exist_ok=True)
+	hooks = directory / "testHooks"
+	hooks.mkdir(exist_ok=True)
+	for name, target in (
+		("synthDrivers", HERE / "synthDrivers"),
+		("globalPlugins", HERE / "fixtures" / "globalPlugins"),
+	):
+		if not (hooks / name).is_symlink():
+			(hooks / name).symlink_to(target)
+	environment = _environment(
+		{
+			"BASEDREADER_TEST_HOOKS_DIR": str(hooks),
+			"TRANSCRIPT_SYNTH_FILE": str(directory / "transcript.jsonl"),
+			"TRANSCRIPT_SYNTH_MODE": "immediate",
+			**(env or {}),
+		},
+	)
+	command = [
+		sys.executable,
+		"-I",
+		"-B",
+		str(Path(__file__).resolve()),
+		"launch",
+		str(directory / "events.jsonl"),
+		str(recordLevel),
+		str(LAUNCHER),
+		*arguments,
+	]
+	with open(directory / "stdout.txt", "w") as stdout, open(directory / "stderr.txt", "w") as stderr:
+		started = time.monotonic()
+		process = subprocess.Popen(command, env=environment, cwd=directory, stdout=stdout, stderr=stderr)
+	return Launch(directory, process, started)
+
+
+def stopRunningCopy() -> None:
+	"""Stop the copy of NVDA holding the lock of the rig's display, if any, as a new copy would.
+
+	A copy that a launch started to restart itself is not the test's child, and is found this way.
+	"""
+	module = singleInstance()
+	lock = module.InstanceLock(module.lockFilePath())
+	try:
+		module.terminateRunning(lock)
+	finally:
+		lock.close()
+
+
+@dataclass
+class _Launches:
+	directory: Path
+	started: list[Launch] = field(default_factory=list)
+
+	def __call__(self, name: str, *arguments: str, env: dict[str, str | None] | None = None) -> Launch:
+		launch = startLauncher(self.directory / name, *arguments, env=env)
+		self.started.append(launch)
+		return launch
+
+
+def launches(directory: Path) -> Iterator[_Launches]:
+	"""Starts launches, each in a directory of its own under directory, and afterwards makes sure none
+	outlives the caller and none changed the repository. Made a fixture by conftest.py."""
+	before = treeState()
+	started = _Launches(directory)
+	yield started
+	for launch in started.started:
+		launch.stop()
+	stopRunningCopy()
+	changed = changedPaths(before, treeState())
+	assert not changed, f"a launch changed the repository: {changed}"
+
+
 if __name__ == "__main__":
-	_child(*sys.argv[1:4])
+	if sys.argv[1] == "child":
+		_child(*sys.argv[2:8])
+	elif sys.argv[1] == "launch":
+		_launch(*sys.argv[2:])
+	else:
+		sys.exit(f"harness: unknown mode {sys.argv[1]!r}")
