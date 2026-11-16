@@ -4,11 +4,8 @@ nix develop . -c tests/linux/rig python3 -m pytest -p no:cacheprovider tests/lin
 """
 
 import json
-import os
 import re
 import stat
-import subprocess
-import sys
 import wave
 from pathlib import Path
 
@@ -605,7 +602,7 @@ class LateErrorSoundHeard(AssertionError):
 	"""The sound for an error logged late in shutdown cut off the exit sound, or its thread outlived it."""
 
 
-def test_lateErrorLeavesTheExitSoundWhole(tmp_path: Path):
+def test_lateErrorLeavesTheExitSoundWhole(launches, tmp_path: Path):
 	"""An error logged in the last step of shutdown cuts off neither the exit sound nor outlives it.
 
 	nvwave plays one file at a time, and the error sound is asked for from a thread of its own, so
@@ -626,37 +623,26 @@ def test_lateErrorLeavesTheExitSoundWhole(tmp_path: Path):
 	capture = tmp_path / "capture"
 	capture.mkdir()
 	resultPath = tmp_path / "result.json"
-	logPath = tmp_path / "nvda.log"
-	env = {
-		**os.environ,
-		"BASEDREADER_TEST_HOOKS_DIR": str(hooks),
-		"BASEDREADER_AUDIO_CAPTURE_DIR": str(capture),
-		"BASEDREADER_TRANSCRIPT_FILE": str(tmp_path / "transcript.jsonl"),
-		"LATE_ERROR_PROBE_RESULT": str(resultPath),
-	}
-	env.pop("BASEDREADER_BOOT_PROBE", None)
-	before = harness.treeState()
-	done = subprocess.run(
-		[
-			sys.executable,
-			"-I",
-			"-B",
-			str(harness.SOURCE / "basedreader.py"),
-			*("-c", str(configDir), "-f", str(logPath), "--debug-logging"),
-		],
-		env=env,
-		cwd=tmp_path,
-		capture_output=True,
-		text=True,
-		timeout=600,
-		check=False,
+	nvda = launches(
+		"lateError",
+		"-c",
+		str(configDir),
+		"-f",
+		str(tmp_path / "launches" / "lateError" / "nvda.log"),
+		"--debug-logging",
+		env={
+			"BASEDREADER_TEST_HOOKS_DIR": str(hooks),
+			"BASEDREADER_AUDIO_CAPTURE_DIR": str(capture),
+			"BASEDREADER_BOOT_PROBE": None,
+			"LATE_ERROR_PROBE_RESULT": str(resultPath),
+		},
 	)
-	after = harness.treeState()
-	assert before == after, "NVDA changed the repository"
-	log = logPath.read_text(encoding="utf-8") if logPath.exists() else ""
-	assert done.returncode == 0, f"exit status {done.returncode}\n{done.stderr[-3000:]}\n{log[-6000:]}"
-	errors = re.findall(r"^(ERROR|CRITICAL) - (\S+) .*\n(.*)$", log, re.MULTILINE)
-	assert errors == [("ERROR", "core._terminate", "Error terminating task scheduler")], log[-6000:]
+	assert nvda.waitForExit(600) == 0, nvda.describe()
+	# The probe makes the task scheduler fail to terminate, which is the late error.
+	nvda.assertClean(ignoring={"logErrors"}, logNames=("nvda.log",))
+	assert nvda.result().logErrors == ["ERROR: Error terminating task scheduler"], nvda.describe()
+	errors = re.findall(r"^(ERROR|CRITICAL) - (\S+) .*\n(.*)$", nvda.text("nvda.log"), re.MULTILINE)
+	assert errors == [("ERROR", "core._terminate", "Error terminating task scheduler")], nvda.describe()
 	result = json.loads(resultPath.read_text(encoding="utf-8"))
 	# The late error did ask for the sound, so the test exercised what it is about.
 	assert ["error.wav", "logHandler.errorSound"] in result["plays"], result
