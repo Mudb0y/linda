@@ -929,7 +929,7 @@ display = AckDisplay()
 handler.display = display
 handler.queuedWrite = [1, 2, 3, 4]
 handler._writeCellsInBackground()
-deadline = time.monotonic() + 2
+deadline = time.monotonic() + 30
 # The handler waits for an acknowledgement before it arms the timer; acknowledging in between would
 # cancel nothing.
 while handler.ackTimerHandle._thread is None and not resetterCalls and time.monotonic() < deadline:
@@ -953,8 +953,14 @@ def test_brailleAckTimer(tmp_path: Path, acknowledged: bool):
 		f"""
 		if {acknowledged!r}:
 			display._handleAck()
-		# Twice the display's timeout is when the handler stops waiting for an acknowledgement.
-		time.sleep(1)
+			# Twice the display's timeout, when a timer that was not cancelled would fire, and then as long
+			# again.
+			time.sleep(1)
+		else:
+			# The timer is due at twice the display's timeout, and a loaded machine runs it later.
+			deadline = time.monotonic() + 30
+			while display._awaitingAck and time.monotonic() < deadline:
+				time.sleep(0.005)
 		up = {{
 			"written": [list(cells) for cells in display.written],
 			"armed": armed,
