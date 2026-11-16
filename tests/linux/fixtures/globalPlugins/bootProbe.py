@@ -33,6 +33,7 @@ the innermost is open. Each call that showed a dialog logs the answer it got, as
 - "followUp" opens a wx dialog, and another inside it. Once the inner one is answered, the call that
 	showed it goes on handling events for a while, as code that reports what its cancelled dialog
 	left undone may, and then asks a question with wx.MessageBox, logged as "followUp".
+- "neverReturns" does the same as "followUp", but goes on handling events for ever instead.
 Those that wait, wait for something to signal NVDA, or with "+exit" appended ask NVDA to exit through
 core.triggerNVDAExit once they are ready, from inside the innermost dialog where there is one.
 Unset, the plugin does nothing, so that other tests which add this directory to globalPlugins
@@ -65,6 +66,7 @@ dialogModes = (
 	"dialogInWelcome",
 	"reopening",
 	"followUp",
+	"neverReturns",
 )
 otherModes = (
 	"exit",
@@ -241,10 +243,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			wx.CallAfter(self._innerThenFollowUp, outer)
 			self._answered("outer", outer.ShowModal())
 
+	def _neverReturns(self) -> None:
+		self._followUp()
+
 	def _innerThenFollowUp(self, outer: wx.Dialog) -> None:
 		self._innerDialog(outer)
 		deadline = time.monotonic() + FOLLOW_UP_DELAY
-		while time.monotonic() < deadline:
+		while self._mode == "neverReturns" or time.monotonic() < deadline:
 			wx.GetApp().Yield(onlyIfNeeded=True)
 			time.sleep(0.01)
 		answer = wx.MessageBox(

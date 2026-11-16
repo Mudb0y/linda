@@ -1075,6 +1075,24 @@ def test_exitsWhileTheCallInsideADialogGoesOn(launcher, route: str):
 	assert nvda.savedSetting() == CHANGED_SETTING[2]
 
 
+def test_callThatNeverReturnsInsideADialogEndsNVDA(launcher):
+	# Once its dialog is answered, the call that showed it handles events for ever inside the outer
+	# dialog, which can therefore never be ended.
+	nvda = launcher("neverReturns", "neverReturns", welcome=False)
+	nvda.waitForSentence(text=DIALOG_SENTENCE)
+	nvda.process.send_signal(signal.SIGTERM)
+	assert nvda.waitForExit(timeout=singleInstance.QUIT_TIMEOUT) == GIVEN_UP_STATUS, nvda.describe()
+	log = nvda.log()
+	assert re.search(
+		r"^Gave up ending modal dialogs: the call that showed .* has not returned after [\d.]+ s; "
+		r"ending NVDA without finishing its exit$",
+		log,
+		re.MULTILINE,
+	), log[-4000:]
+	assert nvda.answers() == {"inner": WX_ID_CLOSE_ALL}
+	assert nvda.savedSetting() == CHANGED_SETTING[2]
+
+
 @pytest.mark.parametrize("route", ["signal", "triggerNVDAExit"])
 def test_dialogReopenedForEverEndsNVDA(launcher, route: str):
 	# Code that shows its dialog again each time it is ended would otherwise keep NVDA half shut down
