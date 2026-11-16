@@ -308,6 +308,28 @@ def test_writesAreSeenWhateverTheChildsDirectoryIsCalled(tmp_path: Path):
 	assert problemsBesides(done) == ["writes"]
 
 
+def test_theRepositoryIsFoundFromUnderTheOverlay(tmp_path: Path):
+	# Upstream code asks git where the checkout is, from source/, which the overlay makes a file
+	# system of its own.
+	done = harness.runChild(
+		tmp_path,
+		f"""
+		import subprocess
+
+		result = subprocess.run(
+			["git", "rev-parse", "--show-toplevel"],
+			cwd={str(harness.SOURCE)!r},
+			capture_output=True,
+			text=True,
+			check=False,
+		).stdout.strip()
+		""",
+		prepare="none",
+	)
+	done.assertClean()
+	assert done.value == str(harness.ROOT)
+
+
 def test_whatIsNotAWriteUnderSourceIsNotReported(tmp_path: Path):
 	done = harness.runChild(
 		tmp_path,

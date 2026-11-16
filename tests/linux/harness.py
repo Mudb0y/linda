@@ -316,6 +316,9 @@ def _isolate(overlay: str, *command: str) -> None:
 			os.utime(upper, ns=(0, 0))
 	except OSError as e:
 		sys.exit(f"harness: cannot put an overlay over the checkout: {e}")
+	# Each overlay is a file system of its own, where git would stop looking for the repository that
+	# a path under it belongs to, as upstream's markdownTranslate asks from source/.
+	os.environ["GIT_DISCOVERY_ACROSS_FILESYSTEM"] = "1"
 	# Becoming a new program also drops the capabilities the new user namespace gave this process.
 	os.execv(command[0], command)
 
