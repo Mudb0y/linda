@@ -9,6 +9,7 @@ state of a whole process. Run under the rig:
 import ast
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -110,6 +111,10 @@ def readAllowedFailures() -> AllowedFailures:
 	for line in ALLOWED_FAILURES.read_text(encoding="utf-8").splitlines():
 		if not line.strip() or line.startswith("#"):
 			continue
+		# A reason has to make sense to a reader with only this repository.
+		assert not re.search(r"\bworkstreams?\b|\.md\b", line, re.IGNORECASE), (
+			f"a reason points outside: {line!r}"
+		)
 		if not line[0].isspace():
 			if reasonLines:
 				settle()

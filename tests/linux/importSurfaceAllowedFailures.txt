@@ -140,7 +140,7 @@ contentRecog.uwpOcr
   replaces, and is not provided
   reached from contentRecog.recogUi: safe, because it imports _wgcCapture
   only while screen curtain or NVDA's magnifier is active, or for a
-  recognition result object, and none can exist on Linux yet: the first two
+  recognition result object, and Linux has none of these: the first two
   drive Windows' Magnification API, and a result object is a Window object
   reached from globalCommands: safe, because both OCR scripts first ask
   winVersion.isUwpOcrAvailable(), which looks for Windows' OCR data under
@@ -206,8 +206,9 @@ mathPres.MathCAT.speech
   not available."
   reached from gui.settingsDialogs: not safe: the settings dialog offers the
   Math category on Linux, and opening it imports MathCAT's preferences and
-  localization, which raise ModuleNotFoundError; B decides whether the
-  category is offered, unless E packages libmathcat_py first
+  localization, which raise ModuleNotFoundError; either the dev shell
+  packages libmathcat_py, or the settings dialog stops offering the
+  category on Linux while it lacks MathCAT
 
 l10nUtil
   translators' tool: needs crowdin_api, which is not a run-time dependency
