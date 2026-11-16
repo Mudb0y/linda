@@ -1,8 +1,7 @@
 """App modules find their application from the process on Linux, through /proc and pidfd.
 
-Flatpak apps are not covered: they reach the accessibility bus through xdg-dbus-proxy, so which
-process the AT-SPI backend reports for them, and how they are named, waits for that backend and for
-the application-name hook that object-model.md R6 describes.
+Flatpak apps are not covered: they reach the accessibility bus through xdg-dbus-proxy, so the
+process ID the bus reports for one of their objects is the proxy's, not the app's.
 
 nix develop . -c tests/linux/rig python3 -m pytest -p no:cacheprovider tests/linux/test_processIdentity.py
 """
@@ -276,7 +275,7 @@ result = {{
 	}
 
 
-def test_productInfoIsNotBuilt(tmp_path: Path):
+def test_productInfoRaises(tmp_path: Path):
 	done = harness.runChild(
 		tmp_path,
 		"""
@@ -297,33 +296,47 @@ except NoLinuxImplementation:
 
 
 def test_otherUsersProcess(tmp_path: Path):
-	info = os.stat("/proc/1")
-	if info.st_uid == os.getuid() or os.access("/proc/1/exe", os.R_OK):
-		pytest.skip("process 1 belongs to this user here")
-	argv0 = Path("/proc/1/cmdline").read_bytes().split(b"\0")[0].decode()
-	if not argv0:
-		pytest.skip("process 1's command line is empty here")
+	# The kernel denies another user's /proc/PID/exe to anyone without the right to trace the process,
+	# and it denies it in the same way for this user's own process when that process is undumpable,
+	# which a process becomes by executing a file it may not read. The rig maps only this user, so the
+	# process's owner is the one fact the test cannot make real, and it changes whom NVDA runs as instead.
+	path = copyAs(tmp_path, "otherapp")
+	os.chmod(path, 0o111)
 	done = harness.runChild(
 		tmp_path,
-		"""
-import appModuleHandler
-mod = appModuleHandler.getAppModuleFromProcessID(1)
-result = {
+		START
+		+ f"""
+import os, appModuleHandler
+from linuxPlatform import processes
+process = start({path!r}, "60", argv0="/elsewhere/sleep")
+processes.userID = os.getuid() + 1
+mod = appModuleHandler.getAppModuleFromProcessID(process.pid)
+result = {{
 	"appName": mod.appName,
 	"alive": mod.isAlive,
 	"appPath": mod.appPath,
 	"appArchitecture": mod.appArchitecture,
+	"is64BitProcess": mod.is64BitProcess,
 	"isRunningUnderDifferentLogonSession": mod.isRunningUnderDifferentLogonSession,
-}
+}}
+try:
+	mod.processExecutablePath
+except OSError as e:
+	result["processExecutablePath"] = type(e).__name__
+processes.userID = os.getuid()
+result["undumpable but this user's"] = processes.isOtherUser(process.pid)
 """,
 	)
 	done.assertClean()
 	assert done.value == {
-		"appName": os.path.basename(argv0).lower(),
+		"appName": "sleep",
 		"alive": True,
 		"appPath": None,
 		"appArchitecture": "unknown",
+		"is64BitProcess": False,
 		"isRunningUnderDifferentLogonSession": True,
+		"processExecutablePath": "PermissionError",
+		"undumpable but this user's": False,
 	}
 
 
@@ -421,20 +434,23 @@ result = {{"errors": errors, "answers": sorted(answers)}}
 	assert done.value == {"errors": [], "answers": [True]}
 
 
-@pytest.mark.parametrize("watch", ["pidfd", "proc"])
-def test_deadProcessIsCleanedUp(tmp_path: Path, watch: str):
-	path = copyAs(tmp_path, "shortlived")
-	# The /proc fallback is what runs when the kernel or a full descriptor table refuses a pidfd.
-	refusePidfd = """
+#: Makes os.pidfd_open fail, so that ProcessWatch takes the /proc fallback that runs when the kernel or
+#: a full descriptor table refuses a pidfd.
+REFUSE_PIDFD = """
 import errno, os
 def refuse(pid, flags=0):
 	raise OSError(errno.ENOSYS, "refused by the test")
 os.pidfd_open = refuse
 """
+
+
+@pytest.mark.parametrize("watch", ["pidfd", "proc"])
+def test_deadProcessIsCleanedUp(tmp_path: Path, watch: str):
+	path = copyAs(tmp_path, "shortlived")
 	done = harness.runChild(
 		tmp_path,
 		START
-		+ (refusePidfd if watch == "proc" else "")
+		+ (REFUSE_PIDFD if watch == "proc" else "")
 		+ f"""
 import appModuleHandler
 process = start({path!r}, "60", argv0="sleep")
@@ -467,6 +483,28 @@ result["nameAfterDeath"] = appModuleHandler.getAppNameFromProcessID(process.pid)
 		"terminated": True,
 		"nameAfterDeath": "",
 	}
+
+
+def test_reusedProcessIDIsNotAliveWithoutPidfd(tmp_path: Path):
+	path = copyAs(tmp_path, "reusedapp")
+	done = harness.runChild(
+		tmp_path,
+		START
+		+ REFUSE_PIDFD
+		+ f"""
+import appModuleHandler
+from linuxPlatform import processes
+process = start({path!r}, "60", argv0="sleep")
+mod = appModuleHandler.getAppModuleFromProcessID(process.pid)
+result = {{"usesPidfd": mod._processWatch._poll is not None, "aliveBefore": mod.isAlive}}
+# The process ID now belongs to a process that started a tick later than the one the module serves.
+readStartTime = processes._readStartTime
+processes._readStartTime = lambda pid: str(int(readStartTime(pid)) + 1).encode()
+result["aliveAfterReuse"] = mod.isAlive
+""",
+	)
+	done.assertClean()
+	assert done.value == {"usesPidfd": False, "aliveBefore": True, "aliveAfterReuse": False}
 
 
 def test_noProcess(tmp_path: Path):

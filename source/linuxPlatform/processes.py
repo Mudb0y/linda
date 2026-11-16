@@ -360,12 +360,18 @@ def is64Bit(processID: int) -> bool:
 	return header is not None and header[0] == _elfClass64
 
 
+#: The real user ID NVDA runs as, which isOtherUser compares each process's real user ID with.
+userID: int = os.getuid()
+
+
 def isOtherUser(processID: int | None) -> bool:
 	"""Whether the process runs as a different user from NVDA.
 
 	This is the Linux sense of Windows' different logon session: a program started with runas there,
 	with sudo or pkexec here. The logind or audit session is not used, because programs that the user's
-	own service manager starts, D-Bus activated ones included, sit outside the login session.
+	own service manager starts, D-Bus activated ones included, sit outside the login session. Nor is the
+	owner of the files in /proc/PID, which are root's for a process that makes itself undumpable, as
+	ssh-agent does.
 	"""
 	if processID is None:
 		return False
@@ -373,7 +379,7 @@ def isOtherUser(processID: int | None) -> bool:
 		with open(f"/proc/{processID}/status", "rb") as f:
 			for line in f:
 				if line.startswith(b"Uid:"):
-					return int(line.split()[1]) != os.getuid()
+					return int(line.split()[1]) != userID
 	except OSError:
 		pass
 	return False
@@ -383,7 +389,7 @@ def getProductInfo(processID: int) -> tuple[str, str]:
 	"""The product name and version, which Windows reads from the executable's version resource."""
 	raise NoLinuxImplementation(
 		"product name and version of a process",
-		"Linux executables carry no version resource; a package or toolkit lookup is not built yet",
+		"Linux executables carry no version resource",
 	)
 
 
