@@ -215,37 +215,48 @@ def test_errorSoundCannotRecurseOrBlock(tmp_path: Path):
 		tmp_path,
 		startLog(tmp_path / "nvda.log")
 		+ """
+		import logging
 		import threading
-		import time
 		import config
+		from linuxPlatform import logSupport
 
 		config.conf["featureFlag"]["playErrorSound"] = 1
 		calls = []
+		entered = threading.Event()
 		release = threading.Event()
+		playerFailureLogged = threading.Event()
+
+		class PlayerFailure(logging.Handler):
+			def emit(self, record):
+				if record.getMessage().startswith("Error running handler"):
+					playerFailureLogged.set()
+
+		log.addHandler(PlayerFailure(level=logging.ERROR))
 
 		def stuckFailingPlayer():
 			calls.append(threading.current_thread().name)
-			release.wait(5)
+			entered.set()
+			# Released only by the thread that logs, so this is False if that thread waited for it.
+			calls.append(release.wait(60))
 			raise RuntimeError("player failed, as the test asks")
 
 		logHandler.getOnErrorSoundRequested().register(stuckFailingPlayer)
-		started = time.perf_counter()
 		log.error("first error")
+		entered.wait(60)
 		log.error("second error")
-		elapsed = time.perf_counter() - started
-		time.sleep(0.3)
+		# Read while the player is still stuck, so the sound's thread cannot have taken a request.
+		askedAgain = logSupport._errorSound._pending.is_set()
 		release.set()
-		time.sleep(1)
-		result = {"elapsed": elapsed, "calls": calls}
+		playerFailureLogged.wait(60)
+		result = {"calls": calls, "askedAgain": askedAgain}
 		""",
 	)
 	assert done.error is None, done.error
 	assert not done.noLinuxImplementation, done.noLinuxImplementation
-	# The logging thread never waits for the player.
-	assert done.value["elapsed"] < 0.5, done.value
-	# The second error arrived while the sound was being requested and asks for nothing. The
-	# player's own failure is logged on the sound's thread, so nothing follows it either.
-	assert done.value["calls"] == ["logHandler.errorSound"], done.value
+	# The second error arrived while the sound was being requested and asks for nothing, and the
+	# thread that logged it went on while the player was stuck. The player's own failure is logged
+	# on the sound's thread, so nothing follows it either.
+	assert done.value == {"calls": ["logHandler.errorSound", True], "askedAgain": False}
 	assert done.logErrors[:2] == ["ERROR: first error", "ERROR: second error"]
 	assert len(done.logErrors) == 3
 	assert done.logErrors[2].startswith("ERROR: Error running handler")
@@ -256,18 +267,32 @@ def test_errorSoundStopsWhenItsPlaybackLogsErrors(tmp_path: Path):
 		tmp_path,
 		startLog(tmp_path / "nvda.log")
 		+ """
+		import logging
 		import threading
 		import time
 		import config
 		from linuxPlatform import logSupport
 
 		config.conf["featureFlag"]["playErrorSound"] = 1
+		# Far longer than a loaded machine takes to fail a playback, so every failure follows its sound.
+		logSupport.ERROR_SOUND_FOLLOW_WINDOW = 30
 		logSupport.ERROR_SOUND_QUIET_PERIOD = 0.5
 		plays = []
 		failing = True
+		stopped = threading.Event()
+		fourthPlay = threading.Event()
+
+		class StopWarning(logging.Handler):
+			def emit(self, record):
+				if record.getMessage().startswith("Errors followed the error sound"):
+					stopped.set()
+
+		log.addHandler(StopWarning(level=logging.WARNING))
 
 		def playerWhosePlaybackFails():
 			plays.append(time.perf_counter())
+			if len(plays) == 4:
+				fourthPlay.set()
 
 			def playback():
 				if not failing:
@@ -284,11 +309,13 @@ def test_errorSoundStopsWhenItsPlaybackLogsErrors(tmp_path: Path):
 
 		logHandler.getOnErrorSoundRequested().register(playerWhosePlaybackFails)
 		log.error("one error")
-		time.sleep(2)
+		stopped.wait(60)
 		loopPlays = len(plays)
 		failing = False
+		# A sleep is never shorter than asked, so errors have been quiet for the quiet period.
+		time.sleep(logSupport.ERROR_SOUND_QUIET_PERIOD + 0.1)
 		log.error("an error while errors are quiet")
-		time.sleep(0.3)
+		fourthPlay.wait(60)
 		result = {"loopPlays": loopPlays, "plays": len(plays), "log": logText()}
 		""",
 	)
@@ -312,8 +339,11 @@ def test_errorSoundThroughNvwaveStops(tmp_path: Path):
 		import config
 		import NVDAHelper
 		import nvwave
+		from linuxPlatform import logSupport
 
 		config.conf["featureFlag"]["playErrorSound"] = 1
+		# Far longer than a loaded machine takes to fail a playback, so every failure follows its sound.
+		logSupport.ERROR_SOUND_FOLLOW_WINDOW = 30
 		created = []
 
 		class FailingPlayer:
@@ -367,7 +397,7 @@ def test_errorWhileSoundThreadStartsDoesNotHang(tmp_path: Path):
 		threading.Thread.start = realStart
 		result = "returned"
 		""",
-		timeout=30,
+		timeout=120,
 	)
 	assert done.error is None, done.error
 	assert done.value == "returned"
@@ -484,8 +514,8 @@ def test_criticalMakesNoSound(tmp_path: Path):
 		tmp_path,
 		startLog(tmp_path / "nvda.log")
 		+ """
-		import time
 		import config
+		from linuxPlatform import logSupport
 
 		config.conf["featureFlag"]["playErrorSound"] = 1
 		calls = []
@@ -495,14 +525,19 @@ def test_criticalMakesNoSound(tmp_path: Path):
 
 		logHandler.getOnErrorSoundRequested().register(player)
 		log.critical("critical by the test")
-		time.sleep(0.5)
-		result = {"calls": len(calls), "log": logText()}
+		# A request starts the sound's thread before the logging call returns.
+		result = {
+			"calls": len(calls),
+			"requested": logSupport._errorSound._thread is not None,
+			"log": logText(),
+		}
 		""",
 	)
 	assert done.error is None, done.error
 	assert not done.noLinuxImplementation, done.noLinuxImplementation
 	assert done.logErrors == ["CRITICAL: critical by the test"]
 	assert done.value["calls"] == 0
+	assert done.value["requested"] is False
 	assert "critical by the test" in done.value["log"]
 
 
