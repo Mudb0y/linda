@@ -491,6 +491,15 @@ def test_noDoneAfterACancelInTheLastWait(tmp_path: Path):
 	assert done.value == {"doneAfterCancel": 0, "after": [["index", 99], ["done", None]]}
 
 
+def test_theLibraryLinksNoSoundLibrary():
+	# What lets the harness and the unit-test runner accept this one library while refusing every
+	# other sound library: it has no audio output of its own, so it links nothing that has one.
+	soname, linked = rununittests.elfLinks(os.path.realpath(os.environ[LIBRARY_VARIABLE]))
+	assert soname == "libespeak-ng.so.1"
+	assert linked, "no dynamic section was read"
+	assert sorted(linked) == ["libc.so.6", "libgcc_s.so.1", "libm.so.6", "libstdc++.so.6"], linked
+
+
 def runUnitTestRunner(tmpPath: Path, test: str, env: dict[str, str]) -> subprocess.CompletedProcess:
 	"""The unit-test runner, on a package of one probe test module."""
 	package = tmpPath / "top" / "probeEspeak"
