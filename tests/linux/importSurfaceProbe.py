@@ -277,6 +277,87 @@ def _outcome(call: object) -> dict:
 	return {"raised": None, "returned": repr(value)}
 
 
+def _callWithNones(func: object) -> object:
+	"""Call func with None for each parameter it requires, as a caller that got that far would."""
+	import inspect
+
+	try:
+		parameters = inspect.signature(func).parameters.values()
+	except (TypeError, ValueError):
+		return func()
+	required = [
+		p
+		for p in parameters
+		if p.default is inspect.Parameter.empty and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+	]
+	return func(
+		*(None for p in required if p.kind is not p.KEYWORD_ONLY),
+		**{p.name: None for p in required if p.kind is p.KEYWORD_ONLY},
+	)
+
+
+def _standInSurface() -> dict:
+	"""What every public name each stand-in module defines does when used: called for a function,
+	constructed for a class, and every public method or property of a class that constructs."""
+	import ctypes
+	import enum
+	import inspect
+
+	from comtypes import IUnknown
+	from linuxPlatform import finder
+
+	def category(cls: type) -> str:
+		if issubclass(cls, BaseException):
+			return "exception"
+		if issubclass(cls, enum.Enum):
+			return "enum"
+		if issubclass(cls, IUnknown):
+			return "interface"
+		if issubclass(cls, (ctypes._SimpleCData, ctypes.Structure, ctypes.Union, ctypes._Pointer)):
+			return "ctypesType"
+		return "class"
+
+	surface: dict[str, dict] = {}
+	for moduleName in finder.standInModules:
+		module = importlib.import_module(moduleName)
+		for attr in sorted(vars(module)):
+			if attr.startswith("_"):
+				continue
+			obj = getattr(module, attr)
+			label = f"{moduleName}.{attr}"
+			if inspect.ismodule(obj):
+				continue
+			if not (inspect.isclass(obj) or callable(obj)):
+				surface[label] = {"kind": "value", "type": type(obj).__name__}
+				continue
+			if getattr(obj, "__module__", None) != moduleName:
+				# Imported, from another stand-in or from ctypes, and covered where it is defined.
+				continue
+			if not inspect.isclass(obj):
+				surface[label] = {"kind": "function", **_outcome(lambda obj=obj: _callWithNones(obj))}
+				continue
+			made: list[object] = []
+			outcome = _outcome(lambda obj=obj: made.append(_callWithNones(obj)))
+			surface[label] = {"kind": "class", "category": category(obj), **outcome}
+			for memberName, member in vars(obj).items():
+				if memberName.startswith("_"):
+					continue
+				memberLabel = f"{label}.{memberName}"
+				if isinstance(member, property):
+					if made:
+						surface[memberLabel] = {
+							"kind": "property",
+							**_outcome(lambda name=memberName: getattr(made[0], name)),
+						}
+				elif isinstance(member, (staticmethod, classmethod)):
+					bound = getattr(obj, memberName)
+					surface[memberLabel] = {"kind": "method", **_outcome(lambda f=bound: _callWithNones(f))}
+				elif inspect.isfunction(member) and made:
+					bound = getattr(made[0], memberName)
+					surface[memberLabel] = {"kind": "method", **_outcome(lambda f=bound: _callWithNones(f))}
+	return surface
+
+
 def runHazard(name: str) -> dict:
 	import ctypes
 
@@ -364,6 +445,7 @@ def runHazard(name: str) -> dict:
 			),
 			"comtypes.COMObject()": lambda: comtypes.COMObject(),
 			"pycaw AudioUtilities.GetAllSessions()": lambda: AudioUtilities.GetAllSessions(),
+			"WINFUNCTYPE COM method prototype": lambda: ctypes.WINFUNCTYPE(ctypes.HRESULT)(3, "Release")(),
 		}
 		outcomes = {label: _outcome(call) for label, call in calls.items()}
 		callback = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_int)(lambda x: x * 2)
@@ -372,6 +454,50 @@ def runHazard(name: str) -> dict:
 			"audited": audited,
 			"callbackIsCFuncPtr": isinstance(callback, ctypes._CFuncPtr),
 			"callbackResult": callback(21),
+			"truthiness": {
+				"ctypes.windll.user32": bool(ctypes.windll.user32),
+				"ctypes.WinDLL('user32')": bool(ctypes.WinDLL("user32")),
+				"ctypes.oledll.ole32": bool(ctypes.oledll.ole32),
+			},
+			"privateAttribute": _outcome(lambda: ctypes.windll.user32._funcptr),
+		}
+	if name == "standInSurface":
+		return _standInSurface()
+	if name == "guid":
+		from comtypes import GUID
+
+		text = "{618736E0-3C3D-11CF-810C-00AA00389B71}"
+		guid = GUID(text)
+		return {
+			"str": str(guid),
+			"repr": repr(guid),
+			"size": ctypes.sizeof(guid),
+			"nullIsFalse": not GUID(),
+			"setIsTrue": bool(guid),
+			"equalByValue": guid == GUID(text.lower()),
+			"unequal": guid != GUID(),
+			"notEqualToText": guid != text,
+			"hashByValue": hash(guid) == hash(GUID(text)),
+		}
+	if name == "finderTables":
+		from linuxPlatform import finder
+
+		def build(**tables: tuple[str, ...]) -> dict:
+			saved = {key: getattr(finder, key) for key in tables}
+			try:
+				for key, value in tables.items():
+					setattr(finder, key, value)
+				return _outcome(finder._buildTable)
+			finally:
+				for key, value in saved.items():
+					setattr(finder, key, value)
+
+		return {
+			"asListed": _outcome(lambda: len(finder._buildTable())),
+			"neverProvidedListed": build(standInModules=(*finder.standInModules, "winreg")),
+			"listedTwice": build(standInModules=(*finder.standInModules, "winsound")),
+			"keptWithoutReplacedPackage": build(keptSubmodules=("config.configFlags",)),
+			"noFile": build(replacedModules=(*finder.replacedModules, "noSuchReplacement")),
 		}
 	if name == "windowsError":
 		error = WindowsError(2, "x", None, 5)  # noqa: UP024

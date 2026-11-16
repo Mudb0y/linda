@@ -327,6 +327,74 @@ def test_standInCallsRaise(tmp_path: Path):
 	assert "kernel32.GetTickCount" in hazard["audited"]
 	assert hazard["callbackIsCFuncPtr"], "WINFUNCTYPE applied to a Python callable must make a real callback"
 	assert hazard["callbackResult"] == 42
+	# A caller that truth-tests a library, as the Lilli braille driver's check() does, asks whether
+	# it can be used.
+	assert not any(hazard["truthiness"].values()), hazard["truthiness"]
+	# copy, pickle and ctypes itself probe private and special names; a Windows function in answer
+	# would mislead them.
+	assert hazard["privateAttribute"]["raised"] == "AttributeError"
+
+
+#: Stand-in functions that build COM method declarations for an interface's _methods_; they call
+#: nothing.
+COM_DECLARATION_BUILDERS = {"comtypes.COMMETHOD", "comtypes.DISPMETHOD", "comtypes.STDMETHOD"}
+#: Stand-in classes that are neither COM objects nor ctypes types, and construct: a DISPID is an
+#: integer, and AudioUtilities is only a namespace for static methods, each of which raises.
+CONSTRUCTIBLE_CLASSES = {"comtypes.dispid", "pycaw.utils.AudioUtilities"}
+#: Class categories that only declare a type: constructing one calls nothing in Windows.
+DECLARING_CATEGORIES = {"exception", "enum", "interface", "ctypesType"}
+
+
+def test_standInSurfaceNeverAnswers(tmp_path: Path):
+	"""Every function, method and property a stand-in defines raises NoLinuxImplementation, and so
+	does constructing any class of it that is not a type declaration; the only values are integer
+	constants. A new stand-in name that returned something plausible would fail here."""
+	surface = runProbe(tmp_path, "hazard", "standInSurface")["hazard"]
+	answering = {}
+	for name, o in surface.items():
+		raisedNoLinux = o.get("raised") == "NoLinuxImplementation" and o.get("isNotImplementedError")
+		if o["kind"] == "value":
+			ok = o["type"] == "int"
+		elif name in COM_DECLARATION_BUILDERS:
+			ok = o["raised"] is None and o["returned"].startswith("(")
+		elif o["kind"] == "class" and (o["category"] in DECLARING_CATEGORIES or name in CONSTRUCTIBLE_CLASSES):
+			ok = True
+		else:
+			ok = raisedNoLinux
+		if not ok:
+			answering[name] = o
+	assert not answering, answering
+	listed = COM_DECLARATION_BUILDERS | CONSTRUCTIBLE_CLASSES
+	assert listed <= surface.keys(), f"listed here but no longer in the stand-ins: {listed - surface.keys()}"
+	assert {"comtypes.GUID.from_progid", "comtypes.automation.tagVARIANT.value"} <= surface.keys()
+
+
+def test_guidIsAValue(tmp_path: Path):
+	"""A GUID is data, not a call into Windows, so it compares, hashes and prints as on Windows."""
+	assert runProbe(tmp_path, "hazard", "guid")["hazard"] == {
+		"str": "{618736E0-3C3D-11CF-810C-00AA00389B71}",
+		"repr": 'GUID("{618736E0-3C3D-11CF-810C-00AA00389B71}")',
+		"size": 16,
+		"nullIsFalse": True,
+		"setIsTrue": True,
+		"equalByValue": True,
+		"unequal": True,
+		"notEqualToText": True,
+		"hashByValue": True,
+	}
+
+
+def test_finderRefusesBadTables(tmp_path: Path):
+	"""A mistake in the finder's tables stops the install rather than making a module importable
+	that must not be, or quietly leaving one out."""
+	hazard = runProbe(tmp_path, "hazard", "finderTables")["hazard"]
+	assert hazard["asListed"]["raised"] is None
+	assert {name: o["raised"] for name, o in hazard.items() if name != "asListed"} == {
+		"neverProvidedListed": "RuntimeError",
+		"listedTwice": "RuntimeError",
+		"keptWithoutReplacedPackage": "RuntimeError",
+		"noFile": "FileNotFoundError",
+	}
 
 
 def test_hotPathsAnswerWithoutError(tmp_path: Path):
