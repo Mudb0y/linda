@@ -82,7 +82,11 @@ source/appModuleHandler.py
 source/appModules/nvda.py
   Linux runtime: chooseNVDAObjectOverlayClasses adds no overlay on Linux,
   where NVDA's own dialogs are AT-SPI objects with no window class or window
-  handle to recognise them by
+  handle to recognise them by. isNvdaMenu knows the NVDA menu as the popup
+  menu directly in a window while gui says the menu is open, as it has no
+  IAccessible identity there, so the menu is named NVDA as on Windows; and
+  the focus on the unnamed window GTK puts that menu in is not spoken, as it
+  passes to the first item at once
 source/argsParsing.py
   Linux runtime: help goes to standard output and a command-line error to standard
   error with exit status 2, as argparse does, instead of a Windows message
@@ -169,8 +173,11 @@ source/gui/__init__.py
   window manager returns focus after a popup by itself. Every dialog NVDA
   opens goes through these, the welcome dialog at a first start and the
   exit dialog among them. shouldConfigProfileTriggersBeSuspended does not
-  ask for the thread's menu mode on Linux, which wxGTK has no flag for, so
-  an open NVDA menu does not suspend triggers there
+  ask for the thread's menu mode on Linux, which wxGTK has no flag for, but
+  for a flag SysTrayIcon.onActivate sets while its PopupMenu runs. showGui
+  does not move the pointer to the middle of the screen before the NVDA
+  menu opens, and onActivate has GTK select the menu's first item once it
+  is shown, as wx pops it up for the pointer with nothing selected
   every platform: the help menu's web pages, the donation page and the
   documentation open through startfile from linuxPlatform.windowsOnly,
   which is os.startfile on Windows and on Linux opens them with the

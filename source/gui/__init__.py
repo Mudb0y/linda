@@ -100,6 +100,10 @@ except RuntimeError:
 	updateCheck = None
 
 ### Constants
+if sys.platform != "win32":
+	#: Whether the NVDA menu is showing; Windows asks the thread's menu mode instead.
+	_isNvdaMenuOpen = False
+
 NVDA_PATH = globalVars.appDir
 ICON_PATH = os.path.join(NVDA_PATH, "images", "nvda.ico")
 DONATE_URL = f"{buildVersion.url}/donate/"
@@ -211,6 +215,11 @@ class MainFrame(wx.Frame):
 			self.Hide()
 
 	def showGui(self):
+		if sys.platform != "win32":
+			# X has no pointer warp that a keyboard user needs here, and Wayland none at all: the menu
+			# takes the keyboard wherever it pops up.
+			self.sysTrayIcon.onActivate(None)
+			return
 		# The menu pops up at the location of the mouse, which means it pops up at an unpredictable location.
 		# Therefore, move the mouse to the center of the screen so that the menu will always pop up there.
 		location = api.getDesktopObject().location
@@ -783,6 +792,19 @@ class SysTrayIcon(wx.adv.TaskBarIcon):
 			# The NVDA app module doesn't know how to identify the NVDA menu yet.
 			# Signal that the NVDA menu has just been opened.
 			appModules.nvda.nvdaMenuIaIdentity = True
+		if sys.platform != "win32":
+			global _isNvdaMenuOpen
+			from linuxPlatform import gtkMenus
+
+			gtkMenus.selectFirstItemWhenShown()
+			# PopupMenu returns once the menu has closed, whichever way it closed.
+			_isNvdaMenuOpen = True
+			try:
+				self.PopupMenu(self.menu)
+			finally:
+				_isNvdaMenuOpen = False
+			mainFrame.postPopup()
+			return
 		self.PopupMenu(self.menu)
 		if appModules.nvda.nvdaMenuIaIdentity is True:
 			# The NVDA menu didn't actually appear for some reason.
@@ -1028,7 +1050,8 @@ def shouldConfigProfileTriggersBeSuspended():
 	"""
 	if sys.platform != "win32":
 		# wx on GTK has no thread menu-mode flag to say whether NVDA's menu is open.
-		pass
+		if _isNvdaMenuOpen:
+			return True
 	elif winUser.getGUIThreadInfo(winBindings.kernel32.GetCurrentThreadId()).flags & 0x00000010:
 		# The NVDA menu is active.
 		return True

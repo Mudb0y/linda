@@ -184,6 +184,14 @@ class AppModule(appModuleHandler.AppModule):
 
 	def isNvdaMenu(self, obj):
 		global nvdaMenuIaIdentity
+		if sys.platform != "win32":
+			# GTK gives each submenu a window of its own too, but parents it to the item that opens it.
+			return (
+				gui._isNvdaMenuOpen
+				and obj.role == controlTypes.Role.POPUPMENU
+				and obj.parent is not None
+				and obj.parent.role == controlTypes.Role.WINDOW
+			)
 		if not isinstance(obj, IAccessible):
 			return False
 		if nvdaMenuIaIdentity and obj.IAccessibleIdentity == nvdaMenuIaIdentity:
@@ -204,6 +212,10 @@ class AppModule(appModuleHandler.AppModule):
 
 	def event_gainFocus(self, obj, nextHandler):
 		if obj.role == controlTypes.Role.UNKNOWN and controlTypes.State.INVISIBLE in obj.states:
+			return
+		if sys.platform != "win32" and gui._isNvdaMenuOpen and obj.role == controlTypes.Role.WINDOW:
+			# The unnamed window GTK puts the NVDA menu in has the focus only until the first item is
+			# selected, a moment later.
 			return
 		nextHandler()
 

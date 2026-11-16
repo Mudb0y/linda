@@ -104,6 +104,9 @@ ALLOWED_STANDARD_ERROR = (
 		r"/org/gtk/libgtk/theme/Adwaita/assets/[\w-]+\.svg\.\n"
 		r"This may indicate that pixbuf loaders or the mime database could not be found\.\n",
 	),
+	# wxGTK pops a menu up at the pointer with no event of GTK's to place it by, as the NVDA menu
+	# opens from a key NVDA captured rather than from GTK; GTK places it at the pointer all the same.
+	re.compile(r"\n?\([^()\n:]+:\d+\): Gtk-WARNING \*\*: [\d:.]+: no trigger event for menu popup\n"),
 )
 
 #: Libraries that can reach a sound server or a sound card, by the start of their file name with any
