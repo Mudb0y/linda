@@ -107,6 +107,9 @@
         # ICU exports every C symbol with this suffix, as in ubrk_open_78.
         BASEDREADER_ICU_VERSION_MAJOR = lib.versions.major pkgs.icu.version;
         BASEDREADER_LOUIS_TABLES_DIR = "${louisTables}";
+        # tools/check-upstream-edits compares it with the release upstream's
+        # include/liblouis submodule pins.
+        BASEDREADER_LIBLOUIS_VERSION = pkgs.liblouis.version;
         BASEDREADER_NVDA_CLDR_DIR = "${nvdaCldr}";
 
         # Every locale, so that which ones the tests can set does not depend

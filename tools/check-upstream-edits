@@ -1,32 +1,199 @@
-#!/usr/bin/env bash
-# Every change to a file that came from NVDA costs something at each upstream
-# merge, so each one is listed in tools/upstream-edits.txt with its reason.
-# This fails when that list and the tree disagree.
-set -euo pipefail
+#!/usr/bin/env python3
+"""Fails when the record of how this tree departs from NVDA's and the tree disagree.
 
-tools=$(cd "$(dirname "$0")" && pwd)
-cd "$(git rev-parse --show-toplevel)"
-ledger=tools/upstream-edits.txt
-base=$("$tools/upstream-ref")
-echo "checking edits to upstream files against $ledger"
+Every change to a file that came from NVDA costs something at each upstream merge, so each one is
+listed in tools/upstream-edits.txt with its reason. A file added beside upstream's in source/ or
+tests/unit is listed there too: it can shadow a module, and an upstream release that adds the same
+path turns it into a conflict.
 
-actual=$(git diff --no-renames --name-only --diff-filter=MD "$base" -- . | sort)
-listed=$(grep -E '^[^[:space:]#]' "$ledger" | sort)
-unlisted=$(comm -23 <(printf '%s\n' "$actual") <(printf '%s\n' "$listed"))
-stale=$(comm -13 <(printf '%s\n' "$actual") <(printf '%s\n' "$listed"))
+Some upstream files are forked rather than edited: linuxPlatform.finder loads a replacement in
+place of each module in its replacedModules, and source/basedreader.py does what source/nvda.pyw
+does. The upstream files stay as they are, so upstream's changes to them merge without a conflict
+into files that never run on Linux. tools/upstream-forks.txt records the upstream object each fork
+was last brought up to date with, and a fork whose upstream file has moved on fails here. So does a
+Nix pin of nvda-cldr that is not the revision upstream's submodule names. A liblouis from nixpkgs
+that is not the release upstream's submodule pins is reported without failing, because nixpkgs,
+not this tree, decides when that moves.
 
-status=0
-if [ -n "$unlisted" ]; then
-	echo "edited or deleted but not listed:" >&2
-	printf '%s\n' "$unlisted" >&2
-	status=1
-fi
-if [ -n "$stale" ]; then
-	echo "listed but identical to upstream:" >&2
-	printf '%s\n' "$stale" >&2
-	status=1
-fi
-if [ "$status" -eq 0 ]; then
-	echo "$(printf '%s\n' "$actual" | grep -c .) upstream files differ, all listed"
-fi
-exit "$status"
+This reads git objects and files only. It never imports NVDA's code, so it runs anywhere.
+"""
+
+import ast
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+TOOLS = Path(__file__).resolve().parent
+EDITS = "tools/upstream-edits.txt"
+FORKS = "tools/upstream-forks.txt"
+FINDER = "source/linuxPlatform/finder.py"
+CLDR_NIX = "nix/nvda-cldr.nix"
+CLDR_LINK = "include/nvda-cldr"
+LOUIS_LINK = "include/liblouis"
+
+#: Where an added file is ours by construction rather than something beside upstream's.
+OURS = ("source/linuxPlatform/", "source/basedreader.py")
+#: Where an added file sits among upstream's modules or tests.
+UPSTREAM_DIRS = ("source", "tests/unit")
+#: Forks the finder does not know about, and the file of ours that carries each.
+MIRRORED = {"source/nvda.pyw": "source/basedreader.py"}
+
+
+class Failure(Exception):
+	pass
+
+
+def git(*args: str) -> str:
+	done = subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+	if done.returncode != 0:
+		raise Failure(f"git {' '.join(args)}: {done.stderr.strip()}")
+	return done.stdout
+
+
+def paths(*args: str) -> set[str]:
+	return {p for p in git(args[0], "-z", *args[1:]).split("\0") if p}
+
+
+def upstreamRef() -> str:
+	done = subprocess.run([TOOLS / "upstream-ref"], capture_output=True, text=True, check=False)
+	if done.returncode != 0:
+		raise Failure(done.stderr.strip())
+	return done.stdout.strip()
+
+
+def objectAt(base: str, path: str) -> str | None:
+	"""The id of what upstream holds at path, a blob or a submodule's commit, or None."""
+	entry = git("ls-tree", "-z", base, "--", path).rstrip("\0")
+	if not entry:
+		return None
+	return entry.split("\t", 1)[0].split()[2]
+
+
+def readLedger(path: str) -> dict[str, list[str]]:
+	"""Each entry's first line, split into words, keyed by the path that starts it."""
+	entries: dict[str, list[str]] = {}
+	for line in Path(path).read_text(encoding="utf-8").splitlines():
+		if line[:1] in ("", "#", " ", "\t"):
+			continue
+		words = line.split()
+		if words[0] in entries:
+			raise Failure(f"{path}: {words[0]} is listed twice")
+		entries[words[0]] = words
+	return entries
+
+
+def replacedModules() -> tuple[str, ...]:
+	tree = ast.parse(Path(FINDER).read_text(encoding="utf-8"), FINDER)
+	for node in tree.body:
+		target = node.target if isinstance(node, ast.AnnAssign) else None
+		if isinstance(node, ast.Assign) and len(node.targets) == 1:
+			target = node.targets[0]
+		if isinstance(target, ast.Name) and target.id == "replacedModules" and node.value:
+			return tuple(ast.literal_eval(node.value))
+	raise Failure(f"{FINDER} no longer assigns replacedModules a literal tuple")
+
+
+def checkEdits(base: str) -> tuple[list[str], int]:
+	changed = paths("diff", "--no-renames", "--name-only", "--diff-filter=MDT", base, "--", ".")
+	added = paths("diff", "--no-renames", "--name-only", "--diff-filter=A", base, "--", *UPSTREAM_DIRS)
+	added |= paths("ls-files", "--others", "--exclude-standard", "--", *UPSTREAM_DIRS)
+	added = {p for p in added if not p.startswith(OURS)}
+	listed = set(readLedger(EDITS))
+	errors = []
+	if unlisted := sorted(changed - listed):
+		errors.append("edited, deleted or changed in type but not listed:")
+		errors += unlisted
+	if unlisted := sorted(added - listed):
+		errors.append("added among upstream's files but not listed:")
+		errors += unlisted
+	if stale := sorted(listed - changed - added):
+		errors.append("listed but identical to upstream:")
+		errors += stale
+	return errors, len(changed | added)
+
+
+def moduleFile(base: str, module: str) -> str:
+	stem = "source/" + module.replace(".", "/")
+	for candidate in (f"{stem}/__init__.py", f"{stem}.py"):
+		if objectAt(base, candidate):
+			return candidate
+	raise Failure(f"{FINDER} replaces {module}, which upstream does not have")
+
+
+def checkForks(base: str) -> tuple[list[str], int]:
+	forked = {moduleFile(base, m) for m in replacedModules()} | set(MIRRORED)
+	listed = readLedger(FORKS)
+	louis = listed.pop(LOUIS_LINK, None)
+	if louis is None or len(louis) != 3:
+		raise Failure(f"{FORKS}: {LOUIS_LINK} needs the commit upstream pins and its release")
+	errors = []
+	if unlisted := sorted(forked - set(listed)):
+		errors.append(f"forked from upstream but not in {FORKS}:")
+		errors += unlisted
+	if stale := sorted(set(listed) - forked):
+		errors.append(f"in {FORKS} but no longer forked:")
+		errors += stale
+	for path in sorted(forked & set(listed)):
+		recorded = listed[path][1] if len(listed[path]) == 2 else None
+		if recorded is None:
+			errors.append(f"{FORKS}: {path} needs the upstream object the fork matches")
+			continue
+		current = objectAt(base, path)
+		if current != recorded:
+			errors.append(
+				f"upstream changed {path}: read git diff {recorded} {current}, carry what applies"
+				f" into its fork, then record {current} in {FORKS}",
+			)
+	return errors, len(forked)
+
+
+def checkCldrPin(base: str) -> list[str]:
+	pin = objectAt(base, CLDR_LINK)
+	nix = Path(CLDR_NIX).read_text(encoding="utf-8")
+	found = re.search(r'^\s*rev = "([0-9a-f]{40})";', nix, re.MULTILINE)
+	fetched = found[1] if found else "no revision"
+	if fetched == pin:
+		return []
+	return [f"upstream pins nvda-cldr at {pin}, but {CLDR_NIX} fetches {fetched}: set its rev and hash to it"]
+
+
+def reportLiblouis(base: str) -> None:
+	_path, recordedPin, release = readLedger(FORKS)[LOUIS_LINK]
+	pin = objectAt(base, LOUIS_LINK)
+	if pin != recordedPin:
+		print(f"liblouis: upstream now pins {pin}, not {recordedPin}; record its release in {FORKS}")
+		return
+	supplied = os.environ.get("BASEDREADER_LIBLOUIS_VERSION")
+	if supplied is None:
+		print("liblouis: not compared, as only the dev shell says which release nixpkgs supplies")
+	elif supplied != release:
+		print(f"liblouis: nixpkgs supplies {supplied}, upstream pins {release}")
+	else:
+		print(f"liblouis: {release}, as upstream pins")
+
+
+def main() -> int:
+	sys.stdout.reconfigure(line_buffering=True)
+	print(f"checking upstream files against {EDITS} and {FORKS}")
+	try:
+		os.chdir(git("rev-parse", "--show-toplevel").strip())
+		base = upstreamRef()
+		editErrors, edited = checkEdits(base)
+		forkErrors, forked = checkForks(base)
+		errors = editErrors + forkErrors + checkCldrPin(base)
+		reportLiblouis(base)
+	except (Failure, OSError, SyntaxError, ValueError) as error:
+		print(error, file=sys.stderr)
+		return 1
+	for line in errors:
+		print(line, file=sys.stderr)
+	if errors:
+		return 1
+	print(f"{edited} upstream files differ, all listed; {forked} forks match upstream")
+	return 0
+
+
+if __name__ == "__main__":
+	sys.exit(main())

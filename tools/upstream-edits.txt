@@ -1,4 +1,6 @@
-# Files that came from NVDA and that this tree changes or deletes.
+# Files that came from NVDA and that this tree changes or deletes, and files
+# it adds among upstream's in source/ or tests/unit, outside
+# source/linuxPlatform and source/basedreader.py.
 # A path at the start of a line, the reason indented beneath it.
 # tools/check-upstream-edits compares this list with the tree.
 

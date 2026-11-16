@@ -26,11 +26,11 @@ class Repo:
 	def __init__(self, path: Path):
 		self.path = path
 
-	def run(self, *args: str | Path, check: bool = True) -> subprocess.CompletedProcess:
+	def run(self, *args: str | Path, check: bool = True, **env: str) -> subprocess.CompletedProcess:
 		done = subprocess.run(
 			[str(a) for a in args],
 			cwd=self.path,
-			env={**os.environ, **GIT_ENV},
+			env={**os.environ, **GIT_ENV, **env},
 			capture_output=True,
 			text=True,
 			check=False,
@@ -42,39 +42,111 @@ class Repo:
 	def git(self, *args: str) -> str:
 		return self.run("git", *args).stdout.strip()
 
-	def tool(self, name: str, *args: str) -> subprocess.CompletedProcess:
-		return self.run(TOOLS / name, *args, check=False)
+	def tool(self, name: str, *args: str, **env: str) -> subprocess.CompletedProcess:
+		return self.run(TOOLS / name, *args, check=False, **env)
 
 	def write(self, path: str, text: str) -> None:
 		target = self.path / path
 		target.parent.mkdir(parents=True, exist_ok=True)
 		target.write_text(text, encoding="utf-8")
 
+	def read(self, path: str) -> str:
+		return (self.path / path).read_text(encoding="utf-8")
+
 	def commit(self, message: str, *paths: str) -> str:
 		self.git("add", "--", *paths)
 		self.git("commit", "-q", "-m", message)
 		return self.git("rev-parse", "HEAD")
 
+	def link(self, path: str, commit: str) -> None:
+		"""Points a submodule link at commit, leaving its directory empty, as a clone does."""
+		(self.path / path).mkdir(parents=True, exist_ok=True)
+		self.git("update-index", "--add", "--cacheinfo", f"160000,{commit},{path}")
 
+	def blob(self, ref: str, path: str) -> str:
+		return self.git("rev-parse", f"{ref}:{path}")
+
+	def onUpstream(self, change) -> None:
+		"""Commits change(self) as a newer NVDA on upstream and merges it into main."""
+		self.git("checkout", "-q", "upstream")
+		change(self)
+		self.git("commit", "-q", "-a", "-m", "Import a newer NVDA")
+		self.git("checkout", "-q", "main")
+		self.git("merge", "-q", "--no-edit", "upstream")
+
+
+CLDR = "c" * 40
+LOUIS = "1" * 40
 EDITS_HEADER = "# Files that came from NVDA and that this tree changes or deletes.\n\n"
+FINDER = "replacedModules: tuple[str, ...] = (\n\t{}\n)\n"
+CLDR_NIX = 'fetchFromGitHub {{\n  rev = "{}";\n}}\n'
+FORKS = "tools/upstream-forks.txt"
+
+
+def writeFinder(r: Repo, *modules: str) -> None:
+	r.write("source/linuxPlatform/finder.py", FINDER.format("\n\t".join(f"{m!r}," for m in modules)))
+
+
+def writeEdits(r: Repo, *paths: str) -> None:
+	r.write("tools/upstream-edits.txt", EDITS_HEADER + "".join(f"{p}\n  a reason\n" for p in paths))
 
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Repo:
-	"""An upstream branch holding a small NVDA tree, and main forked from it with one edit."""
+	"""An upstream branch holding a small NVDA tree, and main forked from it as this tree is.
+
+	main edits one upstream file, replaces two modules through the finder, and mirrors nvda.pyw.
+	"""
 	r = Repo(tmp_path / "work")
 	r.path.mkdir()
 	r.git("init", "-q", "-b", "upstream")
 	r.write("source/nvda.pyw", "launcher = True\n")
 	r.write("source/tones.py", "def beep():\n\tpass\n")
 	r.write("source/edited.py", "value = 1\n")
-	r.commit("Import NVDA", "source")
+	r.write("source/watchdog.py", "def alive():\n\tpass\n")
+	r.write("source/NVDAHelper/__init__.py", "def helper():\n\tpass\n")
+	r.write("tests/unit/test_tones.py", "")
+	r.link("include/nvda-cldr", CLDR)
+	r.link("include/liblouis", LOUIS)
+	r.commit("Import NVDA", "source", "tests")
 	r.git("checkout", "-q", "-b", "main")
 	r.write("source/edited.py", "value = 2\n")
+	r.write("source/basedreader.py", "launcher = True\n")
 	r.write("source/linuxPlatform/__init__.py", "")
-	r.write("tools/upstream-edits.txt", EDITS_HEADER + "source/edited.py\n  a reason\n")
-	r.commit("Fork", "source", "tools")
+	r.write("source/linuxPlatform/replacements/watchdog.py", "")
+	writeFinder(r, "watchdog", "NVDAHelper")
+	r.write("nix/nvda-cldr.nix", CLDR_NIX.format(CLDR))
+	writeEdits(r, "source/edited.py")
+	forks = [f"include/liblouis {LOUIS} 3.39.0"]
+	for path in ("source/nvda.pyw", "source/watchdog.py", "source/NVDAHelper/__init__.py"):
+		forks.append(f"{path} {r.blob('upstream', path)}")
+	r.write(FORKS, "# forks\n\n" + "".join(f"{entry}\n  a reason\n" for entry in forks))
+	r.commit("Fork", "source", "tools", "nix")
 	return r
+
+
+def check(r: Repo, louis: str = "3.39.0") -> subprocess.CompletedProcess:
+	return r.tool("check-upstream-edits", BASEDREADER_LIBLOUIS_VERSION=louis)
+
+
+def assertFails(r: Repo, *expected: str) -> None:
+	done = check(r)
+	assert done.returncode == 1, done.stdout + done.stderr
+	for text in expected:
+		assert text in done.stderr, done.stderr
+
+
+def assertPasses(r: Repo) -> subprocess.CompletedProcess:
+	done = check(r)
+	assert done.returncode == 0, done.stdout + done.stderr
+	assert done.stderr == ""
+	return done
+
+
+def test_treeOnRecordPasses(repo: Repo):
+	done = assertPasses(repo)
+	assert "1 upstream files differ, all listed; 3 forks match upstream" in done.stdout
+	assert "liblouis: 3.39.0, as upstream pins" in done.stdout
 
 
 def test_upstreamRefPrefersTheLocalBranch(repo: Repo):
@@ -88,8 +160,8 @@ def test_freshCloneUsesOriginUpstream(repo: Repo, tmp_path: Path):
 	clone = Repo(tmp_path / "clone")
 	repo.run("git", "clone", "-q", "--branch", "main", repo.path, clone.path)
 	assert clone.tool("upstream-ref").stdout.strip() == "refs/remotes/origin/upstream"
-	checked = clone.tool("check-upstream-edits")
-	assert checked.returncode == 0, checked.stdout + checked.stderr
+	assertPasses(clone)
+	assert clone.git("status", "--short") == ""
 
 
 def test_remoteNamedUpstreamIsNeverTheBase(repo: Repo):
@@ -100,6 +172,113 @@ def test_remoteNamedUpstreamIsNeverTheBase(repo: Repo):
 		done = repo.tool(tool)
 		assert done.returncode != 0, tool
 		assert "git fetch origin upstream:upstream" in done.stderr, tool
+
+
+def test_unlistedEditFails(repo: Repo):
+	repo.write("source/tones.py", "")
+	assertFails(repo, "edited, deleted or changed in type but not listed:\nsource/tones.py")
+
+
+def test_unlistedDeletionFails(repo: Repo):
+	(repo.path / "source/tones.py").unlink()
+	assertFails(repo, "edited, deleted or changed in type but not listed:\nsource/tones.py")
+
+
+def test_entryForAnUntouchedFileFails(repo: Repo):
+	repo.write("source/edited.py", "value = 1\n")
+	assertFails(repo, "listed but identical to upstream:\nsource/edited.py")
+
+
+def test_fileTurnedIntoALinkFails(repo: Repo):
+	(repo.path / "source/tones.py").unlink()
+	(repo.path / "source/tones.py").symlink_to("watchdog.py")
+	assertFails(repo, "edited, deleted or changed in type but not listed:\nsource/tones.py")
+
+
+@pytest.mark.parametrize("path", ["source/locale.py", "source/appModules/thing.py", "tests/unit/test_new.py"])
+def test_fileAddedAmongUpstreamsFailsUntilListed(repo: Repo, path: str):
+	repo.write(path, "")
+	assertFails(repo, f"added among upstream's files but not listed:\n{path}")
+	repo.git("add", "--", path)
+	assertFails(repo, f"added among upstream's files but not listed:\n{path}")
+	writeEdits(repo, "source/edited.py", path)
+	assertPasses(repo)
+
+
+def test_fileAddedInOurOwnPlacesPasses(repo: Repo):
+	repo.write("source/linuxPlatform/new.py", "")
+	repo.git("add", "--", "source/linuxPlatform/new.py")
+	repo.write("engine/new.rs", "")
+	assertPasses(repo)
+
+
+def test_forkWhoseUpstreamFileMovedFails(repo: Repo):
+	old = repo.blob("upstream", "source/watchdog.py")
+	repo.onUpstream(lambda r: r.write("source/watchdog.py", "def alive():\n\treturn True\n"))
+	new = repo.blob("upstream", "source/watchdog.py")
+	assertFails(repo, f"upstream changed source/watchdog.py: read git diff {old} {new}")
+	repo.write(FORKS, repo.read(FORKS).replace(old, new))
+	assertPasses(repo)
+
+
+def test_launcherWhoseUpstreamMovedFails(repo: Repo):
+	repo.onUpstream(lambda r: r.write("source/nvda.pyw", "launcher = False\n"))
+	assertFails(repo, "upstream changed source/nvda.pyw")
+
+
+def test_moduleNewlyReplacedWithoutAnEntryFails(repo: Repo):
+	writeFinder(repo, "watchdog", "NVDAHelper", "tones")
+	assertFails(repo, f"forked from upstream but not in {FORKS}:\nsource/tones.py")
+
+
+def test_entryForAModuleNoLongerReplacedFails(repo: Repo):
+	writeFinder(repo, "NVDAHelper")
+	assertFails(repo, f"in {FORKS} but no longer forked:\nsource/watchdog.py")
+
+
+def test_replacingAModuleUpstreamLacksFails(repo: Repo):
+	writeFinder(repo, "watchdog", "NVDAHelper", "nowhere")
+	assertFails(repo, "replaces nowhere, which upstream does not have")
+
+
+def test_theLauncherIsAlwaysAFork(repo: Repo):
+	repo.write(FORKS, repo.read(FORKS).replace("source/nvda.pyw", "# source/nvda.pyw"))
+	assertFails(repo, f"forked from upstream but not in {FORKS}:\nsource/nvda.pyw")
+
+
+def test_cldrPinOtherThanUpstreamsFails(repo: Repo):
+	repo.write("nix/nvda-cldr.nix", CLDR_NIX.format("d" * 40))
+	assertFails(repo, f"upstream pins nvda-cldr at {CLDR}, but nix/nvda-cldr.nix fetches {'d' * 40}")
+
+
+def test_upstreamMovingASubmoduleMergesAndTheCldrCheckFails(repo: Repo):
+	repo.onUpstream(lambda r: r.link("include/nvda-cldr", "e" * 40))
+	assertFails(repo, f"upstream pins nvda-cldr at {'e' * 40}")
+
+
+def test_liblouisDifferencesAreReportedWithoutFailing(repo: Repo):
+	done = check(repo, louis="3.40.0")
+	assert done.returncode == 0, done.stderr
+	assert "liblouis: nixpkgs supplies 3.40.0, upstream pins 3.39.0" in done.stdout
+	repo.onUpstream(lambda r: r.link("include/liblouis", "2" * 40))
+	done = assertPasses(repo)
+	assert f"liblouis: upstream now pins {'2' * 40}, not {LOUIS}" in done.stdout
+
+
+def test_thisTreeIsOnRecord():
+	done = Repo(ROOT).tool("check-upstream-edits")
+	assert done.returncode == 0, done.stdout + done.stderr
+
+
+def test_thisTreeKeepsUpstreamsSubmoduleLinks():
+	"""So that an upstream release moving a submodule merges instead of conflicting."""
+	r = Repo(ROOT)
+	base = r.tool("upstream-ref").stdout.strip()
+	tree = r.git("ls-tree", "-r", base).splitlines()
+	links = [line.split("\t")[1] for line in tree if line.startswith("160000")]
+	assert links
+	diff = r.run("git", "diff", "--quiet", base, "--", ".gitmodules", *links, check=False)
+	assert diff.returncode == 0
 
 
 @pytest.fixture

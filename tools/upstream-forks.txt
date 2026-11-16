@@ -1,0 +1,33 @@
+# Upstream files that this tree forks instead of editing, each with the
+# upstream object its fork was last brought up to date with, and the
+# liblouis release upstream's submodule pins.
+# A path and the object at the start of a line, the reason indented beneath.
+# Upstream's changes to these files merge without a conflict, though nothing
+# runs them on Linux, so tools/check-upstream-edits fails when upstream's
+# object is no longer the one recorded. To bring a fork up to date, read
+# git diff RECORDED NEW, carry what applies into the fork, and record NEW.
+
+include/liblouis 2e775aca674cd2910e272eed7736acceb4c2e4a2 3.39.0
+  the dev shell takes liblouis and its tables from nixpkgs, not from this
+  submodule, so a release other than this one is reported
+source/IAccessibleHandler/__init__.py f61808cd13686620cbc661e6e1f1f568344f7a7c
+  replaced by linuxPlatform/replacements/IAccessibleHandler/__init__.py
+source/NVDAHelper/__init__.py ace57a276ea6326e9a8dfbde06b0949d8834e83c
+  replaced by linuxPlatform/replacements/NVDAHelper/__init__.py
+source/NVDAHelper/localLib.py 7f2056aacc55f11c3e106afbc2f0da447a9938a5
+  replaced by linuxPlatform/replacements/NVDAHelper/localLib.py
+source/UIAHandler/__init__.py 9e1e2f4b26b4cc7eb6eb9393a16b60351b107540
+  replaced by linuxPlatform/replacements/UIAHandler/__init__.py
+source/easeOfAccess.py 039ff8b533873d42ca7528c19ee69660ccc62a1d
+  replaced by linuxPlatform/replacements/easeOfAccess.py
+source/nvda.pyw caeb8eeb8bddbbcaac1d4f6d0458d5f1b9d8849c
+  source/basedreader.py does on Linux what this does on Windows before and
+  after core.main
+source/wasapi.py 1836072d3ecfbddcfdbe12e78947217401827baa
+  replaced by linuxPlatform/replacements/wasapi.py
+source/watchdog.py f61dbe93355340e80c0798d7e4fde55ecf90abc5
+  replaced by linuxPlatform/replacements/watchdog.py
+source/winAPI/sessionTracking.py 99a0545e5a87647c06a0a9f4384f03370529bb10
+  replaced by linuxPlatform/replacements/winAPI/sessionTracking.py
+source/winBindings/icu.py bd4a904cd8589e832a60cf76769b40080e609a59
+  replaced by linuxPlatform/replacements/winBindings/icu.py
