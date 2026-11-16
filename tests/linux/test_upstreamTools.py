@@ -81,6 +81,7 @@ EDITS_HEADER = "# Files that came from NVDA and that this tree changes or delete
 FINDER = "replacedModules: tuple[str, ...] = (\n\t{}\n)\n"
 CLDR_NIX = 'fetchFromGitHub {{\n  rev = "{}";\n}}\n'
 FORKS = "tools/upstream-forks.txt"
+LINUX_EDIT = 'import sys\n\nvalue = 1\nif sys.platform != "win32":\n\tvalue = 2\n'
 
 
 def writeFinder(r: Repo, *modules: str) -> None:
@@ -91,11 +92,16 @@ def writeEdits(r: Repo, *paths: str) -> None:
 	r.write("tools/upstream-edits.txt", EDITS_HEADER + "".join(f"{p}\n  Linux runtime: why\n" for p in paths))
 
 
+def writeReason(r: Repo, *lines: str) -> None:
+	r.write("tools/upstream-edits.txt", EDITS_HEADER + "source/edited.py\n" + "".join(f"  {line}\n" for line in lines))
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Repo:
 	"""An upstream branch holding a small NVDA tree, and main forked from it as this tree is.
 
-	main edits one upstream file, replaces two modules through the finder, and mirrors nvda.pyw.
+	main edits one upstream file for Linux alone, replaces two modules through the finder, and mirrors
+	nvda.pyw.
 	"""
 	r = Repo(tmp_path / "work")
 	r.path.mkdir()
@@ -110,7 +116,7 @@ def repo(tmp_path: Path) -> Repo:
 	r.link("include/liblouis", LOUIS)
 	r.commit("Import NVDA", "source", "tests")
 	r.git("checkout", "-q", "-b", "main")
-	r.write("source/edited.py", "value = 2\n")
+	r.write("source/edited.py", LINUX_EDIT)
 	r.write("source/basedreader.py", "launcher = True\n")
 	r.write("source/linuxPlatform/__init__.py", "")
 	r.write("source/linuxPlatform/replacements/watchdog.py", "")
@@ -192,6 +198,110 @@ def test_entryForAnUntouchedFileFails(repo: Repo):
 def test_reasonWithoutAKindFails(repo: Repo):
 	repo.write("tools/upstream-edits.txt", EDITS_HEADER + "source/edited.py\n  Linux: why\n")
 	assertFails(repo, "reason not starting with one of import safety:, Linux runtime:")
+
+
+def test_editWindowsRunsMustSaySo(repo: Repo):
+	repo.write("source/edited.py", "value = 2\n")
+	assertFails(repo, "Windows runs a change, but no line of the reason starts every platform:\nsource/edited.py")
+	writeReason(repo, "every platform: why")
+	assertPasses(repo)
+
+
+def test_editOnlyLinuxRunsMustNotClaimWindowsRunsIt(repo: Repo):
+	writeReason(repo, "every platform: why")
+	assertFails(repo, "a line starts every platform:, but Windows runs the same code as upstream:\nsource/edited.py")
+
+
+def test_reasonMayGiveSeveralKinds(repo: Repo):
+	repo.write("source/edited.py", LINUX_EDIT + "other = 3\n")
+	writeReason(repo, "Linux runtime: why", "and more of why", "every platform: why")
+	assertPasses(repo)
+
+
+@pytest.mark.parametrize(
+	"lines",
+	[
+		["import safety: why. Linux runtime: why"],
+		["import safety: why. Linux", "runtime: why"],
+		["Linux runtime: why, and on every platform: why"],
+	],
+)
+def test_kindInsideALineFails(repo: Repo, lines: list[str]):
+	writeReason(repo, *lines)
+	assertFails(repo, "a kind of edit inside a line rather than at the start of one:\nsource/edited.py")
+
+
+UPSTREAM_MODULE = """import os
+import winreg
+
+
+def read(key: winreg.HKEYType, name):
+	if not name:
+		return None
+	return winreg.QueryValue(key, name)
+"""
+
+
+def addUpstreamModule(r: Repo) -> None:
+	r.write("source/registry.py", UPSTREAM_MODULE)
+	r.git("add", "source/registry.py")
+
+
+@pytest.mark.parametrize(
+	"ours",
+	[
+		# winreg after the module's other imports, its annotation quoted, and standard library imports.
+		"""import os
+import ctypes.wintypes
+import sys
+
+if sys.platform == "win32":
+	import winreg
+
+
+def read(key: "winreg.HKEYType", name):
+	if not name:
+		return None
+	return winreg.QueryValue(key, name)
+""",
+		# Linux's branch beside Windows', in each of the forms a test of sys.platform takes.
+		"""import os
+import sys
+import winreg
+
+
+def read(key: winreg.HKEYType, name):
+	if not name and sys.platform != "win32":
+		return ""
+	elif not name:
+		return None
+	if sys.platform == "linux" or "win32" != sys.platform:
+		return os.environ[name]
+	return winreg.QueryValue(key, name) if sys.platform == "win32" else None
+""",
+	],
+)
+def test_editsKeptFromWindowsAreLinuxOnly(repo: Repo, ours: str):
+	repo.onUpstream(addUpstreamModule)
+	repo.write("source/registry.py", ours)
+	writeEdits(repo, "source/edited.py", "source/registry.py")
+	assertPasses(repo)
+
+
+@pytest.mark.parametrize(
+	"change",
+	[
+		("import winreg\n", 'import sys\n\nif sys.platform != "win32":\n\timport winreg\n'),
+		("import winreg\n", "import winreg\nimport wx\n"),
+		("\t\treturn None", "\t\treturn None if os.sep else 0"),
+		("winreg.HKEYType", '"winreg.HKEY"'),
+	],
+)
+def test_editsWindowsRunsAreSeen(repo: Repo, change: tuple[str, str]):
+	repo.onUpstream(addUpstreamModule)
+	repo.write("source/registry.py", UPSTREAM_MODULE.replace(*change))
+	writeEdits(repo, "source/edited.py", "source/registry.py")
+	assertFails(repo, "Windows runs a change, but no line of the reason starts every platform:\nsource/registry.py")
 
 
 def test_entryWithoutAReasonFails(repo: Repo):

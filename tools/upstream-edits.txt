@@ -3,11 +3,15 @@
 # source/linuxPlatform and source/basedreader.py.
 # A path at the start of a line, the reason indented beneath it.
 # tools/check-upstream-edits compares this list with the tree.
-# Each reason starts with the kind of edit, which says what a merge risks:
+# Each reason starts with the kind of edit, which says what a merge risks,
+# and an entry with edits of several kinds starts a line with each:
 #   import safety: Windows-only work done at import is done only on Windows
 #   Linux runtime: what the code does differently when it runs on Linux
-#   every platform: a change Windows sees too
+#   every platform: a change in the code Windows runs, beyond its tests of
+#     sys.platform, even where Windows ends up doing the same
 #   repository: a file that is not NVDA's code
+# For a Python file, the check works out from the code whether Windows runs
+# a change, and fails unless every platform is said exactly when it does.
 
 .gitignore
   repository: ignores for the dev shell output and the Rust build directory
@@ -89,7 +93,8 @@ source/browseMode.py
   empty tuple, which no isinstance test matches
 source/config/__init__.py
   import safety: winreg imported only on Windows, after the module's other
-  imports. Linux: nothing installs NVDA, so isInstalledCopy() is False and
+  imports.
+  Linux runtime: nothing installs NVDA, so isInstalledCopy() is False and
   getInstalledUserConfigPath() is None; that also turns off audio ducking,
   touch, the installed-only settings, parts of the update check and part of
   the remote client. getUserDefaultConfigPath() is the XDG configuration
@@ -105,12 +110,14 @@ source/core.py
   back to its default action over the launcher's GLib handler, so that
   Ctrl+C would end NVDA without shutting it down. A restart starts the new
   copy through linuxPlatform.singleInstance, as a child process, instead of
-  through ShellExecute. On every platform, doStartupDialogs() shows nothing
-  once shutdown has been triggered: wx.CallAfter runs it after the core
+  through ShellExecute.
+  every platform: doStartupDialogs() shows nothing once shutdown has been
+  triggered: wx.CallAfter runs it after the core
   pump's first cycles on GTK, so a quick exit ran it inside the wx.Yield of
   _closeAllWindows, where the welcome dialog waited for ever because the
   pump that ends it was the caller; messageBox refuses after shutdown for
-  the same reason
+  the same reason. wx.App is told whether to clear SIGINT, and Windows
+  passes True, wxPython's default
 source/documentNavigation/paragraphHelper.py
   Linux runtime: after moving the caret, both paragraph moves
   import the UI Automation text class only on Windows; Linux has no UI
@@ -146,7 +153,7 @@ source/hwIo/base.py
   reached, because pyserial opens and configures the port as it is
   constructed and hwIo's reads are Windows overlapped I/O
 source/hwIo/ble/_io.py
-  import safety: WinRTClientArgs comes from bleak.args.winrt, where bleak 3
+  every platform: WinRTClientArgs comes from bleak.args.winrt, where bleak 3
   defines it on every platform and where bleak says to import it from, not
   from bleak's WinRT backend, which imports only on Windows
 source/hwPortUtils.py
@@ -175,14 +182,13 @@ source/languageHandler.py
   and otherwise the user's own language whether translated or not, as
   Windows reports its display language. Converting a name
   to a Windows locale identifier gives LCID_NONE and the reverse uses
-  Python's table. The catalogue directory is absolute under appDir on every
-  platform, so translations no longer depend on the working directory
+  Python's table.
+  every platform: the catalogue directory is absolute under appDir, so
+  translations no longer depend on the working directory
 source/logHandler.py
   Linux runtime: the time comes from logging's own formatTime, not Win32
-  time conversion; log.exception reads comtypes only on Windows; NVDA's own
-  modules are told from external code with the platform's path separator,
-  which on Windows is the backslash upstream wrote; a record that cannot be
-  written is reported on the real standard error, since sys.stderr is
+  time conversion; log.exception reads comtypes only on Windows; a record
+  that cannot be written is reported on the real standard error, since sys.stderr is
   redirected into the log and the report would fail again without end; the
   default log is under XDG_STATE_HOME/basedreader; log files are created
   readable by the user alone, since the log can record every key typed; the
@@ -191,11 +197,13 @@ source/logHandler.py
   beep; faulthandler is armed with a crash file beside the log once the
   log's handler is installed, so that a failure to arm it is logged.
   The Linux code is in linuxPlatform/logSupport.py
+  every platform: NVDA's own modules are told from external code with the
+  platform's path separator, which on Windows is the backslash upstream wrote
 source/louisHelper.py
   import safety: os.add_dll_directory around the louis import only on
   Windows
 source/mathPres/__init__.py
-  Linux runtime: initialize() imports MathCAT inside the try
+  every platform: initialize() imports MathCAT inside the try
   that already turns a MathCAT that cannot start into the warning "MathCAT
   not available.". On Linux that import fails, as libmathcat_py is not
   packaged, and core.main calls initialize() at every start. On Windows a
@@ -230,7 +238,8 @@ source/synthDrivers/espeak.py
   voice that fails to load. The eSpeak port replaces this
 source/systemUtils.py
   import safety: winreg imported only on Windows, after the module's other
-  imports. Linux: hasUiAccess() is True, as X11 isolates no client from
+  imports.
+  Linux runtime: hasUiAccess() is True, as X11 isolates no client from
   another; Wayland sessions are not handled. Its consumers then do this:
   gui's MainFrame skips the Show and Hide trick, which is wanted; the
   full-screen magnifier believes input transforms are supported; touch and
@@ -253,11 +262,15 @@ source/textUtils/__init__.py
 source/textUtils/icu.py
   Linux runtime: on Linux the text buffer handed to ICU and sliced with its
   offsets is a linuxPlatform.utf16.Utf16Buffer, because a c_wchar buffer is
-  UTF-32 there; Windows keeps create_unicode_buffer
+  UTF-32 there
+  every platform: Windows calls create_unicode_buffer, as before, through
+  the name _createUtf16Buffer
 source/textUtils/uniscribe.py
   Linux runtime: on Linux the buffer splitAtCharacterBoundaries passes to
   calculateCharacterBoundaries and slices with its offsets is a
   linuxPlatform.utf16.Utf16Buffer, for the same reason as textUtils/icu.py
+  every platform: Windows calls create_unicode_buffer, as before, through
+  the name _createUtf16Buffer
 source/touchHandler.py
   Linux runtime: touchSupported() is False, as nothing reads touch input on
   Linux yet
@@ -278,6 +291,8 @@ source/winAPI/messageWindow.py
   Linux runtime: _MessageWindow creates no window and its destroy() does nothing, as
   no other process sends NVDA window messages there; core.main still creates
   and destroys it
+  every platform: Windows runs the destroy() override, which there calls
+  CustomWindow's destroy() and nothing else
 source/winInputHook.py
   Linux runtime: initialize and terminate go to linuxPlatform.inputHook,
   which installs no hook; a capture layer will deliver events there to the
@@ -290,9 +305,9 @@ source/winVersion.py
 source/windowUtils.py
   import safety: GetModuleHandle at module level runs only on Windows; on
   Linux appInstance is absent, so creating a CustomWindow raises NameError;
-  winAPI.messageWindow's _MessageWindow creates no window on Linux. Linux
-  runtime: getWindowScalingFactor() is 1, as wxGTK sizes are logical pixels
-  that GTK scales for the display itself; every message box and settings
+  winAPI.messageWindow's _MessageWindow creates no window on Linux.
+  Linux runtime: getWindowScalingFactor() is 1, as wxGTK sizes are logical
+  pixels that GTK scales for the display itself; every message box and settings
   panel asks for it, and the dialogs that scale their sizes through
   gui.dpiScalingHelper would otherwise fail on GetDC
 tests/unit/__init__.py

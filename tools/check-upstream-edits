@@ -4,7 +4,10 @@
 Every change to a file that came from NVDA costs something at each upstream merge, so each one is
 listed in tools/upstream-edits.txt with its reason. A file added beside upstream's in source/ or
 tests/unit is listed there too: it can shadow a module, and an upstream release that adds the same
-path turns it into a conflict.
+path turns it into a conflict. Each reason says which kinds of edit it explains. For a Python file
+the kind that says Windows runs the change too is checked against the code: it must be given
+exactly when the file, with each test of sys.platform decided as on Windows, differs from
+upstream's, because a change Windows runs is one a merge has to weigh for Windows as well.
 
 Some upstream files are forked rather than edited: linuxPlatform.finder loads a replacement in
 place of each module in its replacedModules, and source/basedreader.py does what source/nvda.pyw
@@ -21,6 +24,7 @@ when that branch is pushed beside main.
 """
 
 import ast
+import itertools
 import os
 import re
 import subprocess
@@ -45,8 +49,12 @@ UPSTREAM_DIRS = ("source", "tests/unit")
 REPLACEMENTS = "source/linuxPlatform/replacements/"
 #: Forks the finder does not know about, and the file of ours that carries each.
 MIRRORED = {"source/nvda.pyw": "source/basedreader.py"}
-#: How each reason in the edits list starts, as that list's header explains.
+#: The kinds of edit, as the edits list's header explains. Each reason starts with one, and an entry
+#: whose edits are of several kinds starts a line with each.
 EDIT_KINDS = ("import safety:", "Linux runtime:", "every platform:", "repository:")
+#: The kind that says Windows runs the change too.
+WINDOWS_TOO = "every platform:"
+KIND = re.compile("|".join(re.escape(kind) for kind in EDIT_KINDS))
 
 
 class Failure(Exception):
@@ -117,6 +125,136 @@ def replacedModules() -> tuple[str, ...]:
 	raise Failure(f"{FINDER} no longer assigns replacedModules a literal tuple")
 
 
+class WindowsView(ast.NodeTransformer):
+	"""Reduces a module to the code Windows runs.
+
+	Each test of sys.platform is decided as Windows decides it, and the code it keeps from Windows is
+	dropped. An annotation quoted so that it is not evaluated is read as the expression it holds.
+	"""
+
+	def visit_Compare(self, node: ast.Compare) -> ast.AST:
+		self.generic_visit(node)
+		if len(node.ops) != 1 or not isinstance(node.ops[0], ast.Eq | ast.NotEq):
+			return node
+		left, right = node.left, node.comparators[0]
+		if ast.unparse(right) == "sys.platform":
+			left, right = right, left
+		if ast.unparse(left) != "sys.platform" or not isinstance(right, ast.Constant):
+			return node
+		return ast.Constant((right.value == "win32") == isinstance(node.ops[0], ast.Eq))
+
+	def visit_BoolOp(self, node: ast.BoolOp) -> ast.AST:
+		self.generic_visit(node)
+		decisive = isinstance(node.op, ast.Or)
+		kept = []
+		for value in node.values:
+			if not isDecided(value):
+				kept.append(value)
+			elif value.value == decisive:
+				return ast.Constant(decisive)
+		if len(kept) <= 1:
+			return kept[0] if kept else ast.Constant(not decisive)
+		node.values = kept
+		return node
+
+	def visit_IfExp(self, node: ast.IfExp) -> ast.AST:
+		self.generic_visit(node)
+		if isDecided(node.test):
+			return node.body if node.test.value else node.orelse
+		return node
+
+	def visit_If(self, node: ast.If) -> ast.AST | list[ast.stmt] | None:
+		self.generic_visit(node)
+		if isDecided(node.test):
+			return (node.body if node.test.value else node.orelse) or None
+		return node
+
+	def visit_arg(self, node: ast.arg) -> ast.AST:
+		node.annotation = unquoted(node.annotation)
+		return self.generic_visit(node)
+
+	def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.AST:
+		node.annotation = unquoted(node.annotation)
+		return self.generic_visit(node)
+
+	def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+		node.returns = unquoted(node.returns)
+		return self.generic_visit(node)
+
+	visit_AsyncFunctionDef = visit_FunctionDef
+
+
+def isDecided(node: ast.AST) -> bool:
+	return isinstance(node, ast.Constant) and isinstance(node.value, bool)
+
+
+def unquoted(annotation: ast.expr | None) -> ast.expr | None:
+	if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+		return ast.parse(annotation.value, mode="eval").body
+	return annotation
+
+
+def asWindowsRunsIt(source: str, path: str) -> tuple[set[tuple], list[str]]:
+	"""The module's top-level imports, and the rest of its code, as Windows runs them.
+
+	The imports are a set, since a guarded import goes after the module's others.
+	"""
+	try:
+		tree = WindowsView().visit(ast.parse(source, path))
+	except SyntaxError as error:
+		raise Failure(f"{path}: {error}") from None
+	imports = set()
+	code = []
+	for node in tree.body:
+		if isinstance(node, ast.Import):
+			imports |= {(None, alias.name, alias.asname) for alias in node.names}
+		elif isinstance(node, ast.ImportFrom):
+			module = "." * node.level + (node.module or "")
+			imports |= {(module, alias.name, alias.asname) for alias in node.names}
+		else:
+			code.append(ast.dump(node))
+	return imports, code
+
+
+def windowsRunsAChange(base: str, path: str) -> bool:
+	theirImports, theirCode = asWindowsRunsIt(git("show", f"{base}:{path}"), path)
+	ourImports, ourCode = asWindowsRunsIt(Path(path).read_text(encoding="utf-8"), path)
+	# Importing a standard library module that the file did not import changes nothing it does.
+	added = {name.partition(".")[0] for module, name, _as in ourImports - theirImports if module is None}
+	return (
+		ourCode != theirCode
+		or bool(theirImports - ourImports)
+		or len(ourImports - theirImports) != len(added)
+		or not added <= sys.stdlib_module_names
+	)
+
+
+def checkKinds(base: str, ledger: dict[str, Entry]) -> list[str]:
+	unlabelled, buried, unsaid, overstated = [], [], [], []
+	for path, entry in sorted(ledger.items()):
+		if not entry.reason[0].startswith(EDIT_KINDS):
+			unlabelled.append(path)
+		lineStarts = set(itertools.accumulate((len(line) + 1 for line in entry.reason), initial=0))
+		if any(m.start() not in lineStarts for m in KIND.finditer(" ".join(entry.reason))):
+			buried.append(path)
+		if not path.endswith(".py") or objectAt(base, path) is None or not Path(path).is_file():
+			continue
+		saysSo = any(line.startswith(WINDOWS_TOO) for line in entry.reason)
+		if saysSo != windowsRunsAChange(base, path):
+			(overstated if saysSo else unsaid).append(path)
+	errors = []
+	for found, problem in (
+		(unlabelled, f"reason not starting with one of {', '.join(EDIT_KINDS)}:"),
+		(buried, "a kind of edit inside a line rather than at the start of one:"),
+		(unsaid, f"Windows runs a change, but no line of the reason starts {WINDOWS_TOO}"),
+		(overstated, f"a line starts {WINDOWS_TOO}, but Windows runs the same code as upstream:"),
+	):
+		if found:
+			errors.append(problem)
+			errors += found
+	return errors
+
+
 def checkEdits(base: str) -> tuple[list[str], int]:
 	changed = paths("diff", "--no-renames", "--name-only", "--diff-filter=MDT", base, "--", ".")
 	added = paths("diff", "--no-renames", "--name-only", "--diff-filter=A", base, "--", *UPSTREAM_DIRS)
@@ -124,10 +262,7 @@ def checkEdits(base: str) -> tuple[list[str], int]:
 	added = {p for p in added if not p.startswith(OUR_DIR) and p not in OUR_FILES}
 	ledger = readLedger(EDITS)
 	listed = set(ledger)
-	errors = []
-	if unlabelled := sorted(p for p, e in ledger.items() if not e.reason[0].startswith(EDIT_KINDS)):
-		errors.append(f"reason not starting with one of {', '.join(EDIT_KINDS)}:")
-		errors += unlabelled
+	errors = checkKinds(base, ledger)
 	if unlisted := sorted(changed - listed):
 		errors.append("edited, deleted or changed in type but not listed:")
 		errors += unlisted
