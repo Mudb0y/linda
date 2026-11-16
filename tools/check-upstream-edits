@@ -15,7 +15,9 @@ Nix pin of nvda-cldr that is not the revision upstream's submodule names. A libl
 that is not the release upstream's submodule pins is reported without failing, because nixpkgs,
 not this tree, decides when that moves.
 
-This reads git objects and files only. It never imports NVDA's code, so it runs anywhere.
+This reads git objects and files only. It never imports NVDA's code, so it runs anywhere. The
+upstream branch it compares against is the one tools/upstream-ref names, so a clone has it only
+when that branch is pushed beside main.
 """
 
 import ast

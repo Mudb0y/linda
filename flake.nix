@@ -61,7 +61,7 @@
 
       bench = pkgs.rustPlatform.buildRustPackage {
         pname = "basedreader-bench";
-        version = "0.1.0";
+        inherit ((lib.importTOML ./engine/Cargo.toml).workspace.package) version;
         src = lib.fileset.toSource {
           root = ./engine;
           fileset = lib.fileset.unions [

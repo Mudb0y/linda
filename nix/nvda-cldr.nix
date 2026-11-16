@@ -2,6 +2,7 @@
 
 # The revision upstream's include/nvda-cldr submodule pins, on the main-out
 # branch that carries the generated locale/<lang>/cldr.dic files.
+# tools/check-upstream-edits fails when the two differ.
 fetchFromGitHub {
   owner = "nvaccess";
   repo = "nvda-cldr";
