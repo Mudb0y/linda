@@ -2,8 +2,9 @@
 with what a password field holds kept out of speech and the log.
 
 NVDA's caret, review and say all scripts run from keys pressed on the rig's display when Basedreader
-has a key source; without one, a test plugin runs each script as a key would, with a gesture whose
-send presses the key.
+has a key source. Without one, a test plugin runs each script as that key would. A caret script's key
+is pressed first and its gesture's send does nothing, as with the key source, which leaves every key
+to the application too; so the caret has often moved before the script reads it.
 
 nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_atspiText.py
 """
@@ -41,14 +42,13 @@ DRIVER_PLUGIN = '''
 """Runs NVDA scripts a test asks for, one per line of the file BASEDREADER_TEXT_DRIVER names, and
 counts the lines it has run in that file with ".done" appended.
 
-A line is "focus SCRIPT KEYS", a script of the focus object whose gesture's send presses KEYS on the
-display, or "global SCRIPT", one of globalCommands.
+A line is "focus SCRIPT", a script of the focus object, or "global SCRIPT", one of globalCommands.
+Each gets a gesture whose send does nothing: the test has pressed the key already.
 
 If the AT-SPI handler does not hand text changes to linuxPlatform.atspi.typedChars, this does.
 """
 
 import os
-import subprocess
 
 import api
 import core
@@ -64,12 +64,8 @@ class Gesture:
 	isModifier = False
 	speechEffectWhenExecuted = None
 
-	def __init__(self, keys):
-		self.keys = keys
-
 	def send(self):
-		if self.keys:
-			subprocess.run(["xdotool", "key", self.keys], check=True)
+		pass
 
 
 def _onTextChange(event):
@@ -113,11 +109,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		with open(COMMANDS, encoding="utf-8") as f:
 			lines = f.read().splitlines()
 		for line in lines[self.done:]:
-			kind, script, *keys = line.split()
+			kind, script = line.split()
 			if kind == "focus":
-				getattr(api.getFocusObject(), f"script_{script}")(Gesture(keys[0] if keys else None))
+				getattr(api.getFocusObject(), f"script_{script}")(Gesture())
 			else:
-				getattr(globalCommands.commands, f"script_{script}")(Gesture(None))
+				getattr(globalCommands.commands, f"script_{script}")(Gesture())
 			self.done += 1
 		# Written on the first poll too, which is NVDA's main loop running.
 		with open(COMMANDS + ".done", "w", encoding="utf-8") as f:
@@ -184,8 +180,10 @@ class TextSession:
 			self.desktop.press(keys or SCRIPT_KEYS[script])
 			return mark
 		kind = "focus" if script.startswith("caret_") else "global"
+		if keys:
+			self.desktop.press(keys, gap=0)
 		with open(self.commands, "a", encoding="utf-8") as f:
-			f.write(f"{kind} {script} {keys or ''}\n")
+			f.write(f"{kind} {script}\n")
 		self.sent += 1
 		self._waitForDriver(self.sent, script, 5)
 		return mark
@@ -318,7 +316,8 @@ def test_typingEcho(text: TextSession):
 
 
 def test_passwordIsNeverHeardOrLogged(text: TextSession):
-	text.focus("password", "password …")
+	# Its masking characters are spoken as NVDA's protected character.
+	text.focus("password", "…star")
 	mark = text.desktop.mark()
 	text.desktop.typeText("sec")
 	text.expect("star", "star", "star", since=mark)
