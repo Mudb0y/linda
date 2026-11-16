@@ -90,6 +90,8 @@ pub(crate) struct Engine {
     pool_size: AtomicUsize,
     pool_max: AtomicUsize,
     pool_idle_ns: AtomicU64,
+    /// Whether BASEDREADER_PWSINK_TEST_HOOKS=1 was set when the engine started.
+    test_hooks: bool,
     block_ms: AtomicU64,
     state: UnsafeCell<LoopState>,
 }
@@ -143,6 +145,8 @@ impl Engine {
                 pool_size: AtomicUsize::new(0),
                 pool_max: AtomicUsize::new(POOL_MAX),
                 pool_idle_ns: AtomicU64::new(POOL_IDLE_NS),
+                test_hooks: std::env::var_os("BASEDREADER_PWSINK_TEST_HOOKS")
+                    .is_some_and(|v| v == "1"),
                 block_ms: AtomicU64::new(0),
                 state: UnsafeCell::new(LoopState {
                     context: ptr::null_mut(),
@@ -257,8 +261,10 @@ impl Engine {
     }
 
     pub(crate) fn block_loop(&self, ms: u64) {
-        self.block_ms.store(ms, Relaxed);
-        self.signal();
+        if self.test_hooks {
+            self.block_ms.store(ms, Relaxed);
+            self.signal();
+        }
     }
 
     pub(crate) fn connected(&self) -> bool {

@@ -1301,23 +1301,33 @@ def test_noCallFromPythonWaitsForTheLibrarysThreadOrTheDaemon(pipewire: Pipewire
 			playing.write(tone(SPEECH, 0.9))
 			playing.start()
 			time.sleep(0.1)
+			attachedBefore = lib.pwsink_attached_streams()
 			lib.pwsink_block_loop(500)
 			time.sleep(0.02)
 			busyStart = mono()
 			took = calls("busy")
+			attachedWhileBusy = lib.pwsink_attached_streams()
 			# The loop thread stays blocked for another 450 ms or so, in which the tone plays on.
 			busyEnd = busyStart + 400_000_000
 			time.sleep(0.6)
+			attachedAfter = lib.pwsink_attached_streams()
 			ask("freeze")
 			took.update(calls("frozen"))
 			ask("thaw")
 			waitPlayed(playing, len(tone(SPEECH, 0.9)) // SPEECH.blockAlign, timeout=10)
 			playing.close()
-			result = dict(took=took, busyStart=busyStart, busyEnd=busyEnd)
+			result = dict(
+				took=took,
+				busyStart=busyStart,
+				busyEnd=busyEnd,
+				attached=[attachedBefore, attachedWhileBusy, attachedAfter],
+			)
 			""",
-			{**pipewire.childEnv(), **steps.env()},
+			{**pipewire.childEnv(), **steps.env(), "BASEDREADER_PWSINK_TEST_HOOKS": "1"},
 		)
 	report("call times, ms", {k: round(v, 3) for k, v in value["took"].items()})
+	before, whileBusy, after = value["attached"]
+	assert whileBusy == before < after, "the library's thread was not held up while the calls were made"
 	slow = {name: ms for name, ms in value["took"].items() if ms > 2}
 	assert not slow, slow
 	sound = monitor.soundAfter(value["busyStart"] - 200 * MS)
@@ -1325,6 +1335,27 @@ def test_noCallFromPythonWaitsForTheLibrarysThreadOrTheDaemon(pipewire: Pipewire
 	assert not [
 		e for e in monitor.eventsOf("silence") if value["busyStart"] <= e["graph_ns"] <= value["busyEnd"]
 	], "audio already playing stopped while the library's thread was busy"
+
+
+def test_theLoopBlockingHookDoesNothingOutsideTests(pipewire: PipewireFixture, tmp_path: Path):
+	"""pwsink_block_loop holds up every stream's connecting and waking, so it acts only where the
+	tests ask for it by name."""
+	value = runPipewireChild(
+		tmp_path,
+		"""
+		lib.pwsink_block_loop(3000)
+		time.sleep(0.02)
+		before = lib.pwsink_attached_streams()
+		stream = sink.openStream("", StreamFormat(1, 2, 44100, 16), lambda: None)
+		start = mono()
+		while lib.pwsink_attached_streams() == before and mono() - start < 2_000_000_000:
+			time.sleep(0.005)
+		stream.close()
+		result = (mono() - start) / 1e6
+		""",
+		pipewire.childEnv(),
+	)
+	assert value < 500, f"a new stream waited {value:.0f} ms for the library's thread"
 
 
 def test_theCrateNeverFlushesSetsControlsOrTouchesNodes():

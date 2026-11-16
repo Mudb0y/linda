@@ -293,8 +293,10 @@ pub extern "C" fn pwsink_set_pool_limits(max: u64, idle_ms: u64) {
     }
 }
 
-/// Occupies the connection's thread for ms milliseconds, so that a test can show that nothing
-/// called from Python waits for it.
+/// Occupies the connection's thread for ms milliseconds, inside the loop's lock, so that a test can
+/// show that nothing called from Python waits for that thread or its lock. It does nothing unless
+/// BASEDREADER_PWSINK_TEST_HOOKS=1 was in the environment when the library started: anything else
+/// that called it would hold up connecting, attaching and waking every stream.
 #[unsafe(no_mangle)]
 pub extern "C" fn pwsink_block_loop(ms: u64) {
     if let Ok(engine) = engine() {
