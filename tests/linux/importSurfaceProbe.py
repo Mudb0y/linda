@@ -89,7 +89,7 @@ def prepare() -> None:
 	sys.dont_write_bytecode = True
 	sys.addaudithook(_auditHook)
 	sys.path.insert(0, SOURCE)
-	# nvda.pyw runs from appDir, and languageHandler finds catalogues relative to it.
+	# nvda.pyw runs from appDir.
 	os.chdir(SOURCE)
 	from linuxPlatform import bootstrap
 
@@ -103,20 +103,8 @@ def prepare() -> None:
 	globalVars.appPid = os.getpid()
 	globalVars.appArgs.configPath = configDir = tempfile.mkdtemp(prefix="nvda-config-")
 	import config
-	import winKernel
 
-	# STUB, owned by workstream A2 (fileUtils and winKernel.moveFileEx): config.initialize() writes
-	# nvda.ini through winKernel.moveFileEx, which has no Linux body yet. This stands in for that
-	# body for the one call, and is removed as soon as the call returns.
-	def moveFileEx(lpExistingFileName: str, lpNewFileName: str, dwFlags: int) -> None:
-		os.replace(lpExistingFileName, lpNewFileName)
-
-	realMoveFileEx = winKernel.moveFileEx
-	winKernel.moveFileEx = moveFileEx
-	try:
-		config.initialize()
-	finally:
-		winKernel.moveFileEx = realMoveFileEx
+	config.initialize()
 
 
 def coreMainImports() -> list[dict]:
