@@ -77,6 +77,27 @@ if [ "${1:-}" = --inside ]; then
 	set_status IsEnabled || fail "could not switch accessibility on"
 	# Only some at-spi2-core builds have this one.
 	set_status ScreenReaderEnabled 2>/dev/null || true
+	# A window manager on request, so that a test can have an active window,
+	# focus that moves between windows when they open and close, and the
+	# root window properties a real desktop has.
+	if [ -n "${BASEDREADER_RIG_WM:-}" ]; then
+		[ "$BASEDREADER_RIG_WM" = marco ] || fail "unknown window manager: $BASEDREADER_RIG_WM"
+		marco --no-force-fullscreen >"$XDG_RUNTIME_DIR/wm.log" 2>&1 &
+		up=
+		for _ in $(seq 100); do
+			# It names itself before it has set up the desktops tests read.
+			if xprop -root _NET_SUPPORTING_WM_CHECK _NET_NUMBER_OF_DESKTOPS 2>/dev/null |
+				grep -q '^_NET_NUMBER_OF_DESKTOPS(CARDINAL)'; then
+				up=1
+				break
+			fi
+			sleep 0.05
+		done
+		if [ -z "$up" ]; then
+			cat "$XDG_RUNTIME_DIR/wm.log" >&2
+			fail "the window manager did not start"
+		fi
+	fi
 	# The sandbox is a background job of a shell without job control, and such
 	# a job starts with SIGINT and SIGQUIT ignored, which everything below it
 	# would inherit.

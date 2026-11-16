@@ -221,6 +221,13 @@ def test_rigsOwnFailuresHaveTheirOwnStatus():
 		assert done.stderr.startswith(("rig:", "usage:")), done.stderr
 
 
+def test_unknownWindowManagerIsRefused(monkeypatch: pytest.MonkeyPatch):
+	monkeypatch.setenv("BASEDREADER_RIG_WM", "twm")
+	done = rig("true")
+	assert done.returncode == 125
+	assert "unknown window manager" in done.stderr
+
+
 @pytest.mark.parametrize(
 	"directory",
 	["/", "/tmp", "/tmp/.X11-unix", "/run", "/dev", "/dev/shm", "/proc", "/sys", "/nix", "/etc", "/home"],
