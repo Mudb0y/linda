@@ -456,7 +456,7 @@ class FileHandler(logging.FileHandler):
 		if sys.platform != "win32":
 			# CRITICAL's sound on Windows is the system's own beep, a second route to the speakers
 			# that Linux does not take, so on Linux it has none.
-			if logging.ERROR <= record.levelno < logging.CRITICAL:
+			if logging.ERROR <= record.levelno < logging.CRITICAL and shouldPlayErrorSound():
 				logSupport.requestErrorSound()
 			return super().handle(record)
 		if record.levelno >= logging.CRITICAL:
@@ -469,6 +469,11 @@ class FileHandler(logging.FileHandler):
 		if sys.platform == "win32":
 			return super().handleError(record)
 		logSupport.reportUnwritableRecord(record)
+
+	def _open(self):
+		if sys.platform == "win32":
+			return super()._open()
+		return logSupport.openPrivately(self.baseFilename, self.mode, self.encoding, self.errors)
 
 
 class Formatter(logging.Formatter):
@@ -677,8 +682,6 @@ def initialize(shouldDoRemoteLogging=False):
 				globalVars.appArgs.logFileName = None
 				logHandler = logging.NullHandler()
 				log.error("Faile to open log file, redirecting to standard output")
-			if sys.platform != "win32" and globalVars.appArgs.logFileName:
-				logSupport.enableCrashDump(os.path.dirname(globalVars.appArgs.logFileName))
 			logLevel = globalVars.appArgs.logLevel
 			if globalVars.appArgs.debugLogging:
 				logLevel = Logger.DEBUG
@@ -694,6 +697,8 @@ def initialize(shouldDoRemoteLogging=False):
 	logHandler.setFormatter(logFormatter)
 	logHandler.addFilter(filterExternalDependencyLogging)
 	log.root.addHandler(logHandler)
+	if sys.platform != "win32" and not shouldDoRemoteLogging and not _shouldDisableLogging():
+		logSupport.enableCrashDump(globalVars.appArgs.logFileName)
 	redirectStdout(log)
 	sys.excepthook = _excepthook
 	sys.unraisablehook = _unraisableExceptHook

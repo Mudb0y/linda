@@ -114,9 +114,12 @@ source/logHandler.py
   which on Windows is the backslash upstream wrote; a record that cannot be
   written is reported on the real standard error, since sys.stderr is
   redirected into the log and the report would fail again without end; the
-  default log is under XDG_STATE_HOME/basedreader; the error sound is
-  requested from a thread of its own and CRITICAL has no sound, not the
-  winsound beep; faulthandler is armed with a crash file beside the log.
+  default log is under XDG_STATE_HOME/basedreader; log files are created
+  readable by the user alone, since the log can record every key typed; the
+  error sound is requested from a thread of its own, which stops it when
+  errors keep following it, and CRITICAL has no sound, not the winsound
+  beep; faulthandler is armed with a crash file beside the log once the
+  log's handler is installed, so that a failure to arm it is logged.
   The Linux code is in linuxPlatform/logSupport.py
 source/louisHelper.py
   import safety: os.add_dll_directory around the louis import only on
