@@ -569,4 +569,73 @@ mod tests {
             .unwrap();
         assert_eq!(event(&other).unwrap(), None);
     }
+
+    #[test]
+    fn an_unsigned_detail_is_a_number() {
+        let e = event(&event_message(
+            "PropertyChange",
+            "accessible-role",
+            0,
+            0,
+            Variant::new(88u32),
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(e.any, AnyData::Int(88));
+    }
+
+    #[test]
+    fn a_string_inside_a_variant_inside_a_variant_is_read() {
+        let inner = Variant::new("Heading 1");
+        let msg = body_message(&Variant::Variant(Box::new(inner)));
+        assert_eq!(msg.body().signature().to_string(), "v");
+        assert_eq!(string_property(&msg).unwrap(), "Heading 1");
+    }
+
+    fn tree_entry(props: HashMap<&str, Variant<'_>>) -> TreeEntry {
+        let body = vec![((APP, path("/org/a11y/atspi/accessible/4")), props)];
+        tree(&body_message(&body)).unwrap().remove(0)
+    }
+
+    #[test]
+    fn a_child_count_too_big_for_the_field_is_unknown() {
+        let mut props: HashMap<&str, Variant<'_>> = HashMap::new();
+        props.insert("ChildCount", Variant::new(1i64 << 40));
+        assert_eq!(tree_entry(props).child_count, None);
+        let mut props: HashMap<&str, Variant<'_>> = HashMap::new();
+        props.insert("ChildCount", Variant::new(7u32));
+        assert_eq!(tree_entry(props).child_count, Some(7));
+    }
+
+    #[test]
+    fn attributes_with_a_value_that_is_not_a_string_are_unknown() {
+        let mut attrs: HashMap<&str, Variant<'_>> = HashMap::new();
+        attrs.insert("tag", Variant::new("p"));
+        attrs.insert("level", Variant::new(2i32));
+        let mut props: HashMap<&str, Variant<'_>> = HashMap::new();
+        props.insert("Attributes", Variant::from(attrs));
+        assert_eq!(tree_entry(props).attributes, None);
+    }
+
+    #[test]
+    fn tree_attributes_come_sorted_by_name() {
+        let mut attrs = HashMap::new();
+        for (k, v) in [
+            ("tag", "p"),
+            ("display", "block"),
+            ("level", "2"),
+            ("a", "1"),
+        ] {
+            attrs.insert(k, v);
+        }
+        let mut props: HashMap<&str, Variant<'_>> = HashMap::new();
+        props.insert("Attributes", Variant::from(attrs));
+        let names: Vec<String> = tree_entry(props)
+            .attributes
+            .unwrap()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(names, vec!["a", "display", "level", "tag"]);
+    }
 }
