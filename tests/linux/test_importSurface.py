@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,18 +25,21 @@ PROBE = HERE / "importSurfaceProbe.py"
 ALLOWED_FAILURES = HERE / "importSurfaceAllowedFailures.txt"
 
 
-def runProbe(tmpPath: Path, *args: str) -> dict:
+def runProbe(tmpPath: Path, *args: str, ignoring: Collection[str] = ()) -> dict:
+	"""Run the probe and return its result, once the run has been held to harness.CLEAN_CHECKS,
+	apart from those named in ignoring, which the test expects to fail."""
 	resultPath = tmpPath / "result.json"
+	# The probe's own checks see what its process does; what any process it starts writes lands here.
+	overlay = tmpPath / "overlay"
 	before = harness.treeState()
 	done = subprocess.run(
-		[sys.executable, "-I", "-B", str(PROBE), str(resultPath), *args],
+		harness.isolatedCommand(overlay, [sys.executable, "-I", "-B", str(PROBE), str(resultPath), *args]),
 		capture_output=True,
 		text=True,
 		timeout=900,
 		env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
 		check=False,
 	)
-	# The probe's audit hook sees writes from its own process only; this also sees its children's.
 	changed = harness.changedPaths(before, harness.treeState())
 	assert not changed, f"the probe changed the repository: {changed}"
 	assert resultPath.exists(), (
@@ -46,6 +50,13 @@ def runProbe(tmpPath: Path, *args: str) -> dict:
 		f"the probe failed outside the step under test:\n{result['error']['traceback']}"
 	)
 	assert not result["writeViolations"], f"wrote into the repository: {result['writeViolations']}"
+	harness.ChildResult.fromEvents(
+		result["events"],
+		overlay,
+		returnCode=done.returncode,
+		stdout=done.stdout,
+		stderr=done.stderr,
+	).assertClean(ignoring=ignoring)
 	return result
 
 
@@ -490,7 +501,7 @@ def test_installWithoutLouisFails(tmp_path: Path):
 def test_standInCallsRaise(tmp_path: Path):
 	"""Binding to Windows functions works; calling any of them raises NoLinuxImplementation, a
 	NotImplementedError, and announces it as an audit event even when the caller swallows it."""
-	hazard = runProbe(tmp_path, "hazard", "standInCalls")["hazard"]
+	hazard = runProbe(tmp_path, "hazard", "standInCalls", ignoring={"noLinuxImplementation"})["hazard"]
 	notRaising = {
 		call: o
 		for call, o in hazard["outcomes"].items()
@@ -524,7 +535,7 @@ def test_standInSurfaceNeverAnswers(tmp_path: Path):
 	"""Every function, method and property a stand-in defines raises NoLinuxImplementation, and so
 	does constructing any class of it that is not a type declaration; the only values are integer
 	constants. A new stand-in name that returned something plausible would fail here."""
-	surface = runProbe(tmp_path, "hazard", "standInSurface")["hazard"]
+	surface = runProbe(tmp_path, "hazard", "standInSurface", ignoring={"noLinuxImplementation"})["hazard"]
 	answering = {}
 	for name, o in surface.items():
 		raisedNoLinux = o.get("raised") == "NoLinuxImplementation" and o.get("isNotImplementedError")
@@ -552,7 +563,7 @@ def test_replacedModulesAnswerMissingNamesLoudly(tmp_path: Path):
 	audit hook records, and that is still the AttributeError, or for `from ... import` the
 	ImportError, that code testing for the name expects; special names raise a plain AttributeError,
 	as Python's own probes of a module expect."""
-	hazard = runProbe(tmp_path, "hazard", "replacedNames")["hazard"]
+	hazard = runProbe(tmp_path, "hazard", "replacedNames", ignoring={"noLinuxImplementation"})["hazard"]
 	raised = {name: o["raised"] for name, o in hazard["outcomes"].items()}
 	assert raised == {
 		"IAccessibleHandler.NVDARoleFromAttr": "NoLinuxAttribute",
@@ -583,7 +594,8 @@ def test_addonAppModuleUsingAMissingNameKeepsItsName(tmp_path: Path):
 	"""An add-on's app module that uses a name the replacements lack fails to import; working out the
 	application's name must still give the executable's name, as for any app module that fails to
 	import, and leave the failure for fetchAppModule to report."""
-	hazard = runProbe(tmp_path, "hazard", "addonAppModules")["hazard"]
+	# The add-ons' own use of the missing names is reported, as any is.
+	hazard = runProbe(tmp_path, "hazard", "addonAppModules", ignoring={"noLinuxImplementation"})["hazard"]
 	assert hazard == {
 		"addonfromimport": {"raised": None, "returned": "'addonfromimport'"},
 		"addonattribute": {"raised": None, "returned": "'addonattribute'"},
@@ -632,11 +644,10 @@ def test_finderRefusesBadTables(tmp_path: Path):
 
 def test_hotPathsAnswerWithoutError(tmp_path: Path):
 	"""The lock-screen check runs on every focus and navigator change, and IAccessibleHandler.pumpAll
-	on every core pump cycle; neither may raise or log an error."""
+	on every core pump cycle; neither may raise or log an error, which runProbe's clean check sees."""
 	hazard = runProbe(tmp_path, "hazard", "lockScreen")["hazard"]
 	assert hazard["objectBelowLockScreen"] == {"raised": None, "returned": "False"}
 	assert hazard["IAccessibleHandler.pumpAll"] == {"raised": None, "returned": "None"}
-	assert not {"ERROR", "CRITICAL"} & set(hazard["logLevels"]), hazard["logLevels"]
 
 
 def test_windowsErrorIsDistinct(tmp_path: Path):

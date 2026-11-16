@@ -3,7 +3,8 @@
 usage: importSurfaceProbe.py RESULT_JSON core|sweep|hazard NAME|refuse|noLouis|refuseWhen CONDITION [ENTRY]
 
 It writes its findings to RESULT_JSON and exits 0 whatever they are; deciding pass or fail is the
-test's job.
+test's job. The findings include what harness.Checks recorded in this process, so that the test can
+hold the run to the harness's definition of a clean run.
 """
 
 import ast
@@ -19,11 +20,12 @@ import sys
 import tempfile
 import traceback
 import types
+from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SOURCE = os.path.join(ROOT, "source")
-writeViolations: list[str] = []
-configDir: str | None = None
+#: Where prepare puts the configuration directory, removed at the end.
+workDir: str | None = None
 #: The standard library changes behaviour when any of these imports.
 neverImportable = frozenset({"winreg", "msvcrt", "_winapi"})
 
@@ -44,38 +46,24 @@ def _loadHarness() -> types.ModuleType:
 
 
 harness = _loadHarness()
+#: What harness.Checks records in this process, as it happens.
+events: list[dict] = []
 
 
-def _refuseWrites(event: str, args: tuple) -> None:
-	"""harness's check for writes under source/ and tests/unit, recording each here."""
-	for path in harness.writtenPaths(event, args):
-		if harness.isProtected(path):
-			writeViolations.append(f"{event} {path}")
-			raise PermissionError(f"nothing may write under source/ or tests/unit/ at run time: {path}")
+def _record(kind: str, **fields: object) -> None:
+	events.append({"kind": kind, "pid": os.getpid(), **fields})
+
+
+def writeViolations() -> list[str]:
+	"""Each write under source/ or tests/unit this process tried, which harness.Checks refused."""
+	return [f"{event['event']} {event['path']}" for event in events if event["kind"] == "write"]
 
 
 def prepare() -> None:
 	"""bootstrap.install() and the preconditions nvda.pyw and core.main establish before imports."""
-	global configDir
-	sys.dont_write_bytecode = True
-	sys.addaudithook(_refuseWrites)
-	sys.path.insert(0, SOURCE)
-	# nvda.pyw runs from appDir.
-	os.chdir(SOURCE)
-	from linuxPlatform import bootstrap
-
-	bootstrap.install()
-	import gettext
-
-	gettext.NullTranslations().install(names=["pgettext", "npgettext", "ngettext"])
-	import globalVars
-
-	globalVars.appDir = SOURCE
-	globalVars.appPid = os.getpid()
-	globalVars.appArgs.configPath = configDir = tempfile.mkdtemp(prefix="nvda-config-")
-	import config
-
-	config.initialize()
+	global workDir
+	workDir = tempfile.mkdtemp(prefix="nvda-probe-")
+	harness.prepareChild("config", Path(workDir))
 
 
 def coreMainImports() -> list[dict]:
@@ -195,14 +183,14 @@ def _importInChild(module: str, timeout: int) -> dict:
 		os.close(readFd)
 		signal.alarm(timeout)
 		sys.stdout = sys.stderr = io.StringIO()
-		del writeViolations[:]
+		del events[:]
 		try:
 			imported = importlib.import_module(module)
 			# The file actually loaded, which for a replaced module is not upstream's.
 			result = {"status": "ok", "file": getattr(imported, "__file__", None)}
 		except BaseException as e:  # noqa: BLE001
 			result = {"status": "fail", **_failure(e)}
-		result["writeViolations"] = writeViolations
+		result["writeViolations"] = writeViolations()
 		result["windowsModulesLoaded"] = sorted(neverImportable & set(sys.modules))
 		with os.fdopen(writeFd, "w") as pipe:
 			json.dump(result, pipe)
@@ -225,15 +213,20 @@ def runSweep() -> dict:
 		raise RuntimeError(f"cannot fork a clean child: {threading.active_count()} threads are running")
 	results = {}
 	windowsModulesLoaded = {}
+	inChildren: list[str] = []
 	for module in allSourceModules():
 		if module in notImported:
 			results[module] = {"status": "notImported", "reason": notImported[module]}
 			continue
 		result = results[module] = _importInChild(module, timeout=60)
-		writeViolations.extend(result.pop("writeViolations", ()))
+		inChildren.extend(result.pop("writeViolations", ()))
 		if loaded := result.pop("windowsModulesLoaded", None):
 			windowsModulesLoaded[module] = loaded
-	return {"results": results, "windowsModulesLoaded": windowsModulesLoaded}
+	return {
+		"results": results,
+		"windowsModulesLoaded": windowsModulesLoaded,
+		"writeViolationsInChildren": inChildren,
+	}
 
 
 def _outcome(call: object) -> dict:
@@ -606,24 +599,14 @@ def runHazard(name: str) -> dict:
 		}
 	if name == "lockScreen":
 		# Both run on hot paths: the first for every focus and navigator change, the second on every
-		# core pump cycle. A raise from either becomes an ERROR record in the log each time.
-		import logging
-
+		# core pump cycle. A raise from either becomes an ERROR record in the log each time, which the
+		# harness's checks record.
 		import IAccessibleHandler
-		from logHandler import log
 		from utils.security import objectBelowLockScreenAndWindowsIsLocked
 
-		records: list[str] = []
-
-		class Recorder(logging.Handler):
-			def emit(self, record: logging.LogRecord) -> None:
-				records.append(record.levelname)
-
-		log.addHandler(Recorder())
 		return {
 			"objectBelowLockScreen": _outcome(lambda: objectBelowLockScreenAndWindowsIsLocked(object())),
 			"IAccessibleHandler.pumpAll": _outcome(IAccessibleHandler.pumpAll),
-			"logLevels": records,
 		}
 	if name == "installTwice":
 		from linuxPlatform import bootstrap, finder, windowsCtypes
@@ -722,6 +705,7 @@ def runNoLouis() -> dict:
 def main() -> None:
 	resultPath, mode = sys.argv[1], sys.argv[2]
 	result: dict = {"mode": mode}
+	checks = harness.Checks(_record)
 	try:
 		if mode == "refuse":
 			result.update(runRefuse())
@@ -738,11 +722,13 @@ def main() -> None:
 				result["hazard"] = runHazard(sys.argv[3])
 	except BaseException as e:  # noqa: BLE001
 		result["error"] = _failure(e)
-	result["writeViolations"] = writeViolations
+	checks.finish()
+	result["writeViolations"] = writeViolations() + result.pop("writeViolationsInChildren", [])
+	result["events"] = events
 	with open(resultPath, "w", encoding="utf-8") as f:
-		json.dump(result, f, indent=1)
-	if configDir:
-		shutil.rmtree(configDir, ignore_errors=True)
+		json.dump(result, f, indent=1, default=repr)
+	if workDir:
+		shutil.rmtree(workDir, ignore_errors=True)
 	sys.stdout.flush()
 	sys.stderr.flush()
 	# Skips interpreter teardown, where NVDA's atexit handlers would run against a half-built core.
