@@ -238,8 +238,9 @@ def getWindowScalingFactor(window: int) -> int:
 	return round(winDpi / DEFAULT_DPI_LEVEL)
 
 
-if sys.platform == "win32":
-	appInstance = winBindings.kernel32.GetModuleHandle(None)
+# Linux has no module handle. RegisterClassEx, the first call CustomWindow makes with it, raises
+# NoLinuxImplementation there.
+appInstance = winBindings.kernel32.GetModuleHandle(None) if sys.platform == "win32" else None
 
 
 class CustomWindow(AutoPropertyObject):

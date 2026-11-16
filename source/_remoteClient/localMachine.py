@@ -21,6 +21,7 @@ muting and uses wxPython's CallAfter for thread synchronization.
 from enum import IntEnum, nonmember  # noqa: I001
 import os
 from typing import Any
+from linuxPlatform.windowsOnly import winreg
 import sys
 
 import winBindings.sas
@@ -43,9 +44,6 @@ from utils.security import isRunningOnSecureDesktop
 
 from . import cues, input
 
-if sys.platform == "win32":
-	import winreg
-
 
 class SoftwareSASGeneration(IntEnum):
 	"""
@@ -67,8 +65,7 @@ class SoftwareSASGeneration(IntEnum):
 	BOTH = 3
 	"""both services and Ease of Access applications can simulate the SAS."""
 
-	if sys.platform == "win32":
-		KEY: int = nonmember(winreg.HKEY_LOCAL_MACHINE)
+	KEY: int = nonmember(winreg.HKEY_LOCAL_MACHINE)
 	SUBKEY: str = nonmember(RegistryKey.SYSTEM_POLICIES.value)
 	VALUE_NAME: str = nonmember("SoftwareSASGeneration")
 	DISPLAY_PATH: str = nonmember(
@@ -378,6 +375,9 @@ class LocalMachine:
 
 		:return: True if simulating an SAS should succeed, false otherwise.
 		"""
+		if sys.platform != "win32":
+			log.debug("Unable to simulate the SAS, which is Windows' own and has no counterpart on Linux.")
+			return False
 		if not hasUiAccess():
 			log.debug("Unable to simulate the SAS as NVDA does not have UI Access.")
 			return False

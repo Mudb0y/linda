@@ -30,6 +30,7 @@ import winBindings.advapi32
 import winBindings.kernel32
 import winBindings.shell32
 import winKernel
+from linuxPlatform.windowsOnly import winreg
 import sys
 import shellapi
 import winUser
@@ -38,13 +39,6 @@ import shlobj
 from logHandler import log
 from NVDAState import WritePaths
 from winBindings import advapi32, user32
-
-if sys.platform == "win32":
-	import winreg
-else:
-	from linuxPlatform import session as _linuxSession
-	from linuxPlatform import threads as _linuxThreads
-	from linuxPlatform import xdg as _xdg
 
 
 @functools.lru_cache(maxsize=1)
@@ -61,7 +55,9 @@ def hasSyswow64Dir() -> bool:
 def openUserConfigurationDirectory():
 	"""Opens directory containing config files for the current user"""
 	if sys.platform != "win32":
-		return _xdg.openWithDefaultApplication(WritePaths.configDir)
+		from linuxPlatform import xdg
+
+		return xdg.openWithDefaultApplication(WritePaths.configDir)
 	shellapi.ShellExecute(0, None, WritePaths.configDir, None, None, winUser.SW_SHOWNORMAL)
 
 
@@ -76,7 +72,9 @@ def openDefaultConfigurationDirectory():
 		raise ValueError("no user default config path")
 	config.initConfigPath(path)
 	if sys.platform != "win32":
-		return _xdg.openWithDefaultApplication(path)
+		from linuxPlatform import xdg
+
+		return xdg.openWithDefaultApplication(path)
 	shellapi.ShellExecute(0, None, path, None, None, winUser.SW_SHOWNORMAL)
 
 
@@ -86,8 +84,8 @@ TokenUIAccess = 26
 def hasUiAccess():
 	if sys.platform != "win32":
 		# X11 does not isolate one client's windows from another's input or inspection, so every client
-		# already has what UI Access grants on Windows. Wayland does isolate them; this answers for X11
-		# whatever the session type, and Wayland sessions are not handled yet.
+		# already has what UI Access grants on Windows. Wayland does isolate them, and this answers for
+		# X11 whatever the session type.
 		return True
 	token = ctypes.wintypes.HANDLE()
 	advapi32.OpenProcessToken(
@@ -257,7 +255,9 @@ class ExecAndPump(threading.Thread, Generic[_execAndPumpResT]):
 		self.threadExc: Exception | None = None
 		self.start()
 		if sys.platform != "win32":
-			_linuxThreads.joinWhileYieldingToWx(self)
+			from linuxPlatform import threads
+
+			threads.joinWhileYieldingToWx(self)
 			if self.threadExc:
 				raise self.threadExc
 			return
@@ -290,7 +290,9 @@ def preventSystemIdle(preventDisplayTurningOff: bool | None = None, persistent: 
 	"""
 	if sys.platform != "win32":
 		# Say all and every braille key ask this; a session that may still idle must not stop either.
-		return _linuxSession.preventIdle()
+		from linuxPlatform import session
+
+		return session.preventIdle()
 	if preventDisplayTurningOff is None:
 		import config
 
@@ -305,7 +307,7 @@ def preventSystemIdle(preventDisplayTurningOff: bool | None = None, persistent: 
 def resetThreadExecutionState() -> None:
 	"""Reset the thread execution state to the default."""
 	if sys.platform != "win32":
-		# preventSystemIdle holds nothing on Linux yet, so there is nothing to release.
+		# preventSystemIdle holds nothing on Linux, so there is nothing to release.
 		return
 	winBindings.kernel32.SetThreadExecutionState(winKernel.ES_CONTINUOUS)
 

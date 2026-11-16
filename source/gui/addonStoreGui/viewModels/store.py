@@ -6,8 +6,8 @@
 from os import (  # noqa: I001
 	PathLike,
 )
+from linuxPlatform.windowsOnly import startfile
 import os
-import sys
 from typing import (
 	cast,
 )
@@ -55,9 +55,6 @@ from .addonList import (
 	AddonListItemVM,
 	AddonListVM,
 )
-
-if sys.platform == "win32":
-	from os import startfile
 
 
 class AddonStoreVM:

@@ -4,12 +4,9 @@
 # See the file COPYING for more details.
 
 from enum import Enum, nonmember  # noqa: I001
-import sys
+from linuxPlatform.windowsOnly import winreg
 
 from winBindings.advapi32 import RegDeleteTree
-
-if sys.platform == "win32":
-	import winreg
 
 
 EASE_OF_ACCESS_APP_KEY_NAME = "nvda_nvda_v1"

@@ -16,6 +16,7 @@ from typing import Any
 from addonAPIVersion import BACK_COMPAT_TO
 
 import globalVars
+from linuxPlatform.windowsOnly import winreg
 import os
 import sys
 import errno
@@ -48,11 +49,6 @@ from .featureFlag import (
 from .registry import RegistryKey as _RegistryKey
 import NVDAState
 from NVDAState import WritePaths
-
-if sys.platform == "win32":
-	import winreg
-else:
-	from linuxPlatform import xdg as _xdg
 
 #: True if NVDA is running as a Windows Store Desktop Bridge application
 isAppX = False
@@ -129,7 +125,7 @@ def saveOnExit():
 def isInstalledCopy() -> bool:
 	"""Checks to see if this running copy of NVDA is installed on the system"""
 	if sys.platform != "win32":
-		# Nothing installs NVDA on Linux yet, so every copy runs from where it was unpacked.
+		# Nothing installs NVDA on Linux, so every copy runs from where it was unpacked.
 		return False
 	try:
 		k = winreg.OpenKey(
@@ -175,7 +171,7 @@ def isInstalledCopy() -> bool:
 
 def getInstalledUserConfigPath() -> str | None:
 	if sys.platform != "win32":
-		# Nothing installs NVDA on Linux yet, so there is no installed copy's configuration.
+		# Nothing installs NVDA on Linux, so there is no installed copy's configuration.
 		return None
 	try:
 		winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _RegistryKey.NVDA.value)
@@ -208,7 +204,9 @@ def getUserDefaultConfigPath(useInstalledPathIfExists=False):
 	"""
 	if sys.platform != "win32":
 		# The XDG configuration directory wherever NVDA runs from, so no copy writes into its own tree.
-		return _xdg.userConfigDir()
+		from linuxPlatform import xdg
+
+		return xdg.userConfigDir()
 	installedUserConfigPath = getInstalledUserConfigPath()
 	if installedUserConfigPath and (
 		isInstalledCopy() or isAppX or (useInstalledPathIfExists and os.path.isdir(installedUserConfigPath))

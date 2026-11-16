@@ -9,7 +9,7 @@ import comtypes.client
 import ctypes
 from enum import auto, Enum
 import pathlib
-import sys
+from linuxPlatform.windowsOnly import winreg
 import time
 import os
 import tempfile
@@ -32,9 +32,6 @@ import NVDAState
 from NVDAState import WritePaths
 from utils.tempFile import _createEmptyTempFileForDeletingFile
 from utils._deprecate import handleDeprecations, MovedSymbol, RemovedSymbol
-
-if sys.platform == "win32":
-	import winreg
 
 _wsh = None
 

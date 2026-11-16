@@ -8,6 +8,7 @@ import ctypes  # noqa: I001
 import itertools
 import math
 import typing
+from linuxPlatform.windowsOnly import winreg
 import sys
 from ctypes.wintypes import DWORD, WCHAR
 
@@ -54,9 +55,6 @@ from winBindings.setupapi import (
 	SetupDiOpenDevRegKey as _SetupDiOpenDevRegKey,
 	_Dummy,
 )
-
-if sys.platform == "win32":
-	import winreg
 
 
 def _ValidHandle(value):

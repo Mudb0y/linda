@@ -9,14 +9,12 @@ import platform
 import sys
 import sysconfig
 import time
+from linuxPlatform.windowsOnly import winreg
 
 import buildVersion
 import globalVars
 
 from functools import cached_property
-
-if sys.platform == "win32":
-	import winreg
 
 
 class _WritePaths:
@@ -247,6 +245,10 @@ class _ReadPaths:
 			case "win32":
 				return self.versionedLibX86Path
 			case _:
+				if sys.platform != "win32":
+					from linuxPlatform.windowsOnly import NoWindowsLibrary
+
+					raise NoWindowsLibrary("NVDAState.ReadPaths.coreArchLibPath")
 				raise RuntimeError("Unsupported platform")
 
 	@property
@@ -371,7 +373,8 @@ class _TrackNVDAInitialization:
 
 def _forceSecureModeEnabled() -> bool:
 	if sys.platform != "win32":
-		# An administrator sets this in the registry; Linux has no system-wide store for it yet.
+		# An administrator sets this in the registry. Linux has no registry and NVDA reads no other
+		# system-wide store, so nobody can have set it.
 		return False
 	# Avoid circular import
 	from config.registry import RegistryKey
@@ -386,7 +389,8 @@ def _forceSecureModeEnabled() -> bool:
 
 def _serviceDebugEnabled() -> bool:
 	if sys.platform != "win32":
-		# An administrator sets this in the registry; Linux has no system-wide store for it yet.
+		# An administrator sets this in the registry. Linux has no registry and NVDA reads no other
+		# system-wide store, so nobody can have set it.
 		return False
 	# Avoid circular import
 	from config.registry import RegistryKey

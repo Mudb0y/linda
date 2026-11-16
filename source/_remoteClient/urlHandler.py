@@ -25,9 +25,7 @@ import os
 import sys
 
 from config.registry import RegistryKey, _deleteKeyAndSubkeys
-
-if sys.platform == "win32":
-	import winreg
+from linuxPlatform.windowsOnly import winreg
 
 
 def _createRegistryStructure(keyHandle: "winreg.HKEYType", data: dict):
