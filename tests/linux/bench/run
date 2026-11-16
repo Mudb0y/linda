@@ -3,7 +3,9 @@
 #   nix develop ROOT -c ROOT/tests/linux/rig ROOT/tests/linux/bench/run PAGE OUTDIR [RUNS]
 # PAGE is normal, large or mutation. Each run starts Firefox afresh, waits for
 # the page to load as seen over AT-SPI, runs the bench and writes one JSON file
-# into OUTDIR. Build the bench first: cargo build --release in engine/.
+# into OUTDIR. Build the bench first, outside the rig: nix build .#basedreader-bench.
+# BENCH_BIN names another binary, such as one cargo built in engine/; without
+# it, the flake's is used once built, and otherwise engine/target/release's.
 # BENCH_METHODS, a comma-separated list of method labels such as walk-64 or
 # getitems, limits a fetch run to those methods; none measures only the first
 # load. BENCH_WAIT=warm walks the document before the bench activates the
@@ -29,9 +31,15 @@ outdir=$2
 runs=${3:-5}
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
-bench=${BENCH_BIN:-$root/engine/target/release/basedreader-bench}
+if [ -n "${BENCH_BIN:-}" ]; then
+	bench=$BENCH_BIN
+elif [ -x "${BASEDREADER_BENCH_BIN:-}" ]; then
+	bench=$BASEDREADER_BENCH_BIN
+else
+	bench=$root/engine/target/release/basedreader-bench
+fi
 if [ ! -x "$bench" ]; then
-	echo "bench: $bench is missing; build it with cargo build --release in engine/" >&2
+	echo "bench: $bench is missing; build the bench outside the rig with: nix build $root#basedreader-bench" >&2
 	exit 2
 fi
 mkdir -p "$outdir"
@@ -73,7 +81,7 @@ stop_firefox() {
 }
 trap stop_firefox EXIT
 
-echo "bench: $page page, $runs runs, $wait_mode wait, results in $outdir"
+echo "bench: $page page, $runs runs, $wait_mode wait, $bench, results in $outdir"
 for run in $(seq 0 $((runs - 1))); do
 	seed=$((seed_base + run))
 	if [ "$page" = mutation ]; then

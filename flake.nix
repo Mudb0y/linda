@@ -58,6 +58,22 @@
 
       louisTables = pkgs.callPackage ./nix/louis-tables.nix { };
       nvdaCldr = pkgs.callPackage ./nix/nvda-cldr.nix { };
+
+      bench = pkgs.rustPlatform.buildRustPackage {
+        pname = "basedreader-bench";
+        version = "0.1.0";
+        src = lib.fileset.toSource {
+          root = ./engine;
+          fileset = lib.fileset.unions [
+            ./engine/Cargo.toml
+            ./engine/Cargo.lock
+            ./engine/crates
+          ];
+        };
+        cargoLock.lockFile = ./engine/Cargo.lock;
+        cargoBuildFlags = [ "--package" "basedreader-bench" ];
+        cargoTestFlags = [ "--workspace" ];
+      };
     in
     {
       packages.${system} = {
@@ -69,6 +85,7 @@
           ;
         louis-tables = louisTables;
         nvda-cldr = nvdaCldr;
+        basedreader-bench = bench;
       };
 
       devShells.${system}.default = pkgs.mkShell {
@@ -118,6 +135,11 @@
         # include/liblouis submodule pins.
         BASEDREADER_LIBLOUIS_VERSION = pkgs.liblouis.version;
         BASEDREADER_NVDA_CLDR_DIR = "${nvdaCldr}";
+
+        # Where tests/linux/bench/run finds the bench once nix build
+        # .#basedreader-bench has built it. Stripped of its dependency on the
+        # package, so that entering the shell never builds the engine.
+        BASEDREADER_BENCH_BIN = builtins.unsafeDiscardStringContext "${bench}/bin/basedreader-bench";
 
         # Every locale, so that which ones the tests can set does not depend
         # on the ones the host happens to have built.
