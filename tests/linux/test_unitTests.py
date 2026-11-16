@@ -544,6 +544,28 @@ def test_changesByChildProcessesFailTheRun(tmp_path: Path):
 	assert any(line.startswith("rununittests: 2 tests ran: 2 passed") for line in lines), output
 
 
+def test_writeIntoTheRealCheckoutByAChildFailsTheRun(tmp_path: Path):
+	"""The rig's checkout is read-only, so a process a test starts would only fail to write there,
+	unseen; the run sees the write all the same, and the checkout stays as it was."""
+	modules = {
+		"__init__.py": BOOTSTRAP,
+		"test_writes.py": f"""
+			import subprocess
+			import unittest
+
+			class TestWrites(unittest.TestCase):
+				def test_touchesFromAChild(self):
+					subprocess.run(["touch", {str(TRANSIENT)!r}], check=False)
+		""",
+	}
+	listPath = makeProbes(tmp_path, modules, "")
+	status, lines, output = runRunner(tmp_path, listPath)
+	assert status == 1, output
+	assert f"rununittests: the run changed {TRANSIENT}" in lines, output
+	assert not TRANSIENT.exists()
+	assert any(line.startswith("rununittests: 1 tests ran: 1 passed") for line in lines), output
+
+
 def test_writeThroughALinkIntoTheCheckoutIsRefused(tmp_path: Path):
 	checkout = checkoutStandIn(tmp_path)
 	modules = {

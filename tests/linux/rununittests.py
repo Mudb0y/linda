@@ -788,7 +788,21 @@ def main() -> int:
 			shutil.copyfile(report, args.xml)
 		return status
 	finally:
-		shutil.rmtree(workDir, ignore_errors=True)
+		_removeTree(workDir)
+
+
+def _removeTree(path: str) -> None:
+	"""shutil.rmtree, through the work directories overlayfs leaves with no permissions at all."""
+
+	def retry(function: Callable, failed: str, _error: BaseException) -> None:
+		with contextlib.suppress(OSError):
+			os.chmod(failed, 0o700)
+			if os.path.isdir(failed) and not os.path.islink(failed):
+				shutil.rmtree(failed, onexc=retry)
+			else:
+				function(failed)
+
+	shutil.rmtree(path, onexc=retry)
 
 
 def _runChild(
@@ -796,13 +810,20 @@ def _runChild(
 	tmpDir: Path,
 	timeout: float,
 	capture: bool,
-) -> tuple[int | None, str, float]:
+) -> tuple[int | None, str, float, list[str]]:
 	"""Runs a child in a process group of its own, and ends whatever is left of that group after
-	it; returns its status, None when the timeout ended it, its output and the seconds it ran."""
+	it; returns its status, None when the timeout ended it, its output, the seconds it ran, and what
+	under source/ or tests/unit it or any process it started changed.
+
+	The rig's checkout is read-only, so a write there by a process the child starts would only fail,
+	unseen by the Guard, which is in the child alone. The child runs under harness.isolatedCommand,
+	where such a write lands in an overlay and is found.
+	"""
 	tmpDir.mkdir()
+	overlay = tmpDir.with_name(f"{tmpDir.name}-overlay")
 	started = time.monotonic()
 	process = subprocess.Popen(
-		command,
+		harness.isolatedCommand(overlay, command),
 		env={**os.environ, "TMPDIR": str(tmpDir)},
 		process_group=0,
 		stdout=subprocess.PIPE if capture else None,
@@ -819,7 +840,7 @@ def _runChild(
 	finally:
 		with contextlib.suppress(ProcessLookupError):
 			os.killpg(process.pid, signal.SIGKILL)
-	return status, output or "", time.monotonic() - started
+	return status, output or "", time.monotonic() - started, harness.overlayWrites(overlay)
 
 
 def _childArguments(args: argparse.Namespace, record: Path) -> list[str]:
@@ -875,12 +896,15 @@ def _runImportCheck(
 	every import it made that was not of a package failed as stated, and how each import failed."""
 	record = workDir / f"check-{index}.json"
 	command = [*_childArguments(args, record), "--check-import", check.module]
-	status, output, seconds = _runChild(command, workDir / f"check-{index}", args.timeout + 120, capture=True)
+	status, output, seconds, written = _runChild(
+		command, workDir / f"check-{index}", args.timeout + 120, capture=True
+	)
+	changed = [f"rununittests: the import check for {check.owner} changed {path}" for path in written]
 	if not record.exists():
 		problem = f"the import check for {check.owner} {_ending(status, seconds, args.timeout)}"
-		return [f"rununittests: {problem}; its output follows\n{output}"], []
+		return [*changed, f"rununittests: {problem}; its output follows\n{output}"], []
 	result = json.loads(record.read_text(encoding="utf-8"))
-	problems = [
+	problems = changed + [
 		f"rununittests: refused {refused}, in the import check for {check.owner}"
 		for refused in result["refused"]
 	]
@@ -939,16 +963,20 @@ def _supervise(args: argparse.Namespace, entries: EntryList, workDir: Path) -> t
 			pool.submit(_runImportCheck, args, workDir, index, check) for index, check in enumerate(checks)
 		]
 		# The child's own watchdog fires at the timeout, and its fallback a minute later.
-		status, _output, seconds = _runChild(command, workDir / "tmp", args.timeout + 120, capture=False)
+		status, _output, seconds, written = _runChild(
+			command, workDir / "tmp", args.timeout + 120, capture=False
+		)
 		checkResults = [future.result() for future in pending]
 	summary: list[str] = []
+	for path in written:
+		print(f"rununittests: the run changed {path}", file=sys.stderr)
 	if not record.exists():
 		print(f"rununittests: the test process {_ending(status, seconds, args.timeout)}", file=sys.stderr)
 		status = 1
 	else:
 		result = json.loads(record.read_text(encoding="utf-8"))
 		summary = result["summary"]
-		status = 1 if status or result["status"] else 0
+		status = 1 if status or result["status"] or written else 0
 	for problems, notes in checkResults:
 		for problem in problems:
 			print(problem, file=sys.stderr)
