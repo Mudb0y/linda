@@ -157,14 +157,8 @@ def usesImperialMeasurements() -> bool:
 class _Icu:
 	"""The ICU functions that name languages and regions, from the library winBindings.icu loaded."""
 
-	def __init__(self, library: ctypes.CDLL, version: str) -> None:
-		def bind(name: str, restype: type, *argtypes: type) -> Callable[..., int]:
-			# ICU suffixes every exported name with its major version.
-			function = library[f"{name}_{version}"]
-			function.restype = restype
-			function.argtypes = argtypes
-			return function
-
+	def __init__(self, bind: Callable[..., Callable[..., int]]) -> None:
+		""":param bind: winBindings.icu.bindFunction, which knows the suffix ICU puts on every name."""
 		status = ctypes.POINTER(ctypes.c_int)
 		self.openForContext = bind(
 			"uldn_openForContext",
@@ -202,7 +196,7 @@ def _icu() -> _Icu | None:
 		)
 		return None
 	try:
-		return _Icu(icu.dll, os.environ[icu.VERSION_MAJOR_VARIABLE])
+		return _Icu(icu.bindFunction)
 	except AttributeError:
 		log.warning("ICU cannot name languages, so languages are not named", exc_info=True)
 		return None
