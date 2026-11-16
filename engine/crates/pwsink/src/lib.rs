@@ -88,7 +88,9 @@ pub unsafe extern "C" fn pwsink_open(
         stream.reuse(now);
         return Arc::into_raw(stream);
     }
-    let stream = Arc::new(Stream::new(format, target, now, engine.connected()));
+    // A stream opened before the library has first connected waits for its pw_stream as one opened
+    // while connected does, rather than keeping time as if there were no daemon.
+    let stream = Arc::new(Stream::new(format, target, now, !engine.absent()));
     engine.register(stream.clone());
     Arc::into_raw(stream)
 }

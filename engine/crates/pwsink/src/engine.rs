@@ -86,6 +86,9 @@ pub(crate) struct Engine {
     shared: Mutex<Shared>,
     keep_awake_until: AtomicU64,
     connected: AtomicBool,
+    /// Set once an attempt to connect has failed or the connection was lost, until the next
+    /// connects: until then a new stream expects a pw_stream and waits for one.
+    absent: AtomicBool,
     attached_count: AtomicUsize,
     pool_size: AtomicUsize,
     pool_max: AtomicUsize,
@@ -141,6 +144,7 @@ impl Engine {
                 }),
                 keep_awake_until: AtomicU64::new(0),
                 connected: AtomicBool::new(false),
+                absent: AtomicBool::new(false),
                 attached_count: AtomicUsize::new(0),
                 pool_size: AtomicUsize::new(0),
                 pool_max: AtomicUsize::new(POOL_MAX),
@@ -271,6 +275,11 @@ impl Engine {
         self.connected.load(Relaxed)
     }
 
+    /// Whether the daemon is known to be away, as opposed to not yet connected to.
+    pub(crate) fn absent(&self) -> bool {
+        self.absent.load(Relaxed)
+    }
+
     pub(crate) fn attached_count(&self) -> usize {
         self.attached_count.load(Relaxed)
     }
@@ -325,6 +334,7 @@ impl Engine {
             }
             if lp.context.is_null() {
                 lp.next_connect_ns = now + RECONNECT_NS;
+                self.absent.store(true, Relaxed);
             } else {
                 unsafe { self.connect(lp, now) };
             }
@@ -379,6 +389,7 @@ impl Engine {
             let core = pws::pw_context_connect(lp.context, ptr::null_mut(), 0);
             if core.is_null() {
                 lp.next_connect_ns = now + RECONNECT_NS;
+                self.absent.store(true, Relaxed);
                 return;
             }
             lp.core_events = std::mem::zeroed();
@@ -404,6 +415,7 @@ impl Engine {
             lp.core_lost = false;
         }
         self.connected.store(true, Relaxed);
+        self.absent.store(false, Relaxed);
     }
 
     /// Drops the connection and every pw_stream on it. Their rings and positions stay, so the
@@ -428,6 +440,7 @@ impl Engine {
         }
         lp.core_lost = false;
         self.connected.store(false, Relaxed);
+        self.absent.store(true, Relaxed);
     }
 
     unsafe fn attach(&self, lp: &mut LoopState, s: &Arc<Stream>, now: u64) {
