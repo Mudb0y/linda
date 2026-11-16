@@ -4,36 +4,6 @@
 
 .gitignore
   ignores for the dev shell output and the Rust build directory
-.gitmodules
-  upstream's submodules are Windows build dependencies or libraries Nix supplies
-.vscode
-  submodule link, see .gitmodules
-include/cppjieba
-  submodule link, see .gitmodules
-include/detours
-  submodule link, see .gitmodules
-include/espeak
-  submodule link, see .gitmodules
-include/ia2
-  submodule link, see .gitmodules
-include/javaAccessBridge32
-  submodule link, see .gitmodules
-include/liblouis
-  submodule link, see .gitmodules
-include/nsis
-  submodule link, see .gitmodules
-include/nvda-cldr
-  submodule link, see .gitmodules
-include/nvda-mathcat
-  submodule link, see .gitmodules
-include/sonic
-  submodule link, see .gitmodules
-include/w3c-aria-practices
-  submodule link, see .gitmodules
-include/wil
-  submodule link, see .gitmodules
-miscDeps
-  submodule link, see .gitmodules
 source/NVDAObjects/window/winword.py
   import safety: RegisterWindowMessage at module level runs only on Windows;
   documentNavigation.paragraphHelper, which kept code uses, imports winword.
