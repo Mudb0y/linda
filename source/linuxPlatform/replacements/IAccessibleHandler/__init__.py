@@ -13,19 +13,26 @@ from linuxPlatform import missingAttribute as _missingAttribute
 
 from .types import RelationType  # noqa: F401
 
+# core.main and api.processPendingEvents call these at the points where Windows' accessibility API
+# handler starts, pumps and stops; on Linux that API is AT-SPI.
+
 
 def initialize() -> None:
-	pass
+	from linuxPlatform.atspi import handler
+
+	handler.initialize()
 
 
 def terminate() -> None:
-	pass
+	from linuxPlatform.atspi import handler
+
+	handler.terminate()
 
 
 def pumpAll() -> None:
-	# The core pump calls this every cycle to deliver queued MSAA win events. Linux has none, so
-	# there is nothing to deliver; AT-SPI events get their own place in the pump.
-	pass
+	from linuxPlatform.atspi import handler
+
+	handler.pumpAll()
 
 
 def __getattr__(name: str) -> _NoReturn:

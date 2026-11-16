@@ -15,6 +15,16 @@
 
 .gitignore
   repository: ignores for the dev shell output and the Rust build directory
+source/NVDAObjects/AtSpi/__init__.py
+  Linux runtime: added. NVDAObjects for AT-SPI accessibles, the counterpart
+  of NVDAObjects.IAccessible and NVDAObjects.UIA, which only Linux imports
+source/NVDAObjects/AtSpi/textInfo.py
+  Linux runtime: added. The TextInfo of AT-SPI accessibles with the Text
+  interface, which only Linux imports
+source/NVDAObjects/__init__.py
+  Linux runtime: getPossibleAPIClasses yields only NVDAObjects.AtSpi.AtSpi
+  on Linux, where there are no window handles and every object of another
+  process is an AT-SPI accessible
 source/NVDAObjects/window/winword.py
   import safety: RegisterWindowMessage at module level runs only on Windows;
   documentNavigation.paragraphHelper, which kept code uses, imports winword.
@@ -66,7 +76,13 @@ source/appModuleHandler.py
   Linux program named like a Windows one (code, audacity) gets the base app
   module; an add-on app module that fails to import while a name is looked
   up is reported by fetchAppModule instead; terminate returns before the RPC
-  teardown, which Linux has none of
+  teardown, which Linux has none of. The status bar is found by its AT-SPI
+  role under the foreground window, where upstream raises NotImplementedError
+  and NVDA then looks at whatever lies at the window's bottom corner
+source/appModules/nvda.py
+  Linux runtime: chooseNVDAObjectOverlayClasses adds no overlay on Linux,
+  where NVDA's own dialogs are AT-SPI objects with no window class or window
+  handle to recognise them by
 source/argsParsing.py
   Linux runtime: help goes to standard output and a command-line error to standard
   error with exit status 2, as argparse does, instead of a Windows message
@@ -152,7 +168,9 @@ source/gui/__init__.py
   foreground, and on GTK raising the hidden main frame would show it; the
   window manager returns focus after a popup by itself. Every dialog NVDA
   opens goes through these, the welcome dialog at a first start and the
-  exit dialog among them
+  exit dialog among them. shouldConfigProfileTriggersBeSuspended does not
+  ask for the thread's menu mode on Linux, which wxGTK has no flag for, so
+  an open NVDA menu does not suspend triggers there
   every platform: the help menu's web pages, the donation page and the
   documentation open through startfile from linuxPlatform.windowsOnly,
   which is os.startfile on Windows and on Linux opens them with the

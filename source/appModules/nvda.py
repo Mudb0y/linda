@@ -6,6 +6,7 @@
 
 
 import typing  # noqa: I001
+import sys
 
 import appModuleHandler
 import api
@@ -245,6 +246,9 @@ class AppModule(appModuleHandler.AppModule):
 		return obj.windowHandle == consoleUI.outputCtrl.GetHandle()
 
 	def chooseNVDAObjectOverlayClasses(self, obj, clsList):
+		if sys.platform != "win32":
+			# An AT-SPI object, which has no window class to tell NVDA's own dialogs apart by.
+			return
 		if obj.windowClassName == "#32770" and obj.role == controlTypes.Role.DIALOG:
 			clsList.insert(0, NvdaDialog)
 			if self.isNvdaSettingsDialog(obj):

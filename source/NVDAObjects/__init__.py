@@ -8,6 +8,7 @@
 as well as the associated TextInfo class."""
 
 import time  # noqa: I001
+import sys
 import typing
 from typing import (  # noqa: UP035
 	Dict,  # noqa: F401
@@ -280,6 +281,12 @@ class NVDAObject(
 		@returns: a generator
 		@rtype: generator
 		"""
+		if sys.platform != "win32":
+			# Linux has no window handles; every OS-level object is an AT-SPI accessible.
+			import NVDAObjects.AtSpi
+
+			yield NVDAObjects.AtSpi.AtSpi
+			return
 		import NVDAObjects.window
 
 		yield NVDAObjects.window.Window
