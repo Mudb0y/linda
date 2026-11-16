@@ -7,11 +7,13 @@ run unclean, and ChildResult.assertClean holds a run to one definition of clean 
 A test that expects one of those things opts out of that check alone, by name.
 
 The records go to a file a line at a time, so a child that kills itself or is killed still reports
-what it did up to then.
+what it did up to then. The child and the launcher run under isolatedCommand, so that a write under
+source/ or tests/unit by them or anything they start is seen however it was made.
 
 From a test: harness.runChild(tmp_path, code), or harness.startLauncher(directory, *arguments).
 As the child: harness.py child RESULT_JSON EVENTS PREPARE CODE_FILE TIMEOUT RECORD_LEVEL.
 As the launcher: harness.py launch EVENTS RECORD_LEVEL LAUNCHER [ARGUMENT...].
+Around either: harness.py isolate OVERLAY_DIRECTORY COMMAND [ARGUMENT...].
 
 Only the standard library is imported here, so that a runner with reason to work otherwise, such as
 one started with -I or one running tests in its own process, can load this file by its path and share
@@ -64,7 +66,8 @@ CLEAN_CHECKS = {
 	"threadExceptions": "no thread died of an exception",
 	"unraisable": "no finaliser or other unraisable call failed",
 	"returnCode": "the process exited with status 0",
-	"writes": "nothing tried to write under source/ or tests/unit",
+	"writes": "nothing was written under source/ or tests/unit, by the run or any process it started, "
+	"and the run's Python code did not try to",
 	"audio": "no audio library was loaded and no sound device opened",
 	"stderr": "standard error holds nothing outside ALLOWED_STANDARD_ERROR",
 }
@@ -220,6 +223,81 @@ def treeState(*tops: Path | str) -> dict[str, tuple]:
 
 def changedPaths(before: dict[str, tuple], after: dict[str, tuple]) -> list[str]:
 	return sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
+
+
+_MS_REC = 0x4000
+_MS_PRIVATE = 1 << 18
+
+
+def _overlayUppers(overlay: Path) -> list[tuple[Path, Path]]:
+	"""Each of PROTECTED with the upper directory of its overlay under overlay."""
+	return [(top, overlay / str(index) / "upper") for index, top in enumerate(PROTECTED)]
+
+
+def isolatedCommand(overlay: Path, command: list[str]) -> list[str]:
+	"""command, run in a mount namespace of its own in which each of PROTECTED is a writable overlay.
+
+	The rig's checkout is read-only, so a write there is refused, and nothing but the audit hooks of
+	a Python process would know it was tried. Under the overlay, a write by the command or by any
+	process it starts, by whatever means, lands in an upper directory under overlay, an empty
+	directory of the caller's, where overlayWrites finds it; the checkout stays as it was.
+	"""
+	return [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "isolate", str(overlay), *command]
+
+
+def overlayWrites(overlay: Path) -> list[str]:
+	"""The paths under PROTECTED that a command run by isolatedCommand changed, so far."""
+	changed = []
+	for top, upper in _overlayUppers(overlay):
+		if not upper.exists():
+			continue
+		entries = sorted(path for path in treeState(upper) if path != str(upper))
+		# A directory is in the upper tree because something in it changed, which is listed itself;
+		# it is listed alone when that was an entry made and removed again.
+		leaves = [path for path in entries if not any(other.startswith(path + os.sep) for other in entries)]
+		found = [os.path.join(top, os.path.relpath(path, upper)) for path in leaves]
+		if not found and upper.stat().st_mtime_ns != 0:
+			found = [str(top)]
+		changed += found
+	return changed
+
+
+def _isolate(overlay: str, *command: str) -> None:
+	"""Mount the overlays isolatedCommand describes, then become command."""
+	requireRig()
+	import ctypes
+
+	libc = ctypes.CDLL(None, use_errno=True)
+
+	def mount(source: bytes | None, target: bytes, fsType: bytes | None, flags: int, data: bytes | None):
+		if libc.mount(source, target, fsType, flags, data) != 0:
+			number = ctypes.get_errno()
+			raise OSError(number, f"{os.strerror(number)}: mount on {os.fsdecode(target)}")
+
+	try:
+		uid, gid = os.getuid(), os.getgid()
+		os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS)
+		for name, text in (
+			("setgroups", "deny"),
+			("uid_map", f"{uid} {uid} 1"),
+			("gid_map", f"{gid} {gid} 1"),
+		):
+			with open(f"/proc/self/{name}", "w", encoding="ascii") as f:
+				f.write(text)
+		# So that nothing mounted here shows anywhere else.
+		mount(None, b"/", None, _MS_REC | _MS_PRIVATE, None)
+		for top, upper in _overlayUppers(Path(overlay)):
+			work = upper.parent / "work"
+			upper.mkdir(parents=True)
+			work.mkdir()
+			options = f"lowerdir={top},upperdir={upper},workdir={work},userxattr"
+			mount(b"overlay", os.fsencode(top), b"overlay", 0, os.fsencode(options))
+			# Making and removing an entry leaves only the directory's time changed.
+			os.utime(upper, ns=(0, 0))
+	except OSError as e:
+		sys.exit(f"harness: cannot put an overlay over the checkout: {e}")
+	# Becoming a new program also drops the capabilities the new user namespace gave this process.
+	os.execv(command[0], command)
 
 
 def _absolutePath(path: object, dirFd: object, followsLink: bool) -> str | None:
@@ -503,7 +581,12 @@ class ChildResult:
 	events: list[dict] = field(default_factory=list)
 
 	@classmethod
-	def fromEvents(cls, events: list[dict], **fields: object) -> "ChildResult":
+	def fromEvents(cls, events: list[dict], overlay: Path | None = None, **fields: object) -> "ChildResult":
+		""":param overlay: The directory given to isolatedCommand, whose changes count as writes."""
+		if overlay is not None:
+			events = events + [
+				{"kind": "write", "event": "changed", "path": path} for path in overlayWrites(overlay)
+			]
 		result = cls(events=events, **fields)
 		for event in events:
 			kind = event["kind"]
@@ -537,8 +620,10 @@ class ChildResult:
 				parts.append(
 					f"{event['level']} on {event['logger']}: {event['message']}\n{event['exception'] or ''}"
 				)
-			elif kind == "write":
+			elif kind == "write" and "stack" in event:
 				parts.append(f"{event['event']} {event['path']}, from:\n{''.join(event['stack'])}")
+			elif kind == "write":
+				parts.append(f"{event['event']} {event['path']}, by this process or one it started")
 		return "\n".join(parts)
 
 	def problems(self, ignoring: Collection[str] = ()) -> list[str]:
@@ -622,20 +707,24 @@ def runChild(
 	codePath.write_text(textwrap.dedent(code), encoding="utf-8")
 	resultPath = work / "result.json"
 	eventsPath = work / "events.jsonl"
+	overlay = work / "overlay"
 	before = treeState()
-	command = [
-		sys.executable,
-		"-I",
-		"-B",
-		str(Path(__file__).resolve()),
-		"child",
-		str(resultPath),
-		str(eventsPath),
-		prepare,
-		str(codePath),
-		str(timeout),
-		str(recordLevel),
-	]
+	command = isolatedCommand(
+		overlay,
+		[
+			sys.executable,
+			"-I",
+			"-B",
+			str(Path(__file__).resolve()),
+			"child",
+			str(resultPath),
+			str(eventsPath),
+			prepare,
+			str(codePath),
+			str(timeout),
+			str(recordLevel),
+		],
+	)
 	with subprocess.Popen(
 		command,
 		stdout=subprocess.PIPE,
@@ -659,6 +748,7 @@ def runChild(
 		reported["error"] = f"the child ended without reporting a result: {describeExit(process.returncode)}"
 	return ChildResult.fromEvents(
 		readEvents(eventsPath),
+		overlay,
 		returnCode=process.returncode,
 		stdout=stdout,
 		stderr=stderr,
@@ -760,12 +850,16 @@ def nvdaLogErrorRecords(text: str) -> list[str]:
 class Launch:
 	"""One run of the launcher, as a process of its own, and what it recorded and spoke."""
 
-	def __init__(self, directory: Path, process: subprocess.Popen, started: float) -> None:
+	def __init__(
+		self, directory: Path, process: subprocess.Popen, started: float, overlay: Path | None = None
+	) -> None:
 		self.directory = directory
 		self.process = process
 		#: time.monotonic() as the process was started; the transcript synth stamps its records with
 		#: the same clock, which is system wide.
 		self.started = started
+		#: The directory given to isolatedCommand for the launch, if it was run that way.
+		self.overlay = overlay
 
 	@property
 	def eventsPath(self) -> Path:
@@ -828,6 +922,7 @@ class Launch:
 		returnCode = self.process.poll()
 		return ChildResult.fromEvents(
 			events,
+			self.overlay,
 			returnCode=returnCode,
 			error=None if any(e["kind"] == "start" for e in events) else "the launch recorded nothing",
 			stdout=self.text("stdout.txt"),
@@ -880,21 +975,25 @@ def startLauncher(
 			**(env or {}),
 		},
 	)
-	command = [
-		sys.executable,
-		"-I",
-		"-B",
-		str(Path(__file__).resolve()),
-		"launch",
-		str(directory / "events.jsonl"),
-		str(recordLevel),
-		str(LAUNCHER),
-		*arguments,
-	]
+	overlay = Path(tempfile.mkdtemp(prefix="overlay-", dir=directory))
+	command = isolatedCommand(
+		overlay,
+		[
+			sys.executable,
+			"-I",
+			"-B",
+			str(Path(__file__).resolve()),
+			"launch",
+			str(directory / "events.jsonl"),
+			str(recordLevel),
+			str(LAUNCHER),
+			*arguments,
+		],
+	)
 	with open(directory / "stdout.txt", "w") as stdout, open(directory / "stderr.txt", "w") as stderr:
 		started = time.monotonic()
 		process = subprocess.Popen(command, env=environment, cwd=directory, stdout=stdout, stderr=stderr)
-	return Launch(directory, process, started)
+	return Launch(directory, process, started, overlay)
 
 
 def stopRunningCopy() -> None:
@@ -939,5 +1038,7 @@ if __name__ == "__main__":
 		_child(*sys.argv[2:8])
 	elif sys.argv[1] == "launch":
 		_launch(*sys.argv[2:])
+	elif sys.argv[1] == "isolate":
+		_isolate(*sys.argv[2:])
 	else:
 		sys.exit(f"harness: unknown mode {sys.argv[1]!r}")

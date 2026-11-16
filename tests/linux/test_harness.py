@@ -253,6 +253,40 @@ def test_writeUnderSourceIsReportedEvenWhenSwallowed(tmp_path: Path, write: str)
 	assert problemsBesides(done) == ["writes"]
 
 
+@pytest.mark.parametrize(
+	("write", "changed"),
+	[
+		# The open event does not carry the directory descriptor, so the audit hook cannot place it.
+		(
+			"os.open('harnessTest.tmp', os.O_WRONLY | os.O_CREAT, dir_fd=os.open(SOURCE, os.O_RDONLY))",
+			"harnessTest.tmp",
+		),
+		("subprocess.run(['touch', os.path.join(SOURCE, 'harnessTest.tmp')], check=True)", "harnessTest.tmp"),
+		(
+			"subprocess.run(['sh', '-c', f'touch {SOURCE}/linuxPlatform/x.tmp; rm {SOURCE}/linuxPlatform/x.tmp'], check=True)",
+			"linuxPlatform",
+		),
+		("subprocess.run(['sh', '-c', f'touch {SOURCE}/x.tmp; rm {SOURCE}/x.tmp'], check=True)", ""),
+	],
+)
+def test_writeUnderSourceByAnyMeansIsReported(tmp_path: Path, write: str, changed: str):
+	done = harness.runChild(
+		tmp_path,
+		f"""
+		import os
+		import subprocess
+
+		SOURCE = {str(harness.SOURCE)!r}
+		{write}
+		""",
+		prepare="none",
+	)
+	assert done.writes == [f"changed {os.path.join(harness.SOURCE, changed).rstrip(os.sep)}"]
+	assert problemsBesides(done) == ["writes"]
+	# The write went to the overlay and the checkout is as it was.
+	assert not (harness.SOURCE / "harnessTest.tmp").exists()
+
+
 def test_whatIsNotAWriteUnderSourceIsNotReported(tmp_path: Path):
 	done = harness.runChild(
 		tmp_path,
@@ -620,6 +654,7 @@ UNCLEAN_PLUGIN = """
 import ctypes
 import logging
 import os
+import subprocess
 
 import core
 import globalPluginHandler
@@ -638,6 +673,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			open(os.path.join(globalVars.appDir, "harnessTest.tmp"), "w")
 		except OSError:
 			pass
+		subprocess.run(["touch", os.path.join(globalVars.appDir, "harnessGrandchild.tmp")], check=False)
 		try:
 			ctypes.windll.user32.GetForegroundWindow()
 		except NotImplementedError:
@@ -665,7 +701,10 @@ def test_launchIsHeldToTheSameChecks(launches, tmp_path: Path):
 	assert nvda.waitForExit(timeout=60) == 0, nvda.describe()
 	done = nvda.result()
 	assert done.logErrors == ["ERROR: logged by the test plugin"]
-	assert done.writes == [f"open {harness.SOURCE / 'harnessTest.tmp'}"]
+	assert done.writes == [
+		f"open {harness.SOURCE / 'harnessTest.tmp'}",
+		f"changed {harness.SOURCE / 'harnessGrandchild.tmp'}",
+	]
 	assert done.noLinuxImplementation == ["user32.GetForegroundWindow"]
 	assert problemsBesides(done) == ["noLinuxImplementation", "logErrors", "writes"]
 	with pytest.raises(AssertionError, match="nvda.log holds 1 records at ERROR"):
