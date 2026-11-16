@@ -337,7 +337,7 @@ def _standInSurface() -> dict:
 				surface[label] = {"kind": "function", **_outcome(lambda obj=obj: _callWithNones(obj))}
 				continue
 			made: list[object] = []
-			outcome = _outcome(lambda obj=obj: made.append(_callWithNones(obj)))
+			outcome = _outcome(lambda obj=obj, made=made: made.append(_callWithNones(obj)))
 			surface[label] = {"kind": "class", "category": category(obj), **outcome}
 			for memberName, member in vars(obj).items():
 				if memberName.startswith("_"):
@@ -347,7 +347,7 @@ def _standInSurface() -> dict:
 					if made:
 						surface[memberLabel] = {
 							"kind": "property",
-							**_outcome(lambda name=memberName: getattr(made[0], name)),
+							**_outcome(lambda name=memberName, made=made: getattr(made[0], name)),
 						}
 				elif isinstance(member, (staticmethod, classmethod)):
 					bound = getattr(obj, memberName)

@@ -357,7 +357,9 @@ def test_standInSurfaceNeverAnswers(tmp_path: Path):
 			ok = o["type"] == "int"
 		elif name in COM_DECLARATION_BUILDERS:
 			ok = o["raised"] is None and o["returned"].startswith("(")
-		elif o["kind"] == "class" and (o["category"] in DECLARING_CATEGORIES or name in CONSTRUCTIBLE_CLASSES):
+		elif o["kind"] == "class" and (
+			o["category"] in DECLARING_CATEGORIES or name in CONSTRUCTIBLE_CLASSES
+		):
 			ok = True
 		else:
 			ok = raisedNoLinux
