@@ -3,11 +3,19 @@
 nix develop . -c tests/linux/rig python3 -m pytest -p no:cacheprovider tests/linux/test_logging.py
 """
 
+import json
+import os
 import re
 import stat
+import subprocess
+import sys
+import wave
 from pathlib import Path
 
 import harness
+import pytest
+
+HERE = Path(__file__).resolve().parent
 
 
 def startLog(logFileName: Path | None, debugLogging: bool = True) -> str:
@@ -488,6 +496,181 @@ def test_stoppingErrorSoundRequestsDropsOneNotYetMadeAndNeverWaitsLong(tmp_path:
 		"stuck": {"released": False, "thread": True},
 		"calls": ["stuck"],
 	}
+
+
+#: A global plugin that fails the task scheduler's terminate, the last step of core.main before the
+#: exit sound, and writes to LATE_ERROR_PROBE_RESULT what became of the error sound.
+LATE_ERROR_PROBE = """
+import atexit
+import json
+import os
+import sys
+import threading
+import time
+
+import core
+import globalPluginHandler
+import nvwave
+from linuxPlatform import logSupport
+
+#: The longest the probe waits for anything; only an NVDA that is stuck reaches it.
+WAIT = 60
+_plays = []
+_failedAtExit = threading.Event()
+_release = threading.Event()
+#: What let the held error sound go on: the exit sound starting, or the requests being stopped.
+_releasedBy = []
+
+
+def _releaseHeldSound(why):
+	_releasedBy.append(why)
+	_release.set()
+
+
+_playWaveFile = nvwave.playWaveFile
+
+
+def playWaveFile(fileName, *args, **kwargs):
+	name = os.path.basename(fileName)
+	if name == "exit.wav":
+		_releaseHeldSound("exit sound")
+	elif name == "error.wav" and _failedAtExit.is_set():
+		# The error sound's thread may be slow to get to the player. Holding it until shutdown has
+		# gone on to the exit sound makes it as slow as it can be every time, rather than in the few
+		# runs where the race goes that way.
+		_release.wait(WAIT)
+		if _releasedBy[0] == "exit sound":
+			deadline = time.monotonic() + WAIT
+			while nvwave.fileWavePlayer is None and time.monotonic() < deadline:
+				time.sleep(0.001)
+	_plays.append([name, threading.current_thread().name])
+	return _playWaveFile(fileName, *args, **kwargs)
+
+
+nvwave.playWaveFile = playWaveFile
+_closeRequests = logSupport._errorSound.close
+
+
+def closeRequests(timeout):
+	_releaseHeldSound("requests stopped")
+	_closeRequests(timeout)
+
+
+logSupport._errorSound.close = closeRequests
+
+
+@atexit.register
+def _report():
+	result = {
+		"plays": _plays,
+		"releasedBy": _releasedBy,
+		"errorSoundThreadAlive": any(
+			t.name == "logHandler.errorSound" and t.is_alive() for t in threading.enumerate()
+		),
+	}
+	with open(os.environ["LATE_ERROR_PROBE_RESULT"], "w", encoding="utf-8") as f:
+		json.dump(result, f)
+
+
+class GlobalPlugin(globalPluginHandler.GlobalPlugin):
+	def __init__(self):
+		super().__init__()
+		# postNvdaStartup holds its handlers weakly; globalPluginHandler keeps this plugin alive.
+		core.postNvdaStartup.register(self._onNvdaStarted)
+
+	def _onNvdaStarted(self):
+		schedule = sys.modules["utils.schedule"]
+		terminate = schedule.terminate
+
+		def failingTerminate():
+			terminate()
+			_failedAtExit.set()
+			raise RuntimeError("the task scheduler fails to terminate, as the test asks")
+
+		schedule.terminate = failingTerminate
+		core.triggerNVDAExit()
+"""
+
+
+class LateErrorSoundHeard(AssertionError):
+	"""The sound for an error logged late in shutdown cut off the exit sound, or its thread outlived it."""
+
+
+@pytest.mark.xfail(
+	"stopErrorSoundRequests(" not in (harness.SOURCE / "core.py").read_text(encoding="utf-8"),
+	reason="core.main plays the exit sound without first stopping the error sound's requests",
+	raises=LateErrorSoundHeard,
+	strict=True,
+)
+def test_lateErrorLeavesTheExitSoundWhole(tmp_path: Path):
+	"""An error logged in the last step of shutdown cuts off neither the exit sound nor outlives it.
+
+	nvwave plays one file at a time, and the error sound is asked for from a thread of its own, so
+	unless shutdown stops those requests first, the sound for a late error can start in the middle
+	of the exit sound and stop it.
+	"""
+	hooks = tmp_path / "hooks"
+	(hooks / "globalPlugins").mkdir(parents=True)
+	(hooks / "synthDrivers").symlink_to(HERE / "synthDrivers")
+	(hooks / "globalPlugins" / "lateErrorProbe.py").write_text(LATE_ERROR_PROBE, encoding="utf-8")
+	configDir = tmp_path / "config"
+	configDir.mkdir()
+	config = (HERE / "fixtures" / "bootConfig" / "nvda.ini").read_text(encoding="utf-8")
+	for setting, value in (("playStartAndExitSounds", "True"), ("playErrorSound", "1")):
+		config, replaced = re.subn(rf"^(\t{setting} = ).*$", rf"\g<1>{value}", config, flags=re.MULTILINE)
+		assert replaced == 1, setting
+	(configDir / "nvda.ini").write_text(config, encoding="utf-8")
+	capture = tmp_path / "capture"
+	capture.mkdir()
+	resultPath = tmp_path / "result.json"
+	logPath = tmp_path / "nvda.log"
+	env = {
+		**os.environ,
+		"BASEDREADER_TEST_HOOKS_DIR": str(hooks),
+		"BASEDREADER_AUDIO_CAPTURE_DIR": str(capture),
+		"TRANSCRIPT_SYNTH_FILE": str(tmp_path / "transcript.jsonl"),
+		"LATE_ERROR_PROBE_RESULT": str(resultPath),
+	}
+	env.pop("BASEDREADER_BOOT_PROBE", None)
+	before = harness.treeState()
+	done = subprocess.run(
+		[
+			sys.executable,
+			"-I",
+			"-B",
+			str(harness.SOURCE / "basedreader.py"),
+			*("-c", str(configDir), "-f", str(logPath), "--debug-logging"),
+		],
+		env=env,
+		cwd=tmp_path,
+		capture_output=True,
+		text=True,
+		timeout=600,
+		check=False,
+	)
+	after = harness.treeState()
+	assert before == after, "NVDA changed the repository"
+	log = logPath.read_text(encoding="utf-8") if logPath.exists() else ""
+	assert done.returncode == 0, f"exit status {done.returncode}\n{done.stderr[-3000:]}\n{log[-6000:]}"
+	errors = re.findall(r"^(ERROR|CRITICAL) - (\S+) .*\n(.*)$", log, re.MULTILINE)
+	assert errors == [("ERROR", "core._terminate", "Error terminating task scheduler")], log[-6000:]
+	result = json.loads(resultPath.read_text(encoding="utf-8"))
+	# The late error did ask for the sound, so the test exercised what it is about.
+	assert ["error.wav", "logHandler.errorSound"] in result["plays"], result
+	with wave.open(str(harness.SOURCE / "waves" / "exit.wav"), "rb") as w:
+		exitSound = w.readframes(w.getnframes())
+	heard = {}
+	for path in sorted(capture.iterdir()):
+		with wave.open(str(path), "rb") as w:
+			heard[path.name] = w.readframes(w.getnframes())
+	if not any(frames == exitSound for frames in heard.values()):
+		lengths = {name: len(frames) for name, frames in heard.items()}
+		raise LateErrorSoundHeard(
+			f"no whole exit sound of {len(exitSound)} bytes among {lengths}; "
+			f"the held error sound was let go by {result['releasedBy']}",
+		)
+	if result["errorSoundThreadAlive"]:
+		raise LateErrorSoundHeard("the error sound's thread was still running at exit")
 
 
 def test_noSoundThreadWhenSoundIsOff(tmp_path: Path):
