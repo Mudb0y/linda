@@ -21,7 +21,7 @@ from .nullSink import NullSink, NullStream
 
 
 class CaptureStream(NullStream):
-	def __init__(self, sink: "CaptureSink", streamNumber: int, fmt: StreamFormat):
+	def __init__(self, sink: "CaptureSink", streamNumber: int, fmt: StreamFormat) -> None:
 		super().__init__(fmt)
 		self._sink = sink
 		self._streamNumber = streamNumber
@@ -86,7 +86,7 @@ class CaptureStream(NullStream):
 
 
 class CaptureSink(NullSink):
-	def __init__(self, directory: str):
+	def __init__(self, directory: str) -> None:
 		if not os.path.isdir(directory):
 			raise NotADirectoryError(errno.ENOTDIR, "the audio capture directory does not exist", directory)
 		self.directory = directory

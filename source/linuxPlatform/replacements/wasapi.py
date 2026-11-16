@@ -16,11 +16,13 @@ Failures are raised as the WindowsError the HRESULT would have become under ctyp
 reads winerror.
 """
 
+import contextlib
 import ctypes
 import errno
+import functools
 import itertools
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from enum import Enum, auto
 from typing import Any
 
@@ -43,7 +45,7 @@ _MIN_WAIT = 0.001
 class _PlayState(Enum):
 	stopped = auto()
 	playing = auto()
-	# stop() was called; the thread that next feeds, syncs or idles finishes the job.
+	# stop() was called; the thread that next feeds or idles finishes the job.
 	stopping = auto()
 
 
@@ -52,9 +54,26 @@ def _value(arg: Any) -> Any:
 	return arg.value if isinstance(arg, ctypes._SimpleCData) else arg
 
 
-def _deviceError(e: OSError) -> WindowsError:
-	winerror = _E_NOTFOUND if isinstance(e, NoDevice) else _E_FAIL
-	return WindowsError(e.errno or errno.EIO, e.strerror or str(e), None, winerror)
+@contextlib.contextmanager
+def _asWindowsErrors() -> Iterator[None]:
+	"""Raise a sink's OSError as the WindowsError nvwave expects, which carries winerror."""
+	try:
+		yield
+	except WindowsError:
+		raise
+	except OSError as e:
+		winerror = _E_NOTFOUND if isinstance(e, NoDevice) else _E_FAIL
+		raise WindowsError(e.errno or errno.EIO, e.strerror or str(e), None, winerror) from e
+
+
+def _entryPoint[**P, R](func: Callable[P, R]) -> Callable[P, R]:
+	# The boundary where wasapi.cpp returns an HRESULT, which ctypes raises as an OSError with winerror.
+	@functools.wraps(func)
+	def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+		with _asWindowsErrors():
+			return func(*args, **kwargs)
+
+	return wrapper
 
 
 class _Player:
@@ -64,7 +83,7 @@ class _Player:
 		deviceId: str,
 		fmt: StreamFormat,
 		callback: Callable[[int, int], None],
-	):
+	) -> None:
 		self.handle = handle
 		self.deviceId = deviceId
 		self.format = fmt
@@ -87,32 +106,41 @@ class _Player:
 			self._wakePending = True
 			self._wakeCondition.notify_all()
 
-	def _open(self, force: bool = False) -> None:
-		if self._stream is not None and not force:
+	def _open(self) -> None:
+		if self._stream is not None:
 			return
 		if not self.format.isSupported():
 			raise WindowsError(
 				errno.EINVAL, f"unsupported format {self.format}", None, _AUDCLNT_E_UNSUPPORTED_FORMAT
 			)
-		if self._stream is not None:
-			self._stream.close()
-			self._stream = None
+		stream = audioOutput.getSink().openStream(self.deviceId, self.format, self._wake)
 		try:
-			stream = audioOutput.getSink().openStream(self.deviceId, self.format, self._wake)
-		except OSError as e:
-			raise _deviceError(e) from e
-		for channel, level in enumerate(self._volumes):
-			stream.setChannelVolume(channel, level)
+			for channel, level in enumerate(self._volumes):
+				stream.setChannelVolume(channel, level)
+		except OSError:
+			# The open failed, so the next feed opens a new stream; this one would never be closed.
+			with contextlib.suppress(OSError):
+				stream.close()
+			raise
 		self._stream = stream
 		self._state = _PlayState.stopped
 
 	def _reopenAfterLoss(self) -> None:
-		self._open(force=True)
-		# A callback stranded with the old stream would never be called, and a stranded end of
-		# utterance stalls speech, so they are all due now.
+		lost, self._stream = self._stream, None
+		# Stopped before reopening, so that if no stream can be opened, pause, resume and sync find
+		# nothing playing rather than a missing stream.
+		self._state = _PlayState.stopped
 		pending, self._feedEnds = self._feedEnds, []
-		self._call(feedId for feedId, _end in pending)
 		self._sentFrames = 0
+		try:
+			# The stream is gone already; failing to release it changes nothing.
+			with contextlib.suppress(OSError):
+				lost.close()
+			self._open()
+		finally:
+			# A callback stranded with the old stream would never be called, and a stranded end of
+			# utterance stalls speech, so they are all due now, even when no new stream opened.
+			self._call(feedId for feedId, _end in pending)
 
 	def _bufferedFrames(self) -> int:
 		try:
@@ -307,8 +335,10 @@ def _storeFeedId(idOut: Any, feedId: int) -> None:
 	target.value = feedId
 
 
+# No lock guards this: wasPlay_destroy runs from WavePlayer.__del__, so from wherever the collector
+# runs, including inside wasPlay_create on the same thread, and a lock taken there could be held by
+# the thread itself. Each access is a single dict operation, which the GIL makes atomic.
 _players: dict[int, _Player] = {}
-_playersLock = threading.Lock()
 # Starting at 1: nvwave keys its players by the handle, and a handle of 0 would become None in the
 # callback's c_void_p argument.
 _handles = itertools.count(1)
@@ -319,11 +349,13 @@ def _player(handle: Any) -> _Player:
 	return _players[_value(handle)]
 
 
+@_entryPoint
 def wasPlay_startup() -> None:
 	sink: Sink = audioOutput.getSink()
 	log.info(f"Audio output: {sink.description}")
 
 
+@_entryPoint
 def wasPlay_create(endpointId: str, fmt: Any, callback: Callable[[int, int], None]) -> int:
 	# Copied now, as the C++ takes the structure by value.
 	streamFormat = StreamFormat(
@@ -332,66 +364,76 @@ def wasPlay_create(endpointId: str, fmt: Any, callback: Callable[[int, int], Non
 		samplesPerSec=fmt.nSamplesPerSec,
 		bitsPerSample=fmt.wBitsPerSample,
 	)
-	with _playersLock:
-		handle = next(_handles)
-		_players[handle] = _Player(handle, _value(endpointId) or "", streamFormat, callback)
+	handle = next(_handles)
+	_players[handle] = _Player(handle, _value(endpointId) or "", streamFormat, callback)
 	return handle
 
 
+@_entryPoint
 def wasPlay_destroy(player: Any) -> None:
-	with _playersLock:
-		p = _players.pop(_value(player))
-	p.destroy()
+	_players.pop(_value(player)).destroy()
 
 
+@_entryPoint
 def wasPlay_open(player: Any) -> None:
 	_player(player).open()
 
 
+@_entryPoint
 def wasPlay_feed(player: Any, data: Any, size: Any, id: Any) -> None:
 	size = _value(size)
 	address = ctypes.cast(data, ctypes.c_void_p).value if data is not None else None
 	_player(player).feed(ctypes.string_at(address, size) if address else None, size, id)
 
 
+@_entryPoint
 def wasPlay_stop(player: Any) -> None:
 	_player(player).stop()
 
 
+@_entryPoint
 def wasPlay_sync(player: Any) -> None:
 	_player(player).sync()
 
 
+@_entryPoint
 def wasPlay_idle(player: Any) -> None:
 	_player(player).idle()
 
 
+@_entryPoint
 def wasPlay_pause(player: Any) -> None:
 	_player(player).pause()
 
 
+@_entryPoint
 def wasPlay_resume(player: Any) -> None:
 	_player(player).resume()
 
 
+@_entryPoint
 def wasPlay_setChannelVolume(player: Any, channel: Any, level: Any) -> None:
 	_player(player).setChannelVolume(_value(channel), _value(level))
 
 
+@_entryPoint
 def wasPlay_startTrimmingLeadingSilence(player: Any, start: Any) -> None:
 	_player(player).startTrimmingLeadingSilence(bool(_value(start)))
 
 
+@_entryPoint
 def wasSilence_init(endpointId: str) -> None:
 	global _silenceDeviceId
 	_silenceDeviceId = _value(endpointId) or ""
 
 
+@_entryPoint
 def wasSilence_playFor(ms: Any, volume: Any) -> None:
 	if _silenceDeviceId is not None:
 		audioOutput.getSink().keepAwakeFor(_silenceDeviceId, _value(ms), _value(volume))
 
 
+@_entryPoint
 def wasSilence_terminate() -> None:
 	global _silenceDeviceId
 	_silenceDeviceId = None

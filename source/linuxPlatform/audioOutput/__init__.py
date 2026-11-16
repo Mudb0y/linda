@@ -74,9 +74,19 @@ class SinkStream(ABC):
 	"""One player's stream on a sink.
 
 	The player calls these with its own lock held, so a stream is never called from two threads at
-	once. A sink that consumes on a thread of its own synchronises with that thread itself. Whenever
-	it has made room or moved on, it calls the wake function it was given, from that thread and never
-	from inside one of these calls, which would deadlock on the player's lock.
+	once. A sink that consumes on a thread of its own synchronises with that thread itself.
+
+	The player times its waits from the format and the frame counts, which is all a sink whose
+	device keeps real time needs. A sink whose device may run ahead of that estimate calls the wake
+	function it was given whenever it has made room or moved on, so that a waiting feed or sync
+	looks again at once. wake takes the player's lock and runs Python, so it must be called from an
+	ordinary thread that can take the GIL and holds none of the locks these methods take: never
+	from inside one of these calls, which would deadlock on the player's lock, and never from a
+	real-time audio thread, which must not wait on Python. A real-time callback hands the event to
+	a helper thread instead, through an eventfd or a pipe. wake is harmless after close.
+
+	Any method may raise OSError when the sink fails; the player reports it to nvwave as a failed
+	HRESULT, E_FAIL for most errors and HRESULT_FROM_WIN32(ERROR_NOT_FOUND) for NoDevice.
 	"""
 
 	#: How many frames the stream holds before write would overrun it.
@@ -91,13 +101,18 @@ class SinkStream(ABC):
 
 	@abstractmethod
 	def bufferedFrames(self) -> int:
-		"""Frames written but not yet taken by the device. May raise StreamLost."""
+		"""Frames written but not yet taken by the device.
+
+		May raise StreamLost, after which the player closes this stream and opens another, or another
+		OSError.
+		"""
 
 	@abstractmethod
 	def playedFrames(self) -> int:
 		"""Frames the listener has heard since the stream was opened or last reset.
 
-		Never more than the frames written. May raise StreamLost.
+		Never more than the frames written. May raise StreamLost, after which the player takes every
+		frame written as played, or another OSError.
 		"""
 
 	@abstractmethod
@@ -122,7 +137,10 @@ class SinkStream(ABC):
 
 	@abstractmethod
 	def close(self) -> None:
-		"""Stop and release the stream. Nothing else is called on it afterwards."""
+		"""Stop and release the stream. Nothing else is called on it afterwards.
+
+		An OSError from closing a stream that has raised StreamLost is ignored.
+		"""
 
 
 class Sink(ABC):

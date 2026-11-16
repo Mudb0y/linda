@@ -12,7 +12,7 @@ from . import BUFFER_MS, Sink, SinkStream, StreamFormat
 
 
 class NullStream(SinkStream):
-	def __init__(self, fmt: StreamFormat):
+	def __init__(self, fmt: StreamFormat) -> None:
 		self.format = fmt
 		self.bufferFrames = fmt.samplesPerSec * BUFFER_MS // 1000
 		self.volumes = [1.0] * fmt.channels
@@ -31,8 +31,21 @@ class NullStream(SinkStream):
 		return min(self._written, self._takenAtMark + int(elapsed * self.format.samplesPerSec))
 
 	def _mark(self) -> None:
-		self._takenAtMark = self._taken()
-		self._markTime = time.monotonic()
+		now = time.monotonic()
+		if not self._running:
+			self._markTime = now
+			return
+		rate = self.format.samplesPerSec
+		elapsedFrames = int((now - self._markTime) * rate)
+		if self._takenAtMark + elapsedFrames >= self._written:
+			# Ran dry: the device has been waiting since then, so it carries on from now.
+			self._takenAtMark = self._written
+			self._markTime = now
+		else:
+			self._takenAtMark += elapsedFrames
+			# Moved on by whole frames only, so that the part of a frame already under way is not
+			# dropped at every write, which slows the clock in proportion to how often it is fed.
+			self._markTime += elapsedFrames / rate
 
 	def write(self, data: bytes) -> None:
 		# Marking first means that after an underrun the new frames play from now, not from when
