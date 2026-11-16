@@ -18,7 +18,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 LEDGER = ROOT / "tools" / "upstream-edits.txt"
-OURS = ("source/linuxPlatform", "tests/linux")
+OURS = ("source/linuxPlatform", "source/basedreader.py", "tests/linux")
 RUFF = shutil.which("ruff")
 
 pytestmark = pytest.mark.skipif(
