@@ -748,24 +748,31 @@ def test_autoFallsBackToSilenceAndStaysAuto(tmp_path: Path):
 		characterProcessing.initialize()
 		configuredBefore = config.conf["speech"]["synth"]
 		speech.initialize()
+		synth = synthDriverHandler.getSynth().name
+		config.conf.save()
+		import os
+
+		import globalVars
+		from configobj import ConfigObj
+
+		saved = ConfigObj(os.path.join(globalVars.appArgs.configPath, "nvda.ini"), encoding="UTF-8")
 		result = {
 			"configuredBefore": configuredBefore,
-			"synth": synthDriverHandler.getSynth().name,
+			"synth": synth,
 			"configuredAfter": config.conf["speech"]["synth"],
-			# What config.conf.save() would write.
-			"saved": config.conf.profiles[0].get("speech", {}).get("synth"),
+			"savedSections": sorted(saved),
+			"savedSynth": saved.get("speech", {}).get("synth"),
 		}
 		synthDriverHandler.setSynth(None)
 		""",
 	)
 	# Silence as a fallback is not saved, so eSpeak takes over by itself once it loads.
-	assert done.value == {
-		"configuredBefore": "auto",
-		"synth": "silence",
-		"configuredAfter": "auto",
-		"saved": None,
-	}
-	# Until it does, the one error says why there is no voice. Remove it from here when eSpeak loads.
+	assert done.value["configuredBefore"] == "auto"
+	assert done.value["synth"] == "silence"
+	assert done.value["configuredAfter"] == "auto"
+	assert "schemaVersion" in done.value["savedSections"]
+	assert done.value["savedSynth"] is None
+	# The one error says why there is no voice: auto tries eSpeak first, and its check() fails on Linux.
 	assert done.error is None, done.error
 	assert not done.noLinuxImplementation, done.noLinuxImplementation
 	assert done.logErrors == ["ERROR: setSynth failed for espeak"]
