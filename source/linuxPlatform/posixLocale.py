@@ -202,7 +202,7 @@ def _icu() -> _Icu | None:
 		)
 		return None
 	try:
-		return _Icu(icu.dll, icu._versionMajor)
+		return _Icu(icu.dll, os.environ[icu.VERSION_MAJOR_VARIABLE])
 	except AttributeError:
 		log.warning("ICU cannot name languages, so languages are not named", exc_info=True)
 		return None
