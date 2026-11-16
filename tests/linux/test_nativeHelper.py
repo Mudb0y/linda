@@ -109,6 +109,44 @@ def test_graphemeBoundaries(tmp_path: Path):
 	assert done.value["empty"] is False
 
 
+def test_windowsLineEndingIsTwoCharacters(tmp_path: Path):
+	"""Uniscribe stops on the carriage return and on the line feed, where ICU sees one cluster."""
+	characters = ["a", "\r", "\n", "\U0001f600", "\r", "\n", "\n", "\r", "é", "\r", "\n"]
+	text = "".join(characters)
+	done = harness.runChild(
+		tmp_path,
+		f"""
+		import ctypes
+		import NVDAHelper
+		from NVDAHelper import localLib
+		from textUtils import uniscribe
+		text = {text!r}
+		length = len(text.encode("utf_16_le")) // 2
+		offsets = (ctypes.c_int * (length + 1))()
+		count = ctypes.c_int()
+		localLib.calculateCharacterBoundaries(text, length, offsets, ctypes.byref(count))
+		def characterAt(offset):
+			bounds = ctypes.c_int(), ctypes.c_int()
+			localLib.calculateCharacterOffsets(text, length, offset, *map(ctypes.byref, bounds))
+			return [bound.value for bound in bounds]
+		result = {{
+			"boundaries": offsets[: count.value],
+			"split": list(uniscribe.splitAtCharacterBoundaries(text)),
+			"characters": [characterAt(offset) for offset in range(length)],
+		}}
+		""",
+	)
+	done.assertClean()
+	expected = [0]
+	for character in characters:
+		expected.append(expected[-1] + utf16Length(character))
+	assert done.value["boundaries"] == expected
+	assert done.value["split"] == characters
+	assert done.value["characters"] == [
+		[start, end] for start, end in pairwise(expected) for _ in range(end - start)
+	]
+
+
 def test_wordOffsets(tmp_path: Path):
 	english = "The quick brown fox."
 	polish = "\U0001f600 Zażółć gęślą jaźń, źdźbło."

@@ -141,6 +141,12 @@ def _requireIcu(name: str) -> None:
 		)
 
 
+def _isLineEnding(text: Utf16Buffer, start: int, end: int) -> bool:
+	"""Whether start to end is a carriage return and line feed, which ICU keeps as one grapheme
+	cluster and Uniscribe, so NVDA on Windows, treats as two characters."""
+	return end - start == 2 and text[start:end] == "\r\n"
+
+
 @contextmanager
 def _characterBreaks(text: Utf16Buffer, textLength: int) -> Iterator[int]:
 	status = icu.UErrorCode(0)
@@ -154,8 +160,12 @@ def _characterBreaks(text: Utf16Buffer, textLength: int) -> Iterator[int]:
 
 
 def calculateCharacterBoundaries(text: Any, textLength: int, offsets: Any, offsetsCount: Any) -> bool:
-	"""Store the start of every grapheme cluster, then textLength, in offsets, and their number in
-	offsetsCount. Returns False for no text, as upstream does."""
+	"""Store the start of every character, then textLength, in offsets, and their number in
+	offsetsCount. Returns False for no text, as upstream does.
+
+	A character is a grapheme cluster, except that a carriage return and line feed are two, as
+	they are to Uniscribe: on Windows the review cursor stops on each half of a Windows line ending.
+	"""
 	_requireIcu("calculateCharacterBoundaries")
 	units = _utf16Units(text, textLength)
 	if offsets is None or units is None or units[1] <= 0:
@@ -167,6 +177,9 @@ def calculateCharacterBoundaries(text: Any, textLength: int, offsets: Any, offse
 		with _characterBreaks(text, textLength) as iterator:
 			boundary = icu.ubrk_first(iterator)
 			while boundary != icu.UBRK_DONE:
+				if count and _isLineEnding(text, offsets[count - 1], boundary):
+					offsets[count] = boundary - 1
+					count += 1
 				offsets[count] = boundary
 				count += 1
 				boundary = icu.ubrk_next(iterator)
@@ -180,8 +193,9 @@ def calculateCharacterBoundaries(text: Any, textLength: int, offsets: Any, offse
 def calculateCharacterOffsets(
 	text: Any, textLength: int, offset: int, startOffset: Any, endOffset: Any
 ) -> bool:
-	"""Store the bounds of the grapheme cluster containing offset. Past the end of the text, the unit
-	is the one code unit at offset, as upstream's is."""
+	"""Store the bounds of the character containing offset, a character being what
+	calculateCharacterBoundaries counts. Past the end of the text, the unit is the one code unit at
+	offset, as upstream's is."""
 	_requireIcu("calculateCharacterOffsets")
 	units = _utf16Units(text, textLength)
 	if offset < 0 or units is None:
@@ -200,8 +214,12 @@ def calculateCharacterOffsets(
 	except RuntimeError:
 		log.debugWarning("ICU character break iterator failed", exc_info=True)
 		return False
-	_store(startOffset, 0 if start == icu.UBRK_DONE else start)
-	_store(endOffset, textLength if end == icu.UBRK_DONE else end)
+	start = 0 if start == icu.UBRK_DONE else start
+	end = textLength if end == icu.UBRK_DONE else end
+	if _isLineEnding(text, start, end):
+		start, end = (start, start + 1) if offset == start else (start + 1, end)
+	_store(startOffset, start)
+	_store(endOffset, end)
 	return True
 
 
