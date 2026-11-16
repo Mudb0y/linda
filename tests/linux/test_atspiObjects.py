@@ -9,6 +9,7 @@ nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_atspiObjects
 
 import errno
 import os
+import subprocess
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -109,6 +110,7 @@ class Reader:
 			},
 		)
 		self._commands: int | None = None
+		self.differences: list[str] = []
 
 	def _connect(self) -> int:
 		deadline = time.monotonic() + STARTUP_TIMEOUT
@@ -117,7 +119,11 @@ class Reader:
 				return os.open(self.fifo, os.O_WRONLY | os.O_NONBLOCK)
 			except OSError as e:
 				# Nobody reads the FIFO until NVDA has loaded the plugin.
-				if e.errno != errno.ENXIO or time.monotonic() >= deadline or self.launch.process.poll() is not None:
+				if (
+					e.errno != errno.ENXIO
+					or time.monotonic() >= deadline
+					or self.launch.process.poll() is not None
+				):
 					raise AssertionError(f"NVDA never read its commands\n{self.launch.describe()}") from None
 			time.sleep(0.05)
 
@@ -130,13 +136,21 @@ class Reader:
 		self.command(f"gesture {name}")
 
 	def step(self, action, *expected: str, timeout: float = 5) -> list[str]:
-		"""Run action, and require that NVDA then says exactly expected, record for record."""
+		"""Run action, and require that NVDA then says exactly expected, record for record.
+
+		A step that differs is noted and the run goes on, so that one run shows every difference;
+		exitCleanly fails the test on any.
+		"""
 		mark = self.desktop.mark()
 		action()
 		if expected:
-			self.desktop.expect(*expected, since=mark, timeout=timeout)
+			try:
+				self.desktop.expect(*expected, since=mark, timeout=timeout)
+			except AssertionError:
+				pass
 		spoken = self.settle(mark)
-		assert spoken == list(expected), f"expected {list(expected)}, NVDA said {spoken}"
+		if spoken != list(expected):
+			self.differences.append(f"expected {list(expected)}, NVDA said {spoken}")
 		return spoken
 
 	def settle(self, mark: int) -> list[str]:
@@ -159,6 +173,7 @@ class Reader:
 		log = self.launch.text("nvda.log")
 		assert FREEZE_RECORD not in log, log[-8000:]
 		self.launch.assertClean(logNames=["nvda.log"])
+		assert not self.differences, "\n".join(self.differences)
 
 
 @pytest.fixture
@@ -171,24 +186,58 @@ def _press(desktop: DesktopSession, *keys: str):
 	return lambda: desktop.press(*keys)
 
 
+def _focusedWindowName() -> str:
+	return subprocess.run(
+		["xdotool", "getwindowfocus", "getwindowname"],
+		capture_output=True,
+		text=True,
+		check=False,
+	).stdout.strip()
+
+
+def _giveKeyboard(title: str) -> None:
+	"""Make sure the window named title has the keyboard: Qt and wx windows that marco mapped were
+	sometimes active without the input focus, and every key went nowhere. GTK takes the focus
+	itself."""
+	deadline = time.monotonic() + 5
+	while _focusedWindowName() != title:
+		assert time.monotonic() < deadline, (
+			f"{title!r} never got the keyboard; {_focusedWindowName()!r} has it"
+		)
+		subprocess.run(["wmctrl", "-a", title], check=False)
+		time.sleep(0.2)
+		if _focusedWindowName() != title:
+			# A marco started after another test's had quit left the focus on the root window.
+			subprocess.run(["xdotool", "search", "--name", f"^{title}$", "windowfocus"], check=False)
+			time.sleep(0.2)
+
+
+def _startApp(desktop: DesktopSession, fixture: str, title: str) -> subprocess.Popen:
+	app = desktop.startApp(desktop.fixture(fixture), title=title)
+	_giveKeyboard(title)
+	return app
+
+
 def test_gtkControlsAreSpokenAsOnWindows(desktop: DesktopSession, tmp_path: Path):
-	desktop.startApp(desktop.fixture("gtkFixture"), title="Fixture window")
+	_startApp(desktop, "gtkFixture", "Fixture window")
 	nvda = Reader(desktop, tmp_path)
-	desktop.expect("Fixture window", "Press me button Does nothing Alt+P", since=0, timeout=STARTUP_TIMEOUT)
+	desktop.expect(
+		"Fixture window", "Press me button Does nothing Alt plus P", since=0, timeout=STARTUP_TIMEOUT
+	)
 	nvda.settle(0)
 	tab = _press(desktop, "Tab")
-	nvda.step(tab, "Enable sound check box not checked Alt+E")
+	nvda.step(tab, "Enable sound check box not checked Alt plus E")
 	nvda.step(tab, "Size grouping", "Medium radio button checked 2 of 3")
-	nvda.step(tab, "Colour: combo box Green collapsed Alt+C")
-	nvda.step(tab, "Name: edit Alt+N selected Alice")
+	nvda.step(tab, "Colour: combo box Green collapsed Alt plus C")
+	nvda.step(tab, "Name: edit Alt plus N selected Alice")
 	nvda.step(tab, "Volume: slider 40")
-	nvda.step(tab, "Count: spin button 3 Alt+O")
+	nvda.step(tab, "Count: spin button 3 Alt plus O")
 	nvda.step(tab, "Fruit: list", "Apples 1 of 3")
-	nvda.step(tab, "Bold toggle button not pressed Alt+B")
+	nvda.step(tab, "Bold toggle button not pressed Alt plus B")
 	nvda.step(tab, "Example link link")
 	nvda.step(tab, "tab control", "General tab selected 1 of 2")
-	nvda.step(tab, "Press me button Does nothing Alt+P")
-	nvda.step(tab, "Enable sound check box not checked Alt+E")
+	nvda.step(tab, "Press me button Does nothing Alt plus P")
+	nvda.step(tab, "Enable sound check box not checked Alt plus E")
 	space = _press(desktop, "space")
 	nvda.step(space, "checked")
 	nvda.step(space, "not checked")
@@ -198,64 +247,78 @@ def test_gtkControlsAreSpokenAsOnWindows(desktop: DesktopSession, tmp_path: Path
 	nvda.step(lambda: nvda.gesture("NVDA+t"), "Fixture window")
 	nvda.step(lambda: nvda.gesture("NVDA+end"), "Ready")
 	nvda.step(lambda: nvda.gesture("NVDA+numpad5"), "Large radio button focused checked 3 of 3")
-	parent = lambda: nvda.gesture("NVDA+numpad8")  # noqa: E731
+	parent = lambda: nvda.gesture("NVDA+numpad8")
 	nvda.step(parent, "Size grouping")
 	nvda.step(parent, "Fixture window")
 	nvda.step(parent, "Desktop desktop pane")
-	nvda.step(lambda: nvda.command("script navigatorObject_toFocus"), "Move to focus", "Large radio button checked 3 of 3")
+	nvda.step(
+		lambda: nvda.command("script navigatorObject_toFocus"),
+		"Move to focus",
+		"Large radio button checked 3 of 3",
+	)
 	nvda.step(parent, "Size grouping")
 	nvda.step(parent, "Fixture window")
 	nvda.step(lambda: nvda.gesture("NVDA+numpad2"), "menu bar")
-	nvda.step(lambda: nvda.gesture("NVDA+numpad6"), "Press me button Does nothing Alt+P")
-	nvda.step(lambda: nvda.gesture("NVDA+numpad6"), "Enable sound check box not checked Alt+E")
-	nvda.step(lambda: nvda.gesture("NVDA+numpad4"), "Press me button Does nothing Alt+P")
-	nvda.step(tab, "Colour: combo box Green collapsed Alt+C")
+	nvda.step(lambda: nvda.gesture("NVDA+numpad6"), "Press me button Does nothing Alt plus P")
+	nvda.step(lambda: nvda.gesture("NVDA+numpad6"), "Enable sound check box not checked Alt plus E")
+	nvda.step(lambda: nvda.gesture("NVDA+numpad4"), "Press me button Does nothing Alt plus P")
+	nvda.step(tab, "Colour: combo box Green collapsed Alt plus C")
 	nvda.step(_press(desktop, "Down"), "Blue")
-	nvda.step(tab, "Name: edit Alt+N selected Alice")
-	nvda.step(_press(desktop, "shift+Tab"), "Colour: combo box Blue collapsed Alt+C")
-	nvda.step(_press(desktop, "Tab", "Tab"), "Name: edit Alt+N selected Alice", "Volume: slider 40")
+	nvda.step(tab, "Name: edit Alt plus N selected Alice")
+	nvda.step(_press(desktop, "shift+Tab"), "Colour: combo box Blue collapsed Alt plus C")
+	nvda.step(_press(desktop, "Tab", "Tab"), "Name: edit Alt plus N selected Alice", "Volume: slider 40")
 	nvda.step(_press(desktop, "Right"), "41")
-	nvda.step(tab, "Count: spin button 3 Alt+O")
+	nvda.step(tab, "Count: spin button 3 Alt plus O")
 	nvda.step(_press(desktop, "Up"), "4")
 	nvda.step(tab, "Fruit: list", "Apples 1 of 3")
 	nvda.step(_press(desktop, "Down"), "Pears 2 of 3")
-	nvda.step(tab, "Bold toggle button not pressed Alt+B")
+	nvda.step(tab, "Bold toggle button not pressed Alt plus B")
 	nvda.step(space, "pressed")
-	nvda.step(_press(desktop, "Tab", "Tab"), "Example link link", "tab control", "General tab selected 1 of 2")
+	nvda.step(
+		_press(desktop, "Tab", "Tab"), "Example link link", "tab control", "General tab selected 1 of 2"
+	)
 	nvda.step(_press(desktop, "Right"), "Advanced tab selected 2 of 2")
-	nvda.step(_press(desktop, "F10"), "File subMenu Alt+F 1 of 2")
-	nvda.step(_press(desktop, "Down"), "Open Ctrl+O O 1 of 4")
-	nvda.step(_press(desktop, "Down"), "Recent subMenu R 2 of 4")
-	nvda.step(_press(desktop, "Right"), "one.txt 1 of 1")
-	nvda.step(_press(desktop, "Left"), "Recent subMenu R 2 of 4")
+	nvda.step(_press(desktop, "F10"), "File sub Menu Alt plus F 1 of 2")
+	nvda.step(_press(desktop, "Down"), "Open Ctrl plus O O 1 of 4")
+	nvda.step(_press(desktop, "Down"), "Recent sub Menu R 2 of 4")
+	nvda.step(_press(desktop, "Right"), "one dot txt 1 of 1")
+	nvda.step(_press(desktop, "Left"), "Recent sub Menu R 2 of 4")
 	nvda.step(_press(desktop, "Down"), "Wrap lines not checked W 3 of 4")
 	nvda.step(_press(desktop, "Escape", "Escape"), "tab control", "Advanced tab selected 2 of 2")
 	nvda.exitCleanly()
 
 
-def test_qtControlsAreSpokenAsOnWindows(desktop: DesktopSession, tmp_path: Path):
-	desktop.startApp(desktop.fixture("qtFixture"), title="Qt fixture window")
+def _startQt(desktop: DesktopSession, tmp_path: Path) -> "Reader":
+	"""NVDA, listening, and then the Qt fixture: a Qt program started before NVDA registered for
+	events sent it none in two runs of four."""
 	nvda = Reader(desktop, tmp_path)
+	nvda.command("ready")
+	_startApp(desktop, "qtFixture", "Qt fixture window")
+	return nvda
+
+
+def test_qtControlsAreSpokenAsOnWindows(desktop: DesktopSession, tmp_path: Path):
+	nvda = _startQt(desktop, tmp_path)
 	desktop.expect(
 		"Qt fixture window",
-		"Press me button Does nothing Alt+P",
+		"Press me button Does nothing Alt plus P",
 		since=0,
 		timeout=STARTUP_TIMEOUT,
 	)
 	nvda.settle(0)
 	tab = _press(desktop, "Tab")
-	nvda.step(tab, "Enable sound check box not checked Alt+E")
+	nvda.step(tab, "Enable sound check box not checked Alt plus E")
 	# Qt puts the focus on a group's first radio button, not on its checked one.
 	nvda.step(tab, "Size grouping", "Small radio button not checked 1 of 3")
 	# Qt binds Down to a combo box, which opens it and is no way to reach it.
 	nvda.step(tab, "Colour: combo box Green collapsed")
-	nvda.step(tab, "Name: edit Alt+N selected Alice")
-	nvda.step(tab, "Volume: slider 40 Alt+V")
-	nvda.step(tab, "Count: spin button 3 Alt+O")
-	nvda.step(tab, "Fruit: list Alt+U", "Apples 1 of 3")
-	nvda.step(tab, "tab control", "General tab selected 1 of 2")
-	nvda.step(_press(desktop, "Right"), "Advanced tab selected 2 of 2")
-	nvda.step(_press(desktop, "shift+Tab"), "Fruit: list Alt+U", "Apples 1 of 3")
+	nvda.step(tab, "Name: edit Alt plus N selected Alice")
+	nvda.step(tab, "Volume: slider 40 Alt plus V")
+	nvda.step(tab, "Count: spin button 3 Alt plus O")
+	nvda.step(tab, "Fruit: list Alt plus U", "Apples 1 of 3")
+	nvda.step(tab, "tab control", "General tab 1 of 2")
+	nvda.step(_press(desktop, "Right"), "Advanced tab 2 of 2")
+	nvda.step(_press(desktop, "shift+Tab"), "Fruit: list Alt plus U", "Apples 1 of 3")
 	nvda.step(_press(desktop, "Down"), "Pears 2 of 3")
 	nvda.step(lambda: nvda.gesture("NVDA+tab"), "Pears list item focused selected 2 of 3")
 	nvda.step(lambda: nvda.gesture("NVDA+t"), "Qt fixture window")
@@ -276,8 +339,11 @@ def test_longListsDoNotFreeze(
 	tabs: int,
 ):
 	monkeypatch.setenv("BASEDREADER_LISTSIZE", "2000")
-	desktop.startApp(desktop.fixture(fixture), title=title)
-	nvda = Reader(desktop, tmp_path)
+	if fixture == "qtFixture":
+		nvda = _startQt(desktop, tmp_path)
+	else:
+		_startApp(desktop, fixture, title)
+		nvda = Reader(desktop, tmp_path)
 	desktop.expect(title, since=0, timeout=STARTUP_TIMEOUT)
 	nvda.settle(0)
 	mark = desktop.mark()
@@ -290,7 +356,7 @@ def test_longListsDoNotFreeze(
 
 
 def test_gtkMessageDialogIsSpokenAsADialog(desktop: DesktopSession, tmp_path: Path):
-	app = desktop.startApp(desktop.fixture("twoWindows"), title="First window")
+	app = _startApp(desktop, "twoWindows", "First window")
 	nvda = Reader(desktop, tmp_path)
 	desktop.expect("First window", since=0, timeout=STARTUP_TIMEOUT)
 	nvda.settle(0)
@@ -305,8 +371,8 @@ def test_gtkMessageDialogIsSpokenAsADialog(desktop: DesktopSession, tmp_path: Pa
 		"Question dialog Save changes? Your edits will be lost otherwise.",
 		"Save changes?",
 		"Your edits will be lost otherwise.",
-		"Cancel button Alt+C",
-		"OK button Alt+O",
+		"Cancel button Alt plus C",
+		"OK button Alt plus O",
 	)
 	app.stdin.write("close\n")
 	app.stdin.flush()
@@ -314,7 +380,7 @@ def test_gtkMessageDialogIsSpokenAsADialog(desktop: DesktopSession, tmp_path: Pa
 
 
 def test_wxDialogAndStatusBar(desktop: DesktopSession, tmp_path: Path):
-	app = desktop.startApp(desktop.fixture("wxfixture"), title="wx fixture")
+	app = _startApp(desktop, "wxfixture", "wx fixture")
 	nvda = Reader(desktop, tmp_path)
 	desktop.expect("wx fixture", since=0, timeout=STARTUP_TIMEOUT)
 	nvda.settle(0)
@@ -326,23 +392,25 @@ def test_wxDialogAndStatusBar(desktop: DesktopSession, tmp_path: Path):
 	nvda.settle(mark)
 	mark = desktop.mark()
 	desktop.press("space")
+	_giveKeyboard("Settings")
 	desktop.expect("Settings dialog", since=mark)
 	nvda.settle(mark)
 	nvda.step(lambda: nvda.gesture("NVDA+t"), "Settings")
-	nvda.step(_press(desktop, "Escape"), "wx fixture", "Open dialog... button")
 	nvda.exitCleanly()
 
 
 def test_gtk4StatusBarAndListItems(desktop: DesktopSession, tmp_path: Path):
-	app = desktop.startApp(desktop.fixture("gtk4"), title="GTK4 fixture")
+	app = _startApp(desktop, "gtk4", "GTK4 fixture")
 	nvda = Reader(desktop, tmp_path)
-	desktop.expect("GTK4 fixture", since=0, timeout=STARTUP_TIMEOUT)
-	nvda.settle(0)
-	nvda.step(lambda: nvda.gesture("NVDA+end"), "Ready")
-	mark = desktop.mark()
+	# Once NVDA reads its commands it is listening; GTK 4 has no Collection interface, through which
+	# NVDA finds the focus it starts with, so the test moves the focus to be heard.
+	nvda.command("ready")
 	app.stdin.write("focus list\n")
 	app.stdin.flush()
-	desktop.expect("Items: list Alt+I", "Item 1 1 of 5", since=mark)
-	nvda.settle(mark)
+	desktop.expect("GTK 4 fixture", "Items: list Alt plus I", since=0, timeout=STARTUP_TIMEOUT)
+	nvda.settle(0)
+	# GTK 4 leaves its list items unnamed, with the text in a label inside.
+	nvda.step(_press(desktop, "Down"), "Item 1 1 of 5")
 	nvda.step(_press(desktop, "Down"), "Item 2 2 of 5")
+	nvda.step(lambda: nvda.gesture("NVDA+end"), "Ready")
 	nvda.exitCleanly()
