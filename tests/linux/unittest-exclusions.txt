@@ -163,8 +163,8 @@ tests.unit.test_languageHandler
 tests.unit.test_synthDrivers.test_espeak.TestSynthDriver_Integration.test_availableLanguagesWithoutLocale
   For good: it takes the language from each voice identifier by splitting on a backslash, the
   directory separator in eSpeak NG's identifiers on Windows. On Linux the separator is a slash, so
-  gmw/en is never reduced to en.
-  Raises: AssertionError: 'en' != 'gmw/en'
+  gmw/en is never reduced to en. Which language fails first depends on the order of a set.
+  Raises: AssertionError: Language without locale not supported by eSpeak
 tests.unit.test_synthDrivers.test_espeak.TestSynthDriver_Integration.test_fallbackToBritishEnglish
   For good: it expects the voice identifier gmw\en, spelled with Windows' directory separator. The
   driver falls back to British English on Linux too, where eSpeak NG names it gmw/en.
