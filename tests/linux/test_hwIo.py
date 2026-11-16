@@ -195,9 +195,8 @@ def test_functionThatRaisesIsLoggedAndTheThreadCarriesOn(tmp_path: Path):
 		hwIo.terminate()
 		""",
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"logErrors"})
 	assert done.value is True
-	assert not done.noLinuxImplementation
 	assert len(done.logErrors) == 1
 	assert done.logErrors[0].startswith("ERROR: Error in APC function")
 
@@ -527,8 +526,7 @@ def test_crashedThreadIsLoggedAndForgetsWhatWasPending(tmp_path: Path):
 		hwIo.terminate()
 		""",
 	)
-	assert done.error is None, done.error
-	assert not done.noLinuxImplementation
+	done.assertClean(ignoring={"logErrors"})
 	assert done.logErrors == ["CRITICAL: Exception in IoThread function"]
 	assert done.value == {"alive": False, "pending": 2, "storedAfter": 0, "timerDisarmed": True}
 
@@ -572,29 +570,16 @@ def test_overlappedCompletionHasNoLinuxImplementation(tmp_path: Path):
 		hwIo.terminate()
 		""",
 	)
-	assert done.error is None, done.error
+	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert done.value == "hwIo.ioThread.IoThread.queueAsCompletionRoutine"
 	assert done.noLinuxImplementation == [done.value]
-	assert not done.logErrors
 
 
 def test_devicesAreNeverOpened(tmp_path: Path):
 	done = runWithThread(
 		tmp_path,
 		"""
-		import sys
-
 		from linuxPlatform import NoLinuxImplementation
-
-		opened = []
-
-
-		def watch(event, args):
-			if event == "open" and isinstance(args[0], str) and args[0].startswith("/dev/"):
-				opened.append(args[0])
-
-
-		sys.addaudithook(watch)
 
 		def onReceive(data: bytes) -> None:
 			pass
@@ -609,13 +594,12 @@ def test_devicesAreNeverOpened(tmp_path: Path):
 				construct()
 			except NoLinuxImplementation as e:
 				missing[name] = e.what
-		result = {"missing": missing, "opened": opened}
+		result = {"missing": missing}
 		hwIo.terminate()
 		""",
 	)
-	assert done.error is None, done.error
-	assert done.value["opened"] == []
+	done.assertClean(ignoring={"noLinuxImplementation"})
+	assert [reach for reach in done.reached if reach.startswith("open /dev/")] == []
 	assert done.value["missing"]["serial"] == "hwIo.Serial"
 	assert set(done.value["missing"]) == {"serial", "hid", "bulk"}
 	assert done.noLinuxImplementation == list(done.value["missing"].values())
-	assert not done.logErrors
