@@ -256,7 +256,13 @@ def test_feedPacesFeederAndCallsBackOnItsThread(tmp_path: Path):
 	returned = {i: at for kind, i, at in value["order"] if kind == "returned"}
 	# Three chunks fit before the queue passes half of 400 ms; after that each feed waits 100 ms.
 	assert returned[2] < 0.05
+	assert 0.08 <= returned[3] <= 0.15
 	assert 0.6 <= returned[9] <= 0.85
+	for i, at in returned.items():
+		# Playing began after the clock was read, so this overstates what was still queued, which a
+		# feed that waits only while more than half of 400 ms is queued keeps to 300 ms at most.
+		queued = (i + 1) * 0.1 - at
+		assert queued <= 0.3 + 0.001, (i, queued)
 	synced = value["order"][-1][2]
 	assert 0.99 <= synced <= 1.25
 	merged = value["merged"]
@@ -301,6 +307,29 @@ def test_callbacksRunOnlyInsideFeedSyncOrIdle(tmp_path: Path):
 	assert value["idStored"] == [1]
 	assert value["idAfterIdle"] == [0]
 	assert 0.08 <= value["idleTook"] <= 0.25
+
+
+def test_emptyFeedAfterPlaybackCallsBackAtTheNextSync(tmp_path: Path):
+	"""feed(None, 0, onDone) once everything has been heard, as sapi5 ends an utterance. Its callback
+	is due at once, but must wait until the feed has returned and nvwave has filed it under its id,
+	or it is lost."""
+	value = runAudio(
+		tmp_path,
+		"""
+		player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+		player.feed(bytes(800), onDone=done("a"))  # 50 ms
+		time.sleep(0.2)
+		player.feed(None, 0, onDone=done("b"))
+		firedByFeed = [tag for tag, _thread, _at in events]
+		syncer = threading.Thread(target=player.sync, name="syncer")
+		syncer.start()
+		syncer.join()
+		player.sync()
+		result = {"firedByFeed": firedByFeed, "calls": [(tag, thread) for tag, thread, _at in events]}
+		""",
+	)
+	assert value["firedByFeed"] == ["a"]
+	assert value["calls"] == [["a", "MainThread"], ["b", "syncer"]]
 
 
 def test_stopWakesFeederAndDiscardsPendingCallbacks(tmp_path: Path):
@@ -575,6 +604,328 @@ def test_lostStreamIsReopenedAndStrandsNoCallback(tmp_path: Path):
 	assert value["firedByFeed"] == ["before"]
 	assert [tag for tag, _at in value["calls"]] == ["before", "after"]
 	assert 0.08 <= value["calls"][1][1] <= 0.25
+
+
+def test_streamThatCannotBeReopenedLeavesNothingPlaying(tmp_path: Path):
+	"""A lost stream whose device has gone for good: the pending callback still runs, pause and
+	resume do nothing, and playing works again once the device is back."""
+	value = runAudio(
+		tmp_path,
+		"""
+		from linuxPlatform import audioOutput
+		from linuxPlatform.audioOutput.nullSink import NullSink, NullStream
+
+		class LosingStream(NullStream):
+			lose = False
+
+			def bufferedFrames(self):
+				if LosingStream.lose:
+					LosingStream.lose = False
+					raise audioOutput.StreamLost("device went away")
+				return super().bufferedFrames()
+
+		class GoneSink(NullSink):
+			gone = False
+
+			def openStream(self, deviceId, fmt, wake):
+				if GoneSink.gone:
+					raise audioOutput.NoDevice(2, "no device")
+				return LosingStream(fmt)
+
+		audioOutput._sink = GoneSink()
+		player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+		player.feed(bytes(8000), onDone=done("before"))  # 500 ms
+		LosingStream.lose = GoneSink.gone = True
+		player.feed(bytes(1600), onDone=done("lost"))
+		firedByFeed = [tag for tag, _thread, _at in events]
+		failures = []
+		for name, call in (
+			("pause", lambda: player.pause(True)),
+			("resume", lambda: player.pause(False)),
+			("sync", player.sync),
+		):
+			try:
+				call()
+			except Exception as e:
+				failures.append((name, repr(e)))
+		try:
+			wasapi.wasPlay_feed(player._player, None, 0, None)
+			reopenError = None
+		except OSError as e:
+			reopenError = (type(e).__name__, e.winerror)
+		GoneSink.gone = False
+		player.feed(bytes(1600), onDone=done("back"))
+		# Bounded, because a player still counting frames from the lost stream would wait forever.
+		syncer = threading.Thread(target=player.sync, name="syncer", daemon=True)
+		syncer.start()
+		syncer.join(3)
+		result = {
+			"firedByFeed": firedByFeed,
+			"failures": failures,
+			"reopenError": reopenError,
+			"syncHung": syncer.is_alive(),
+			"calls": [tag for tag, _thread, _at in events],
+		}
+		""",
+	)
+	assert value["firedByFeed"] == ["before"]
+	assert value["failures"] == []
+	assert not value["syncHung"]
+	assert value["reopenError"] == ["WindowsError", -2147023728]
+	# nvwave filed no callback for the feed that failed.
+	assert value["calls"] == ["before", "back"]
+
+
+def test_sinkFailuresReachNvwaveAsWindowsErrors(tmp_path: Path):
+	"""nvwave reads winerror from what wasapi raises, so a sink's plain OSError must arrive as a
+	WindowsError carrying E_FAIL, with its own errno, and never as an AttributeError."""
+	value = runAudio(
+		tmp_path,
+		"""
+		from linuxPlatform import audioOutput
+		from linuxPlatform.audioOutput.nullSink import NullSink, NullStream
+
+		class FailingStream(NullStream):
+			failIn = set()
+
+			def write(self, data):
+				if "write" in FailingStream.failIn:
+					raise OSError(5, "Input/output error")
+				super().write(data)
+
+			def setChannelVolume(self, channel, level):
+				if "setChannelVolume" in FailingStream.failIn:
+					raise OSError(5, "Input/output error")
+				super().setChannelVolume(channel, level)
+
+		class FailingSink(NullSink):
+			def openStream(self, deviceId, fmt, wake):
+				return FailingStream(fmt)
+
+		def described(e):
+			return [type(e).__name__, e.errno, e.winerror, type(e.__cause__).__name__]
+
+		audioOutput._sink = FailingSink()
+		FailingStream.failIn = {"setChannelVolume"}
+		try:
+			nvwave.playWaveFile(os.path.join(globalVars.appDir, "waves", "start.wav"), asynchronous=False)
+			waveFileError = None
+		except Exception as e:
+			waveFileError = described(e)
+		FailingStream.failIn = {"write"}
+		player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+		data = bytes(1600)
+		try:
+			wasapi.wasPlay_feed(player._player, ctypes.cast(data, ctypes.c_char_p), len(data), None)
+			feedError = None
+		except Exception as e:
+			feedError = described(e)
+		# nvwave's feed logs the failure and returns, as for an endpoint lost on Windows.
+		player.feed(data, onDone=done("failed"))
+		FailingStream.failIn = set()
+		player.feed(data, onDone=done("recovered"))
+		player.sync()
+		result = {
+			"waveFileError": waveFileError,
+			"feedError": feedError,
+			"calls": [tag for tag, _thread, _at in events],
+		}
+		""",
+		extra="""
+		import ctypes
+
+		import globalVars
+		""",
+	)
+	failed = ["WindowsError", 5, -2147467259, "OSError"]
+	assert value == {"waveFileError": failed, "feedError": failed, "calls": ["recovered"]}
+
+
+def test_destroyRunByTheCollectorInsideCreateDoesNotHang(tmp_path: Path):
+	"""WavePlayer.__del__ destroys the player wherever a collection happens to run, which can be in
+	the middle of wasapi creating another player on the same thread."""
+	value = runAudio(
+		tmp_path,
+		"""
+		class Holder:
+			pass
+
+		# A dead player that only the cycle collector can free.
+		gc.disable()
+		dead = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+		deadHandle = dead._player
+		holder = Holder()
+		holder.player = dead
+		dead.holder = holder
+		del dead, holder
+
+		class CollectingPlayer(wasapi._Player):
+			def __init__(self, *args, **kwargs):
+				# Stands for a collection that the allocations here happen to set off.
+				gc.collect()
+				super().__init__(*args, **kwargs)
+
+		wasapi._Player = CollectingPlayer
+		created = []
+
+		def create():
+			created.append(nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS))
+
+		creator = threading.Thread(target=create, name="creator", daemon=True)
+		creator.start()
+		creator.join(5)
+		hung = creator.is_alive()
+		gc.enable()
+		result = {
+			"hung": hung,
+			"created": len(created),
+			"deadDestroyed": deadHandle not in wasapi._players,
+		}
+		""",
+	)
+	assert value == {"hung": False, "created": 1, "deadDestroyed": True}
+
+
+def test_nullClockKeepsTimeWhenFedInSmallPieces(tmp_path: Path):
+	"""The null sink's clock against a clock the test moves: no time is lost to writes, however small
+	and frequent, and after the queue has run dry new frames play from when they were written."""
+	done = harness.runChild(
+		tmp_path,
+		"""
+		from linuxPlatform.audioOutput import StreamFormat, nullSink
+
+		class Clock:
+			now = 1000.0
+
+			@staticmethod
+			def monotonic():
+				return Clock.now
+
+		nullSink.time = Clock
+		rate = 44100
+		stream = nullSink.NullStream(StreamFormat(1, 1, rate, 16))
+		stream.write(bytes(2 * rate * 2))
+		stream.start()
+		# Ten and a half frames of time pass between writes of ten frames, 4200 times: one second.
+		for _ in range(4200):
+			Clock.now += 10.5 / rate
+			stream.write(bytes(20))
+		fedInPieces = stream.playedFrames()
+		dry = nullSink.NullStream(StreamFormat(1, 1, rate, 16))
+		dry.start()
+		dry.write(bytes(200))
+		Clock.now += 1.0
+		dry.write(bytes(200))
+		Clock.now += 50.5 / rate
+		afterRunningDry = dry.playedFrames()
+		result = {"fedInPieces": fedInPieces, "afterRunningDry": afterRunningDry}
+		""",
+		prepare="bootstrap",
+	)
+	done.assertClean()
+	assert abs(done.value["fedInPieces"] - 44100) <= 1
+	assert done.value["afterRunningDry"] == 150
+
+
+def test_wakeFromASinkThreadEndsWaitsEarly(tmp_path: Path):
+	"""A sink whose device runs far ahead of the player's estimate wakes the waiting feeder and
+	syncer from a thread of its own; callbacks still run only on the thread feeding or syncing."""
+	value = runAudio(
+		tmp_path,
+		"""
+		from linuxPlatform import audioOutput
+
+		class RushingStream(audioOutput.SinkStream):
+			# Takes everything written 20 ms after the last write, while the player expects real time.
+			def __init__(self, fmt, wake):
+				self.bufferFrames = fmt.samplesPerSec * audioOutput.BUFFER_MS // 1000
+				self._blockAlign = fmt.blockAlign
+				self._wake = wake
+				self._lock = threading.Lock()
+				self._written = self._taken = 0
+				self._dueAt = None
+				self._running = False
+				self._closed = threading.Event()
+				threading.Thread(target=self._consume, name="sinkThread", daemon=True).start()
+
+			def _consume(self):
+				while not self._closed.wait(0.002):
+					with self._lock:
+						due = self._running and self._dueAt is not None and time.monotonic() >= self._dueAt
+						if due:
+							self._taken = self._written
+							self._dueAt = None
+					if due:
+						wakes.append(threading.current_thread().name)
+						self._wake()
+
+			def write(self, data):
+				with self._lock:
+					self._written += len(data) // self._blockAlign
+					self._dueAt = time.monotonic() + 0.02
+
+			def bufferedFrames(self):
+				with self._lock:
+					return self._written - self._taken
+
+			def playedFrames(self):
+				with self._lock:
+					return self._taken
+
+			def start(self):
+				with self._lock:
+					self._running = True
+
+			def stop(self):
+				with self._lock:
+					self._running = False
+
+			def reset(self):
+				with self._lock:
+					self._written = self._taken = 0
+					self._dueAt = None
+
+			def setChannelVolume(self, channel, level):
+				pass
+
+			def close(self):
+				self._closed.set()
+
+		class RushingSink(audioOutput.Sink):
+			description = "a sink whose device runs ahead"
+
+			def openStream(self, deviceId, fmt, wake):
+				return RushingStream(fmt, wake)
+
+			def devices(self):
+				return []
+
+			def keepAwakeFor(self, deviceId, ms, noiseVolume):
+				pass
+
+			def stopKeepingAwake(self):
+				pass
+
+		wakes = []
+		audioOutput._sink = RushingSink()
+		player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+		start = time.monotonic()
+		for i in range(20):
+			player.feed(bytes(1600), onDone=done(i))  # 100 ms each
+		player.sync()
+		took = time.monotonic() - start
+		result = {
+			"took": took,
+			"wakeThreads": sorted(set(wakes)),
+			"calls": [(tag, thread) for tag, thread, _at in events],
+		}
+		""",
+	)
+	# Two seconds of audio. Timed by the estimate alone, the feeds and the sync would wait about
+	# 100 ms seven times; woken, each wait lasts about 20 ms.
+	assert value["took"] < 0.4, value["took"]
+	assert value["wakeThreads"] == ["sinkThread"]
+	assert value["calls"] == [[i, "MainThread"] for i in range(20)]
 
 
 def test_missingCaptureDirectoryFailsAtStart(tmp_path: Path):
