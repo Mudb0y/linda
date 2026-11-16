@@ -70,9 +70,10 @@
       # does not record; evaluation stops until it is set again for a new one.
       openevvVersion = "0.7-5-gaaebca3";
       openevvLibeci =
-        assert lib.hasSuffix openevv.shortRev openevvVersion;
+        assert lib.assertMsg (lib.hasSuffix openevv.shortRev openevvVersion)
+          "openevvVersion is not of ${openevv.rev}: set it to what git describe says of that commit";
         pkgs.callPackage ./nix/openevv-libeci.nix {
-          src = builtins.path { name = "src"; path = openevv; };
+          src = openevv;
           version = openevvVersion;
         };
       openevvDriver = pkgs.callPackage ./nix/openevv-driver.nix {
