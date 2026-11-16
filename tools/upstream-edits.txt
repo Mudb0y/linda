@@ -266,6 +266,11 @@ source/mouseHandler.py
   NoLinuxImplementation, since Linux has no GDI screen capture, so audio
   coordinates that read brightness fail naming what is missing; terminate
   does not ask whether NVDA locked a button, which it cannot do on Linux
+source/nvwave.py
+  Linux runtime: playWaveFile stops the previous file's player through a
+  copy of fileWavePlayer read once per pass, before upstream's loop, which
+  reads the global twice; the previous file's thread can set it to None in
+  between, and the AttributeError that follows loses the new file
 source/oleacc.py
   import safety: on Linux the oleacc type library's names come from the
   comInterfaces.Accessibility stand-in, since comtypes.client.GetModule

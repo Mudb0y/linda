@@ -7,6 +7,7 @@
 """Provides a simple Python interface to playing audio using the Windows Audio Session API (WASAPI), as well as other useful utilities."""
 
 import threading  # noqa: I001
+import sys
 import typing
 from enum import Enum, auto
 from ctypes import (
@@ -93,6 +94,12 @@ def playWaveFile(
 	f = wave.open(fileName, "r")  # noqa: SIM115
 	if f is None:
 		raise RuntimeError("can not open file %s" % fileName)  # noqa: UP031
+	if sys.platform != "win32":
+		# The loop below tests fileWavePlayer and then reads it again to stop it. Between the two, at
+		# the loop's backward jump, the thread playing the previous file can run and set it to None,
+		# and the stop then raises AttributeError and this file is not played.
+		while (previousPlayer := fileWavePlayer) is not None:
+			previousPlayer.stop()
 	if fileWavePlayer is not None:
 		# There are several race conditions where the background thread might feed
 		# audio after we call stop here in the main thread. Some of these are
