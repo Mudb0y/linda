@@ -673,6 +673,12 @@ WATCHDOG_FAST = """
 		watchdog.NORMAL_CORE_ALIVE_TIMEOUT = 0.2
 		watchdog.FROZEN_WARNING_TIMEOUT = 0.3
 		watchdog.RECOVER_ATTEMPT_INTERVAL = 0.01
+
+		def waitFor(condition, bound=60):
+			deadline = time.monotonic() + bound
+			while not condition() and time.monotonic() < deadline:
+				time.sleep(0.01)
+			return condition()
 """
 
 
@@ -682,12 +688,21 @@ def test_watchdogLogsStackOfFrozenCore(tmp_path: Path):
 		startLog(tmp_path / "nvda.log")
 		+ WATCHDOG_FAST
 		+ """
+		import logging
+		import select
+		import threading
+
 		import exceptions
 
+		frozenReported = threading.Event()
+
+		class FrozenReport(logging.Handler):
+			def emit(self, record):
+				if record.getMessage().startswith("Core frozen in stack!"):
+					frozenReported.set()
+
+		log.addHandler(FrozenReport(level=logging.ERROR))
 		watchdog.initialize()
-
-		import select
-
 		fd = watchdog.cancelCallFd()
 
 		def readable():
@@ -695,24 +710,32 @@ def test_watchdogLogsStackOfFrozenCore(tmp_path: Path):
 
 		before = {"cancelling": watchdog.isCancellingCalls(), "readable": readable()}
 
+		def tryCall():
+			try:
+				return watchdog.cancellableExecute(lambda: "ran")
+			except exceptions.CallCancelled:
+				return "refused"
+
 		def coreStuckInTest():
 			watchdog.alive()
-			time.sleep(1.5)
-			try:
-				watchdog.cancellableExecute(lambda: "ran")
-				refused = False
-			except exceptions.CallCancelled:
-				refused = True
+			# Frozen until recovery is cancelling calls and the core has been reported stuck.
+			waitFor(watchdog.isCancellingCalls)
+			frozenReported.wait(60)
+			fromWorker = []
+			worker = threading.Thread(target=lambda: fromWorker.append(tryCall()))
+			worker.start()
+			worker.join(60)
 			return {
 				"recovering": watchdog.isAttemptingRecovery,
-				"refused": refused,
+				"mainThread": tryCall(),
+				"otherThread": fromWorker,
 				"cancelling": watchdog.isCancellingCalls(),
 				"readable": readable(),
 			}
 
 		during = coreStuckInTest()
 		watchdog.asleep()
-		time.sleep(0.2)
+		waitFor(lambda: not watchdog.isAttemptingRecovery)
 		after = {
 			"recovering": watchdog.isAttemptingRecovery,
 			"cancelling": watchdog.isCancellingCalls(),
@@ -721,8 +744,7 @@ def test_watchdogLogsStackOfFrozenCore(tmp_path: Path):
 
 		def coreStuckAgainInTest():
 			watchdog.alive()
-			time.sleep(0.6)
-			return watchdog.isCancellingCalls()
+			return waitFor(watchdog.isCancellingCalls)
 
 		# Frozen again, and the screen reader stops before the core recovers.
 		frozenAgain = coreStuckAgainInTest()
@@ -744,7 +766,14 @@ def test_watchdogLogsStackOfFrozenCore(tmp_path: Path):
 	assert done.logErrors, "no frozen core was reported"
 	assert all(record.startswith("ERROR: Core frozen in stack!") for record in done.logErrors), done.logErrors
 	assert done.value["before"] == {"cancelling": False, "readable": False}
-	assert done.value["during"] == {"recovering": True, "refused": True, "cancelling": True, "readable": True}
+	# Only the frozen main thread gives up; a call on any other thread is not what froze the core.
+	assert done.value["during"] == {
+		"recovering": True,
+		"mainThread": "refused",
+		"otherThread": ["ran"],
+		"cancelling": True,
+		"readable": True,
+	}
 	assert done.value["after"] == {"recovering": False, "cancelling": False, "readable": False}
 	assert done.value["frozenAgain"] is True
 	assert done.value["terminated"] == {"cancelling": False, "readable": False}
@@ -773,9 +802,17 @@ def test_watchdogQuietWhileCoreRuns(tmp_path: Path):
 	done = harness.runChild(
 		tmp_path,
 		startLog(tmp_path / "nvda.log")
-		+ WATCHDOG_FAST
 		+ """
 		import threading
+		import time
+		import watchdog
+
+		# Shorter than upstream's, so that the idle waits below outlast them, and still far longer
+		# than a busy machine stretches the core's few milliseconds of work.
+		watchdog.MIN_CORE_ALIVE_TIMEOUT = 0.25
+		watchdog.NORMAL_CORE_ALIVE_TIMEOUT = 1.0
+		watchdog.FROZEN_WARNING_TIMEOUT = 1.5
+		outlastingEveryTimeout = 1.7
 
 		# The core pump calls these whether or not the watchdog was started.
 		watchdog.alive()
@@ -787,18 +824,19 @@ def test_watchdogQuietWhileCoreRuns(tmp_path: Path):
 			time.sleep(0.002)
 			watchdog.asleep()
 			time.sleep(0.005)
-		# Asleep for longer than every threshold: an idle core is not a frozen one.
-		time.sleep(0.6)
+		# An idle core is not a frozen one.
+		time.sleep(outlastingEveryTimeout)
 		with watchdog.Suspender():
-			time.sleep(0.3)
+			time.sleep(outlastingEveryTimeout)
 		value = watchdog.cancellableExecute(lambda a, b=0: a + b, 1, b=2)
 		recovering = watchdog.WatchdogObserver().isAttemptingRecovery
 		count = 100000
-		started = time.perf_counter()
+		# CPU time, which a loaded machine stretches far less than it does the clock.
+		started = time.thread_time()
 		for _ in range(count):
 			watchdog.alive()
 			watchdog.asleep()
-		perPump = (time.perf_counter() - started) / count
+		perPump = (time.thread_time() - started) / count
 		watchdog.terminate()
 		result = {
 			"value": value,
@@ -815,9 +853,64 @@ def test_watchdogQuietWhileCoreRuns(tmp_path: Path):
 	assert done.value["recovering"] is False
 	assert done.value["asleep"] is True
 	assert not done.value["watcherLeft"]
-	assert "freeze" not in done.value["log"]
+	assert "Starting freeze recovery" not in done.value["log"]
 	# alive() and asleep() run around every queued function; a pair costs about a microsecond.
 	assert done.value["perPump"] < 20e-6, done.value["perPump"]
+
+
+def test_watchdogRunsCallsWhileSuspended(tmp_path: Path):
+	done = harness.runChild(
+		tmp_path,
+		startLog(tmp_path / "nvda.log")
+		+ """
+		import exceptions
+		import NVDAState
+		import watchdog
+
+		watchdog.initialize()
+		try:
+			watchdog.initialize()
+			again = "started twice"
+		except RuntimeError as e:
+			again = str(e)
+		with watchdog.Suspender():
+			# The watcher can begin a recovery just as the core suspends it for a modal loop.
+			watchdog._startCancellingCalls()
+			cancelling = watchdog.isCancellingCalls()
+			try:
+				suspended = watchdog.cancellableExecute(lambda: "ran")
+			except exceptions.CallCancelled:
+				suspended = "refused"
+		cancellingAfter = watchdog.isCancellingCalls()
+		watchdog.terminate()
+		NVDAState._allowDeprecatedAPI = lambda: True
+		moved = watchdog.getFormattedStacksForAllThreads is logHandler.getFormattedStacksForAllThreads
+		try:
+			watchdog.noSuchAttribute
+			missing = "found"
+		except AttributeError:
+			missing = "AttributeError"
+		result = {
+			"again": again,
+			"cancelling": cancelling,
+			"suspended": suspended,
+			"cancellingAfter": cancellingAfter,
+			"moved": moved,
+			"missing": missing,
+			"log": logText(),
+		}
+		""",
+	)
+	done.assertClean()
+	assert {key: value for key, value in done.value.items() if key != "log"} == {
+		"again": "already running",
+		"cancelling": True,
+		"suspended": "ran",
+		"cancellingAfter": False,
+		"moved": True,
+		"missing": "AttributeError",
+	}
+	assert "Importing getFormattedStacksForAllThreads from here is deprecated" in done.value["log"]
 
 
 def test_watchdogSendMessageIsWindowsOnly(tmp_path: Path):
