@@ -10,12 +10,15 @@ linuxPlatform.audioOutput sink instead of a WASAPI endpoint:
 - stop may be called from any thread, returns at once, wakes a blocked feeder and discards pending
   callbacks without calling them;
 - pause and resume keep what is queued and its position;
-- leading silence is trimmed as SilenceDetect does it, with one silent frame put back.
+- leading silence is trimmed as SilenceDetect does it, with one silent frame put back;
+- at interpreter exit every stream is closed and no other is opened, so that no thread is left
+  inside a sink as the interpreter is torn down.
 
 Failures are raised as the WindowsError the HRESULT would have become under ctypes, since nvwave
 reads winerror.
 """
 
+import atexit
 import contextlib
 import ctypes
 import errno
@@ -40,6 +43,12 @@ _AUDCLNT_E_UNSUPPORTED_FORMAT = -2004287480
 #: The shortest sleep of a blocked call, so that a callback due within a millisecond is not waited
 #: for by spinning.
 _MIN_WAIT = 0.001
+
+#: How long the exit hook waits for a thread to come out of a call into a stream.
+_EXIT_WAIT = 1.0
+
+#: Set once the interpreter is exiting, after which no stream is opened.
+_isExiting = False
 
 
 class _PlayState(Enum):
@@ -107,7 +116,7 @@ class _Player:
 			self._wakeCondition.notify_all()
 
 	def _open(self) -> None:
-		if self._stream is not None:
+		if self._stream is not None or _isExiting:
 			return
 		if not self.format.isSupported():
 			raise WindowsError(
@@ -204,6 +213,9 @@ class _Player:
 	def feed(self, data: bytes | None, size: int, idOut: Any) -> None:
 		with self._lock:
 			self._open()
+			if self._stream is None:
+				# The interpreter is exiting, and nothing more is played.
+				return
 			if self._state is _PlayState.stopping:
 				# stop() was called after the previous feed returned.
 				self._completeStop()
@@ -281,17 +293,16 @@ class _Player:
 			self._syncLocked()
 
 	def _syncLocked(self) -> None:
-		if self._stream is None:
-			return
 		sentFrames = self._sentFrames
-		while (playPos := self._playPos()) < sentFrames:
-			if self._state is not _PlayState.playing:
+		# Checked on every pass, as a callback releases the lock, and stop or the exit hook may run.
+		while self._stream is not None and self._state is _PlayState.playing:
+			playPos = self._playPos()
+			if playPos >= sentFrames:
+				# A callback right at the end of the stream.
+				self._maybeFireCallbacks()
 				return
 			self._maybeFireCallbacks()
 			self._waitUntilNeeded(self.format.framesToSeconds(sentFrames - playPos))
-		# A callback right at the end of the stream.
-		if self._state is _PlayState.playing:
-			self._maybeFireCallbacks()
 
 	def idle(self) -> None:
 		self.sync()
@@ -316,7 +327,8 @@ class _Player:
 				# As IAudioStreamVolume::SetChannelVolume; nvwave relies on it for mono streams.
 				raise WindowsError(errno.EINVAL, "The parameter is incorrect", None, E_INVALIDARG)
 			self._volumes[channel] = level
-			self._stream.setChannelVolume(channel, level)
+			if self._stream is not None:
+				self._stream.setChannelVolume(channel, level)
 
 	def startTrimmingLeadingSilence(self, start: bool) -> None:
 		with self._lock:
@@ -327,6 +339,29 @@ class _Player:
 			if self._stream is not None:
 				self._stream.close()
 				self._stream = None
+
+	def closeForExit(self) -> None:
+		"""Close the stream and leave any waiting feed or sync to return, without waiting for long.
+
+		A daemon thread, such as nvwave's wave file player, can still be playing at interpreter exit,
+		and must not be inside a sink, which may be native code, as the interpreter is torn down.
+		"""
+		if not self._lock.acquire(timeout=_EXIT_WAIT):
+			# A thread is stuck inside the stream; calling it from here too would break the sink's
+			# contract.
+			return
+		try:
+			stream, self._stream = self._stream, None
+			# Stopping, so that a feed or sync now waiting returns as it does after stop().
+			self._state = _PlayState.stopping
+			self._feedEnds = []
+			self._wakePending = True
+			self._wakeCondition.notify_all()
+			if stream is not None:
+				with contextlib.suppress(OSError):
+					stream.close()
+		finally:
+			self._lock.release()
 
 
 def _storeFeedId(idOut: Any, feedId: int) -> None:
@@ -438,3 +473,15 @@ def wasSilence_terminate() -> None:
 	global _silenceDeviceId
 	_silenceDeviceId = None
 	audioOutput.getSink().stopKeepingAwake()
+
+
+@atexit.register
+def _closeForExit() -> None:
+	global _isExiting, _silenceDeviceId
+	_isExiting = True
+	for player in list(_players.values()):
+		player.closeForExit()
+	if _silenceDeviceId is not None:
+		_silenceDeviceId = None
+		with contextlib.suppress(OSError):
+			audioOutput.getSink().stopKeepingAwake()

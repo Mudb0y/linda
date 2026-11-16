@@ -898,6 +898,129 @@ def test_wakeFromASinkThreadEndsWaitsEarly(tmp_path: Path):
 	assert value["calls"] == [[i, "MainThread"] for i in range(20)]
 
 
+def test_exitClosesEveryStreamWithoutWaitingForItsAudio(tmp_path: Path):
+	"""The exit hook, called directly: a feeder blocked in feed and a syncer blocked in sync both
+	return, every stream is closed, no callback runs, and nothing opens a stream afterwards."""
+	value = runAudio(
+		tmp_path,
+		"""
+		from linuxPlatform import audioOutput
+		from linuxPlatform.audioOutput.nullSink import NullSink, NullStream
+
+		closed = []
+
+		class RecordingStream(NullStream):
+			def close(self):
+				closed.append(threading.current_thread().name)
+				super().close()
+
+		class RecordingSink(NullSink):
+			opened = 0
+
+			def openStream(self, deviceId, fmt, wake):
+				RecordingSink.opened += 1
+				return RecordingStream(fmt)
+
+		audioOutput._sink = RecordingSink()
+		feeding = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+		syncing = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+
+		def feedLong():
+			feeding.feed(bytes(32000), onDone=done("fed"))  # 2 s, five times the buffer
+			feeding.idle()
+
+		feeder = threading.Thread(target=feedLong, name="feeder")
+		feeder.start()
+		syncing.feed(bytes(16000), onDone=done("synced"))  # 1 s
+		syncer = threading.Thread(target=syncing.idle, name="syncer")
+		syncer.start()
+		time.sleep(0.1)
+		start = time.monotonic()
+		wasapi._closeForExit()
+		hookTook = time.monotonic() - start
+		feeder.join(3)
+		syncer.join(3)
+		late = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+		late.feed(bytes(1600), onDone=done("late"))
+		late.sync()
+		result = {
+			"hookTook": hookTook,
+			"alive": [thread.name for thread in (feeder, syncer) if thread.is_alive()],
+			"closed": closed,
+			"opened": RecordingSink.opened,
+			"calls": [tag for tag, _thread, _at in events],
+		}
+		""",
+	)
+	assert value["alive"] == []
+	# Neither stream's audio was waited for.
+	assert value["hookTook"] < 0.5
+	assert value["closed"] == ["MainThread", "MainThread"]
+	assert value["opened"] == 2
+	assert value["calls"] == []
+
+
+def test_aPlayerStillPlayingAtExitIsClosedBeforeTheInterpreterGoes(tmp_path: Path):
+	"""A daemon thread playing at exit, as nvwave's wave file player can be: the stream it is
+	feeding is closed at exit, and nothing reaches the stream after that."""
+	record = tmp_path / "streamCalls.txt"
+	done = harness.runChild(
+		tmp_path,
+		f"""
+		import threading
+		import time
+
+		import NVDAHelper
+		import nvwave
+		from linuxPlatform import audioOutput
+		from linuxPlatform.audioOutput.nullSink import NullSink, NullStream
+
+
+		def note(what):
+			with open({str(record)!r}, "a", encoding="utf-8") as f:
+				f.write(what + "\\n")
+
+
+		class RecordingStream(NullStream):
+			def write(self, data):
+				note("write")
+				super().write(data)
+
+			def close(self):
+				note("close")
+				super().close()
+
+
+		class RecordingSink(NullSink):
+			def openStream(self, deviceId, fmt, wake):
+				note("open")
+				return RecordingStream(fmt)
+
+
+		nvwave.initialize()
+		audioOutput._sink = RecordingSink()
+		player = nvwave.WavePlayer(1, 8000, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS)
+
+
+		def play():
+			player.feed(bytes(160000))  # 10 s
+			player.idle()
+
+
+		threading.Thread(target=play, name="player", daemon=True).start()
+		time.sleep(0.3)
+		result = "exiting"
+		""",
+	)
+	done.assertClean()
+	assert done.returnCode == 0, done.stderr
+	assert "Traceback" not in done.stderr, done.stderr
+	calls = record.read_text(encoding="utf-8").split()
+	assert calls[0] == "open"
+	assert "write" in calls
+	assert calls[-1] == "close" and calls.count("close") == 1, calls
+
+
 def test_missingCaptureDirectoryFailsAtStart(tmp_path: Path):
 	done = harness.runChild(
 		tmp_path,
