@@ -71,7 +71,13 @@ CLEAN_CHECKS = {
 	"and the run's Python code did not try to",
 	"audio": "no audio library was loaded and no sound device opened",
 	"stderr": "standard error holds nothing outside ALLOWED_STANDARD_ERROR",
+	"freeze": "the watchdog never found the core frozen",
 }
+
+#: What the watchdog logs, at INFO, once the core has not reported alive for as long as it takes to
+#: count as frozen. An ERROR follows only after a further 15 s, and a freeze that ends before then,
+#: such as a 17 s walk of a long list's siblings, is otherwise logged at INFO alone.
+FREEZE_MESSAGE = "Starting freeze recovery after "
 
 #: Gaps that Linux bodies note through linuxPlatform.noteNoLinuxImplementation rather than raise, which
 #: a clean run may record, each with where and why.
@@ -468,11 +474,19 @@ class Checks:
 				checks._onLogRecord(record)
 
 		self._collector = Collector(level=recordLevel)
+
+		class FreezeCollector(logging.Handler):
+			def emit(self, record: logging.LogRecord) -> None:
+				if isinstance(record.msg, str) and record.msg.startswith(FREEZE_MESSAGE):
+					checks.record("freeze", message=record.getMessage())
+
+		self._freezeCollector = FreezeCollector(level=logging.INFO)
 		sys.addaudithook(self._onAudit)
 		threading.excepthook = self._onThreadException
 		sys.unraisablehook = self._onUnraisable
 		# On the root logger, which every logger's records reach, NVDA's among them.
 		logging.getLogger().addHandler(self._collector)
+		logging.getLogger().addHandler(self._freezeCollector)
 
 	def _onAudit(self, event: str, args: tuple) -> None:
 		# ctypes opens the program itself, with no name, as it imports.
@@ -621,6 +635,8 @@ class ChildResult:
 	unraisable: list[str] = field(default_factory=list)
 	writes: list[str] = field(default_factory=list)
 	audio: list[str] = field(default_factory=list)
+	#: What the watchdog logged as each freeze began.
+	freezes: list[str] = field(default_factory=list)
 	#: "EVENT WHAT" for each of REACH_EVENTS and each open under SYSTEM_FILES; no check reads it.
 	reached: list[str] = field(default_factory=list)
 	stdout: str = ""
@@ -653,6 +669,8 @@ class ChildResult:
 				result.writes.append(f"{event['event']} {event['path']}")
 			elif kind == "audio":
 				result.audio.append(event["what"])
+			elif kind == "freeze":
+				result.freezes.append(event["message"])
 			elif kind == "reach":
 				result.reached.append(f"{event['event']} {event['what']}")
 		return result
@@ -688,6 +706,7 @@ class ChildResult:
 			"writes": self.writes and self._detail("write"),
 			"audio": "\n".join(self.audio),
 			"stderr": unexpectedStandardError(self.stderr)[-4000:],
+			"freeze": "\n".join(self.freezes),
 		}
 		return [
 			f"not clean: {CLEAN_CHECKS[name]} does not hold:\n{detail}"
