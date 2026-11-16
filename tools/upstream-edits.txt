@@ -198,13 +198,13 @@ source/installer.py
   installing raises NoLinuxImplementation on Linux, naming the first
   registry call it reaches
 source/keyboardHandler.py
-  Linux runtime: what a key press needs from the live keyboard comes from
-  linuxPlatform.inputHook, where a capture layer will answer it: the sticky
-  keys flags, whether num lock is on for a numpad operator key, and the
-  character that names a key with no name of its own. A single character in
-  a key name is looked up there too, which answers for lower case letters
-  without the layout. Until a capture layer exists the rest raise
-  NoLinuxImplementation
+  Linux runtime: what a key press needs from the live keyboard is asked of
+  linuxPlatform.inputHook instead of user32: the sticky keys flags, whether
+  num lock is on for a numpad operator key, and the character that names a
+  key with no name of its own. A single character in a key name is looked
+  up there too, which answers for the ASCII letters as VkKeyScanEx does on
+  Latin layouts, shift for upper case. inputHook reads no layout or key
+  state, so the rest raise NoLinuxImplementation
 source/languageHandler.py
   Linux runtime: the interface language, the C locale, language names and the
   measurement system come from linuxPlatform.posixLocale, which reads the

@@ -78,12 +78,14 @@ def vkKeyScan(char: str) -> tuple[int, int]:
 	"""The modifiers and virtual-key code that type char, as winUser.VkKeyScanEx returns them.
 
 	Windows defines the virtual-key codes of the letters A to Z as their upper case ASCII codes on
-	every layout, and on Latin layouts a lower case letter takes no modifier. Any other character,
-	digits included, which take shift on French layouts, depends on the layout in use, which only a
-	capture layer will know.
+	every layout, and on Latin layouts a lower case letter takes no modifier and an upper case one
+	takes shift. Any other character, digits included, which take shift on French layouts, depends on
+	the layout in use, which nothing here reads.
+
+	:return: The modifiers as VkKeyScanEx's high byte gives them, 1 being shift, and the virtual-key code.
 	"""
-	if len(char) == 1 and char in string.ascii_lowercase:
-		return 0, ord(char.upper())
+	if len(char) == 1 and char in string.ascii_letters:
+		return int(char.isupper()), ord(char.upper())
 	raise NoLinuxImplementation(
 		"keyboard layout lookup", f"which key types {char!r} depends on the keyboard layout"
 	)

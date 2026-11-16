@@ -262,6 +262,7 @@ def test_gestureModifierLogic(tmp_path: Path):
 		shift = KeyboardInputGesture.fromName("shift")
 		leftControlA = KeyboardInputGesture({(winUser.VK_LCONTROL, False)}, ord("A"), 0x1E, False)
 		shiftA = KeyboardInputGesture.fromName("shift+a")
+		upperT = KeyboardInputGesture.fromName("NVDA+T")
 		space = KeyboardInputGesture.fromName("space")
 		capsLock = KeyboardInputGesture.fromName("capsLock")
 		result = {
@@ -271,6 +272,7 @@ def test_gestureModifierLogic(tmp_path: Path):
 			"generalized": sorted(leftControlA.generalizedModifiers),
 			"leftControlA": [leftControlA.isCharacter, leftControlA.shouldReportAsCommand, leftControlA.identifiers[1]],
 			"shiftA": [shiftA.isCharacter, shiftA.shouldReportAsCommand],
+			"upperT": [inputCore.normalizeGestureIdentifier(i) for i in upperT.identifiers],
 			"space": [space.isCharacter, space.shouldReportAsCommand],
 			"capsLock": [capsLock.isNVDAModifierKey, capsLock.shouldReportAsCommand],
 			"speechEffect": [shiftA.speechEffectWhenExecuted, shift.speechEffectWhenExecuted],
@@ -292,6 +294,8 @@ def test_gestureModifierLogic(tmp_path: Path):
 		"generalized": [[17, False]],
 		"leftControlA": [False, True, "kb:control+a"],
 		"shiftA": [True, False],
+		# An upper case letter in a key name is typed with shift, as VkKeyScanEx answers on Windows.
+		"upperT": ["kb(desktop):nvda+shift+t", "kb:nvda+shift+t"],
 		"space": [True, False],
 		# Caps lock is an NVDA key only when the configuration says so, which by default it does not.
 		"capsLock": [False, False],
@@ -305,10 +309,10 @@ def test_gestureModifierLogic(tmp_path: Path):
 @pytest.mark.parametrize(
 	("call", "missing"),
 	(
-		# Which key types a character other than a lower case letter depends on the layout.
+		# Which key types a character other than an ASCII letter depends on the layout.
 		("KeyboardInputGesture.fromName('NVDA+.')", "keyboard layout lookup"),
 		("KeyboardInputGesture.fromName('NVDA+1')", "keyboard layout lookup"),
-		("KeyboardInputGesture.fromName('T')", "keyboard layout lookup"),
+		("KeyboardInputGesture.fromName('NVDA+\u00e9')", "keyboard layout lookup"),
 		# The numpad operators read whether num lock is on.
 		("KeyboardInputGesture.fromName('numpadPlus')", "keyboard state"),
 		# A key with no name of its own is named after what it types.
