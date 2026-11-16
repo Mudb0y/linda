@@ -169,30 +169,6 @@ def eventObject(node: Node):
 	return getObject(node)
 
 
-def findStatusBar(window) -> object | None:
-	"""The first status bar inside window, found by role in one Collection call."""
-	node = getattr(window, "node", None)
-	if node is None:
-		return None
-	try:
-		found = client().firstMatchWithRole(node, "status bar")
-	except NodeGone:
-		return None
-	return getObject(found) if found else None
-
-
-def inTreeOrder(nodes: list[Node]) -> list[Node]:
-	"""nodes in the order a user meets them; GTK lists a radio group's members last first."""
-	c = client()
-	try:
-		parents = {c.parent(n) for n in nodes}
-		if len(parents) == 1:
-			return sorted(nodes, key=c.indexInParent)
-		return sorted(nodes, key=lambda n: (c.extents(n) or (0, 0, 0, 0))[1::-1])
-	except NodeGone:
-		return list(nodes)
-
-
 # The foreground and the focus, which AT-SPI has no call for.
 
 

@@ -12,7 +12,6 @@ counted by their roles only, and only in small containers.
 """
 
 import re
-from collections.abc import Callable
 
 import api
 from controlTypes import Role, State
@@ -92,73 +91,41 @@ _OPAQUE_RAW_ROLES = frozenset({"list", "list box", "table", "tree", "tree table"
 _keyName = re.compile(r"<(\w+)>")
 _MODIFIERS = {"control": "Ctrl", "primary": "Ctrl", "alt": "Alt", "shift": "Shift", "super": "Windows"}
 _QT_MODIFIERS = {"Ctrl": "Ctrl", "Alt": "Alt", "Shift": "Shift", "Meta": "Windows"}
-#: The toolkit of each application, by bus name, which no other application ever has.
-_toolkits: dict[str, str] = {}
 
 
-def _client():
+def _client() -> atspiClient.Client:
 	"""The client every fact comes through."""
-	shared = getattr(atspiClient, "client", None)
-	if isinstance(shared, atspiClient.Client):
-		return shared
-	return handler.client()
-
-
-def _askClient(node: Node, question: str, libatspiAnswer: Callable[[object], str | None]) -> str:
-	"""The client's answer to question about node, or, where the client has no such question,
-	libatspiAnswer(node.ref), made through the client's call wrapper."""
-	ask = getattr(_client(), question, None)
-	if ask is not None:
-		return ask(node) or ""
-	call: Callable | None = getattr(atspiClient, "call", None)
-	if call is not None:
-		return call(node, lambda *_args: libatspiAnswer(node.ref)) or ""
-	return atspiClient._call(libatspiAnswer, node.ref) or ""
-
-
-def _libatspiToolkit(ref) -> str | None:
-	# Qt answers ToolkitName only on its application object.
-	app = ref.get_application()
-	return (app or ref).get_toolkit_name()
+	return atspiClient.client
 
 
 def desktopNode() -> Node:
-	ask = getattr(handler, "desktopNode", None)
-	return ask() if ask is not None else _client().desktop()
+	return handler.desktopNode()
 
 
 def isApplication(node: Node) -> bool:
 	return node.path == ROOT_PATH and node != desktopNode()
 
 
-def _isHung(node: Node) -> bool:
-	ask = getattr(_client(), "isHung", None)
-	return ask is not None and ask(node.busName)
-
-
 def applications() -> list[Node]:
 	"""Every application on the desktop that answers."""
+	c = _client()
 	try:
-		apps = _client().applications()
+		apps = c.applications()
 	except NodeGone:
 		return []
-	return [app for app in apps if not _isHung(app)]
+	return [app for app in apps if not c.isHung(app.busName)]
 
 
 def toolkitOf(node: Node) -> str:
-	toolkit = _toolkits.get(node.busName)
-	if toolkit is None:
-		try:
-			toolkit = _askClient(node, "toolkit", _libatspiToolkit)
-		except NodeGone:
-			return ""
-		_toolkits[node.busName] = toolkit
-	return toolkit
+	try:
+		return _client().toolkit(node)
+	except NodeGone:
+		return ""
 
 
 def accessibleIdOf(node: Node) -> str:
 	try:
-		return _askClient(node, "accessibleId", lambda ref: ref.get_accessible_id())
+		return _client().accessibleId(node)
 	except NodeGone:
 		return ""
 

@@ -14,6 +14,7 @@ import dataclasses
 import inspect
 import threading
 import time
+import warnings
 from collections.abc import Callable
 
 import gi
@@ -191,9 +192,14 @@ class Client:
 		"""The application's ToolkitName: "gtk" for GTK 3, "GTK" for GTK 4, "Qt", and so on."""
 		name = _toolkits.get(node.busName)
 		if name is None:
-			name = call(node, Atspi.Accessible.get_toolkit_name) or ""
+			# Qt answers ToolkitName only on its application object.
+			name = call(node, lambda: (node.ref.get_application() or node.ref).get_toolkit_name()) or ""
 			_toolkits[node.busName] = name
 		return name
+
+	def accessibleId(self, node: Node) -> str:
+		"""The AccessibleId the toolkit gives the accessible, which names its widget class in GTK 4 and Qt."""
+		return call(node, Atspi.Accessible.get_accessible_id) or ""
 
 	def role(self, node: Node) -> str:
 		# GTK 4 and Qt give their own names from GetRoleName; the number is AT-SPI's.
@@ -268,10 +274,9 @@ class Client:
 		)
 
 	def actions(self, node: Node) -> list[tuple[str, str]]:
-		# get_action_name reaches a deprecated function, whose warning would be logged.
 		return [
 			(
-				call(node, Atspi.Action.get_localized_name, i),
+				call(node, lambda i=i: _actionName(node.ref, i)),
 				call(node, Atspi.Action.get_key_binding, i),
 			)
 			for i in range(call(node, Atspi.Action.get_n_actions))
@@ -430,6 +435,17 @@ class Client:
 			for eventType in eventTypes:
 				self._listener.deregister(eventType)
 			self._listener = None
+
+
+def _actionName(ref, index: int) -> str:
+	try:
+		return Atspi.Action.get_localized_name(ref, index)
+	except GLib.Error:
+		# Qt answers only GetName, which libatspi reaches through a deprecated function whose warning
+		# would be logged.
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", DeprecationWarning)
+			return Atspi.Action.get_action_name(ref, index)
 
 
 _client: Client | None = None
