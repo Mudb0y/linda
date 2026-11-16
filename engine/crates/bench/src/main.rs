@@ -264,7 +264,21 @@ async fn wait(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// The bench finds the accessibility bus the way a screen reader does, so
+/// anywhere but the rig it would walk the live desktop's applications. The
+/// variable alone could be copied into another shell; the rig's sandbox is
+/// also the first process and has no /run/user, as the rig itself checks.
+fn inside_rig() -> bool {
+    std::env::var("BASEDREADER_RIG").as_deref() == Ok("1")
+        && std::fs::read_to_string("/proc/1/comm").is_ok_and(|c| c.trim_end() == "bwrap")
+        && !std::path::Path::new("/run/user").exists()
+}
+
 fn main() -> ExitCode {
+    if !inside_rig() {
+        eprintln!("basedreader-bench: runs only inside tests/linux/rig");
+        return ExitCode::from(2);
+    }
     let mut argv = std::env::args().skip(1);
     let cmd = argv.next().unwrap_or_default();
     let args = match Args::parse(argv) {
