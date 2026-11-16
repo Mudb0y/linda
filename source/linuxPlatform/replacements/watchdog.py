@@ -23,7 +23,7 @@ from typing import Any, NoReturn
 import exceptions
 import logHandler
 import NVDAState
-from linuxPlatform import NoLinuxImplementation
+from linuxPlatform import NoLinuxImplementation, missingAttribute
 from logHandler import log
 
 
@@ -36,7 +36,7 @@ def __getattr__(attrName: str) -> Any:
 			stack_info=True,
 		)
 		return logHandler.getFormattedStacksForAllThreads
-	raise AttributeError(f"module {__name__!r} has no attribute {attrName!r}")
+	missingAttribute(__name__, attrName)
 
 
 MIN_CORE_ALIVE_TIMEOUT = 0.5

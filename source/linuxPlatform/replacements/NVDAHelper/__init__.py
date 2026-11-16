@@ -10,15 +10,14 @@ has a Linux counterpart here, so initialize() registers nothing and a program wr
 NVDA's controller client cannot reach this copy.
 
 Every other name of upstream's module is missing here; reaching for one raises
-winBindings.icu.NoLinuxAttribute naming it: audited as NoLinuxImplementation, and an AttributeError
+linuxPlatform.NoLinuxAttribute naming it: audited as NoLinuxImplementation, and an AttributeError
 to hasattr, getattr with a default and ``from NVDAHelper import name``, which then raises
 ImportError. That holds for upstream's submodules this package lacks, such as localWin10, too.
 """
 
 from typing import NoReturn  # noqa: I001
 
-from linuxPlatform import NoLinuxImplementation
-from winBindings import icu
+from linuxPlatform import NoLinuxImplementation, missingAttribute
 
 from . import localLib  # noqa: F401
 
@@ -46,4 +45,4 @@ def getHelperLocalWin10Dll() -> NoReturn:
 
 
 def __getattr__(name: str) -> NoReturn:
-	icu.missingAttribute(__name__, name)
+	missingAttribute(__name__, name)

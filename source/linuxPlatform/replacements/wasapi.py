@@ -27,10 +27,10 @@ import itertools
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from enum import Enum, auto
-from typing import Any
+from typing import Any, NoReturn
 
 from comtypes.hresult import E_INVALIDARG
-from linuxPlatform import audioOutput
+from linuxPlatform import audioOutput, missingAttribute
 from linuxPlatform.audioOutput import NoDevice, Sink, SinkStream, StreamFormat, StreamLost, pcm
 from linuxPlatform.bootstrap import WindowsError
 from logHandler import log
@@ -498,3 +498,7 @@ def _closeForExit() -> None:
 		_silenceDeviceId = None
 		with contextlib.suppress(OSError):
 			audioOutput.getSink().stopKeepingAwake()
+
+
+def __getattr__(name: str) -> NoReturn:
+	missingAttribute(__name__, name)

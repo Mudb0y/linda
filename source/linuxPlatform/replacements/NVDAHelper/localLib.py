@@ -5,7 +5,7 @@ The beep generator and the three text boundary functions are implemented here, w
 calling convention, so their callers work unchanged; the others raise NoLinuxImplementation.
 Entry points that only Windows-only modules call (in-process helpers for Office, SysListView32,
 IAccessible2 and UI Automation) are left out, and reaching for one, or for any other name upstream's
-module has and this one lacks, raises winBindings.icu.NoLinuxAttribute naming it: audited as
+module has and this one lacks, raises linuxPlatform.NoLinuxAttribute naming it: audited as
 NoLinuxImplementation, and an AttributeError to hasattr, getattr with a default and
 ``from NVDAHelper.localLib import name``, which then raises ImportError.
 
@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from ctypes import c_ulonglong, c_void_p
 from typing import Any, NoReturn
 
-from linuxPlatform import NoLinuxImplementation
+from linuxPlatform import NoLinuxImplementation, missingAttribute
 from linuxPlatform.utf16 import Utf16Buffer
 from logHandler import log
 from winBindings import icu
@@ -67,7 +67,7 @@ writeCrashDump = _notImplemented("writeCrashDump")
 
 
 def __getattr__(name: str) -> NoReturn:
-	icu.missingAttribute(__name__, name)
+	missingAttribute(__name__, name)
 
 
 # The beep generator is nvdaHelper/local/beeps.cpp, statement for statement. hz arrives as a C float

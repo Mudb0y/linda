@@ -6,8 +6,9 @@ XDG autostart entries, and a display manager's login screen starts what its own 
 """
 
 from enum import IntEnum
+from typing import NoReturn
 
-from linuxPlatform import NoLinuxImplementation, xdg
+from linuxPlatform import NoLinuxImplementation, missingAttribute, xdg
 
 
 class AutoStartContext(IntEnum):
@@ -40,3 +41,7 @@ def willAutoStart(autoStartContext: AutoStartContext) -> bool:
 def setAutoStart(autoStartContext: AutoStartContext, enable: bool) -> None:
 	# Writing an autostart entry needs the command that starts NVDA, which only an installed copy has.
 	raise NoLinuxImplementation(f"easeOfAccess.setAutoStart({autoStartContext.name})")
+
+
+def __getattr__(name: str) -> NoReturn:
+	missingAttribute(__name__, name)

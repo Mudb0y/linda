@@ -9,7 +9,7 @@ name and NoLinuxImplementation.
 
 from typing import NoReturn as _NoReturn
 
-from linuxPlatform import NoLinuxAttribute as _NoLinuxAttribute
+from linuxPlatform import missingAttribute as _missingAttribute
 
 from .types import RelationType  # noqa: F401
 
@@ -29,8 +29,4 @@ def pumpAll() -> None:
 
 
 def __getattr__(name: str) -> _NoReturn:
-	# Special names are how Python and its tools probe a module, as `from ... import *` does for
-	# __all__; they need the AttributeError that says the module has no such name.
-	if name.startswith("__") and name.endswith("__"):
-		raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-	raise _NoLinuxAttribute(__name__, name)
+	_missingAttribute(__name__, name)

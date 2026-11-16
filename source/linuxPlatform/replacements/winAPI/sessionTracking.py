@@ -11,7 +11,10 @@ for everything but the desktop, the screen locker's unlock prompt included. Teac
 the locker's objects before _querySessionLocked ever answers True.
 """
 
+from typing import NoReturn
+
 from baseObject import AutoPropertyObject
+from linuxPlatform import missingAttribute
 from logHandler import log
 from NVDAState import _TrackNVDAInitialization
 
@@ -85,3 +88,7 @@ def isLockScreenModeActive() -> bool:
 		# Use secure mode instead if on the secure desktop
 		return False
 	return _isSessionLocked()
+
+
+def __getattr__(name: str) -> NoReturn:
+	missingAttribute(__name__, name)
