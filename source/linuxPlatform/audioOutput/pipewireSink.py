@@ -20,18 +20,35 @@ import errno
 import os
 from collections.abc import Callable
 
-from . import BUFFER_MS, Sink, SinkStream, StreamFormat
+from . import BUFFER_MS, Sink, SinkStream, StreamFormat, checkGain
 
 #: Names the libpwsink the sink loads.
 LIBRARY_VARIABLE = "BASEDREADER_PWSINK_LIB"
 
 
-def _load() -> ctypes.CDLL:
+class _Silencers:
+	"""pwsink_stop and pwsink_abort, called without letting go of the GIL.
+
+	Each is one atomic store, which can never block, so the thread silencing speech has no reason to
+	give the GIL up. Through CDLL it would, and would then have to win the GIL back from the threads
+	running Python meanwhile, which with three busy ones can take hundreds of milliseconds. Nothing
+	else in the library is called like this: opening and closing take a lock the library's own thread
+	holds for a moment, and the rest are not on the path that silences speech.
+	"""
+
+	def __init__(self, lib: ctypes.CDLL) -> None:
+		keepingGil = ctypes.PyDLL(lib._name, handle=lib._handle)
+		self.stop = keepingGil.pwsink_stop
+		self.abort = keepingGil.pwsink_abort
+		for function in (self.stop, self.abort):
+			function.restype = None
+			function.argtypes = [ctypes.c_void_p]
+
+
+def _load() -> tuple[ctypes.CDLL, _Silencers]:
 	path = os.environ.get(LIBRARY_VARIABLE, "")
 	if not path:
 		raise OSError(errno.ENOENT, f"{LIBRARY_VARIABLE} does not name libpwsink")
-	# CDLL rather than PyDLL, so that the GIL is released during every call: the calls never wait,
-	# and keeping the GIL through them was measured to gain nothing.
 	lib = ctypes.CDLL(path)
 	handle = ctypes.c_void_p
 	lib.pwsink_init.restype = ctypes.c_int
@@ -44,7 +61,7 @@ def _load() -> ctypes.CDLL:
 		function = getattr(lib, f"pwsink_{name}")
 		function.restype = ctypes.c_uint64
 		function.argtypes = [handle]
-	for name in ("start", "stop", "reset", "close"):
+	for name in ("start", "reset", "close"):
 		function = getattr(lib, f"pwsink_{name}")
 		function.restype = None
 		function.argtypes = [handle]
@@ -66,12 +83,13 @@ def _load() -> ctypes.CDLL:
 	lib.pwsink_set_pool_limits.argtypes = [ctypes.c_uint64, ctypes.c_uint64]
 	lib.pwsink_block_loop.restype = None
 	lib.pwsink_block_loop.argtypes = [ctypes.c_uint64]
-	return lib
+	return lib, _Silencers(lib)
 
 
 class PipewireStream(SinkStream):
-	def __init__(self, lib: ctypes.CDLL, handle: int, fmt: StreamFormat) -> None:
+	def __init__(self, lib: ctypes.CDLL, silencers: _Silencers, handle: int, fmt: StreamFormat) -> None:
 		self._lib = lib
+		self._silencers = silencers
 		#: libpwsink's handle, None once closed.
 		self.handle: int | None = handle
 		self.format = fmt
@@ -100,7 +118,10 @@ class PipewireStream(SinkStream):
 		self._lib.pwsink_start(self._live())
 
 	def stop(self) -> None:
-		self._lib.pwsink_stop(self._live())
+		self._silencers.stop(self._live())
+
+	def abort(self) -> None:
+		self._silencers.abort(self._live())
 
 	def reset(self) -> None:
 		self._lib.pwsink_reset(self._live())
@@ -120,7 +141,7 @@ class PipewireSink(Sink):
 	description = "PipeWire, through libpwsink"
 
 	def __init__(self) -> None:
-		self.lib = _load()
+		self.lib, self._silencers = _load()
 		result = self.lib.pwsink_init()
 		if result < 0:
 			raise OSError(-result, f"libpwsink could not start: {os.strerror(-result)}")
@@ -140,7 +161,7 @@ class PipewireSink(Sink):
 		)
 		if not handle:
 			raise OSError(-error.value, f"PipeWire is not given {fmt}: {os.strerror(-error.value)}")
-		return PipewireStream(self.lib, handle, fmt)
+		return PipewireStream(self.lib, self._silencers, handle, fmt)
 
 	def devices(self) -> list[tuple[str, str]]:
 		# Only the default device, which nvwave lists itself. WirePlumber moves the streams when the
@@ -159,6 +180,8 @@ class PipewireSink(Sink):
 		self.lib.pwsink_keep_awake(0)
 
 	def setGain(self, level: float) -> None:
+		# Checked here as well, since the library sees the level only once rounded to a float32.
+		checkGain(level)
 		if self.lib.pwsink_set_gain(level) < 0:
 			raise ValueError(f"a gain of {level} is not between 0 and 1")
 
