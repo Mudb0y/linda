@@ -14,9 +14,6 @@ Methods in test classes should have a C{test_} prefix.
 ### Ugly bootstrapping code.
 
 import os
-import shutil
-import sys
-import tempfile
 
 # The path to the unit tests.
 UNIT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -24,6 +21,8 @@ UNIT_DIR = os.path.dirname(os.path.abspath(__file__))
 TOP_DIR = os.path.dirname(os.path.dirname(UNIT_DIR))
 # The path to the NVDA "source" directory.
 SOURCE_DIR = os.path.join(TOP_DIR, "source")
+import sys
+
 if sys.platform == "linux":
 	from linuxPlatform import bootstrap
 
@@ -52,6 +51,9 @@ globalVars.appDir = SOURCE_DIR
 # We use the unit test directory, since we want a clean config.
 globalVars.appArgs.configPath = UNIT_DIR
 if sys.platform == "linux":
+	import shutil
+	import tempfile
+
 	# Nothing may be written under tests/unit at run time: runs share the checkout, which may be read-only.
 	_configDir = tempfile.TemporaryDirectory(prefix="nvda-unit-config-")
 	globalVars.appArgs.configPath = _configDir.name
@@ -99,7 +101,18 @@ import characterProcessing
 characterProcessing.initialize()
 import speech
 
+if sys.platform == "linux":
+	import synthDriverHandler
+
+	# eSpeak comes first in Linux's automatic choice, and its library links audio libraries; nobody
+	# has ruled yet on loading it under the rig. Every synth fails to load here anyway, because the
+	# speech dictionaries are never set up, so offering silence alone leaves the run with no synth
+	# just as the full list would.
+	_defaultSynths = synthDriverHandler.defaultSynthPriorityList
+	synthDriverHandler.defaultSynthPriorityList = ["silence"]
 speech.initialize()
+if sys.platform == "linux":
+	synthDriverHandler.defaultSynthPriorityList = _defaultSynths
 
 import braille
 import braille.display

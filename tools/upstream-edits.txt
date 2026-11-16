@@ -59,9 +59,9 @@ source/_remoteClient/localMachine.py
   policy raises AttributeError
 source/_remoteClient/transport.py
   Linux runtime: an outbound connection gets the same TCP keep-alive as on
-  Windows, on with the first probe after 60 s idle and then every 2 s,
-  through setsockopt, as socket.ioctl and SIO_KEEPALIVE_VALS exist only on
-  Windows
+  Windows, on with the first probe after 60 s idle, then every 2 s, and 10
+  probes, through setsockopt, as socket.ioctl and SIO_KEEPALIVE_VALS exist
+  only on Windows
 source/_remoteClient/urlHandler.py
   import safety: winreg imported only on Windows, after the module's other
   imports; the one annotation that names it is quoted so it is not
@@ -323,4 +323,7 @@ tests/unit/__init__.py
   comtypes monkey patches and the load of nvdaHelperLocal.dll run only on
   Windows, and on Linux NVDAHelper.localLib stays the Linux replacement; the
   configuration directory is a temporary one, holding a copy of the test
-  braille tables, so that nothing is written under tests/unit
+  braille tables, so that nothing is written under tests/unit; while speech
+  is initialised, the automatic synth choice offers only silence, so that it
+  never loads eSpeak, whose library links audio libraries, before anyone has
+  ruled on that

@@ -460,10 +460,12 @@ class TCPTransport(Transport):
 		if sys.platform == "win32":
 			serverSock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 60000, 2000))
 		else:
-			# The same keep-alive as on Windows: on, first probe after 60 s idle, then every 2 s.
+			# The keep-alive Windows gives: on, first probe after 60 s idle, then every 2 s, and the
+			# connection dropped after the 10 unanswered probes that Windows always sends.
 			serverSock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 			serverSock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
 			serverSock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 2)
+			serverSock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 10)
 		ctx = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
 		if insecure:
 			ctx.verify_mode = ssl.CERT_NONE
