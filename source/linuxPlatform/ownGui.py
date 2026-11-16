@@ -21,6 +21,8 @@ its first item, as Windows opens NVDA's menu and as GTK opens a context menu fro
 import wx
 from gui import nvdaControls, settingsDialogs
 
+from linuxPlatform import processes
+
 #: Milliseconds between looks for a menu being shown, and how many looks it gets to appear.
 _MENU_INTERVAL = 20
 _MENU_ATTEMPTS = 25
@@ -105,6 +107,9 @@ def install() -> None:
 	settingsDialogs.SettingsDialog.__init__ = _initSettingsDialog
 	for cls in (settingsDialogs.MultiCategorySettingsDialog, settingsDialogs.NVDASettingsDialog):
 		cls.onCategoryChange = _ignoredOnceDestroyed(cls.onCategoryChange)
+	# appModules.marco was written for MATE's window manager, whose switcher NVDA reads beside its own
+	# GUI, not for a Windows program of that name.
+	processes.portedAppModules = processes.portedAppModules | {"marco"}
 
 
 def selectFirstMenuItemWhenShown() -> None:

@@ -79,6 +79,10 @@ source/appModuleHandler.py
   teardown, which Linux has none of. The status bar is found by its AT-SPI
   role under the foreground window, where upstream raises NotImplementedError
   and NVDA then looks at whatever lies at the window's bottom corner
+source/appModules/marco.py
+  Linux runtime: added. The app module for MATE's window manager, which
+  speaks the window or workspace its switcher names while Alt+Tab is held,
+  as NVDA speaks the Windows task switcher; no Windows program is named marco
 source/appModules/nvda.py
   Linux runtime: chooseNVDAObjectOverlayClasses adds no overlay on Linux,
   where NVDA's own dialogs are AT-SPI objects with no window class or window
