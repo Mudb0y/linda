@@ -352,6 +352,7 @@ def test_errorSoundThroughNvwaveStops(tmp_path: Path):
 		# Far longer than a loaded machine takes to fail a playback, so every failure follows its sound.
 		logSupport.ERROR_SOUND_FOLLOW_WINDOW = 30
 		created = []
+		stopped = whenLogged("Errors followed the error sound")
 
 		class FailingPlayer:
 			# Not an OSError, so nvwave's own error state never stops the replays.
@@ -361,6 +362,12 @@ def test_errorSoundThroughNvwaveStops(tmp_path: Path):
 				created.append(1)
 
 			def feed(self, data):
+				# A device's feed fails once playing has begun, after the request for the sound has
+				# returned. An error logged before then is one logged while the sound was being
+				# requested, which asks for nothing and would end the chain before the limit.
+				deadline = time.monotonic() + 60
+				while logSupport._errorSound._handling and time.monotonic() < deadline:
+					time.sleep(0.001)
 				raise RuntimeError("feed failed, as the test asks")
 
 			def idle(self):
@@ -369,17 +376,23 @@ def test_errorSoundThroughNvwaveStops(tmp_path: Path):
 			def stop(self):
 				pass
 
+		def playErrorSoundOnceThePreviousHasEnded():
+			# playWaveFile reads the global player again after checking it, so a playback thread that
+			# clears it in between makes playWaveFile raise, which playErrorSound swallows, and ends the
+			# chain early. That race is upstream's own and not what this test is about.
+			if nvwave.fileWavePlayerThread is not None:
+				nvwave.fileWavePlayerThread.join(60)
+			nvwave.playErrorSound()
+
 		nvwave.WavePlayer = FailingPlayer
-		logHandler.getOnErrorSoundRequested().register(nvwave.playErrorSound)
+		logHandler.getOnErrorSoundRequested().register(playErrorSoundOnceThePreviousHasEnded)
 		log.error("one error")
-		time.sleep(2)
-		result = {"players": len(created)}
+		result = {"stopped": stopped.wait(60), "players": len(created)}
 		""",
 	)
 	assert done.error is None, done.error
 	assert not done.noLinuxImplementation, done.noLinuxImplementation
-	# Upstream's playWaveFile sometimes ends the chain sooner, through a race of its own.
-	assert 1 <= done.value["players"] <= 3, done.value
+	assert done.value == {"stopped": True, "players": 3}
 
 
 def test_errorWhileSoundThreadStartsDoesNotHang(tmp_path: Path):
