@@ -195,7 +195,7 @@ impl Mirror {
 
     fn drop_subtree(&mut self, path: &str) {
         let n = self.tree.remove_subtree(path);
-        self.stats.objects_dropped_with_subtrees += n;
+        self.stats.objects_dropped_with_subtrees += n.len();
     }
 
     /// A node for a newly admitted object, from its pooled item where there

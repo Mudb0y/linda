@@ -171,15 +171,53 @@ impl Tree {
 
     /// How many objects the subtree under `path` holds, `path` included.
     pub fn subtree_len(&self, path: &str) -> usize {
-        let mut n = 0;
+        self.subtree(path).len()
+    }
+
+    /// The paths of the subtree under `path`, `path` included, following
+    /// each child list only to children whose parent is that node. Each
+    /// object is visited once, so a cycle cannot keep it going.
+    pub fn subtree(&self, path: &str) -> HashSet<String> {
+        let mut seen = HashSet::new();
+        if !self.nodes.contains_key(path) {
+            return seen;
+        }
         let mut stack = vec![path];
         while let Some(p) = stack.pop() {
-            if let Some(node) = self.nodes.get(p) {
-                n += 1;
-                stack.extend(node.children.iter().map(String::as_str));
+            if !seen.insert(p.to_owned()) {
+                continue;
             }
+            let Some(n) = self.nodes.get(p) else { continue };
+            stack.extend(
+                n.children
+                    .iter()
+                    .filter(|c| {
+                        self.nodes
+                            .get(*c)
+                            .is_some_and(|k| k.parent.as_deref() == Some(p))
+                    })
+                    .map(String::as_str),
+            );
         }
-        n
+        seen
+    }
+
+    /// The ancestors of `path`, nearest first, through each node's parent.
+    /// The climb stops at a parent the tree does not hold, and at one it has
+    /// already passed, so a cycle cannot keep it going.
+    pub fn ancestors(&self, path: &str) -> Vec<String> {
+        let mut up = Vec::new();
+        let mut seen = HashSet::from([path]);
+        let mut at = self.nodes.get(path).and_then(|n| n.parent.as_deref());
+        while let Some(p) = at {
+            if !seen.insert(p) {
+                break;
+            }
+            let Some(n) = self.nodes.get(p) else { break };
+            up.push(p.to_owned());
+            at = n.parent.as_deref();
+        }
+        up
     }
 
     /// Drops every node that cannot be reached from the root, which is how a
@@ -193,10 +231,12 @@ impl Tree {
     }
 
     /// Removes a node and its whole subtree, and unlinks it from its parent.
-    /// Returns how many nodes went.
-    pub fn remove_subtree(&mut self, path: &str) -> usize {
+    /// A child goes with it only if its parent is the node being removed, so
+    /// a stale listing cannot take an object from where it now is. Returns
+    /// the paths that went.
+    pub fn remove_subtree(&mut self, path: &str) -> Vec<String> {
         let Some(node) = self.nodes.get(path) else {
-            return 0;
+            return Vec::new();
         };
         if let Some(parent) = node.parent.clone()
             && let Some(p) = self.nodes.get_mut(&parent)
@@ -204,12 +244,16 @@ impl Tree {
             p.children.retain(|c| c != path);
             self.renumber(&parent);
         }
-        let mut removed = 0;
+        let mut removed = Vec::new();
         let mut stack = vec![path.to_owned()];
         while let Some(p) = stack.pop() {
             if let Some(n) = self.nodes.remove(&p) {
-                removed += 1;
-                stack.extend(n.children);
+                stack.extend(n.children.into_iter().filter(|c| {
+                    self.nodes
+                        .get(c)
+                        .is_some_and(|k| k.parent.as_deref() == Some(p.as_str()))
+                }));
+                removed.push(p);
             }
         }
         removed
@@ -411,11 +455,11 @@ pub fn diff(reference: &Tree, other: &Tree, fields: Compared) -> TreeDiff {
             d.child_order_wrong += 1;
             d.note("child_order_wrong", path);
         }
+        // A reference built from an unpruned GetItems reply can name a parent
+        // it does not hold, and then the place in it is unknown.
         if let Some(parent) = &r.parent
-            && let Some(pos) = reference.nodes[parent]
-                .children
-                .iter()
-                .position(|c| c == path)
+            && let Some(p) = reference.nodes.get(parent)
+            && let Some(pos) = p.children.iter().position(|c| c == path)
             && o.index_in_parent != pos as i32
         {
             d.index_wrong += 1;
@@ -522,12 +566,79 @@ mod tests {
 
     #[test]
     fn removing_a_subtree_renumbers_siblings() {
-        let mut t = Tree::from_items(APP, &sample_items());
-        t.nodes.get_mut("/b").unwrap().children.push("/c".into());
-        assert_eq!(t.remove_subtree("/b"), 2);
-        assert!(!t.nodes.contains_key("/c"));
+        let mut items = sample_items();
+        items.push(item("/b1", "/b", 0));
+        let mut t = Tree::from_items(APP, &items);
+        let mut removed = t.remove_subtree("/b");
+        removed.sort();
+        assert_eq!(removed, vec!["/b", "/b1"]);
         assert_eq!(t.nodes["/a"].children, vec!["/c", "/t"]);
+        assert_eq!(t.nodes["/c"].index_in_parent, 0);
         assert_eq!(t.nodes["/t"].index_in_parent, 1);
+    }
+
+    #[test]
+    fn a_stale_listing_does_not_remove_an_object_from_where_it_is() {
+        let mut t = Tree::from_items(APP, &sample_items());
+        // /c is /a's child; /b still lists it from before a move.
+        t.nodes.get_mut("/b").unwrap().children.push("/c".into());
+        assert_eq!(t.remove_subtree("/b"), vec!["/b"]);
+        assert_eq!(t.nodes["/c"].parent.as_deref(), Some("/a"));
+        assert_eq!(t.nodes["/a"].children, vec!["/c", "/t"]);
+    }
+
+    #[test]
+    fn climbs_and_walks_stop_at_a_cycle() {
+        let mut t = Tree::from_items(APP, &sample_items());
+        // /a is the root's child and /c's parent; make it /c's child too.
+        t.nodes.get_mut("/a").unwrap().parent = Some("/c".into());
+        t.nodes.get_mut("/c").unwrap().children.push("/a".into());
+        assert_eq!(t.ancestors("/c"), vec!["/a"]);
+        let mut sub: Vec<String> = t.subtree("/a").into_iter().collect();
+        sub.sort();
+        assert_eq!(sub, vec!["/a", "/b", "/c", "/t"]);
+        assert_eq!(t.subtree_len("/c"), 4);
+        let removed = t.remove_subtree("/a");
+        assert_eq!(removed.len(), 4);
+        assert_eq!(t.ancestors("/gone"), Vec::<String>::new());
+        assert_eq!(t.ancestors(ROOT_PATH), Vec::<String>::new());
+    }
+
+    #[test]
+    fn ancestors_are_nearest_first() {
+        let t = Tree::from_items(APP, &sample_items());
+        assert_eq!(t.ancestors("/c"), vec!["/a", ROOT_PATH]);
+    }
+
+    #[test]
+    fn diff_takes_a_reference_with_a_parent_it_does_not_hold() {
+        let mut items = sample_items();
+        items.push(item("/orphan", "/gone", 0));
+        let t = Tree::from_items(APP, &items);
+        let pruned = {
+            let mut p = t.clone();
+            p.prune_unreachable();
+            p
+        };
+        let d = diff(&t, &t, Compared::ITEM);
+        assert_eq!(d.total(), diff(&pruned, &pruned, Compared::ITEM).total());
+        let mut other = t.clone();
+        other.nodes.get_mut("/orphan").unwrap().parent = Some("/a".into());
+        assert_eq!(diff(&t, &other, Compared::ITEM).parent_wrong, 1);
+    }
+
+    #[test]
+    fn diff_counts_a_wrong_parent_and_a_wrong_place() {
+        let mut reference = Tree::from_items(APP, &sample_items());
+        reference.renumber_all();
+        let mut other = reference.clone();
+        other.nodes.get_mut("/b").unwrap().parent = Some(ROOT_PATH.into());
+        other.nodes.get_mut("/c").unwrap().index_in_parent = 0;
+        let d = diff(&reference, &other, Compared::ITEM);
+        assert_eq!(d.parent_wrong, 1);
+        assert_eq!(d.index_wrong, 1);
+        assert_eq!(d.samples["parent_wrong"], vec!["/b"]);
+        assert_eq!(d.samples["index_wrong"], vec!["/c"]);
     }
 
     #[test]
@@ -595,5 +706,12 @@ mod tests {
         assert_eq!(t.nodes[ROOT_PATH].children, vec!["/a", "/b"]);
         assert_eq!(t.nodes["/b"].index_in_parent, 1);
         assert_eq!(t.reachable().len(), 4);
+        // GetTree on a subtree gives its root's own parent too; the tree has
+        // no place for it.
+        let mut entries = entries;
+        entries[1].parent = Some(r("/elsewhere"));
+        let t = Tree::from_tree_entries(APP, "/a", &entries[1..]);
+        assert_eq!(t.nodes["/a"].parent, None);
+        assert_eq!(t.nodes["/a1"].parent.as_deref(), Some("/a"));
     }
 }
