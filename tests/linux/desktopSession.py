@@ -6,6 +6,7 @@ starts is one of its own children, which close stops by its process ID.
 """
 
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -32,14 +33,19 @@ ATSPI_TIMEOUT_MS = 1000
 
 
 def windowManagerIsRunning() -> bool:
-	"""Whether a window manager has named itself on the root window and set up its desktops."""
+	"""Whether a window manager has named itself on the root window, set up its desktops, and is still
+	there."""
 	shown = subprocess.run(
 		["xprop", "-root", "_NET_SUPPORTING_WM_CHECK", "_NET_NUMBER_OF_DESKTOPS"],
 		capture_output=True,
 		text=True,
 		check=False,
 	).stdout
-	return "_NET_NUMBER_OF_DESKTOPS(CARDINAL)" in shown
+	checkWindow = re.search(r"_NET_SUPPORTING_WM_CHECK\(WINDOW\): window id # (0x[0-9a-fA-F]+)", shown)
+	if checkWindow is None or "_NET_NUMBER_OF_DESKTOPS(CARDINAL)" not in shown:
+		return False
+	# marco leaves both properties on the root window when it exits; the window it names goes with it.
+	return subprocess.run(["xprop", "-id", checkWindow[1]], capture_output=True, check=False).returncode == 0
 
 
 def _atspi():
