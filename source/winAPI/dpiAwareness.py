@@ -14,6 +14,8 @@ from .constants import (
 	SystemErrorCodes,
 )
 
+import sys
+
 
 def setDPIAwareness() -> None:
 	"""
@@ -26,6 +28,9 @@ def setDPIAwareness() -> None:
 	It is recommended that you set the process-default DPI awareness via application manifest.
 	Setting the process-default DPI awareness via these API calls can lead to unexpected application behavior.
 	"""
+	if sys.platform != "win32":
+		# GTK scales for the display's resolution by itself; a process has no DPI awareness to declare.
+		return
 	# Support is inconsistent across versions of Windows, so try/excepts are used rather than explicit
 	# version checks.
 	# https://docs.microsoft.com/en-us/windows/win32/hidpi/setting-the-default-dpi-awareness-for-a-process

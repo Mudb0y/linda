@@ -45,6 +45,12 @@ source/NVDAState.py
   at start-up, answer False, as Linux has no system-wide store for those
   administrator settings yet. The installer-only registry readers still
   raise NameError on Linux
+source/_magnifier/__init__.py
+  Linux runtime: initialize() makes no magnifier, as every magnified view is
+  built on Windows' Magnification API and its constructor reads the cursor
+  through Win32; isActive() and getMagnifier() report none. The magnifier's
+  toggle command then logs an error and still announces the magnifier
+  enabled, which a Linux magnifier will have to put right
 source/_remoteClient/localMachine.py
   import safety: winreg imported only on Windows, after the module's other
   imports; the SAS policy's registry key class attribute is defined only
@@ -108,6 +114,13 @@ source/config/__init__.py
 source/config/registry.py
   import safety: winreg imported only on Windows, after the module's other
   imports; on Linux winreg is absent, so its registry helpers raise NameError
+source/core.py
+  boot on Linux: the desktop object is linuxPlatform.desktop's placeholder,
+  which belongs to no process and finds no object with focus, in the
+  foreground or under a point, until the AT-SPI backend provides the real
+  desktop; and wx.App leaves SIGINT alone, which wxPython otherwise puts
+  back to its default action over the launcher's GLib handler, so that
+  Ctrl+C would end NVDA without shutting it down
 source/documentNavigation/paragraphHelper.py
   import safety when running: after moving the caret, both paragraph moves
   import the UI Automation text class only on Windows; Linux has no UI
@@ -185,6 +198,10 @@ source/mathPres/__init__.py
   packaged, and core.main calls initialize() at every start. On Windows a
   MathCAT that fails to import now gives the same warning instead of
   stopping NVDA's start-up
+source/monkeyPatches/wxMonkeyPatches.py
+  Linux runtime: apply() patches nothing, as wxGTK runs CallAfter callbacks
+  inside popup menus and message boxes by itself, and the patch would post a
+  Windows message for every CallAfter once the main frame has a window
 source/mouseHandler.py
   Linux runtime: initialize takes the pointer position from wx, and
   scrBmpObj is linuxPlatform.screenBitmap's, whose captureImage raises
@@ -250,6 +267,10 @@ source/utils/security.py
   Linux: isRunningOnSecureDesktop() is True only in a display manager's
   login screen session, the counterpart of the secure desktop, as
   XDG_SESSION_CLASS says. NVDASettingsDialog's class body calls it at import
+source/winAPI/dpiAwareness.py
+  boot on Linux: setDPIAwareness() returns at once, as GTK scales for the
+  display by itself and a process has no DPI awareness to declare; core.main
+  calls it on every run from source
 source/winAPI/messageWindow.py
   Linux: _MessageWindow creates no window and its destroy() does nothing, as
   no other process sends NVDA window messages there; core.main still creates

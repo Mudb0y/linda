@@ -602,7 +602,12 @@ def _initializeObjectCaches():
 	import NVDAObjects
 	import winUser
 
-	desktopObject = NVDAObjects.window.Window(windowHandle=winUser.getDesktopWindow())
+	if sys.platform == "win32":
+		desktopObject = NVDAObjects.window.Window(windowHandle=winUser.getDesktopWindow())
+	else:
+		from linuxPlatform.desktop import Desktop
+
+		desktopObject = Desktop()
 	api.setDesktopObject(desktopObject)
 	api.setForegroundObject(desktopObject)
 	api.setFocusObject(desktopObject)
@@ -651,7 +656,9 @@ def _setUpWxApp() -> "wx.App":
 			This code may need to be revisited when we update Python / wxPython.
 			"""
 
-	app = App(redirect=False)
+	# wxPython puts SIGINT back to its default action, which ends the process at once, unless told not to.
+	# On Linux the launcher has already given it to GLib to exit NVDA properly.
+	app = App(redirect=False, clearSigInt=sys.platform == "win32")
 
 	# We support queryEndSession events, but in general don't do anything for them.
 	# However, when running as a Windows Store application, we do want to request to be restarted for updates

@@ -16,6 +16,8 @@ from .config import getMagnifiedView, getEnabled, setEnabled
 from .utils.types import MagnifiedView
 from .utils.errorHandling import MagnifierStartError
 
+import sys
+
 if TYPE_CHECKING:
 	from .magnifier import Magnifier
 
@@ -77,6 +79,10 @@ def initialize() -> None:
 	Initialize the magnifier module with the default magnifier view from config.
 	"""
 	log.debug("Initializing magnifier")
+	if sys.platform != "win32":
+		# Every magnified view is built on Windows' Magnification API. Linux has none, so no magnifier
+		# is made, and isActive and getMagnifier report none.
+		return
 	magnifiedView = getMagnifiedView()
 	_setMagnifiedView(magnifiedView)
 	if getEnabled():

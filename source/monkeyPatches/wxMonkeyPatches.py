@@ -3,6 +3,7 @@
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
+import sys
 from functools import wraps
 
 
@@ -15,6 +16,9 @@ def apply(mainFrame, winUser, wx):
 	post a WM_NULL message to our top-level window after calling the original CallAfter,
 	which causes wx's event loop to wake up enough to execute the callback.
 	"""
+	if sys.platform != "win32":
+		# wxGTK runs CallAfter callbacks inside popup menus and message boxes, and has no window messages.
+		return
 	old_wx_CallAfter = wx.CallAfter
 
 	@wraps(wx.CallAfter)
