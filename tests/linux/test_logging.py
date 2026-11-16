@@ -4,6 +4,7 @@ nix develop . -c tests/linux/rig python3 -m pytest -p no:cacheprovider tests/lin
 """
 
 import re
+import stat
 from pathlib import Path
 
 import harness
@@ -168,12 +169,153 @@ def test_errorSoundCannotRecurseOrBlock(tmp_path: Path):
 	assert not done.noLinuxImplementation, done.noLinuxImplementation
 	# The logging thread never waits for the player.
 	assert done.value["elapsed"] < 0.5, done.value
-	# The second request arrived while the first was handled and runs once after it. The player's
-	# own failures are logged, but ask for no sound, so nothing follows them.
-	assert done.value["calls"] == ["logHandler.errorSound"] * 2, done.value
+	# The second error arrived while the sound was being requested and asks for nothing. The
+	# player's own failure is logged on the sound's thread, so nothing follows it either.
+	assert done.value["calls"] == ["logHandler.errorSound"], done.value
 	assert done.logErrors[:2] == ["ERROR: first error", "ERROR: second error"]
-	assert len(done.logErrors) == 4
-	assert all(record.startswith("ERROR: Error running handler") for record in done.logErrors[2:])
+	assert len(done.logErrors) == 3
+	assert done.logErrors[2].startswith("ERROR: Error running handler")
+
+
+def test_errorSoundStopsWhenItsPlaybackLogsErrors(tmp_path: Path):
+	done = harness.runChild(
+		tmp_path,
+		startLog(tmp_path / "nvda.log")
+		+ """
+		import threading
+		import time
+		import config
+		from linuxPlatform import logSupport
+
+		config.conf["featureFlag"]["playErrorSound"] = 1
+		logSupport.ERROR_SOUND_QUIET_PERIOD = 0.5
+		plays = []
+		failing = True
+
+		def playerWhosePlaybackFails():
+			plays.append(time.perf_counter())
+
+			def playback():
+				if not failing:
+					return
+				# Feeding takes a moment, so the error comes after the sound was requested.
+				time.sleep(0.05)
+				try:
+					raise RuntimeError("feed failed, as the test asks")
+				except RuntimeError:
+					log.exception("Error playing wave file")
+
+			# As nvwave's playWaveFile does: the error comes from a thread of the player's own.
+			threading.Thread(target=playback, daemon=True).start()
+
+		logHandler.getOnErrorSoundRequested().register(playerWhosePlaybackFails)
+		log.error("one error")
+		time.sleep(2)
+		loopPlays = len(plays)
+		failing = False
+		log.error("an error while errors are quiet")
+		time.sleep(0.3)
+		result = {"loopPlays": loopPlays, "plays": len(plays), "log": logText()}
+		""",
+	)
+	assert done.error is None, done.error
+	assert not done.noLinuxImplementation, done.noLinuxImplementation
+	# Each failing playback asks for the sound again; the third that follows its sound stops it.
+	assert done.value["loopPlays"] == 3, done.value
+	assert done.logErrors.count("ERROR: Error playing wave file") == 3, done.logErrors
+	text = done.value["log"]
+	assert len(re.findall(r"^WARNING - .*\nErrors followed the error sound 3 times", text, re.MULTILINE)) == 1
+	# Once errors have been quiet for the quiet period, the sound comes back.
+	assert done.value["plays"] == 4, done.value
+
+
+def test_errorSoundThroughNvwaveStops(tmp_path: Path):
+	done = harness.runChild(
+		tmp_path,
+		startLog(tmp_path / "nvda.log")
+		+ """
+		import time
+		import config
+		import NVDAHelper
+		import nvwave
+
+		config.conf["featureFlag"]["playErrorSound"] = 1
+		created = []
+
+		class FailingPlayer:
+			# Not an OSError, so nvwave's own error state never stops the replays.
+			audioDeviceError_static = False
+
+			def __init__(self, **kwargs):
+				created.append(1)
+
+			def feed(self, data):
+				raise RuntimeError("feed failed, as the test asks")
+
+			def idle(self):
+				pass
+
+			def stop(self):
+				pass
+
+		nvwave.WavePlayer = FailingPlayer
+		logHandler.getOnErrorSoundRequested().register(nvwave.playErrorSound)
+		log.error("one error")
+		time.sleep(2)
+		result = {"players": len(created)}
+		""",
+	)
+	assert done.error is None, done.error
+	assert not done.noLinuxImplementation, done.noLinuxImplementation
+	# Upstream's playWaveFile sometimes ends the chain sooner, through a race of its own.
+	assert 1 <= done.value["players"] <= 3, done.value
+
+
+def test_errorWhileSoundThreadStartsDoesNotHang(tmp_path: Path):
+	done = harness.runChild(
+		tmp_path,
+		startLog(tmp_path / "nvda.log")
+		+ """
+		import threading
+		import config
+
+		config.conf["featureFlag"]["playErrorSound"] = 1
+		realStart = threading.Thread.start
+
+		def startThatLogs(self, *args, **kwargs):
+			# Stands in for a finaliser or a signal handler that runs on this thread and logs.
+			if self.name == "logHandler.errorSound":
+				log.error("logged while the sound thread starts")
+			return realStart(self, *args, **kwargs)
+
+		threading.Thread.start = startThatLogs
+		log.error("first error")
+		threading.Thread.start = realStart
+		result = "returned"
+		""",
+		timeout=30,
+	)
+	assert done.error is None, done.error
+	assert done.value == "returned"
+	assert sorted(done.logErrors) == ["ERROR: first error", "ERROR: logged while the sound thread starts"]
+
+
+def test_noSoundThreadWhenSoundIsOff(tmp_path: Path):
+	done = harness.runChild(
+		tmp_path,
+		startLog(tmp_path / "nvda.log")
+		+ """
+		import threading
+		import config
+
+		config.conf["featureFlag"]["playErrorSound"] = 2
+		log.error("an error with the sound off")
+		result = [thread.name for thread in threading.enumerate()]
+		""",
+	)
+	assert done.error is None, done.error
+	assert done.logErrors == ["ERROR: an error with the sound off"]
+	assert "logHandler.errorSound" not in done.value
 
 
 def test_criticalMakesNoSound(tmp_path: Path):
@@ -219,7 +361,48 @@ def test_defaultLogPathHonoursXdgStateHome(tmp_path: Path):
 	assert done.value == str(logDir / "nvda.log")
 	assert "in the default place" in (logDir / "nvda.log").read_text(encoding="utf-8")
 	assert (logDir / "nvda_crash.log").exists()
-	assert (logDir.stat().st_mode & 0o777) == 0o700
+	assert stat.S_IMODE(logDir.stat().st_mode) == 0o700
+
+
+def test_logFilesAreTheUsersAlone(tmp_path: Path):
+	state = tmp_path / "state"
+	# Left open by something else, or by an earlier build.
+	(state / "basedreader").mkdir(parents=True, mode=0o755)
+	(state / "basedreader").chmod(0o755)
+	chosen = tmp_path / "chosen"
+	chosen.mkdir()
+	(chosen / "shared.log").write_text("")
+	(chosen / "shared.log").chmod(0o644)
+	done = harness.runChild(
+		tmp_path,
+		startLog(None)
+		+ f"""
+		import logging
+		import os
+
+		log.info("in the default place")
+		logHandler.logHandler.close()
+		log.root.removeHandler(logHandler.logHandler)
+		globalVars.appArgs.logFileName = {str(chosen / "my.log")!r}
+		logHandler.initialize()
+		shared = logHandler.FileHandler({str(chosen / "shared.log")!r}, mode="w", encoding="utf-8")
+		shared.close()
+		result = "returned"
+		""",
+		env={"XDG_STATE_HOME": str(state)},
+	)
+	done.assertClean()
+
+	def mode(path: Path) -> int:
+		return stat.S_IMODE(path.stat().st_mode)
+
+	assert mode(state / "basedreader") == 0o700
+	assert mode(state / "basedreader" / "nvda.log") == 0o600
+	assert mode(state / "basedreader" / "nvda_crash.log") == 0o600
+	assert mode(chosen / "my.log") == 0o600
+	assert mode(chosen / "nvda_crash.log") == 0o600
+	# A file that exists keeps the mode it was given.
+	assert mode(chosen / "shared.log") == 0o644
 
 
 def test_defaultLogPathFallsBackToLocalState(tmp_path: Path):
@@ -247,7 +430,20 @@ def test_logFileOptionAndRedirection(tmp_path: Path):
 	(logDir / "my.log").write_text("the previous run\n", encoding="utf-8")
 	done = harness.runChild(
 		tmp_path,
-		startLog(logDir / "my.log")
+		f"""
+		import argsParsing
+		import globalVars
+		import logHandler
+
+		options, _ = argsParsing.getParser().parse_known_args(["-f", {str(logDir / "my.log")!r}])
+		globalVars.appArgs.logFileName = options.logFileName
+		logHandler.initialize()
+
+		def logText():
+			logHandler.logHandler.flush()
+			with open(globalVars.appArgs.logFileName, encoding="utf-8") as f:
+				return f.read()
+		"""
 		+ """
 		import sys
 
@@ -299,7 +495,7 @@ def test_crashDumpBesideLog(tmp_path: Path):
 		crashed = os.WIFSIGNALED(status) and os.WTERMSIG(status) == 11
 		with open(os.path.join(os.path.dirname(globalVars.appArgs.logFileName), "nvda_crash.log")) as f:
 			dump = f.read()
-		logSupport.enableCrashDump(os.path.dirname(globalVars.appArgs.logFileName))
+		logSupport.enableCrashDump(globalVars.appArgs.logFileName)
 		result = {"crashed": crashed, "dump": dump, "enabled": faulthandler.is_enabled()}
 		""",
 	)
@@ -314,6 +510,72 @@ def test_crashDumpBesideLog(tmp_path: Path):
 	# The next start keeps the dump as the old one and starts an empty file.
 	assert (logDir / "nvda_crash-old.log").read_text() == dump
 	assert (logDir / "nvda_crash.log").read_text() == ""
+
+
+def test_crashDumpKeptWhenItCannotBeMoved(tmp_path: Path):
+	logDir = tmp_path / "logs"
+	logDir.mkdir()
+	(logDir / "nvda_crash.log").write_text("the last crash\n")
+	# A directory in the old dump's place makes the move fail.
+	(logDir / "nvda_crash-old.log").mkdir()
+	(logDir / "nvda_crash-old.log" / "occupied").write_text("")
+	done = harness.runChild(
+		tmp_path,
+		startLog(logDir / "nvda.log")
+		+ """
+		import faulthandler
+
+		result = faulthandler.is_enabled()
+		""",
+	)
+	done.assertClean()
+	assert done.value is True
+	assert (logDir / "nvda_crash.log").read_text() == "the last crash\n"
+
+
+def test_crashDumpWithoutLogFile(tmp_path: Path):
+	state = tmp_path / "state"
+	done = harness.runChild(
+		tmp_path,
+		startLog(tmp_path / "missing" / "nvda.log")
+		+ """
+		import faulthandler
+
+		result = {"enabled": faulthandler.is_enabled(), "logFileName": globalVars.appArgs.logFileName}
+		""",
+		env={"XDG_STATE_HOME": str(state)},
+	)
+	assert done.error is None, done.error
+	assert done.logErrors == ["ERROR: Faile to open log file, redirecting to standard output"]
+	assert done.value == {"enabled": True, "logFileName": None}
+	assert (state / "basedreader" / "nvda_crash.log").exists()
+
+
+def test_crashDumpThatCannotBeOpenedIsReported(tmp_path: Path):
+	logDir = tmp_path / "logs"
+	logDir.mkdir()
+	# Directories in both places: the dump can neither be moved aside nor opened.
+	for name in ("nvda_crash.log", "nvda_crash-old.log"):
+		(logDir / name).mkdir()
+		(logDir / name / "occupied").write_text("")
+	done = harness.runChild(
+		tmp_path,
+		startLog(logDir / "nvda.log")
+		+ """
+		import faulthandler
+
+		result = {"enabled": faulthandler.is_enabled(), "log": logText()}
+		""",
+	)
+	done.assertClean()
+	# The real standard error takes the dump instead.
+	assert done.value["enabled"] is True
+	assert re.search(
+		r"^WARNING - linuxPlatform\.logSupport\.enableCrashDump .*\nCannot write crash dumps to "
+		+ re.escape(str(logDir)),
+		done.value["log"],
+		re.MULTILINE,
+	), done.value["log"]
 
 
 WATCHDOG_FAST = """
@@ -337,6 +599,15 @@ def test_watchdogLogsStackOfFrozenCore(tmp_path: Path):
 
 		watchdog.initialize()
 
+		import select
+
+		fd = watchdog.cancelCallFd()
+
+		def readable():
+			return bool(select.select([fd], [], [], 0)[0])
+
+		before = {"cancelling": watchdog.isCancellingCalls(), "readable": readable()}
+
 		def coreStuckInTest():
 			watchdog.alive()
 			time.sleep(1.5)
@@ -345,22 +616,52 @@ def test_watchdogLogsStackOfFrozenCore(tmp_path: Path):
 				refused = False
 			except exceptions.CallCancelled:
 				refused = True
-			return {"recovering": watchdog.isAttemptingRecovery, "refused": refused}
+			return {
+				"recovering": watchdog.isAttemptingRecovery,
+				"refused": refused,
+				"cancelling": watchdog.isCancellingCalls(),
+				"readable": readable(),
+			}
 
 		during = coreStuckInTest()
 		watchdog.asleep()
 		time.sleep(0.2)
-		after = watchdog.isAttemptingRecovery
+		after = {
+			"recovering": watchdog.isAttemptingRecovery,
+			"cancelling": watchdog.isCancellingCalls(),
+			"readable": readable(),
+		}
+
+		def coreStuckAgainInTest():
+			watchdog.alive()
+			time.sleep(0.6)
+			return watchdog.isCancellingCalls()
+
+		# Frozen again, and the screen reader stops before the core recovers.
+		frozenAgain = coreStuckAgainInTest()
 		watchdog.terminate()
-		result = {"during": during, "after": after, "log": logText()}
+		terminated = {"cancelling": watchdog.isCancellingCalls(), "readable": readable()}
+		result = {
+			"before": before,
+			"during": during,
+			"after": after,
+			"frozenAgain": frozenAgain,
+			"terminated": terminated,
+			"sameFd": watchdog.cancelCallFd() == fd,
+			"log": logText(),
+		}
 		""",
 	)
 	assert done.error is None, done.error
 	assert not done.noLinuxImplementation, done.noLinuxImplementation
 	assert done.logErrors, "no frozen core was reported"
 	assert all(record.startswith("ERROR: Core frozen in stack!") for record in done.logErrors), done.logErrors
-	assert done.value["during"] == {"recovering": True, "refused": True}
-	assert done.value["after"] is False
+	assert done.value["before"] == {"cancelling": False, "readable": False}
+	assert done.value["during"] == {"recovering": True, "refused": True, "cancelling": True, "readable": True}
+	assert done.value["after"] == {"recovering": False, "cancelling": False, "readable": False}
+	assert done.value["frozenAgain"] is True
+	assert done.value["terminated"] == {"cancelling": False, "readable": False}
+	assert done.value["sameFd"] is True
 	text = done.value["log"]
 	assert "Starting freeze recovery after" in text
 	assert "Recovered from freeze after" in text
@@ -376,7 +677,9 @@ def test_watchdogLogsStackOfFrozenCore(tmp_path: Path):
 		for stack in listing.split("Python stack for thread ")
 		if "(MainThread):" in stack
 	]
-	assert mainStacks and all("in coreStuckInTest" in stack for stack in mainStacks), listings
+	assert mainStacks and all(
+		"in coreStuckInTest" in stack or "in coreStuckAgainInTest" in stack for stack in mainStacks
+	), listings
 
 
 def test_watchdogQuietWhileCoreRuns(tmp_path: Path):

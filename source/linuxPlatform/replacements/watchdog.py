@@ -3,11 +3,19 @@
 Upstream notices a frozen core through a Windows waitable timer, and recovers by cancelling the COM
 and SendMessage calls the main thread is blocked in. Linux has neither kind of call. What carries
 over unchanged is the diagnosis: the core reports alive and asleep, and a watcher thread logs every
-thread's stack, with upstream's messages and thresholds, once the core stops reporting. Recovery is
-reduced to its signal: while it runs, _cancelCallEvent is set, as upstream's is, and alive() clears
-it, so a blocking call into another process can wait on it beside its reply and give up.
+thread's stack, with upstream's messages and thresholds, once the core stops reporting.
+
+Recovery is reduced to its signal, and only cancellableExecute acts on it, by refusing new calls
+from the main thread. While recovery runs,
+isCancellingCalls() is True and the descriptor from cancelCallFd() is readable, until the core next
+reports alive or asleep. Upstream's cancel event is a kernel handle that native code waits on beside
+its call; a descriptor is the Linux equivalent, which a GLib source, tokio's AsyncFd or an asyncio
+reader can wait on beside a D-Bus socket. A call already blocked on the main thread is not
+abandoned, so until the AT-SPI backend and the engine wait on it, a call into a hung application
+freezes the core for as long as the call takes, and the watchdog only logs where it is stuck.
 """
 
+import os
 import threading
 from collections.abc import Callable
 from time import perf_counter as _timer
@@ -52,8 +60,43 @@ _watcherThread: threading.Thread | None = None
 _coreAwake = threading.Event()
 #: Set by terminate(), and the watcher's every timed wait is on it, so terminating never waits.
 _terminating = threading.Event()
-#: Set while the watcher is recovering a frozen core, cleared by alive() and asleep().
-_cancelCallEvent = threading.Event()
+#: True while the watcher is recovering a frozen core, until alive() or asleep().
+_cancellingCalls = False
+#: Readable exactly while calls are being cancelled. An eventfd stays readable until it is read, so
+#: a waiter that registers late still sees a recovery already under way.
+_cancelCallFd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+
+
+def isCancellingCalls() -> bool:
+	"""Whether the watchdog is recovering a frozen core, so that a blocking call should give up."""
+	return _cancellingCalls
+
+
+def cancelCallFd() -> int:
+	"""A descriptor that is readable while the watchdog is cancelling calls.
+
+	A call that blocks on another process waits on it beside its reply, and gives up with
+	CallCancelled when it becomes readable. The waiter must not read it: the watchdog drains it when
+	the core recovers. It stays open for the life of the process.
+	"""
+	return _cancelCallFd
+
+
+def _startCancellingCalls() -> None:
+	global _cancellingCalls
+	# Written before the flag is set, so that the core, which drains only after seeing the flag,
+	# never leaves the descriptor readable with the flag clear.
+	os.eventfd_write(_cancelCallFd, 1)
+	_cancellingCalls = True
+
+
+def _stopCancellingCalls() -> None:
+	global _cancellingCalls
+	_cancellingCalls = False
+	try:
+		os.eventfd_read(_cancelCallFd)
+	except BlockingIOError:
+		pass
 
 
 def alive() -> None:
@@ -65,8 +108,8 @@ def alive() -> None:
 	# one does, so each is changed only when it has to be.
 	if not _coreAwake.is_set():
 		_coreAwake.set()
-	if _cancelCallEvent.is_set():
-		_cancelCallEvent.clear()
+	if _cancellingCalls:
+		_stopCancellingCalls()
 
 
 def asleep() -> None:
@@ -75,8 +118,8 @@ def asleep() -> None:
 	_lastAlive = _timer()
 	_coreIsAsleep = True
 	_coreAwake.clear()
-	if _cancelCallEvent.is_set():
-		_cancelCallEvent.clear()
+	if _cancellingCalls:
+		_stopCancellingCalls()
 
 
 def isCoreAsleep() -> bool:
@@ -134,7 +177,7 @@ def waitForFreezeRecovery(waitedSince: float) -> None:
 			f"Listing stacks for Python threads:\n{stacks}",
 		)
 	lastTime = _timer()
-	_cancelCallEvent.set()
+	_startCancellingCalls()
 	while not _isAlive():
 		curTime = _timer()
 		if curTime - lastTime > FROZEN_WARNING_TIMEOUT:
@@ -176,6 +219,9 @@ def terminate() -> None:
 	_terminating.set()
 	_coreAwake.set()
 	_watcherThread.join()
+	# A recovery under way when the core stopped has no alive() left to end it.
+	if _cancellingCalls:
+		_stopCancellingCalls()
 
 
 class Suspender:
@@ -197,16 +243,17 @@ def cancellableExecute(
 ) -> Any:
 	"""Execute a function, unless the watchdog is cancelling calls to recover a frozen core.
 
-	Upstream runs the function on another thread so that a frozen main thread can abandon it. On
-	Linux the blocking calls are D-Bus calls into other applications, which take their own timeouts
-	and wait on _cancelCallEvent, so the function runs here, and ccPumpMessages, which lets Windows
-	pump messages during the wait, has nothing to do.
+	Upstream runs the function on another thread, which the main thread abandons when the watchdog
+	cancels calls. Here the function runs inline and nothing interrupts it once it has started: only
+	a call made while recovery is already cancelling calls is refused. A function that can block on
+	another process must bound its own wait, and give up when cancelCallFd() becomes readable.
+	ccPumpMessages lets Windows pump messages during the wait and has nothing to do on Linux.
 	@raise CallCancelled: If the call was refused because recovery is cancelling calls.
 	"""
 	if (
 		isRunning
 		and not _suspended
-		and _cancelCallEvent.is_set()
+		and _cancellingCalls
 		and threading.current_thread() is threading.main_thread()
 	):
 		raise exceptions.CallCancelled
