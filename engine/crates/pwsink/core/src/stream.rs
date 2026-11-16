@@ -4,30 +4,37 @@
 //!
 //! Three kinds of thread touch a stream, and each datum has one writer:
 //! - the producer, the one thread at a time that NVDA's player lets call it, writes the ring
-//!   ahead of the read position, `write_pos`, `base`, `paused`, the gains and the clock fields,
-//!   and raises `skip_to`;
+//!   ahead of the read position, `write_pos`, `base`, `paused`, the gains, the clock's fields and
+//!   `kick_ns`, and raises `skip_to`;
 //! - the real-time callback writes `read_pos`, `in_cycle`, the position snapshot and the cycle
-//!   counters, and reads the rest;
-//! - the loop thread writes the attachment state: `attached_ns`, `active`, `pw`, `broken` and
-//!   the link, and reads positions to decide whether the stream is idle.
+//!   counters;
+//! - the loop thread writes what it knows of the pw_stream: `attached_ns`, `active`, `broken`,
+//!   `retry_ns` and `pw`. It also clears the cycle counters, but only in `prepare_attach`, before
+//!   there is a pw_stream whose callback could run.
 //!
-//! Nothing here takes a lock. Where two threads must not both act on a stale view of each other,
-//! the pair of flags is stored and loaded sequentially consistent, so that at least one of them
-//! sees the other's store: the producer's `skip_to` against the callback's `in_cycle`, and the
-//! producer's `write_pos` against the loop thread's `active`.
+//! Nothing here takes a lock or waits. These are the orderings that matter:
+//! - `stop` is one store of `paused`, which the callback loads at the start of its next cycle, so
+//!   at most the cycle in progress is heard after it.
+//! - The ring's bytes are published by the store of `write_pos`, which the callback loads before
+//!   reading them.
+//! - A reset or the clock raises `skip_to` while the callback may be inside a cycle that read the
+//!   old value and is still copying the frames it covers. The producer reuses those frames only
+//!   when it sees `in_cycle` false after raising `skip_to`; the callback sets `in_cycle` before it
+//!   loads `skip_to`. Both pairs are sequentially consistent, so one of them sees the other.
+//! - The loop thread deactivates a stream that has nothing to play while the producer may be
+//!   writing to it. The producer stores `write_pos` and then loads `active`; the loop thread
+//!   stores `active` false and then loads `write_pos`, again sequentially consistent: either the
+//!   producer sees the stream inactive and asks for it to be woken, or the loop thread sees the
+//!   new frames and keeps it active.
 
-use std::cell::UnsafeCell;
-use std::ffi::CString;
+use std::ffi::{CString, c_void};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64};
 
-use pipewire::sys as pws;
-
-use crate::engine::Link;
 use crate::format::{Format, MAX_CHANNELS, Sample, apply_gain};
 
-pub(crate) const NS: u64 = 1_000_000_000;
+pub const NS: u64 = 1_000_000_000;
 
 /// How far the producer may run ahead of the graph. NVDA's player keeps at most 400 ms queued,
 /// so a second leaves room for what the graph holds besides.
@@ -45,8 +52,8 @@ const MAX_CYCLE_NS: u64 = 200_000_000;
 const MIN_DRAIN_FRAMES: u64 = 64;
 
 pub struct Stream {
-    pub(crate) format: Format,
-    pub(crate) target: Option<CString>,
+    pub format: Format,
+    pub target: Option<CString>,
     stride: usize,
     capacity: u64,
     ring: NonNull<u8>,
@@ -67,6 +74,7 @@ pub struct Stream {
     snap_pos: AtomicU64,
     snap_latency: AtomicU64,
 
+    /// Process calls since the stream was last given a pw_stream.
     process_calls: AtomicU64,
     cycle_ns: AtomicU64,
     last_graph_ns: AtomicU64,
@@ -77,20 +85,22 @@ pub struct Stream {
     clock_pos: AtomicU64,
     clock_ns: AtomicU64,
     seen_calls: AtomicU64,
+    /// When the producer last saw process_calls move.
     progress_ns: AtomicU64,
+    /// When the producer last started the stream or asked for it to be woken.
     kick_ns: AtomicU64,
     played_high: AtomicU64,
 
     /// When the loop thread last gave the stream a pw_stream, or 0 while it has none.
-    pub(crate) attached_ns: AtomicU64,
-    pub(crate) active: AtomicBool,
-    pub(crate) pw: AtomicPtr<pws::pw_stream>,
-    pub(crate) broken: AtomicBool,
-    pub(crate) link: UnsafeCell<Link>,
+    attached_ns: AtomicU64,
+    active: AtomicBool,
+    broken: AtomicBool,
+    retry_ns: AtomicU64,
+    pw: AtomicPtr<c_void>,
 }
 
 // SAFETY: the ring is written only ahead of the read position and read only behind the write
-// position, which the atomics publish; the link is touched only by the loop thread.
+// position, which the atomics publish; everything else is an atomic.
 unsafe impl Send for Stream {}
 unsafe impl Sync for Stream {}
 
@@ -144,9 +154,9 @@ impl Stream {
             played_high: AtomicU64::new(0),
             attached_ns: AtomicU64::new(0),
             active: AtomicBool::new(false),
-            pw: AtomicPtr::new(ptr::null_mut()),
             broken: AtomicBool::new(false),
-            link: UnsafeCell::new(Link::default()),
+            retry_ns: AtomicU64::new(0),
+            pw: AtomicPtr::new(ptr::null_mut()),
         }
     }
 
@@ -154,7 +164,7 @@ impl Stream {
     // on two threads at once for one stream.
 
     /// Copies whole frames into the ring and returns how many it took, which is fewer only when
-    /// the ring is full. Also says whether the loop thread must reactivate the stream.
+    /// the ring is full. Also says whether the loop thread must wake the stream.
     pub fn write(&self, data: &[u8], now: u64) -> (u64, bool) {
         self.tick(now);
         let wp = self.write_pos.load(Relaxed);
@@ -196,7 +206,7 @@ impl Stream {
     }
 
     /// Lets the callback give frames again from its next cycle. Says whether the loop thread must
-    /// reactivate the stream.
+    /// wake the stream.
     pub fn start(&self, now: u64) -> bool {
         if self.paused.swap(false, SeqCst) {
             self.kick_ns.store(now, Relaxed);
@@ -301,9 +311,7 @@ impl Stream {
         self.clock_ns.store(now, Relaxed);
     }
 
-    /// Whether the loop thread must reactivate the stream for frames just written or started. If
-    /// it is deactivating the stream at this moment, either it sees the new write_pos and keeps
-    /// it active, or this sees active false and asks.
+    /// Whether the loop thread must wake the stream for frames just written or started.
     fn needs_kick(&self, now: u64) -> bool {
         if self.attached_ns.load(SeqCst) != 0 && !self.active.load(SeqCst) {
             self.kick_ns.store(now, Relaxed);
@@ -362,17 +370,17 @@ impl Stream {
 
     // Shared reads.
 
-    pub(crate) fn consumed(&self) -> u64 {
+    pub fn consumed(&self) -> u64 {
         self.read_pos.load(Acquire).max(self.skip_to.load(Acquire))
     }
 
-    /// Whether the graph has nothing left to play. Loaded sequentially consistent: see needs_kick.
-    pub(crate) fn is_empty(&self) -> bool {
+    /// Whether the graph has nothing left to play.
+    pub fn is_empty(&self) -> bool {
         self.write_pos.load(SeqCst) <= self.consumed()
     }
 
     /// How long what the stream holds will take to play, or None while it is paused.
-    pub(crate) fn pending_ns(&self) -> Option<u64> {
+    pub fn pending_ns(&self) -> Option<u64> {
         if self.paused.load(Relaxed) {
             return None;
         }
@@ -383,32 +391,92 @@ impl Stream {
     /// Whether the callback has handed over the silence that follows the last frames, which a
     /// stream must have done before it is deactivated: what PipeWire still held would otherwise
     /// play when it is next activated.
-    pub(crate) fn is_drained(&self) -> bool {
+    pub fn is_drained(&self) -> bool {
         self.drain_frames.load(Acquire) == 0
     }
 
-    pub(crate) fn process_calls(&self) -> u64 {
+    pub fn process_calls(&self) -> u64 {
         self.process_calls.load(Acquire)
     }
 
     /// Frames PipeWire's resampler held in the last cycle, which play after anything handed over.
-    pub(crate) fn resampler_frames(&self) -> u64 {
+    pub fn resampler_frames(&self) -> u64 {
         self.resampler_frames.load(Relaxed)
+    }
+
+    pub fn is_attached(&self) -> bool {
+        self.attached_ns.load(Acquire) != 0
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active.load(SeqCst)
+    }
+
+    pub fn pw(&self) -> *mut c_void {
+        self.pw.load(Acquire)
     }
 
     // The loop thread's side.
 
     /// Clears what the callback counted for the previous pw_stream, before a new one is made.
-    pub(crate) fn prepare_attach(&self) {
+    pub fn prepare_attach(&self) {
         self.process_calls.store(0, Release);
         self.last_graph_ns.store(0, Relaxed);
         self.cycle_ns.store(0, Relaxed);
     }
 
+    pub fn set_pw(&self, pw: *mut c_void) {
+        self.pw.store(pw, Release);
+    }
+
+    /// The stream has a connected pw_stream, which is active.
+    pub fn mark_attached(&self, now: u64) {
+        self.active.store(true, SeqCst);
+        self.attached_ns.store(now.max(1), SeqCst);
+    }
+
+    pub fn mark_detached(&self) {
+        self.attached_ns.store(0, SeqCst);
+        self.active.store(false, SeqCst);
+        self.pw.store(ptr::null_mut(), Release);
+    }
+
+    pub fn set_broken(&self, broken: bool) {
+        self.broken.store(broken, Relaxed);
+    }
+
+    pub fn take_broken(&self) -> bool {
+        self.broken.swap(false, Relaxed)
+    }
+
+    pub fn retry_ns(&self) -> u64 {
+        self.retry_ns.load(Relaxed)
+    }
+
+    pub fn set_retry_ns(&self, at: u64) {
+        self.retry_ns.store(at, Relaxed);
+    }
+
+    /// Marks the stream inactive unless something was written since the caller found it empty,
+    /// and says whether it did; the caller then deactivates its pw_stream. A write racing this
+    /// either sees the stream inactive and asks for it to be woken, or is seen here.
+    pub fn deactivate_if_still_empty(&self) -> bool {
+        self.active.store(false, SeqCst);
+        if self.is_empty() {
+            return true;
+        }
+        self.active.store(true, SeqCst);
+        false
+    }
+
+    pub fn reactivate(&self) {
+        self.active.store(true, SeqCst);
+    }
+
     // The real-time callback's side: no allocation, no lock, no system call, no wait.
 
     /// Enters a cycle and returns the read position, having skipped what was discarded.
-    pub(crate) fn begin_cycle(&self) -> u64 {
+    pub fn begin_cycle(&self) -> u64 {
         self.in_cycle.store(true, SeqCst);
         let skip = self.skip_to.load(SeqCst);
         let rp = self.read_pos.load(Relaxed);
@@ -420,7 +488,7 @@ impl Stream {
         }
     }
 
-    pub(crate) fn available(&self, rp: u64) -> u64 {
+    pub fn available(&self, rp: u64) -> u64 {
         if self.paused.load(Acquire) {
             0
         } else {
@@ -428,13 +496,13 @@ impl Stream {
         }
     }
 
-    pub(crate) fn stride(&self) -> usize {
+    pub fn stride(&self) -> usize {
         self.stride
     }
 
     /// Copies the frames from rp that fill dst, then applies the channel gains and the process
     /// gain.
-    pub(crate) fn copy_out(&self, rp: u64, dst: &mut [u8], process_gain: f32) {
+    pub fn copy_out(&self, rp: u64, dst: &mut [u8], process_gain: f32) {
         let bytes = dst.len();
         let start = (rp % self.capacity) as usize * self.stride;
         let first = bytes.min(self.ring_len - start);
@@ -464,14 +532,14 @@ impl Stream {
         );
     }
 
-    pub(crate) fn end_cycle(&self, rp: u64) {
+    pub fn end_cycle(&self, rp: u64) {
         self.read_pos.store(rp, Release);
         self.in_cycle.store(false, SeqCst);
     }
 
     /// Publishes where the graph's read position was in the cycle at graph_ns and how many of
     /// those frames had not yet been heard.
-    pub(crate) fn publish(&self, graph_ns: u64, pos: u64, latency: f64) {
+    pub fn publish(&self, graph_ns: u64, pos: u64, latency: f64) {
         let seq = self.snap_seq.load(Relaxed);
         self.snap_seq.store(seq + 1, Relaxed);
         std::sync::atomic::fence(Release);
@@ -482,11 +550,11 @@ impl Stream {
     }
 
     /// Whether silence is still due after the last frames handed over.
-    pub(crate) fn draining(&self) -> bool {
+    pub fn draining(&self) -> bool {
         self.drain_frames.load(Relaxed) > 0
     }
 
-    pub(crate) fn silence_byte(&self) -> u8 {
+    pub fn silence_byte(&self) -> u8 {
         if self.format.sample == Sample::U8 {
             0x80
         } else {
@@ -495,7 +563,7 @@ impl Stream {
     }
 
     /// Counts a buffer handed over: frames from the ring, then silence up to filled.
-    pub(crate) fn note_handed(&self, frames: u64, filled: u64) {
+    pub fn note_handed(&self, frames: u64, filled: u64) {
         if frames > 0 {
             let drain = MIN_DRAIN_FRAMES.max(2 * self.resampler_frames.load(Relaxed));
             self.drain_frames.store(drain, Release);
@@ -506,7 +574,7 @@ impl Stream {
     }
 
     /// Counts a cycle, with the frames PipeWire's resampler said it held.
-    pub(crate) fn note_cycle(&self, graph_ns: u64, resampler_frames: u64) {
+    pub fn note_cycle(&self, graph_ns: u64, resampler_frames: u64) {
         let last = self.last_graph_ns.swap(graph_ns, Relaxed);
         if last != 0 && graph_ns > last && graph_ns - last <= MAX_CYCLE_NS {
             self.cycle_ns.store(graph_ns - last, Relaxed);
@@ -546,10 +614,10 @@ mod tests {
         out
     }
 
+    /// What the loop thread does when it gives a stream a pw_stream.
     fn attach(s: &Stream, now: u64) {
         s.prepare_attach();
-        s.active.store(true, SeqCst);
-        s.attached_ns.store(now, SeqCst);
+        s.mark_attached(now);
     }
 
     #[test]
@@ -736,6 +804,28 @@ mod tests {
         assert!(!s.write(&frames(10, 1), 1).1);
         s.active.store(false, SeqCst);
         assert!(s.write(&frames(10, 1), 1).1);
+    }
+
+    #[test]
+    fn a_write_racing_deactivation_is_never_left_in_an_inactive_stream() {
+        // The loop thread found the stream empty, and the producer writes before it clears active:
+        // the producer sees the stream still active and asks for nothing, so the loop thread must
+        // see the frames and keep it active.
+        let s = mono16(8000);
+        attach(&s, 1);
+        assert!(s.is_empty());
+        let (_, kick) = s.write(&frames(10, 1), 2);
+        let deactivated = s.deactivate_if_still_empty();
+        assert!(
+            kick || !deactivated,
+            "frames left in an inactive stream with no wake asked for"
+        );
+        assert!(s.is_active());
+        // The producer writes after active was cleared: it must ask for the stream to be woken.
+        let s = mono16(8000);
+        attach(&s, 1);
+        assert!(s.deactivate_if_still_empty());
+        assert!(s.write(&frames(10, 1), 3).1);
     }
 
     #[test]

@@ -1,8 +1,7 @@
 //! The sample formats a stream carries, how PipeWire names them and lays out their channels, and
 //! the gain stage the real-time callback applies.
 
-use pipewire::spa::param::audio::AudioFormat;
-use pipewire::spa::sys as spas;
+use libspa_sys as spas;
 
 /// The most channels a stream takes, which is also the length of its per-channel gains.
 pub const MAX_CHANNELS: usize = 8;
@@ -49,14 +48,14 @@ impl Sample {
     /// The SPA format of the same layout. S24 must be S24_LE, the packed one: declaring S24_32_LE
     /// for packed data makes PipeWire read every sample from the wrong bytes, which plays as
     /// full-scale noise.
-    pub fn spa(self) -> AudioFormat {
+    pub fn spa(self) -> spas::spa_audio_format {
         match self {
-            Sample::U8 => AudioFormat::U8,
-            Sample::S16 => AudioFormat::S16LE,
-            Sample::S24 => AudioFormat::S24LE,
-            Sample::S32 => AudioFormat::S32LE,
-            Sample::F32 => AudioFormat::F32LE,
-            Sample::F64 => AudioFormat::F64LE,
+            Sample::U8 => spas::SPA_AUDIO_FORMAT_U8,
+            Sample::S16 => spas::SPA_AUDIO_FORMAT_S16_LE,
+            Sample::S24 => spas::SPA_AUDIO_FORMAT_S24_LE,
+            Sample::S32 => spas::SPA_AUDIO_FORMAT_S32_LE,
+            Sample::F32 => spas::SPA_AUDIO_FORMAT_F32_LE,
+            Sample::F64 => spas::SPA_AUDIO_FORMAT_F64_LE,
         }
     }
 }
@@ -246,7 +245,7 @@ mod tests {
 
     #[test]
     fn packed_24_bit_is_declared_as_packed() {
-        assert_eq!(Sample::S24.spa(), AudioFormat::S24LE);
+        assert_eq!(Sample::S24.spa(), spas::SPA_AUDIO_FORMAT_S24_LE);
         assert_eq!(Sample::S24.bytes(), 3);
     }
 

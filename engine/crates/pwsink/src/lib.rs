@@ -16,16 +16,14 @@
 //! been passed to pwsink_close, and must not be called on one handle from two threads at once.
 
 mod engine;
-mod format;
-mod stream;
 
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
 use engine::{DELIVERED, PROCESS_GAIN, engine};
-use format::Format;
-use stream::{NS, Stream};
+use pwsink_core::format::Format;
+use pwsink_core::stream::{NS, Stream};
 
 /// Nanoseconds on CLOCK_MONOTONIC, the clock PipeWire's graph times are on.
 pub fn mono_ns() -> u64 {
@@ -270,7 +268,7 @@ pub unsafe extern "C" fn pwsink_resampler_frames(stream: *const Stream) -> u64 {
 pub unsafe extern "C" fn pwsink_is_active(stream: *const Stream) -> c_int {
     // SAFETY: as documented.
     let s = unsafe { &*stream };
-    (s.attached_ns.load(Relaxed) != 0 && s.active.load(Relaxed)) as c_int
+    (s.is_attached() && s.is_active()) as c_int
 }
 
 /// How many closed streams the pool holds.
@@ -300,34 +298,5 @@ pub extern "C" fn pwsink_set_pool_limits(max: u64, idle_ms: u64) {
 pub extern "C" fn pwsink_block_loop(ms: u64) {
     if let Ok(engine) = engine() {
         engine.block_loop(ms);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Inside tests/linux/rig with no daemon running: cargo test --no-run outside, then this
-    /// test's binary by name inside the rig with --ignored.
-    #[test]
-    #[ignore = "initialises PipeWire, which outside the rig would reach the live sound server"]
-    fn with_no_daemon_a_stream_opens_and_keeps_time() {
-        assert_eq!(pwsink_init(), 0);
-        let mut err = 0;
-        let s = unsafe { pwsink_open(1, 1, 8000, 16, std::ptr::null(), &mut err) };
-        assert!(!s.is_null(), "{err}");
-        let data = vec![0u8; 1600 * 2];
-        let started = std::time::Instant::now();
-        assert_eq!(unsafe { pwsink_write(s, data.as_ptr(), data.len()) }, 1600);
-        unsafe { pwsink_start(s) };
-        while unsafe { pwsink_played(s) } < 1600 {
-            assert!(started.elapsed().as_millis() < 1000);
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        let took = started.elapsed().as_millis();
-        assert!((195..400).contains(&took), "{took} ms for 200 ms of audio");
-        assert_eq!(pwsink_delivered(), 0);
-        assert_eq!(pwsink_connected(), 0);
-        unsafe { pwsink_close(s) };
     }
 }

@@ -71,8 +71,16 @@ dependencies = [
 name = "basedreader-pwsink"
 version = "0.1.0"
 dependencies = [
+ "basedreader-pwsink-core",
  "libc",
  "pipewire",
+]
+
+[[package]]
+name = "basedreader-pwsink-core"
+version = "0.1.0"
+dependencies = [
+ "libspa-sys",
 ]
 
 [[package]]

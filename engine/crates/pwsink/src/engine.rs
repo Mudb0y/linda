@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::ptr;
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
@@ -20,11 +20,11 @@ use pipewire as pw;
 use pw::spa;
 use pw::spa::spa_interface_call_method;
 use pw::sys as pws;
+use pwsink_core::format::Format;
+use pwsink_core::stream::{NS, Stream};
 use spa::sys as spas;
 
-use crate::format::Format;
 use crate::mono_ns;
-use crate::stream::{NS, Stream};
 
 /// How long after failing to connect, or after losing the daemon, the next attempt is made. A
 /// failed attempt costs the loop thread a few milliseconds.
@@ -43,24 +43,12 @@ pub(crate) static PROCESS_GAIN: AtomicU32 = AtomicU32::new(0x3f80_0000);
 /// Frames taken by the graph, over every stream since the library was loaded.
 pub(crate) static DELIVERED: AtomicU64 = AtomicU64::new(0);
 
-/// The loop thread's handle on a stream's pw_stream.
-pub(crate) struct Link {
+/// A stream the loop thread has given a pw_stream, with the listener on it. Boxed, since PipeWire
+/// keeps the addresses of the hook and event table.
+struct Link {
+    stream: Arc<Stream>,
     hook: spas::spa_hook,
     events: pws::pw_stream_events,
-    retry_ns: u64,
-}
-
-impl Default for Link {
-    fn default() -> Link {
-        // SAFETY: both are plain C structures for which all zeroes is the empty value.
-        unsafe {
-            Link {
-                hook: std::mem::zeroed(),
-                events: std::mem::zeroed(),
-                retry_ns: 0,
-            }
-        }
-    }
 }
 
 struct Shared {
@@ -80,7 +68,11 @@ struct LoopState {
     core_lost: bool,
     next_connect_ns: u64,
     timer: *mut spas::spa_source,
-    attached: Vec<Arc<Stream>>,
+    #[allow(
+        clippy::vec_box,
+        reason = "PipeWire keeps the addresses of each link's hooks, which must not move as the list grows"
+    )]
+    links: Vec<Box<Link>>,
 }
 
 pub(crate) struct Engine {
@@ -97,8 +89,8 @@ pub(crate) struct Engine {
     state: UnsafeCell<LoopState>,
 }
 
-// SAFETY: thread_loop is used only while starting; state only on the loop thread, inside its
-// callbacks; the rest are atomics, a mutex and a file descriptor.
+// SAFETY: thread_loop is used only while starting and by the loop thread; state only on the loop
+// thread, inside its callbacks; the rest are atomics, a mutex and a file descriptor.
 unsafe impl Send for Engine {}
 unsafe impl Sync for Engine {}
 
@@ -155,7 +147,7 @@ impl Engine {
                     core_lost: false,
                     next_connect_ns: 0,
                     timer: ptr::null_mut(),
-                    attached: Vec::new(),
+                    links: Vec::new(),
                 }),
             }));
             let data = engine as *const Engine as *mut c_void;
@@ -326,17 +318,16 @@ impl Engine {
         let mut retry_due = None::<u64>;
         if !lp.core.is_null() {
             for s in &streams {
-                if s.broken.swap(false, Relaxed) {
+                if s.take_broken() {
                     unsafe { self.detach(lp, s) };
-                    unsafe { (*s.link.get()).retry_ns = now + RECONNECT_NS };
+                    s.set_retry_ns(now + RECONNECT_NS);
                 }
-                if s.pw.load(Relaxed).is_null() {
-                    let retry = unsafe { (*s.link.get()).retry_ns };
-                    if retry <= now {
+                if !s.is_attached() {
+                    if s.retry_ns() <= now {
                         unsafe { self.attach(lp, s, now) };
                     }
-                    if s.pw.load(Relaxed).is_null() {
-                        let retry = unsafe { (*s.link.get()).retry_ns };
+                    if !s.is_attached() {
+                        let retry = s.retry_ns();
                         retry_due = Some(retry_due.map_or(retry, |d| d.min(retry)));
                     }
                 }
@@ -392,8 +383,9 @@ impl Engine {
     /// Drops the connection and every pw_stream on it. Their rings and positions stay, so the
     /// streams keep time by the clock until they are attached again.
     unsafe fn disconnect(&self, lp: &mut LoopState) {
-        for s in lp.attached.clone() {
-            unsafe { self.detach(lp, &s) };
+        let streams: Vec<Arc<Stream>> = lp.links.iter().map(|l| l.stream.clone()).collect();
+        for s in &streams {
+            unsafe { self.detach(lp, s) };
         }
         if !lp.core.is_null() {
             // SAFETY: on the loop thread; the hook was added in connect.
@@ -409,23 +401,26 @@ impl Engine {
     }
 
     unsafe fn attach(&self, lp: &mut LoopState, s: &Arc<Stream>, now: u64) {
-        // SAFETY: on the loop thread, which alone touches the link; the Arc in lp.attached keeps
-        // the stream alive for as long as the callback can be given its address.
+        // SAFETY: on the loop thread. The link is boxed before its hook and events are handed to
+        // PipeWire, and lp.links keeps it, and the stream the callbacks are given, alive until
+        // detach has removed them.
         unsafe {
-            let link = &mut *s.link.get();
             let props = stream_properties(&s.target);
             let stream = pws::pw_stream_new(lp.core, c"Basedreader".as_ptr(), props);
             if stream.is_null() {
-                link.retry_ns = now + RECONNECT_NS;
+                s.set_retry_ns(now + RECONNECT_NS);
                 return;
             }
             s.prepare_attach();
-            s.pw.store(stream, Release);
-            link.events = std::mem::zeroed();
+            s.set_pw(stream as *mut c_void);
+            let mut link = Box::new(Link {
+                stream: s.clone(),
+                hook: std::mem::zeroed(),
+                events: std::mem::zeroed(),
+            });
             link.events.version = pws::PW_VERSION_STREAM_EVENTS;
             link.events.state_changed = Some(on_stream_state);
             link.events.process = Some(on_process);
-            link.hook = std::mem::zeroed();
             pws::pw_stream_add_listener(
                 stream,
                 &mut link.hook,
@@ -447,41 +442,35 @@ impl Engine {
             );
             if r < 0 {
                 spa::utils::hook::remove(link.hook);
-                link.hook = std::mem::zeroed();
                 pws::pw_stream_destroy(stream);
-                s.pw.store(ptr::null_mut(), Release);
-                link.retry_ns = now + RECONNECT_NS;
+                s.mark_detached();
+                s.set_retry_ns(now + RECONNECT_NS);
                 return;
             }
-            s.active.store(true, SeqCst);
-            s.attached_ns.store(now, SeqCst);
+            s.mark_attached(now);
+            lp.links.push(link);
         }
-        lp.attached.push(s.clone());
-        self.attached_count.store(lp.attached.len(), Relaxed);
+        self.attached_count.store(lp.links.len(), Relaxed);
     }
 
     unsafe fn detach(&self, lp: &mut LoopState, s: &Arc<Stream>) {
-        let stream = s.pw.load(Acquire);
-        if stream.is_null() {
+        let Some(i) = lp.links.iter().position(|l| Arc::ptr_eq(&l.stream, s)) else {
             return;
-        }
-        s.attached_ns.store(0, SeqCst);
-        s.active.store(false, SeqCst);
+        };
+        let link = lp.links.swap_remove(i);
+        let stream = s.pw() as *mut pws::pw_stream;
+        s.mark_detached();
         // SAFETY: on the loop thread. Removing the hook takes the data loop's lock to clear the
         // stream's real-time callbacks, so no callback runs for this stream once it returns.
         unsafe {
-            let link = &mut *s.link.get();
             spa::utils::hook::remove(link.hook);
-            link.hook = std::mem::zeroed();
             pws::pw_stream_disconnect(stream);
             pws::pw_stream_destroy(stream);
         }
-        s.pw.store(ptr::null_mut(), Release);
         // A state change this detach caused, or one the connection's loss caused, needs nothing
         // more doing.
-        s.broken.store(false, Relaxed);
-        lp.attached.retain(|a| !Arc::ptr_eq(a, s));
-        self.attached_count.store(lp.attached.len(), Relaxed);
+        s.take_broken();
+        self.attached_count.store(lp.links.len(), Relaxed);
     }
 
     /// Keeps streams active until the keep-awake deadline, so that the device stays awake, then
@@ -491,10 +480,11 @@ impl Engine {
         let deadline = self.keep_awake_until.load(Acquire);
         let mut due = None::<u64>;
         let mut sooner = |t: u64| due = Some(due.map_or(t, |d: u64| d.min(t)));
-        for s in &lp.attached {
-            let stream = s.pw.load(Relaxed);
-            if s.active.load(SeqCst) {
-                // A stream not scheduled since it connected costs nothing, and deactivating it
+        for link in &lp.links {
+            let s = &link.stream;
+            let stream = s.pw() as *mut pws::pw_stream;
+            if s.is_active() {
+                // A stream not yet scheduled since it connected costs nothing, and deactivating it
                 // could race the session manager linking it.
                 if s.process_calls() == 0 {
                     sooner(now + RECHECK_NS);
@@ -513,17 +503,14 @@ impl Engine {
                     sooner(now + DRAIN_CHECK_NS);
                     continue;
                 }
-                s.active.store(false, SeqCst);
-                if !s.is_empty() {
-                    // A write came in between: the producer saw active still true.
-                    s.active.store(true, SeqCst);
+                if !s.deactivate_if_still_empty() {
                     sooner(now + RECHECK_NS);
                     continue;
                 }
                 // SAFETY: on the loop thread, with a live pw_stream.
                 unsafe { pws::pw_stream_set_active(stream, false) };
             } else if !s.is_empty() {
-                s.active.store(true, SeqCst);
+                s.reactivate();
                 // SAFETY: as above.
                 unsafe { pws::pw_stream_set_active(stream, true) };
                 let played = now + s.pending_ns().unwrap_or(RECHECK_NS) + DRAIN_CHECK_NS;
@@ -612,7 +599,9 @@ unsafe fn stream_properties(target: &Option<CString>) -> *mut pws::pw_properties
 
 fn format_pod(format: &Format) -> Vec<u8> {
     let mut info = spa::param::audio::AudioInfoRaw::new();
-    info.set_format(format.sample.spa());
+    info.set_format(spa::param::audio::AudioFormat::from_raw(
+        format.sample.spa(),
+    ));
     info.set_rate(format.rate);
     info.set_channels(format.channels);
     let mut position = [0u32; spa::param::audio::MAX_CHANNELS];
@@ -669,9 +658,9 @@ unsafe extern "C" fn on_stream_state(
     if state == pws::pw_stream_state_PW_STREAM_STATE_ERROR
         || state == pws::pw_stream_state_PW_STREAM_STATE_UNCONNECTED
     {
-        // SAFETY: data is the stream's address, which lp.attached keeps alive.
+        // SAFETY: data is the stream's address, which its link keeps alive.
         let s = unsafe { &*(data as *const Stream) };
-        s.broken.store(true, Relaxed);
+        s.set_broken(true);
         if let Some(Ok(engine)) = ENGINE.get() {
             engine.signal();
         }
@@ -688,11 +677,11 @@ unsafe extern "C" fn on_stream_state(
 /// a few frames of history, until more input comes; without the silence, the end of every sound
 /// would be held back and played at the start of the next one on the same stream.
 unsafe extern "C" fn on_process(data: *mut c_void) {
-    // SAFETY: data is the stream's address, which lp.attached keeps alive while the callback can
+    // SAFETY: data is the stream's address, which its link keeps alive while the callback can
     // run, and pw is its live pw_stream.
     unsafe {
         let s = &*(data as *const Stream);
-        let stream = s.pw.load(Acquire);
+        let stream = s.pw() as *mut pws::pw_stream;
         let mut rp = s.begin_cycle();
         let available = s.available(rp);
         let mut took = false;
