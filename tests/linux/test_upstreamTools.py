@@ -215,6 +215,11 @@ def test_fileAddedAmongUpstreamsFailsUntilListed(repo: Repo, path: str):
 	assertPasses(repo)
 
 
+def test_fileNamedLikeTheLauncherIsNotOurs(repo: Repo):
+	repo.write("source/basedreader.pyi", "")
+	assertFails(repo, "added among upstream's files but not listed:\nsource/basedreader.pyi")
+
+
 def test_fileAddedInOurOwnPlacesPasses(repo: Repo):
 	repo.write("source/linuxPlatform/new.py", "")
 	repo.git("add", "--", "source/linuxPlatform/new.py")
@@ -226,14 +231,18 @@ def test_forkWhoseUpstreamFileMovedFails(repo: Repo):
 	old = repo.blob("upstream", "source/watchdog.py")
 	repo.onUpstream(lambda r: r.write("source/watchdog.py", "def alive():\n\treturn True\n"))
 	new = repo.blob("upstream", "source/watchdog.py")
-	assertFails(repo, f"upstream changed source/watchdog.py: read git diff {old} {new}")
+	assertFails(
+		repo,
+		f"upstream changed source/watchdog.py: read git diff {old} {new}, carry what applies into"
+		" source/linuxPlatform/replacements/watchdog.py",
+	)
 	repo.write(FORKS, repo.read(FORKS).replace(old, new))
 	assertPasses(repo)
 
 
 def test_launcherWhoseUpstreamMovedFails(repo: Repo):
 	repo.onUpstream(lambda r: r.write("source/nvda.pyw", "launcher = False\n"))
-	assertFails(repo, "upstream changed source/nvda.pyw")
+	assertFails(repo, "upstream changed source/nvda.pyw", "carry what applies into source/basedreader.py")
 
 
 def test_moduleNewlyReplacedWithoutAnEntryFails(repo: Repo):

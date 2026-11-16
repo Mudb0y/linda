@@ -37,9 +37,12 @@ CLDR_LINK = "include/nvda-cldr"
 LOUIS_LINK = "include/liblouis"
 
 #: Where an added file is ours by construction rather than something beside upstream's.
-OURS = ("source/linuxPlatform/", "source/basedreader.py")
+OUR_DIR = "source/linuxPlatform/"
+OUR_FILES = ("source/basedreader.py",)
 #: Where an added file sits among upstream's modules or tests.
 UPSTREAM_DIRS = ("source", "tests/unit")
+#: Where the finder loads each replacement from, at the module's own path.
+REPLACEMENTS = "source/linuxPlatform/replacements/"
 #: Forks the finder does not know about, and the file of ours that carries each.
 MIRRORED = {"source/nvda.pyw": "source/basedreader.py"}
 #: How each reason in the edits list starts, as that list's header explains.
@@ -118,7 +121,7 @@ def checkEdits(base: str) -> tuple[list[str], int]:
 	changed = paths("diff", "--no-renames", "--name-only", "--diff-filter=MDT", base, "--", ".")
 	added = paths("diff", "--no-renames", "--name-only", "--diff-filter=A", base, "--", *UPSTREAM_DIRS)
 	added |= paths("ls-files", "--others", "--exclude-standard", "--", *UPSTREAM_DIRS)
-	added = {p for p in added if not p.startswith(OURS)}
+	added = {p for p in added if not p.startswith(OUR_DIR) and p not in OUR_FILES}
 	ledger = readLedger(EDITS)
 	listed = set(ledger)
 	errors = []
@@ -146,19 +149,22 @@ def moduleFile(base: str, module: str) -> str:
 
 
 def checkForks(base: str) -> tuple[list[str], int]:
-	forked = {moduleFile(base, m) for m in replacedModules()} | set(MIRRORED)
+	forked = dict(MIRRORED)
+	for module in replacedModules():
+		upstreamFile = moduleFile(base, module)
+		forked[upstreamFile] = REPLACEMENTS + upstreamFile.removeprefix("source/")
 	listed = readLedger(FORKS)
 	louis = listed.pop(LOUIS_LINK, None)
 	if louis is None or len(louis.words) != 3:
 		raise Failure(f"{FORKS}: {LOUIS_LINK} needs the commit upstream pins and its release")
 	errors = []
-	if unlisted := sorted(forked - set(listed)):
+	if unlisted := sorted(forked.keys() - set(listed)):
 		errors.append(f"forked from upstream but not in {FORKS}:")
 		errors += unlisted
-	if stale := sorted(set(listed) - forked):
+	if stale := sorted(set(listed) - forked.keys()):
 		errors.append(f"in {FORKS} but no longer forked:")
 		errors += stale
-	for path in sorted(forked & set(listed)):
+	for path in sorted(forked.keys() & set(listed)):
 		words = listed[path].words
 		recorded = words[1] if len(words) == 2 else None
 		if recorded is None:
@@ -168,7 +174,7 @@ def checkForks(base: str) -> tuple[list[str], int]:
 		if current != recorded:
 			errors.append(
 				f"upstream changed {path}: read git diff {recorded} {current}, carry what applies"
-				f" into its fork, then record {current} in {FORKS}",
+				f" into {forked[path]}, then record {current} in {FORKS}",
 			)
 	return errors, len(forked)
 
