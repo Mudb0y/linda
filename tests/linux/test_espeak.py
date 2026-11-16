@@ -20,6 +20,7 @@ from pathlib import Path
 
 import harness
 import rununittests
+from pipewireFixture import PipewireFixture, assertSpeechHeard
 
 LIBRARY_VARIABLE = "BASEDREADER_ESPEAK_LIB"
 DATA_DIR_VARIABLE = "BASEDREADER_ESPEAK_DATA_DIR"
@@ -517,6 +518,12 @@ def test_noDoneAfterACancelInTheLastWait(tmp_path: Path):
 		""",
 	)
 	assert done.value == {"doneAfterCancel": 0, "after": [["index", 99], ["done", None]]}
+
+
+def test_isHeardThroughPipewire(pipewire: PipewireFixture, tmp_path: Path):
+	assertSpeechHeard(
+		pipewire, tmp_path, "espeak", "This is Basedreader, speaking through eSpeak and PipeWire."
+	)
 
 
 def test_theLibraryLinksNoSoundLibrary():

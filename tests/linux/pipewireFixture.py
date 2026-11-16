@@ -89,6 +89,84 @@ def assertCleanThroughPipewire(done: harness.ChildResult, *, ignoring: Collectio
 	)
 
 
+#: Brings speech up as core.main does with the synthesizer SYNTH configured, speaks TEXT through
+#: speech.speakMessage and the speech manager, and returns when the synthesizer reports it done.
+SPEAK_MESSAGE = """
+import time
+
+import core
+# core.main's first import after config; entering NVDA's import cycle anywhere else fails.
+import NVDAHelper
+from linuxPlatform import synthDriverPaths
+
+synthDriverPaths.install()
+import characterProcessing
+import config
+import languageHandler
+import nvwave
+import queueHandler
+import speech
+import speechDictHandler
+import synthDriverHandler
+
+languageHandler.setLanguage("en")
+nvwave.initialize()
+speechDictHandler.initialize()
+characterProcessing.initialize()
+config.conf["speech"]["synth"] = SYNTH
+speech.initialize()
+synth = synthDriverHandler.getSynth()
+assert synth.name == SYNTH, synth.name
+
+
+class Done:
+	# extensionPoints holds handlers weakly, so this is a bound method of an object kept alive here.
+	def __init__(self):
+		self.at = []
+		synthDriverHandler.synthDoneSpeaking.register(self.onDone)
+
+	def onDone(self, synth):
+		self.at.append(time.monotonic_ns())
+
+
+done = Done()
+asked = time.monotonic_ns()
+speech.speakMessage(TEXT)
+end = time.monotonic() + 30
+while not done.at and time.monotonic() < end:
+	queueHandler.pumpAll()
+	time.sleep(0.002)
+synthDriverHandler.setSynth(None)
+result = {"asked": asked, "done": done.at}
+"""
+
+
+def assertSpeechHeard(fixture: "PipewireFixture", tmpPath: Path, synth: str, text: str) -> None:
+	"""The synthesizer, loaded by NVDA and given text through speech.speakMessage, is heard at the
+	monitor through the PipeWire sink, and reports the end of the utterance only after the last of it
+	was heard."""
+	monitor = fixture.monitor()
+	done = harness.runChild(
+		tmpPath,
+		f"SYNTH = {synth!r}\nTEXT = {text!r}\n" + SPEAK_MESSAGE,
+		env=fixture.childEnv(),
+		timeout=120,
+	)
+	assertCleanThroughPipewire(done)
+	asked = done.value["asked"]
+	assert len(done.value["done"]) == 1, done.value
+	finished = done.value["done"][0]
+	first = monitor.soundAfter(asked)
+	sounds = [e["graph_ns"] for e in monitor.eventsOf("sound") if e["graph_ns"] >= asked]
+	last = monitor.silenceAfter(sounds[-1])
+	assert (first - asked) / 1e6 < 1000, "the first sound came more than a second after asking"
+	assert (last - first) / 1e9 > 1.0, "less than a second of speech was heard"
+	assert finished >= last - 1_000_000, "the end of the utterance was reported before it was heard"
+	assert not [ns for ns in sounds if ns > finished], "sound was heard after the utterance ended"
+	left, right = monitor.samples(first, last)
+	assert max(abs(s) for s in left) > 0.1 and max(abs(s) for s in right) > 0.1, "the speech was barely heard"
+
+
 def _refuseOutsideTheRig() -> None:
 	why = harness.whyNotInRig()
 	if why is not None:

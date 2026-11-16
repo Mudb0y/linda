@@ -26,6 +26,7 @@ from pathlib import Path
 
 import harness
 import pytest
+from pipewireFixture import PipewireFixture, assertSpeechHeard
 
 DRIVER_DIR_VARIABLE = "BASEDREADER_OPENEVV_DRIVER_DIR"
 
@@ -580,3 +581,10 @@ def test_anUnknownCommandIsNoError(tmp_path: Path):
 	)
 	done.assertClean()
 	assert done.value == [["index", 1], ["done", None]]
+
+
+def test_isHeardThroughPipewire(pipewire: PipewireFixture, tmp_path: Path):
+	requireDriverDirectory()
+	assertSpeechHeard(
+		pipewire, tmp_path, "openevv", "This is openevv, speaking through Basedreader and PipeWire."
+	)
