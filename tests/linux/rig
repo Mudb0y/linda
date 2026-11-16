@@ -241,11 +241,22 @@ variables+=(
 	BASEDREADER_RIG=1
 )
 
+# A cgroup of its own with a limit on memory, where the session's systemd
+# will make one: a test that runs away is then killed inside it, where
+# otherwise the kernel, or systemd-oomd with the whole login session's
+# cgroup, picks what dies. A rig started inside a rig is already in one.
+scope=()
+if [ -z "${BASEDREADER_RIG:-}" ] && command -v systemd-run >/dev/null 2>&1 &&
+	systemd-run --user --scope --quiet --collect true 2>/dev/null; then
+	scope=(systemd-run --user --scope --quiet --collect
+		-p "MemoryMax=${BASEDREADER_RIG_MEMORY:-16G}" -p MemorySwapMax=0 --)
+fi
+
 # Python only to close every descriptor the caller left open, which could
 # be a socket to something live, before bwrap takes this process's place.
 # Standard input is named because a background job otherwise gets
 # /dev/null, and a script piped to the command would silently not run.
-env -i "${variables[@]}" python3 -I -S -c '
+"${scope[@]}" env -i "${variables[@]}" python3 -I -S -c '
 import os, sys
 os.closerange(3, 1 << 20)
 os.execvp(sys.argv[1], sys.argv[1:])
