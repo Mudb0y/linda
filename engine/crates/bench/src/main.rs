@@ -7,12 +7,13 @@
 //!                          [--seed N] [--wait-info FILE]
 //!                          [--methods LABEL,...|none]
 //!                          [--app NAME] [--method-timeout-ms N]
+//!                          [--connect-timeout-ms N]
 //! basedreader-bench mirror --title T --out FILE --watch-ms N [--run-index N]
 //!                          [--seed N] [--interval-ms N] [--wait-info FILE]
 //!                          [--coalesce-ms N] [--dump FILE]
 //!                          [--app NAME] [--method-timeout-ms N]
+//!                          [--connect-timeout-ms N]
 
-mod delay;
 mod fetchcmd;
 mod mirrorcmd;
 mod procstat;
@@ -22,11 +23,23 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use mirror::client::Client;
-use mirror::discovery::{self, BusAddress};
-use mirror::fetch::{self, WalkFields};
-use mirror::{Error, app, consts};
+use mirror::discovery::{self, BusAddress, Peer, Timeouts};
+use mirror::fetch::{self, WalkFields, WalkLimits};
+use mirror::{Error, app, consts, time};
 use serde::Serialize;
 use zbus::Connection;
+
+/// Generous enough for a sequential walk of the large page over the bus,
+/// which takes about a minute and a half.
+pub const WALK_LIMITS: WalkLimits = WalkLimits {
+    max_objects: 1_000_000,
+    max_time: Duration::from_secs(600),
+};
+
+pub async fn sleep(d: Duration) -> Result<(), String> {
+    time::sleep(d).map_err(|e| format!("no timer: {e}"))?.await;
+    Ok(())
+}
 
 pub struct Args(HashMap<String, String>);
 
@@ -68,12 +81,14 @@ pub struct Target {
     pub bus_address: BusAddress,
     pub app_bus: String,
     pub pid: u32,
-    pub method_timeout: Duration,
+    pub owner: Peer,
+    pub timeouts: Timeouts,
 }
 
 #[derive(Serialize)]
 pub struct TargetInfo {
     pub bus_discovery: discovery::Source,
+    pub bus_addresses_refused: Vec<String>,
     pub app_bus_name: String,
     pub pid: u32,
     pub process_name: String,
@@ -82,14 +97,18 @@ pub struct TargetInfo {
     pub toolkit_version: String,
     pub document: Option<String>,
     pub method_timeout_ms: u128,
+    pub connect_timeout_ms: u128,
 }
 
 pub async fn connect(args: &Args) -> Result<Target, String> {
-    let method_timeout = Duration::from_millis(args.num("method-timeout-ms", 30_000)?);
-    let bus_address = discovery::find_bus_address(method_timeout)
+    let timeouts = Timeouts {
+        method: Duration::from_millis(args.num("method-timeout-ms", 30_000)?),
+        connect: Duration::from_millis(args.num("connect-timeout-ms", 10_000)?),
+    };
+    let bus_address = discovery::find_bus_address(timeouts)
         .await
         .map_err(|e| format!("finding the accessibility bus: {e}"))?;
-    let bus = discovery::connect_bus(&bus_address.address, method_timeout)
+    let bus = discovery::connect_bus(&bus_address.address, timeouts)
         .await
         .map_err(|e| format!("connecting to {}: {e}", bus_address.address))?;
     let want = args.or("app", "Firefox");
@@ -97,21 +116,54 @@ pub async fn connect(args: &Args) -> Result<Target, String> {
     let app_bus = app::find_app(&bus, want, timeout)
         .await
         .map_err(|e| e.to_string())?;
-    let pid = app::owner_pid(&bus, &app_bus)
+    let owner = app::owner(&bus, &app_bus)
         .await
-        .map_err(|e| format!("pid of {app_bus}: {e}"))?;
+        .map_err(|e| format!("owner of {app_bus}: {e}"))?;
     Ok(Target {
         bus,
         bus_address,
         app_bus,
-        pid,
-        method_timeout,
+        pid: owner.pid,
+        owner,
+        timeouts,
     })
+}
+
+/// How a run got its connection for calls: peer to peer when the
+/// application offers a server the engine accepts and the connection is
+/// made in time, otherwise over the bus.
+#[derive(Serialize, Default)]
+pub struct PeerToPeer {
+    pub address_offered: bool,
+    pub connect_s: Option<f64>,
+    /// Why the run fell back to the bus, when it did.
+    pub fell_back: Option<String>,
 }
 
 impl Target {
     pub fn bus_client(&self) -> Client {
         Client::bus(self.bus.clone(), &self.app_bus)
+    }
+
+    /// A peer-to-peer client to the server at `address`, or the reason there
+    /// is none.
+    pub async fn p2p_client(&self, address: &str, p2p: &mut PeerToPeer) -> Option<Client> {
+        p2p.address_offered = !address.is_empty();
+        if address.is_empty() {
+            return None;
+        }
+        let t = Instant::now();
+        match discovery::connect_p2p(address, self.owner, self.timeouts).await {
+            Ok(conn) => {
+                p2p.connect_s = Some(t.elapsed().as_secs_f64());
+                Some(Client::p2p(conn, &self.app_bus))
+            }
+            Err(e) => {
+                eprintln!("basedreader-bench: using the bus, peer to peer failed: {e}");
+                p2p.fell_back = Some(e.to_string());
+                None
+            }
+        }
     }
 
     pub async fn info(&self, title: &str) -> TargetInfo {
@@ -126,6 +178,7 @@ impl Target {
         };
         TargetInfo {
             bus_discovery: self.bus_address.source,
+            bus_addresses_refused: self.bus_address.refused.clone(),
             app_bus_name: self.app_bus.clone(),
             pid: self.pid,
             process_name: procstat::comm(self.pid),
@@ -136,7 +189,8 @@ impl Target {
             toolkit: prop("ToolkitName").await,
             toolkit_version: prop("Version").await,
             document: app::find_document(&c, title).await.ok().flatten(),
-            method_timeout_ms: self.method_timeout.as_millis(),
+            method_timeout_ms: self.timeouts.method.as_millis(),
+            connect_timeout_ms: self.timeouts.connect.as_millis(),
         }
     }
 }
@@ -163,7 +217,7 @@ pub fn unix_time() -> u64 {
 }
 
 /// Sums the CPU of `pid` and its descendants over `window`, in seconds.
-async fn tree_cpu_over(pid: u32, window: Duration) -> f64 {
+async fn tree_cpu_over(pid: u32, window: Duration) -> Result<f64, String> {
     let sum = || -> f64 {
         procstat::process_tree(pid)
             .into_iter()
@@ -171,8 +225,8 @@ async fn tree_cpu_over(pid: u32, window: Duration) -> f64 {
             .sum()
     };
     let before = sum();
-    delay::sleep(window).await;
-    sum() - before
+    sleep(window).await?;
+    Ok(sum() - before)
 }
 
 /// Waits until the document titled `--title` exists and is not busy, then
@@ -212,7 +266,7 @@ async fn wait(args: &Args) -> Result<(), String> {
         if Instant::now() > deadline {
             return Err(format!("no loaded document titled {title:?}"));
         }
-        delay::sleep(Duration::from_millis(250)).await;
+        sleep(Duration::from_millis(250)).await?;
     };
     let t_doc = t0.elapsed().as_secs_f64();
     let mut document_objects = None;
@@ -221,7 +275,7 @@ async fn wait(args: &Args) -> Result<(), String> {
         let mut last = 0;
         let mut stable = 0;
         while stable < 2 && Instant::now() < deadline {
-            let n = fetch::walk(&c, &doc, 64, WalkFields::STRUCTURE, None)
+            let n = fetch::walk(&c, &doc, 64, WalkFields::STRUCTURE, None, WALK_LIMITS)
                 .await
                 .tree
                 .len();
@@ -231,15 +285,15 @@ async fn wait(args: &Args) -> Result<(), String> {
                 stable = 0;
                 last = n;
             }
-            delay::sleep(Duration::from_millis(500)).await;
+            sleep(Duration::from_millis(500)).await?;
         }
         document_objects = Some(last);
     } else {
-        delay::sleep(Duration::from_millis(args.num("settle-ms", 3000)?)).await;
+        sleep(Duration::from_millis(args.num("settle-ms", 3000)?)).await?;
         let window = Duration::from_millis(500);
         let mut idle = 0;
         while idle < 2 && Instant::now() < deadline {
-            if tree_cpu_over(target.pid, window).await <= 0.02 {
+            if tree_cpu_over(target.pid, window).await? <= 0.02 {
                 idle += 1;
             } else {
                 idle = 0;

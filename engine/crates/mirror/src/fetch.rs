@@ -2,18 +2,21 @@
 //! bridge's one-call `Cache.GetItems`, and its undocumented
 //! `Collection.GetTree`.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
 
-use futures_util::future::LocalBoxFuture;
+use futures_util::future::{Either, LocalBoxFuture, select};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use zbus::Message;
 
-use crate::client::Client;
+use crate::Error;
+use crate::client::{CallFailure, Client, FailureKind};
 use crate::consts::{
     CACHE_PATH, IFACE_ACCESSIBLE, IFACE_CACHE, IFACE_COLLECTION, IFACE_PROPERTIES, IFACE_TEXT,
     INTERFACE_TEXT_BIT,
 };
 use crate::decode::{self, CacheItem, TreeEntry};
+use crate::time;
 use crate::tree::{Node, Tree};
 
 /// What a virtual buffer needs from each object, one call each.
@@ -42,73 +45,118 @@ impl Field {
             Field::Text => "Text.GetText",
         }
     }
+
+    /// The interface and member of the call that fetches the field.
+    pub fn method(self) -> (&'static str, &'static str) {
+        match self {
+            Field::Children => (IFACE_ACCESSIBLE, "GetChildren"),
+            Field::Role => (IFACE_ACCESSIBLE, "GetRole"),
+            Field::States => (IFACE_ACCESSIBLE, "GetState"),
+            Field::Name | Field::Description => (IFACE_PROPERTIES, "Get"),
+            Field::Interfaces => (IFACE_ACCESSIBLE, "GetInterfaces"),
+            Field::Attributes => (IFACE_ACCESSIBLE, "GetAttributes"),
+            Field::Text => (IFACE_TEXT, "GetText"),
+        }
+    }
+
+    /// What the call's reply carries.
+    pub fn reply_signature(self) -> &'static str {
+        match self {
+            Field::Children => "a(so)",
+            Field::Role => "u",
+            Field::States => "au",
+            Field::Name | Field::Description => "v holding s",
+            Field::Interfaces => "as",
+            Field::Attributes => "a{ss}",
+            Field::Text => "s",
+        }
+    }
 }
 
 pub type Call = (String, Field);
 
-fn issue<'a>(
-    client: &'a Client,
+fn issue(
+    client: &Client,
+    id: u64,
     path: String,
     field: Field,
-) -> LocalBoxFuture<'a, (String, Field, zbus::Result<Message>)> {
+) -> LocalBoxFuture<'_, (u64, zbus::Result<Message>)> {
     Box::pin(async move {
         let p = path.as_str();
+        let (iface, member) = field.method();
         let r = match field {
-            Field::Children => client.call(p, IFACE_ACCESSIBLE, "GetChildren", &()).await,
-            Field::Role => client.call(p, IFACE_ACCESSIBLE, "GetRole", &()).await,
-            Field::States => client.call(p, IFACE_ACCESSIBLE, "GetState", &()).await,
-            Field::Interfaces => client.call(p, IFACE_ACCESSIBLE, "GetInterfaces", &()).await,
-            Field::Attributes => client.call(p, IFACE_ACCESSIBLE, "GetAttributes", &()).await,
             Field::Name => {
                 client
-                    .call(p, IFACE_PROPERTIES, "Get", &(IFACE_ACCESSIBLE, "Name"))
+                    .call(p, iface, member, &(IFACE_ACCESSIBLE, "Name"))
                     .await
             }
             Field::Description => {
                 client
-                    .call(
-                        p,
-                        IFACE_PROPERTIES,
-                        "Get",
-                        &(IFACE_ACCESSIBLE, "Description"),
-                    )
+                    .call(p, iface, member, &(IFACE_ACCESSIBLE, "Description"))
                     .await
             }
-            Field::Text => client.call(p, IFACE_TEXT, "GetText", &(0i32, -1i32)).await,
+            Field::Text => client.call(p, iface, member, &(0i32, -1i32)).await,
+            _ => client.call(p, iface, member, &()).await,
         };
-        (path, field, r)
+        (id, r)
     })
 }
 
 /// Keeps up to `window` calls in flight until the queue and the window are
-/// both empty. `on_reply` may queue further calls. A window of 1 is a plain
-/// sequential client: one call, wait for its reply, then the next.
+/// both empty, or until `deadline`. `on_reply` may queue further calls. A
+/// window of 1 is a plain sequential client: one call, wait for its reply,
+/// then the next. Returns the calls queued or still in flight at the
+/// deadline, which are given up.
 pub async fn pipeline<F>(
     client: &Client,
     window: usize,
     initial: impl IntoIterator<Item = Call>,
+    deadline: Option<Instant>,
     mut on_reply: F,
-) where
+) -> Vec<Call>
+where
     F: FnMut(String, Field, zbus::Result<Message>, &mut VecDeque<Call>),
 {
     let window = window.max(1);
     let mut queue: VecDeque<Call> = initial.into_iter().collect();
     let mut inflight = FuturesUnordered::new();
+    let mut pending: HashMap<u64, Call> = HashMap::new();
+    let mut next_id = 0u64;
+    // Without a timer the deadline still holds at the next reply, and every
+    // call is bounded by the method timeout.
+    let mut timer = deadline.and_then(|at| time::sleep_until(at).ok());
     loop {
+        if deadline.is_some_and(|at| Instant::now() >= at) {
+            break;
+        }
         while inflight.len() < window {
             let Some((path, field)) = queue.pop_front() else {
                 break;
             };
-            inflight.push(issue(client, path, field));
+            pending.insert(next_id, (path.clone(), field));
+            inflight.push(issue(client, next_id, path, field));
+            next_id += 1;
         }
-        let Some((path, field, r)) = inflight.next().await else {
+        let reply = match timer.as_mut() {
+            Some(t) => match select(inflight.next(), t).await {
+                Either::Left((r, _)) => r,
+                Either::Right(_) => break,
+            },
+            None => inflight.next().await,
+        };
+        let Some((id, r)) = reply else {
             break;
         };
-        on_reply(path, field, r, &mut queue);
+        if let Some((path, field)) = pending.remove(&id) {
+            on_reply(path, field, r, &mut queue);
+        }
     }
+    let mut left: Vec<Call> = pending.into_values().collect();
+    left.extend(queue);
+    left
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalkFields {
     /// Role, states, name, description and interfaces. Without them a walk
     /// fetches structure only.
@@ -134,18 +182,114 @@ impl WalkFields {
         attributes: false,
         text: false,
     };
+
+    pub fn asks_for(self, f: Field) -> bool {
+        match f {
+            Field::Children => true,
+            Field::Role | Field::States | Field::Name | Field::Description | Field::Interfaces => {
+                self.data
+            }
+            Field::Attributes => self.attributes,
+            Field::Text => self.text,
+        }
+    }
 }
 
-#[derive(Debug, Default)]
+/// Bounds on one walk, so that an application that invents objects without
+/// end, or stops answering, cannot keep it going for ever. Both are reported
+/// when reached, never silently.
+#[derive(Debug, Clone, Copy)]
+pub struct WalkLimits {
+    /// The most objects a walk takes in. A child list that would take it
+    /// past the limit is not taken.
+    pub max_objects: usize,
+    /// Calls not answered by then are given up.
+    pub max_time: Duration,
+}
+
+/// How many failed calls a walk keeps in full; the rest are only counted.
+pub const MAX_FAILURES_KEPT: usize = 64;
+
+#[derive(Debug)]
 pub struct WalkResult {
     pub tree: Tree,
+    /// What the walk asked each object for.
+    pub fields: WalkFields,
     /// Failed calls by method.
     pub errors: BTreeMap<&'static str, usize>,
-    /// Objects whose `GetChildren` failed with an error reply, which for an
-    /// object the walk was just told about means it is already gone.
-    pub children_failed: Vec<String>,
+    /// The first failed calls, in full.
+    pub failures: Vec<CallFailure>,
+    pub failures_not_kept: usize,
+    /// For each object, the fields the walk did not get, and why. Such a
+    /// field is unknown, not empty: an object whose `GetChildren` timed out
+    /// may well have children.
+    pub failed: HashMap<String, BTreeMap<Field, FailureKind>>,
+    /// The walk reached its object limit or ran out of time.
+    pub truncated: bool,
     /// Children owned by another bus name, such as an embedded application.
     pub foreign_children: usize,
+}
+
+impl WalkResult {
+    fn new(bus: &str, root: &str, fields: WalkFields) -> Self {
+        Self::from_tree(Tree::new(bus, root), fields)
+    }
+
+    /// A walk that got every field in `fields` for every object of `tree`.
+    pub fn from_tree(tree: Tree, fields: WalkFields) -> Self {
+        WalkResult {
+            tree,
+            fields,
+            errors: BTreeMap::new(),
+            failures: Vec::new(),
+            failures_not_kept: 0,
+            failed: HashMap::new(),
+            truncated: false,
+            foreign_children: 0,
+        }
+    }
+
+    pub fn failure(&self, path: &str, field: Field) -> Option<&FailureKind> {
+        self.failed.get(path).and_then(|f| f.get(&field))
+    }
+}
+
+/// Cache items a walk may take objects' data from instead of asking for it.
+pub trait Known {
+    fn item(&self, path: &str) -> Option<&CacheItem>;
+}
+
+impl Known for HashMap<String, CacheItem> {
+    fn item(&self, path: &str) -> Option<&CacheItem> {
+        self.get(path)
+    }
+}
+
+struct Failures<'a> {
+    client: &'a Client,
+    errors: &'a mut BTreeMap<&'static str, usize>,
+    failures: &'a mut Vec<CallFailure>,
+    not_kept: &'a mut usize,
+    failed: &'a mut HashMap<String, BTreeMap<Field, FailureKind>>,
+}
+
+impl Failures<'_> {
+    fn record(&mut self, path: &str, field: Field, kind: FailureKind) {
+        if !matches!(kind, FailureKind::NotMade { .. } | FailureKind::OverLimit) {
+            *self.errors.entry(field.label()).or_default() += 1;
+            if self.failures.len() < MAX_FAILURES_KEPT {
+                let (iface, member) = field.method();
+                self.failures
+                    .push(self.client.failure(path, iface, member, kind.clone()));
+            } else {
+                *self.not_kept += 1;
+            }
+        }
+        self.failed
+            .entry(path.to_owned())
+            .or_default()
+            .insert(field, kind);
+    }
 }
 
 fn data_calls(path: &str, fields: WalkFields) -> impl Iterator<Item = Call> + '_ {
@@ -169,21 +313,21 @@ fn data_calls(path: &str, fields: WalkFields) -> impl Iterator<Item = Call> + '_
 /// object's data with one call per field. Where `known` holds a cache item
 /// for an object, its data comes from there and only the calls the item
 /// cannot answer are made: children unless the item says there are none,
-/// attributes, and text.
+/// attributes, and text. Every object is taken in once, so the tree returned
+/// has no cycles whatever the application answers.
 pub async fn walk(
     client: &Client,
     root: &str,
     window: usize,
     fields: WalkFields,
-    known: Option<&HashMap<String, CacheItem>>,
+    known: Option<&dyn Known>,
+    limits: WalkLimits,
 ) -> WalkResult {
-    let mut res = WalkResult {
-        tree: Tree::new(&client.app_bus, root),
-        ..WalkResult::default()
-    };
+    let deadline = Instant::now().checked_add(limits.max_time);
+    let mut res = WalkResult::new(&client.app_bus, root, fields);
     let app_bus = client.app_bus.clone();
     let start = |path: &str, tree: &mut Tree, initial: &mut Vec<Call>| {
-        let item = known.and_then(|k| k.get(path));
+        let item = known.and_then(|k| k.item(path));
         let node = tree.nodes.entry(path.to_owned()).or_default();
         match item {
             Some(it) => {
@@ -218,77 +362,122 @@ pub async fn walk(
     );
     start(root, &mut res.tree, &mut initial);
     let tree = &mut res.tree;
-    let errors = &mut res.errors;
     let foreign = &mut res.foreign_children;
-    let failed = &mut res.children_failed;
-    pipeline(client, window, initial, |path, field, r, queue| {
-        let msg = match r {
-            Ok(m) => m,
-            Err(e) => {
-                *errors.entry(field.label()).or_default() += 1;
-                if field == Field::Children && !crate::client::is_timeout(&e) {
-                    failed.push(path);
+    let truncated = &mut res.truncated;
+    let mut fails = Failures {
+        client,
+        errors: &mut res.errors,
+        failures: &mut res.failures,
+        not_kept: &mut res.failures_not_kept,
+        failed: &mut res.failed,
+    };
+    // The text call is only made once the interfaces are known.
+    let text_unknown = FailureKind::NotMade {
+        reason: "the interfaces are unknown",
+    };
+    let left = pipeline(
+        client,
+        window,
+        initial,
+        deadline,
+        |path, field, r, queue| {
+            let msg = match r {
+                Ok(m) => m,
+                Err(e) => {
+                    fails.record(&path, field, FailureKind::of(&e));
+                    if field == Field::Interfaces && fields.text {
+                        fails.record(&path, Field::Text, text_unknown.clone());
+                    }
+                    return;
                 }
-                return;
+            };
+            let decoded: zbus::Result<()> = (|| {
+                match field {
+                    Field::Children => {
+                        let kids = decode::children(&msg)?;
+                        let mut own = Vec::with_capacity(kids.len());
+                        let mut here = HashSet::with_capacity(kids.len());
+                        for k in kids {
+                            if k.is_null() {
+                                continue;
+                            }
+                            if k.bus != app_bus {
+                                *foreign += 1;
+                                continue;
+                            }
+                            if tree.nodes.contains_key(&k.path) || !here.insert(k.path.clone()) {
+                                continue;
+                            }
+                            own.push(k.path);
+                        }
+                        if tree.nodes.len() + own.len() > limits.max_objects {
+                            *truncated = true;
+                            fails.record(&path, Field::Children, FailureKind::OverLimit);
+                            return Ok(());
+                        }
+                        for (i, k) in own.iter().enumerate() {
+                            tree.nodes.insert(
+                                k.clone(),
+                                Node {
+                                    parent: Some(path.clone()),
+                                    index_in_parent: i as i32,
+                                    ..Node::default()
+                                },
+                            );
+                            let mut more = Vec::new();
+                            start(k, tree, &mut more);
+                            queue.extend(more);
+                        }
+                        if let Some(n) = tree.nodes.get_mut(&path) {
+                            n.child_count = own.len() as i32;
+                            n.children = own;
+                        }
+                    }
+                    Field::Role => node(tree, &path).role = Some(decode::role(&msg)?),
+                    Field::States => node(tree, &path).states = Some(decode::states(&msg)?),
+                    Field::Name => node(tree, &path).name = Some(decode::string_property(&msg)?),
+                    Field::Description => {
+                        node(tree, &path).description = Some(decode::string_property(&msg)?)
+                    }
+                    Field::Interfaces => {
+                        let bits = decode::interfaces(&msg)?;
+                        node(tree, &path).interfaces = Some(bits);
+                        if fields.text && bits & INTERFACE_TEXT_BIT != 0 {
+                            queue.push_back((path.clone(), Field::Text));
+                        }
+                    }
+                    Field::Attributes => {
+                        node(tree, &path).attributes = Some(decode::attributes(&msg)?)
+                    }
+                    Field::Text => node(tree, &path).text = Some(decode::string(&msg)?),
+                }
+                Ok(())
+            })();
+            if decoded.is_err() {
+                fails.record(
+                    &path,
+                    field,
+                    FailureKind::undecodable(&msg, field.reply_signature()),
+                );
+                if field == Field::Interfaces && fields.text {
+                    fails.record(&path, Field::Text, text_unknown.clone());
+                }
             }
-        };
-        let decoded: zbus::Result<()> = (|| {
-            match field {
-                Field::Children => {
-                    let kids = decode::children(&msg)?;
-                    let mut own = Vec::with_capacity(kids.len());
-                    for k in kids {
-                        if k.is_null() {
-                            continue;
-                        }
-                        if k.bus != app_bus {
-                            *foreign += 1;
-                            continue;
-                        }
-                        if tree.nodes.contains_key(&k.path) {
-                            continue;
-                        }
-                        tree.nodes.insert(
-                            k.path.clone(),
-                            Node {
-                                parent: Some(path.clone()),
-                                index_in_parent: own.len() as i32,
-                                ..Node::default()
-                            },
-                        );
-                        let mut more = Vec::new();
-                        start(&k.path, tree, &mut more);
-                        queue.extend(more);
-                        own.push(k.path);
-                    }
-                    if let Some(n) = tree.nodes.get_mut(&path) {
-                        n.child_count = own.len() as i32;
-                        n.children = own;
-                    }
-                }
-                Field::Role => node(tree, &path).role = Some(decode::role(&msg)?),
-                Field::States => node(tree, &path).states = Some(decode::states(&msg)?),
-                Field::Name => node(tree, &path).name = Some(decode::string_property(&msg)?),
-                Field::Description => {
-                    node(tree, &path).description = Some(decode::string_property(&msg)?)
-                }
-                Field::Interfaces => {
-                    let bits = decode::interfaces(&msg)?;
-                    node(tree, &path).interfaces = Some(bits);
-                    if fields.text && bits & INTERFACE_TEXT_BIT != 0 {
-                        queue.push_back((path.clone(), Field::Text));
-                    }
-                }
-                Field::Attributes => node(tree, &path).attributes = Some(decode::attributes(&msg)?),
-                Field::Text => node(tree, &path).text = Some(decode::string(&msg)?),
-            }
-            Ok(())
-        })();
-        if decoded.is_err() {
-            *errors.entry(field.label()).or_default() += 1;
-        }
-    })
+        },
+    )
     .await;
+    if !left.is_empty() {
+        *truncated = true;
+    }
+    let out_of_time = FailureKind::NotMade {
+        reason: "the walk ran out of time",
+    };
+    for (path, field) in left {
+        fails.record(&path, field, out_of_time.clone());
+        if field == Field::Interfaces && fields.text {
+            fails.record(&path, Field::Text, out_of_time.clone());
+        }
+    }
     res
 }
 
@@ -320,7 +509,7 @@ pub async fn supplement(
         }
     }
     let mut errors = BTreeMap::new();
-    pipeline(client, window, calls, |path, field, r, _| {
+    pipeline(client, window, calls, None, |path, field, r, _| {
         let ok = r.and_then(|msg| {
             match field {
                 Field::Attributes => node(tree, &path).attributes = Some(decode::attributes(&msg)?),
@@ -337,11 +526,18 @@ pub async fn supplement(
     errors
 }
 
-pub async fn get_items(client: &Client) -> zbus::Result<Vec<CacheItem>> {
+pub async fn get_items(client: &Client) -> Result<Vec<CacheItem>, Error> {
     let msg = client
-        .call(CACHE_PATH, IFACE_CACHE, "GetItems", &())
+        .request(CACHE_PATH, IFACE_CACHE, "GetItems", &())
         .await?;
-    decode::items(&msg)
+    client.decode(
+        &msg,
+        CACHE_PATH,
+        IFACE_CACHE,
+        "GetItems",
+        "a((so)(so)(so)iiassusau)",
+        decode::items,
+    )
 }
 
 /// The match rule `(aiia{ss}iaiiasib)` that matches everything: an empty set
@@ -379,16 +575,23 @@ pub async fn get_tree(
     client: &Client,
     root: &str,
     properties: &[&str],
-) -> zbus::Result<Vec<TreeEntry>> {
+) -> Result<Vec<TreeEntry>, Error> {
     let msg = client
-        .call(
+        .request(
             root,
             IFACE_COLLECTION,
             "GetTree",
             &(match_all(), properties.to_vec()),
         )
         .await?;
-    decode::tree(&msg)
+    client.decode(
+        &msg,
+        root,
+        IFACE_COLLECTION,
+        "GetTree",
+        "a((so)a{sv})",
+        decode::tree,
+    )
 }
 
 #[cfg(test)]

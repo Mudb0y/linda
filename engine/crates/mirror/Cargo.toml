@@ -12,4 +12,6 @@ name = "mirror"
 zbus.workspace = true
 futures-util.workspace = true
 x11rb.workspace = true
+zruntime.workspace = true
+rustix.workspace = true
 serde.workspace = true

@@ -1,36 +1,47 @@
 //! Part two: build a mirror from `GetItems`, keep it current from signals
 //! while the page mutates on its schedule, then compare it with a fresh walk.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 use futures_util::future::{Either, select};
 use futures_util::stream::StreamExt;
-use mirror::client::Client;
+use mirror::client::{CallFailure, Client, FailureKind};
 use mirror::consts::{
     IFACE_ACCESSIBLE, IFACE_CACHE, IFACE_PROPERTIES, IFACE_TEXT, ROLE_HEADING, ROOT_PATH,
     state_name,
 };
-use mirror::decode;
-use mirror::fetch::{self, WalkFields};
+use mirror::fetch::{self, Field, Known, WalkFields};
 use mirror::maintain::{Mirror, NaiveMirror, Repair};
 use mirror::tree::{self, Compared, Tree};
-use mirror::{app, discovery};
+use mirror::{app, decode, time};
 use serde::Serialize;
 use serde_json::json;
 use zbus::message::Type;
 use zbus::{MatchRule, Message, MessageStream};
 
-use crate::delay::Delay;
 use crate::procstat::Meter;
-use crate::{Args, delay, unix_time, write_json};
+use crate::{Args, PeerToPeer, WALK_LIMITS, sleep, unix_time, write_json};
 
 const STATUS_PREFIX: &str = "Mutations ";
 
 /// Calls in flight for the build and for repair walks; four to sixteen
 /// already keep Firefox's main thread busy.
 const REPAIR_WINDOW: usize = 16;
+
+/// The most repairs one batch runs. The rest wait for the next batch, so
+/// that an application which keeps inventing objects cannot hold the signal
+/// loop for ever.
+const MAX_REPAIRS_PER_BATCH: usize = 10_000;
+
+/// How far Locate follows parents the mirror does not hold. A newly shown
+/// subtree is a few levels deep; a chain longer than this is an application
+/// inventing parents.
+const MAX_LOCATE_DEPTH: usize = 64;
+
+/// Failed calls kept in full for the result; the rest are counted.
+const FAILURES_KEPT: usize = 32;
 
 fn status(t: &Tree) -> Option<String> {
     t.nodes
@@ -59,6 +70,11 @@ struct LoopStats {
     repair_call_errors: BTreeMap<String, usize>,
     repair_timeouts: usize,
     repair_undecodable_replies: usize,
+    /// The first failed calls, with the object and the error.
+    repair_failures: Vec<String>,
+    walks_truncated: usize,
+    repairs_dropped_over_budget: usize,
+    locate_chains_cut: usize,
     /// Every signal, one line each, kept only when the run dumps its trees.
     #[serde(skip)]
     signal_log: Option<Vec<String>>,
@@ -97,14 +113,18 @@ fn describe(m: &Message) -> String {
 }
 
 impl LoopStats {
-    fn call_failed(&mut self, method: &str, e: &zbus::Error) {
-        *self
-            .repair_call_errors
-            .entry(method.to_owned())
-            .or_default() += 1;
-        if mirror::client::is_timeout(e) {
+    fn keep(&mut self, failure: String) {
+        if self.repair_failures.len() < FAILURES_KEPT {
+            self.repair_failures.push(failure);
+        }
+    }
+
+    fn call_failed(&mut self, label: &str, failure: &CallFailure) {
+        *self.repair_call_errors.entry(label.to_owned()).or_default() += 1;
+        if failure.kind == FailureKind::Timeout {
             self.repair_timeouts += 1;
         }
+        self.keep(failure.to_string());
     }
 
     fn undecodable(&mut self, method: &str) {
@@ -132,6 +152,9 @@ async fn run_repairs(
         queue.extend(rs.into_iter().filter(|r| seen.insert(r.clone())));
     };
     enqueue(&mut queue, &mut seen, repairs);
+    // How many parents each Locate is from the object a signal came from.
+    let mut climbed: HashMap<String, usize> = HashMap::new();
+    let mut run = 0;
     let t = Instant::now();
     while let Some(r) = queue.pop_front() {
         let path = r.path();
@@ -142,10 +165,22 @@ async fn run_repairs(
             stats.repairs_skipped_object_gone += usize::from(!held);
             continue;
         }
+        if run == MAX_REPAIRS_PER_BATCH {
+            stats.repairs_dropped_over_budget += 1;
+            continue;
+        }
+        run += 1;
         stats.repairs_run += 1;
         if let Some(log) = stats.signal_log.as_mut() {
             log.push(format!("repair {r:?}"));
         }
+        // Only the application saying the object does not exist makes the
+        // mirror drop it.
+        let failed = |stats: &mut LoopStats, field: Field, e: &zbus::Error| {
+            let (iface, member) = field.method();
+            let f = client.failure(path, iface, member, FailureKind::of(e));
+            stats.call_failed(field.label(), &f);
+        };
         match &r {
             Repair::RefetchChildren(p) => {
                 match client.call(p, IFACE_ACCESSIBLE, "GetChildren", &()).await {
@@ -156,24 +191,47 @@ async fn run_repairs(
                         }
                         Err(_) => stats.undecodable("GetChildren"),
                     },
-                    Err(e) => {
-                        stats.call_failed("GetChildren", &e);
-                        if !mirror::client::is_timeout(&e) {
-                            mirror.forget(p);
-                        }
+                    Err(e) if mirror::client::is_gone(&e) => {
+                        stats.call_failed(
+                            "GetChildren",
+                            &client.failure(
+                                p,
+                                IFACE_ACCESSIBLE,
+                                "GetChildren",
+                                FailureKind::of(&e),
+                            ),
+                        );
+                        mirror.forget(p);
                     }
+                    Err(e) => failed(stats, Field::Children, &e),
                 }
             }
             Repair::FetchSubtree(p) => {
-                let res =
-                    fetch::walk(client, p, REPAIR_WINDOW, MIRROR_FIELDS, Some(mirror.pool())).await;
+                let known: &dyn Known = mirror.pool();
+                let res = fetch::walk(
+                    client,
+                    p,
+                    REPAIR_WINDOW,
+                    MIRROR_FIELDS,
+                    Some(known),
+                    WALK_LIMITS,
+                )
+                .await;
                 for (method, n) in &res.errors {
                     *stats
                         .repair_call_errors
                         .entry((*method).to_owned())
                         .or_default() += n;
                 }
-                if res.children_failed.iter().any(|f| f == p) {
+                for f in &res.failures {
+                    if f.kind == FailureKind::Timeout {
+                        stats.repair_timeouts += 1;
+                    }
+                    stats.keep(f.to_string());
+                }
+                stats.walks_truncated += usize::from(res.truncated);
+                let root = res.failure(p, Field::Children);
+                if root.is_some_and(FailureKind::is_gone) {
                     stats.subtree_roots_gone += 1;
                     mirror.forget(p);
                 } else {
@@ -187,7 +245,7 @@ async fn run_repairs(
                         Ok(text) => mirror.set_text(p, text),
                         Err(_) => stats.undecodable("Text.GetText"),
                     },
-                    Err(e) => stats.call_failed("Text.GetText", &e),
+                    Err(e) => failed(stats, Field::Text, &e),
                 }
             }
             Repair::Locate(p) => {
@@ -196,17 +254,28 @@ async fn run_repairs(
                     .await;
                 match parent.map(|m| decode::ref_property(&m)) {
                     Ok(Ok(parent)) if parent.bus == client.app_bus && !parent.is_null() => {
+                        let up = climbed.get(p).copied().unwrap_or(0) + 1;
                         let next = match mirror.tree.nodes.get(&parent.path) {
                             Some(n) if n.children.contains(p) => None,
                             Some(_) => Some(Repair::RefetchChildren(parent.path)),
-                            None => Some(Repair::Locate(parent.path)),
+                            None if up > MAX_LOCATE_DEPTH => {
+                                stats.locate_chains_cut += 1;
+                                None
+                            }
+                            None => {
+                                climbed.insert(parent.path.clone(), up);
+                                Some(Repair::Locate(parent.path))
+                            }
                         };
                         enqueue(&mut queue, &mut seen, next.into_iter().collect());
                     }
                     Ok(Ok(_)) => {}
                     Ok(Err(_)) => stats.undecodable("Get(Parent)"),
                     // The object is gone, which is why the mirror lacks it.
-                    Err(e) => stats.call_failed("Get(Parent)", &e),
+                    Err(e) => stats.call_failed(
+                        "Get(Parent)",
+                        &client.failure(p, IFACE_PROPERTIES, "Get", FailureKind::of(&e)),
+                    ),
                 }
             }
             Repair::RefetchAttributes(p) => {
@@ -215,7 +284,7 @@ async fn run_repairs(
                         Ok(a) => mirror.set_attributes(p, a),
                         Err(_) => stats.undecodable("GetAttributes"),
                     },
-                    Err(e) => stats.call_failed("GetAttributes", &e),
+                    Err(e) => failed(stats, Field::Attributes, &e),
                 }
             }
         }
@@ -237,7 +306,9 @@ async fn prime_attributes(client: &Client, document: &str) -> usize {
         {
             return n;
         }
-        delay::sleep(Duration::from_millis(10)).await;
+        if sleep(Duration::from_millis(10)).await.is_err() {
+            return n;
+        }
     }
     50
 }
@@ -426,14 +497,8 @@ pub async fn run(args: &Args) -> Result<(), String> {
     }
     let bus_client = target.bus_client();
     let address = app::activate(&bus_client).await.map_err(crate::err)?;
-    let p2p_client = if address.is_empty() {
-        None
-    } else {
-        let conn = discovery::connect_p2p(&address, target.method_timeout)
-            .await
-            .map_err(|e| format!("peer-to-peer connection to {address}: {e}"))?;
-        Some(Client::p2p(conn, &target.app_bus))
-    };
+    let mut p2p = PeerToPeer::default();
+    let p2p_client = target.p2p_client(&address, &mut p2p).await;
     let client = p2p_client.as_ref().unwrap_or(&bus_client);
 
     let t_build = Instant::now();
@@ -469,7 +534,7 @@ pub async fn run(args: &Args) -> Result<(), String> {
         ..LoopStats::default()
     };
     let meter = Meter::start(target.pid, client.counters());
-    let mut deadline = Delay::new(watch_left);
+    let mut deadline = time::sleep(watch_left).map_err(crate::err)?;
     loop {
         let first = match select(stream.next(), &mut deadline).await {
             Either::Left((Some(Ok(m)), _)) => m,
@@ -481,7 +546,7 @@ pub async fn run(args: &Args) -> Result<(), String> {
         };
         let mut batch = vec![first];
         if !coalesce.is_zero() {
-            delay::sleep(coalesce).await;
+            sleep(coalesce).await?;
         }
         while let Some(Some(r)) = stream.next().now_or_never() {
             match r {
@@ -504,9 +569,17 @@ pub async fn run(args: &Args) -> Result<(), String> {
         run_repairs(client, &mut mirror, repairs, &mut stats).await;
     }
 
-    delay::sleep(Duration::from_millis(300)).await;
+    sleep(Duration::from_millis(300)).await?;
     let meter = Meter::start(target.pid, client.counters());
-    let walked = fetch::walk(client, ROOT_PATH, REPAIR_WINDOW, MIRROR_FIELDS, None).await;
+    let walked = fetch::walk(
+        client,
+        ROOT_PATH,
+        REPAIR_WINDOW,
+        MIRROR_FIELDS,
+        None,
+        WALK_LIMITS,
+    )
+    .await;
     let reference_cost = meter.stop(client.counters());
     let reference = walked.tree;
     let fresh_items = fetch::get_items(client)
@@ -544,6 +617,7 @@ pub async fn run(args: &Args) -> Result<(), String> {
             "wait": crate::wait_info(args),
             "target": info,
             "transport_for_calls": client.transport,
+            "peer_to_peer": p2p,
             "events_over": "bus",
             "build": {
                 "cost": build_cost,
@@ -569,6 +643,8 @@ pub async fn run(args: &Args) -> Result<(), String> {
                 "cost": reference_cost,
                 "objects": reference.len(),
                 "call_errors": walked.errors,
+                "failures": walked.failures,
+                "truncated": walked.truncated,
                 "status": status(&reference),
             },
             "mirror_vs_walk": mirror_diff,

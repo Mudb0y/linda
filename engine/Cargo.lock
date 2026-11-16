@@ -36,9 +36,11 @@ name = "basedreader-mirror"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "rustix",
  "serde",
  "x11rb",
  "zbus",
+ "zruntime",
 ]
 
 [[package]]

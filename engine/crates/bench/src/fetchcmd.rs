@@ -6,16 +6,16 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use futures_util::future::join3;
+use mirror::app;
 use mirror::client::{Client, Counters, Transport};
 use mirror::consts::{IFACE_ACCESSIBLE, ROOT_PATH};
 use mirror::fetch::{self, WalkFields};
 use mirror::tree::{self, Compared, ObjectSetComparison, Tree, TreeDiff};
-use mirror::{app, discovery};
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::procstat::{Cost, Meter};
-use crate::{Args, delay, unix_time, write_json};
+use crate::{Args, PeerToPeer, WALK_LIMITS, sleep, unix_time, write_json};
 
 /// What a virtual buffer needs from GetTree; the bridge returns every
 /// property of every interface when the list is empty.
@@ -114,6 +114,7 @@ struct Fetched {
 struct Probe {
     samples: Vec<f64>,
     errors: usize,
+    timer_failed: bool,
 }
 
 impl Probe {
@@ -130,6 +131,7 @@ impl Probe {
         json!({
             "calls": s.len(),
             "errors": self.errors,
+            "timer_failed": self.timer_failed,
             "median_ms": q(0.5),
             "p90_ms": q(0.9),
             "p99_ms": q(0.99),
@@ -152,7 +154,10 @@ async fn probe(client: &Client, done: &Cell<bool>, limit: Option<usize>) -> Prob
             Ok(_) => p.samples.push(t.elapsed().as_secs_f64()),
             Err(_) => p.errors += 1,
         }
-        delay::sleep(Duration::from_millis(5)).await;
+        if sleep(Duration::from_millis(5)).await.is_err() {
+            p.timer_failed = true;
+            break;
+        }
     }
     p
 }
@@ -171,9 +176,11 @@ async fn fetch_by(
             } else {
                 WalkFields::ITEM
             };
-            let r = fetch::walk(client, ROOT_PATH, w, fields, None).await;
+            let r = fetch::walk(client, ROOT_PATH, w, fields, None, WALK_LIMITS).await;
             call_errors = r.errors;
             details.insert("foreign_children", json!(r.foreign_children));
+            details.insert("truncated", json!(r.truncated));
+            details.insert("failures", json!(r.failures));
             r.tree
         }
         Method::Items => {
@@ -200,13 +207,14 @@ async fn fetch_by(
             let idle_side = probe(side, &Cell::new(false), Some(100)).await;
             let done = Cell::new(false);
             let walk = async {
-                let r = fetch::walk(client, ROOT_PATH, w, WalkFields::ALL, None).await;
+                let r = fetch::walk(client, ROOT_PATH, w, WalkFields::ALL, None, WALK_LIMITS).await;
                 done.set(true);
                 r
             };
             let (r, same, other) =
                 join3(walk, probe(client, &done, None), probe(side, &done, None)).await;
             call_errors = r.errors;
+            details.insert("truncated", json!(r.truncated));
             details.insert(
                 "probe",
                 json!({
@@ -235,9 +243,12 @@ async fn measure(
     reference: Option<&Tree>,
 ) -> (MethodResult, Option<Tree>) {
     // Lets the application go idle, and its timers fire, outside the timing.
-    delay::sleep(Duration::from_millis(300)).await;
+    let paused = sleep(Duration::from_millis(300)).await;
     let meter = Meter::start(pid, client.counters());
-    let r = fetch_by(method, client, side).await;
+    let r = match paused {
+        Ok(()) => fetch_by(method, client, side).await,
+        Err(e) => Err(e),
+    };
     let cost = meter.stop(client.counters());
     let mut res = MethodResult {
         method: method.label(),
@@ -296,6 +307,8 @@ struct Load {
     activation: Cost,
     p2p_address_offered: bool,
     p2p_connect_s: Option<f64>,
+    /// Why calls went over the bus although a server was offered.
+    p2p_fell_back: Option<String>,
     first_getitems: Cost,
     first_getitems_transport: Transport,
     first_getitems_objects: usize,
@@ -353,17 +366,8 @@ pub async fn run(args: &Args) -> Result<(), String> {
     let meter = Meter::start(target.pid, bus_client.counters());
     let address = app::activate(&bus_client).await.map_err(crate::err)?;
     let activation = meter.stop(bus_client.counters());
-    let mut p2p_connect_s = None;
-    let p2p_client = if address.is_empty() {
-        None
-    } else {
-        let t = Instant::now();
-        let conn = discovery::connect_p2p(&address, target.method_timeout)
-            .await
-            .map_err(|e| format!("peer-to-peer connection to {address}: {e}"))?;
-        p2p_connect_s = Some(t.elapsed().as_secs_f64());
-        Some(Client::p2p(conn, &target.app_bus))
-    };
+    let mut p2p = PeerToPeer::default();
+    let p2p_client = target.p2p_client(&address, &mut p2p).await;
     let main_client = p2p_client.as_ref().unwrap_or(&bus_client);
     let meter = Meter::start(target.pid, main_client.counters());
     let first = app::get_items_once_active(main_client, Duration::from_secs(10))
@@ -380,8 +384,9 @@ pub async fn run(args: &Args) -> Result<(), String> {
         wait_mode,
         total,
         activation,
-        p2p_address_offered: !address.is_empty(),
-        p2p_connect_s,
+        p2p_address_offered: p2p.address_offered,
+        p2p_connect_s: p2p.connect_s,
+        p2p_fell_back: p2p.fell_back,
         first_getitems,
         first_getitems_transport: main_client.transport,
         first_getitems_objects: first_tree.len(),
@@ -393,6 +398,7 @@ pub async fn run(args: &Args) -> Result<(), String> {
     let mut results = Vec::new();
     let mut reference = None;
     let mut order = Vec::new();
+    let mut second = PeerToPeer::default();
     if only.as_ref().is_none_or(|o| !o.contains(&"none")) {
         for m in [Method::Walk(64), Method::Items] {
             warmup.push(measure(m, main_client, None, target.pid, None).await.0);
@@ -404,13 +410,10 @@ pub async fn run(args: &Args) -> Result<(), String> {
         load.first_getitems_vs_reference = Some(walked.same_objects(&first_tree));
         load.first_getitems_differences = Some(tree::diff(&walked, &first_tree, Compared::ITEM));
 
+        // A probe without its second connection reports the method as
+        // failed; the run itself goes on.
         let side = match &p2p_client {
-            Some(_) => Some(Client::p2p(
-                discovery::connect_p2p(&address, target.method_timeout)
-                    .await
-                    .map_err(|e| format!("second peer-to-peer connection: {e}"))?,
-                &target.app_bus,
-            )),
+            Some(_) => target.p2p_client(&address, &mut second).await,
             None => None,
         };
         let mut plan: Vec<(Method, &Client)> = Vec::new();
@@ -457,6 +460,7 @@ pub async fn run(args: &Args) -> Result<(), String> {
             "wait": wait,
             "target": info,
             "load": load,
+            "second_connection": second,
             "warmup": warmup,
             "reference": format!("walk-1 over {}", transport_name(main_client)),
             "application_objects": reference.as_ref().map(Tree::len),
