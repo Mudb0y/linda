@@ -31,6 +31,9 @@ PROTECTED_CHARACTER = "*"
 MASKS = frozenset("*\u2022")
 #: Seconds within which VTE's report of the text a change removed is paired with what replaced it.
 REPLACED_SECONDS = 0.05
+#: How far inside an editable focus a change to the text typed into it may come from: a web page's
+#: rich text editor keeps its text in the paragraphs inside it, which report the change themselves.
+INSIDE_FOCUS_DEPTH = 4
 
 #: The last text removed from an object, as (its node, offset, text, time.monotonic()).
 _lastRemoved: tuple[object, int, str, float] | None = None
@@ -114,6 +117,25 @@ def _typedInTerminal(removed: str | None, inserted: str, key) -> str | None:
 	return found[0] if len(found) == 1 else None
 
 
+def _isInsideFocus(node, focus) -> bool:
+	"""Whether node is inside focus, an editable object, within INSIDE_FOCUS_DEPTH parents."""
+	if "editable" not in getattr(focus, "atspiStates", ()):
+		return False
+	from .client import NodeGone
+	from .handler import client
+
+	try:
+		for _ in range(INSIDE_FOCUS_DEPTH):
+			node = client().parent(node)
+			if node is None:
+				return False
+			if node == focus.node:
+				return True
+	except NodeGone:
+		pass
+	return False
+
+
 def handleTextChange(
 	obj,
 	kind: Literal["insert", "delete"],
@@ -134,11 +156,15 @@ def handleTextChange(
 	# The focus as queued, which a focus event earlier in the same pump has already changed.
 	focus = eventHandler.lastQueuedFocusObject
 	node = getattr(focus, "node", None)
-	if node is None or getattr(obj, "node", None) != node:
+	objNode = getattr(obj, "node", None)
+	if node is None or objNode is None:
 		return
 	global _lastRemoved
 	key = _lastKeyDown()
 	isRecent = key is not None and time.monotonic() - key.time <= TYPING_WINDOW
+	inside = objNode != node
+	if inside and not (isRecent and _isInsideFocus(objNode, focus)):
+		return
 	removed = None
 	if _lastRemoved is not None:
 		removedNode, removedOffset, removedText, removedAt = _lastRemoved
@@ -153,7 +179,7 @@ def handleTextChange(
 		if text is not None:
 			_lastRemoved = (node, offset, text, time.monotonic())
 		# Clears the character from the word NVDA builds for typed word echo; nothing is spoken.
-		if isRecent and key.vkCode == VK_BACK:
+		if isRecent and key.vkCode == VK_BACK and (not inside or claimEcho(key.time)):
 			eventHandler.queueEvent("typedCharacter", focus, ch="\b")
 		return
 	if kind != "insert":
@@ -176,4 +202,7 @@ def handleTextChange(
 		if text in NOT_ECHOED or not isOneCharacter(text):
 			return
 		character = text
+	# An editor whose paragraph and the run of text in it both report one change echoes it once.
+	if inside and not claimEcho(key.time):
+		return
 	eventHandler.queueEvent("typedCharacter", focus, ch=character)
