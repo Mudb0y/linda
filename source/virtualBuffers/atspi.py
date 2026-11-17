@@ -407,6 +407,12 @@ class AtSpiBuffer(VirtualBuffer):
 			if self._loadHold is not None:
 				self._loadHold.Stop()
 				self._loadHold = None
+			# What Firefox takes from the page's objects as they go may be told only after this buffer,
+			# which says nothing of it, is gone. NVDA speaks such a change of the focus and of what
+			# holds it, so those are told that their page went.
+			for obj in (*api.getFocusAncestors(), api.getFocusObject()):
+				if obj in self:
+					obj.wentWithItsPage = True
 			treeInterceptorHandler.killTreeInterceptor(self)
 			return
 		if self._loadHold is not None:

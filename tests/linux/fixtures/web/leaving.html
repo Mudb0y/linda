@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Leaving page</title></head>
+<body>
+<h1>Leaving</h1>
+<p><button>First</button></p>
+<p><button>Second</button></p>
+<script>
+for (const button of document.querySelectorAll("button")) {
+	button.addEventListener("click", () => setTimeout(() => button.setAttribute("aria-disabled", "true"), 4000));
+}
+</script>
+</body></html>

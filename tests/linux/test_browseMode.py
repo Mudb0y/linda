@@ -29,6 +29,8 @@ BUFFER_BOUND = 60.0
 SETTLE = 1.0
 #: Seconds a followed link has to bring its page.
 PAGE_BOUND = 15.0
+#: Seconds in which a button of leaving.html has gone out of use after it was pressed.
+LEAVING_BOUND = 8.0
 #: Whether the buffer gets the page's changes by itself; without the update thread a test re-renders it.
 UPDATES_ARRIVE = (harness.ROOT / "source" / "linuxPlatform" / "vbufUpdates.py").is_file()
 #: Seconds a busy page is left to change, and the share of one processor NVDA may use meanwhile; it
@@ -244,6 +246,28 @@ def test_followingLinks(desktop: DesktopSession, tmp_path: Path):
 	assert "unavailable" not in desktop.spokenSince(mark), desktop.spokenSince(mark)
 	# Firefox gives the focus back to the link followed, and reading starts there.
 	step(desktop, "alt+Left", "Usable page", "visited link the second page…", timeout=PAGE_BOUND)
+	quit(desktop, nvda)
+
+
+def test_statesLostAfterThePageWentAreNotNews(desktop: DesktopSession, tmp_path: Path):
+	"""Firefox may tell that the link followed lost its states only once the page's buffer, which says
+	nothing of that, is gone. Here each button goes out of use four seconds after it is pressed."""
+	nvda = browse(
+		desktop, tmp_path, "leaving.html", "Leaving page", "heading level 1 Leaving", "button Second"
+	)
+	step(desktop, "control+Home", "heading level 1 Leaving")
+	step(desktop, "Tab", "First button")
+	# On a page that stays, it is news.
+	mark = desktop.mark()
+	desktop.press("Return")
+	expect(desktop, "unavailable", since=mark, timeout=LEAVING_BOUND)
+	time.sleep(SETTLE)
+	step(desktop, "Tab", "Second button")
+	mark = desktop.mark()
+	desktop.press("Return")
+	hook(desktop, "events gone")
+	time.sleep(LEAVING_BOUND)
+	assert "unavailable" not in desktop.spokenSince(mark), desktop.spokenSince(mark)
 	quit(desktop, nvda)
 
 

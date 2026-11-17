@@ -230,8 +230,18 @@ class AtSpi(NVDAObject):
 		super().__init__()
 		handler.registerObject(self)
 
+	#: Whether the page this was on has gone, and its buffer with it.
+	wentWithItsPage = False
+
 	def _isEqual(self, other) -> bool:
 		return self.node.key == other.node.key
+
+	def event_stateChange(self):
+		# As the page's buffer does while it is there: Firefox on Windows tells nothing of the states
+		# an object loses as its page is left.
+		if self.wentWithItsPage:
+			return
+		super().event_stateChange()
 
 	def findOverlayClasses(self, clsList) -> None:
 		role = self.role
