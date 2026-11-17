@@ -15,6 +15,13 @@
 # ones get in; anything else goes through env, as in
 # rig env LANG=pl_PL.UTF-8 command.
 #
+# BASEDREADER_RIG_NET=1 in the caller's environment gives the sandbox the
+# internet, through pasta, a network stack in user space: still a network
+# namespace of its own, so the live display's abstract socket and anything on
+# the host's loopback stay out of reach, with no port forwarded either way,
+# the host's own addresses shut off, and names resolved through a nameserver
+# address that pasta passes to the host's resolver and nowhere else.
+#
 # The exit status is the command's, or 125 when the rig itself failed.
 set -euo pipefail
 
@@ -24,6 +31,19 @@ fail() {
 }
 
 self=$(realpath -e -- "$0")
+
+# The first step of a networked sandbox, in a user and network namespace of
+# its own: it waits there while the rig outside connects pasta to the
+# namespace and shuts off the host's addresses in it, then becomes the
+# sandbox, which keeps that network namespace.
+if [ "${1:-}" = --network ]; then
+	[ "${BASEDREADER_RIG:-}" = 1 ] ||
+		fail "--network is the rig's own and runs only in the namespace it makes"
+	: >"$2"
+	read -r _ <"$3" || fail "the network was never connected"
+	shift 4
+	exec "$@"
+fi
 
 if [ "${1:-}" = --inside ]; then
 	# This half sets itself up against whatever session it finds, so it must
@@ -118,6 +138,11 @@ within() {
 if [ -z "${AT_SPI_BUS_LAUNCHER:-}" ] || [ -z "${BASEDREADER_RIG_PATH:-}" ]; then
 	fail "run inside the dev shell, nix develop"
 fi
+case "${BASEDREADER_RIG_NET:-}" in
+'' | 0) network= ;;
+1) network=1 ;;
+*) fail "BASEDREADER_RIG_NET is 1 for the internet or unset for none, not $BASEDREADER_RIG_NET" ;;
+esac
 
 checkout=$(dirname "$(dirname "$(dirname "$self")")")
 # A worktree keeps its history in the main checkout, and git needs to read it.
@@ -173,12 +198,18 @@ root=$(mktemp -d "${TMPDIR:-/tmp}/basedreader-rig.XXXXXX") || fail "cannot make 
 mkdir -m 700 "$root/home" "$root/run"
 
 sandbox=
+helper=
 cleanup() {
 	if [ -n "$sandbox" ]; then
 		# Everything inside dies with the sandbox's first process, and that
 		# one dies with bwrap.
 		kill -KILL "$sandbox" 2>/dev/null || true
 		wait "$sandbox" 2>/dev/null || true
+	fi
+	# pasta leaves by itself once the sandbox is gone, but not at once.
+	if [ -n "$helper" ]; then
+		kill -KILL "$helper" 2>/dev/null || true
+		wait "$helper" 2>/dev/null || true
 	fi
 	# A command may leave directories it made unwritable. Nothing here may
 	# fail: under set -e that would replace the command's exit status.
@@ -252,6 +283,29 @@ if [ -z "${BASEDREADER_RIG:-}" ] && command -v systemd-run >/dev/null 2>&1 &&
 		-p "MemoryMax=${BASEDREADER_RIG_MEMORY:-16G}" -p MemorySwapMax=0 --)
 fi
 
+namespaces=(--unshare-all)
+stack=()
+if [ -n "$network" ]; then
+	for program in pasta unshare nsenter ip; do
+		command -v "$program" >/dev/null || fail "$program is not on the dev shell's PATH"
+	done
+	# Not an address of the host or of any network it is on: pasta answers it
+	# itself and passes only queries on the DNS ports to the host's resolver.
+	nameserver=169.254.1.1
+	printf 'nameserver %s\n' "$nameserver" >"$root/resolv.conf"
+	mkfifo "$root/network-go"
+	# bwrap keeps the namespace unshare made, so that pasta, which joins it
+	# from outside, never runs inside the sandbox.
+	namespaces=(--unshare-all --share-net
+		--ro-bind "$root/resolv.conf" "$(realpath -m /etc/resolv.conf)")
+	# A networked rig inside this one runs its own pasta in here.
+	if [ -c /dev/net/tun ]; then
+		namespaces+=(--dev-bind /dev/net/tun /dev/net/tun)
+	fi
+	stack=(unshare --user --map-current-user --net
+		-- "$self" --network "$root/network-ready" "$root/network-go" --)
+fi
+
 # Python only to close every descriptor the caller left open, which could
 # be a socket to something live, before bwrap takes this process's place.
 # Standard input is named because a background job otherwise gets
@@ -260,15 +314,57 @@ fi
 import os, sys
 os.closerange(3, 1 << 20)
 os.execvp(sys.argv[1], sys.argv[1:])
-' bwrap --unshare-all --die-with-parent --new-session \
+' "${stack[@]}" bwrap --die-with-parent --new-session \
 	--ro-bind /nix /nix --ro-bind /etc /etc --ro-bind /sys /sys \
 	--ro-bind /bin /bin --ro-bind /usr /usr \
 	--dev /dev --proc /proc --tmpfs /tmp --dir /tmp/.X11-unix --tmpfs /run \
+	"${namespaces[@]}" \
 	--ro-bind "$checkout" "$checkout" --ro-bind "$history" "$history" \
 	--bind "$root" "$root" "${binds[@]}" --chdir "$start" \
 	-- dbus-run-session --config-file="$(dirname "$self")/rig-session.conf" \
 	-- "$self" --inside "$@" 0<&0 &
 sandbox=$!
+
+if [ -n "$network" ]; then
+	for _ in $(seq 200); do
+		[ -e "$root/network-ready" ] && break
+		kill -0 "$sandbox" 2>/dev/null || break
+		sleep 0.05
+	done
+	[ -e "$root/network-ready" ] || fail "could not make the sandbox's network namespace"
+	# No port forwarded either way, and the host's loopback not mapped onto
+	# any address in there.
+	pasta --quiet --foreground --config-net \
+		-t none -u none -T none -U none \
+		--map-host-loopback none --map-guest-addr none \
+		--dns-forward "$nameserver" "$sandbox" &
+	helper=$!
+	enter=(nsenter --target "$sandbox" --user --net --preserve-credentials)
+	up=
+	for _ in $(seq 200); do
+		if [ -n "$("${enter[@]}" ip -4 route show default 2>/dev/null)" ]; then
+			up=1
+			break
+		fi
+		kill -0 "$helper" 2>/dev/null || break
+		sleep 0.05
+	done
+	[ -n "$up" ] || fail "pasta did not connect the sandbox's network"
+	# pasta reaches every address from the host's side, so without these the
+	# host's other interfaces, and whatever listens on all addresses, would
+	# answer from in there. The address pasta copies into the namespace is
+	# the namespace's own, and connections to it stay inside.
+	while read -r _ interface _ address _; do
+		[ "$interface" != lo ] || continue
+		address=${address%/*}
+		# A host without IPv6 has none of its addresses to shut off.
+		"${enter[@]}" --keep-caps ip route add prohibit "$address" 2>/dev/null ||
+			{ [[ $address == *:* ]] && [ ! -e /proc/net/if_inet6 ]; } ||
+			fail "could not shut off the host's address $address"
+	done < <(ip -o address show)
+	echo >"$root/network-go"
+fi
+
 status=0
 wait "$sandbox" || status=$?
 sandbox=

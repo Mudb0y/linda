@@ -194,8 +194,13 @@
           featherpad
           # Another program's side of the clipboard, for the clipboard tests.
           xclip
-          # tests/linux/rig builds its sandbox with this.
+          # tests/linux/rig builds its sandbox with this, and gives it the
+          # internet on request through pasta, in a namespace it makes and
+          # enters with util-linux and whose routes it sets with ip.
           bubblewrap
+          passt
+          iproute2
+          util-linux
           git
           # libclang, for crates whose bindings bindgen generates.
           rustPlatform.bindgenHook
