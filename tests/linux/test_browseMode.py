@@ -311,6 +311,20 @@ def test_pageStillLoadingIsReadWhole(desktop: DesktopSession):
 		quit(desktop, nvda)
 
 
+def test_fieldBuiltAgainWhenFocusedIsInFocusMode(desktop: DesktopSession):
+	# The focus moves to a box the buffer does not hold until the update after it; Escape must still
+	# reach browse mode rather than the page.
+	nvda = startFirst(desktop)
+	webSession.startFirefox(desktop, "realSearchBox.html")
+	expect(desktop, "Search box page…", "The search box is built again…", since=0, timeout=BUFFER_BOUND)
+	time.sleep(SETTLE)
+	step(desktop, "control+Home", "banner landmark search landmark Search the site edit…")
+	step(desktop, "Return", "Focus mode", "combo box Search the site…")
+	step(desktop, "Escape", "Browse mode")
+	step(desktop, "Down", "main landmark…")
+	quit(desktop, nvda)
+
+
 def processorSeconds(pid: int) -> float:
 	"""The processor time process pid has used so far, user and system."""
 	fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()

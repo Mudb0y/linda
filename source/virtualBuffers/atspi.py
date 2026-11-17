@@ -13,12 +13,13 @@ import time
 
 import api
 import aria
+import browseMode
 import config
 import queueHandler
 import textInfos
 import tones
 import treeInterceptorHandler
-from controlTypes import IsCurrent, Role, State
+from controlTypes import IsCurrent, OutputReason, Role, State
 from linuxPlatform import vbufEngine, vbufLib
 from linuxPlatform.atspi import accessibleFor, handler
 from linuxPlatform.atspi.client import Node, NodeGone
@@ -364,8 +365,25 @@ class AtSpiBuffer(VirtualBuffer):
 			return
 		if self.VBufHandle:
 			self._handleUpdate()
+			self._adoptFocus()
 		if "loadComplete" in events:
 			self.event_documentLoadComplete(self.rootNVDAObject, lambda: None)
+
+	def _adoptFocus(self) -> None:
+		"""Take the focus as this document's when its focus event came before the update that brought
+		it into the buffer, as a field does that a page builds and focuses after it has loaded: without
+		this the field stays outside both browse and focus mode, and Escape does nothing."""
+		focus = api.getFocusObject()
+		if focus.treeInterceptor is not None or focus not in self:
+			return
+		focus.treeInterceptor = self
+		try:
+			self._set_selection(self.makeTextInfo(focus), reason=OutputReason.FOCUS)
+		except LookupError:
+			pass
+		if not self.passThrough and self.shouldPassThrough(focus, reason=OutputReason.FOCUS):
+			self.passThrough = True
+			browseMode.reportPassThrough(self)
 
 	def _unwatch(self) -> None:
 		unwatch = getattr(vbufEngine, "unwatch", None)

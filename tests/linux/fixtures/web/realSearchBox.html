@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Search box page</title>
+</head>
+<body>
+<header>
+<form role="search"><input type="search" id="query" aria-label="Search the site"></form>
+</header>
+<main>
+<h1>Search box page</h1>
+<p>The search box is built again when it is first focused.</p>
+</main>
+<script>
+// As an encyclopedia's search does: the box the page came with is replaced by a combo box, which
+// takes the focus, once the user first focuses it.
+const query = document.getElementById("query");
+query.addEventListener("focus", () => {
+	setTimeout(() => {
+		const box = document.createElement("input");
+		box.type = "search";
+		box.setAttribute("role", "combobox");
+		box.setAttribute("aria-expanded", "false");
+		box.setAttribute("aria-autocomplete", "list");
+		box.setAttribute("aria-label", "Search the site");
+		query.replaceWith(box);
+		box.focus();
+	}, 50);
+}, { once: true });
+</script>
+</body>
+</html>
