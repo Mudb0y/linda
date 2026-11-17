@@ -178,10 +178,18 @@ _DIRECT = (
 )
 
 
+def _loadedOnFirstCall(name: str) -> Callable:
+	def call(*args):
+		return getattr(lib(), name)(*args)
+
+	call.__name__ = name
+	return call
+
+
 def entryPoints() -> dict[str, Callable]:
-	"""Every VBuf_* name virtualBuffers calls, bound to this library."""
-	dll = lib()
-	points = {name: getattr(dll, name) for name in _DIRECT}
+	"""Every VBuf_* name virtualBuffers calls, bound to this library, which the first call loads: NVDA
+	binds them as it starts, and a session that reads no web page never needs it."""
+	points = {name: _loadedOnFirstCall(name) for name in _DIRECT}
 	points["VBuf_destroyBuffer"] = VBuf_destroyBuffer
 	points["VBuf_getTextInRange"] = VBuf_getTextInRange
 	points["VBuf_findNodeByAttributes"] = VBuf_findNodeByAttributes

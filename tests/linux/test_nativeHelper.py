@@ -684,6 +684,7 @@ def test_probingForAMissingNameKeepsPythonsRules(tmp_path: Path):
 
 
 def test_virtualBufferAndDisplayModelStillRaise(tmp_path: Path):
+	"""Without the buffer storage library, which the dev shell and the package name."""
 	done = harness.runChild(
 		tmp_path,
 		"""
@@ -697,6 +698,7 @@ def test_virtualBufferAndDisplayModelStillRaise(tmp_path: Path):
 			except NoLinuxImplementation:
 				result.append(name)
 		""",
+		env={"BASEDREADER_VBUF_LIB": None},
 	)
 	done.assertClean(ignoring={"noLinuxImplementation"})
 	expected = ["VBuf_getTextLength", "VBuf_createBuffer", "displayModel_getWindowTextInRect"]
