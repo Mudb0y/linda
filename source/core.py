@@ -526,14 +526,14 @@ def _closeAllWindows():
 		import wx
 		from linuxPlatform import modalDialogs
 
-		if not modalDialogs.isOneWxDialogAtMost():
+		if not modalDialogs.areNoneOpen():
 			# wxGTK cannot end a modal dialog while another runs inside it, nor see those it shows with GTK's
-			# own widgets. So those inside the outermost are ended first, innermost first, and this runs
-			# again once they are.
+			# own widgets. So they are ended first, innermost first, and this runs again from the main loop
+			# once they are.
 			modalDialogs.endModalDialogs(
 				wx.ID_CLOSE_ALL,
 				then=_closeAllWindows,
-				until=modalDialogs.isOneWxDialogAtMost,
+				until=modalDialogs.areNoneOpen,
 			)
 			return
 	import gui  # noqa: I001

@@ -618,15 +618,15 @@ def test_endingDialogsUsesTheGtkThatWxLoaded(tmp_path: Path):
 		before = gtk()
 		from linuxPlatform import modalDialogs
 
-		result = [before, gtk(), modalDialogs.isOneWxDialogAtMost()]
+		result = [before, gtk(), modalDialogs.areNoneOpen()]
 		""",
 		prepare="bootstrap",
 	)
 	done.assertClean()
-	before, after, isOneAtMost = done.value
+	before, after, areNoneOpen = done.value
 	assert len(before) == 1 and "/libgtk-3.so" in before[0], before
 	assert after == before
-	assert isOneAtMost
+	assert areNoneOpen
 
 
 def test_desktopIsOneObjectWithNothingUnderIt(tmp_path: Path):

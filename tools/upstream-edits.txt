@@ -172,12 +172,13 @@ source/core.py
   NVDA was started with it ignored, as nohup starts a program. A restart
   starts the new copy through linuxPlatform.singleInstance, as a child
   process, instead of through ShellExecute. On exit, _closeAllWindows first
-  ends, through linuxPlatform.modalDialogs, every modal dialog inside the
-  outermost one, innermost first, and GTK's own dialogs, and runs again once
-  they are gone, or saves the configuration and ends NVDA when they cannot
-  be ended; on wxGTK EndModal on an outer dialog leaves its loop running,
-  and wx.GetTopLevelWindows does not list the dialogs wx.MessageBox and
-  wx.FileDialog show, so NVDA never exited. Once main() is out of the main
+  ends, through linuxPlatform.modalDialogs, every modal dialog, innermost
+  first, GTK's own dialogs among them, and runs again from the main loop
+  once they are gone, or saves the configuration and ends NVDA when they
+  cannot be ended; on wxGTK EndModal on an outer dialog leaves its loop
+  running, wx.GetTopLevelWindows does not list the dialogs wx.MessageBox and
+  wx.FileDialog show, and an exit run inside a dialog's loop left the main
+  loop asleep once that loop returned, so NVDA never exited. Once main() is out of the main
   loop it tells linuxPlatform.quitSignals, so that a further quit signal
   ends a shutdown that hangs, even in C code. The Java Access Bridge
   failing to load is logged at debug level on Linux instead of as a warning

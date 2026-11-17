@@ -64,11 +64,15 @@ def _openDialogs() -> list[ModalDialog]:
 	return dialogs
 
 
-def isOneWxDialogAtMost() -> bool:
-	"""Whether the modal dialogs open are no more than one of wx's own, which EndModal ends on wxGTK as it
-	does on Windows."""
-	dialogs = _openDialogs()
-	return not dialogs or (len(dialogs) == 1 and isinstance(dialogs[0], wx.Dialog))
+def areNoneOpen() -> bool:
+	"""Whether no modal dialog is showing, so that NVDA's exit runs in the main loop itself.
+
+	Even one of wx's dialogs, which EndModal ends on wxGTK as on Windows, is ended here first: the exit
+	otherwise ran inside that dialog's loop, and once the loop had returned the main loop slept with
+	NVDA's windows scheduled for destruction, which a restart from the Exit dialog left running until
+	the new copy killed it.
+	"""
+	return not _openDialogs()
 
 
 def _end(dialog: ModalDialog, returnCode: int) -> None:
