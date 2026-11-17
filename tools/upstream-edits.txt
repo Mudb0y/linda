@@ -51,6 +51,10 @@ source/_magnifier/__init__.py
   MagnifierStartError saying the magnifier is not available on Linux and
   records it as disabled, so the toggle command speaks that, as it does any
   failure to start, instead of logging an error and announcing it enabled
+source/_remoteClient/client.py
+  Linux runtime: no secure desktop handler is made, as Linux has no secure
+  desktop for a session to follow its user onto and the handler is built on
+  Windows events; upstream logged an error and went on without one
 source/_remoteClient/localMachine.py
   every platform: winreg comes from linuxPlatform.windowsOnly, whose
   placeholder for HKEY_LOCAL_MACHINE the SAS policy class body holds on
@@ -58,16 +62,24 @@ source/_remoteClient/localMachine.py
   Linux runtime: _canSendSAS answers False on Linux, which has no secure
   attention sequence, so a remote control+alt+delete is refused with
   upstream's own message for a SAS it cannot send
+source/_remoteClient/server.py
+  Linux runtime: the relay server binds every IPv6 address as ::, which
+  upstream writes in a form only Windows resolves, takes IPv6 only on that
+  socket so that it does not claim the port's IPv4 side, which the other
+  socket has, and sets SO_REUSEADDR, so that a server restarted with NVDA
+  can listen again at once
 source/_remoteClient/transport.py
   Linux runtime: an outbound connection gets the same TCP keep-alive as on
   Windows, on with the first probe after 60 s idle, then every 2 s, and 10
   probes, through setsockopt, as socket.ioctl and SIO_KEEPALIVE_VALS exist
   only on Windows
 source/_remoteClient/urlHandler.py
-  every platform: winreg comes from linuxPlatform.windowsOnly, so
-  registering or removing the nvdaremote URL handler raises
-  NoLinuxImplementation on Linux. The one annotation that names
-  winreg.HKEYType is quoted, as the stand-in refuses that name at import
+  every platform: winreg comes from linuxPlatform.windowsOnly. The one
+  annotation that names winreg.HKEYType is quoted, as the stand-in refuses
+  that name at import.
+  Linux runtime: registering and removing the nvdaremote URL handler do
+  nothing, as nothing on Linux opens such a link yet; raising there stopped
+  NVDA from starting once Remote Access was switched on in the settings
 source/api.py
   Linux runtime: copyToClip and getClipData use the desktop's clipboard
   through linuxPlatform.clipboard, which goes through GTK on the main

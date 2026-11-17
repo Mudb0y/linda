@@ -28,6 +28,7 @@ import os
 import shutil
 import socket
 import ssl
+import sys
 import tempfile
 import time
 from datetime import UTC, datetime, timedelta
@@ -308,6 +309,9 @@ class LocalRelayServer:
 		:param bindHost: IPv4 address to bind to, defaults to all interfaces
 		:param bindHost6: IPv6 address to bind to, defaults to all interfaces
 		"""
+		if sys.platform != "win32" and bindHost6 == "[::]:":
+			# Windows takes the default for every IPv6 address, which Linux writes without brackets.
+			bindHost6 = "::"
 		self.port = port
 		self.password = password
 		self.certManager = RemoteCertificateManager()
@@ -342,6 +346,12 @@ class LocalRelayServer:
 		:raises socket.error: If socket creation or binding fails
 		"""
 		serverSocket = socket.socket(family, type)
+		if sys.platform != "win32":
+			# Windows lets a server that has just stopped listen on its port again at once.
+			serverSocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+			if family == socket.AF_INET6:
+				# As on Windows, where an IPv6 socket leaves the port's IPv4 side to the other socket.
+				serverSocket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
 		sslContext = self.certManager.createSSLContext()
 		serverSocket = sslContext.wrap_socket(serverSocket, server_side=True)
 		serverSocket.bind(bindAddress)

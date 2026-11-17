@@ -4,6 +4,7 @@
 # See the file COPYING for more details.
 
 import threading  # noqa: I001
+import sys
 
 import api
 import braille
@@ -77,7 +78,8 @@ class RemoteClient:
 		self._wasSendingKeysBeforeLock: bool = False
 		self._disconnectConfirmationDialog: MessageDialog | None = None
 		try:
-			self.sdHandler = SecureDesktopHandler()
+			# Linux has no secure desktop for a session to follow its user onto.
+			self.sdHandler = SecureDesktopHandler() if sys.platform == "win32" else None
 		except RuntimeError:
 			log.error("Failed to initialise the secure desktop handler.", exc_info=True)  # noqa: G201
 			self.sdHandler = None

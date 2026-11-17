@@ -219,6 +219,44 @@ def test_startsSpeaksAndExitsThroughTriggerNVDAExit(start: Start):
 	print(f"start-up to speech: {toSpeech:.2f} s")
 
 
+def test_remoteAccessSwitchedOnStartsAndExits(start: Start, tmp_path: Path):
+	# What the Enable Remote Access checkbox of the settings leaves in the configuration.
+	configDir = tmp_path / "remoteConfig"
+	configDir.mkdir()
+	(configDir / "nvda.ini").write_text(
+		CONFIG_FIXTURE.read_text(encoding="utf-8") + "[remote]\n\tenabled = True\n", encoding="utf-8"
+	)
+	nvda = start("remote", "exit", configDir=configDir)
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	assert "Initializing NVDA Remote client" in nvda.text("nvda.log")
+
+
+def test_remoteAccessConnectsToAServerOfItsOwn(start: Start, tmp_path: Path):
+	# Hosting the control server here takes the relay server, its certificate, a TLS connection to it
+	# and the session, with no second machine.
+	configDir = tmp_path / "remoteConfig"
+	configDir.mkdir()
+	(configDir / "nvda.ini").write_text(
+		CONFIG_FIXTURE.read_text(encoding="utf-8")
+		+ "[remote]\n\tenabled = True\n\t[[controlServer]]\n\t\tautoconnect = True\n"
+		"\t\tselfHosted = True\n\t\tconnectionMode = 0\n\t\tport = 16837\n\t\tkey = loopback\n",
+		encoding="utf-8",
+	)
+	nvda = start("remote", "wait", configDir=configDir)
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	deadline = time.monotonic() + STARTUP_BOUND
+	while "Control connector connected" not in (log := nvda.text("nvda.log")):
+		assert time.monotonic() < deadline and nvda.process.poll() is None, nvda.describe()
+		time.sleep(0.05)
+	assert "Client 1 authenticated successfully" in log
+	nvda.process.send_signal(signal.SIGTERM)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	assert "Shutting down NVDA Remote relay server" in nvda.text("nvda.log")
+
+
 @pytest.mark.parametrize("signalNumber", [signal.SIGTERM, signal.SIGHUP, signal.SIGINT])
 def test_exitsOnSignal(start: Start, signalNumber: signal.Signals):
 	nvda = start("wait", "wait")

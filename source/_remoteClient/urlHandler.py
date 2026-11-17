@@ -59,6 +59,9 @@ def registerURLHandler():
 
 	:raises OSError: If registration in the registry fails
 	"""
+	if sys.platform != "win32":
+		# Nothing on Linux opens an nvdaremote link yet, and Remote Access needs no handler to start.
+		return
 	try:
 		with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RegistryKey.REMOTE_URL_HANDLER.value) as key:
 			_createRegistryStructure(key, URL_HANDLER_REGISTRY)
@@ -71,6 +74,8 @@ def unregisterURLHandler():
 
 	:raises OSError: If unregistration from the registry fails
 	"""
+	if sys.platform != "win32":
+		return
 	try:
 		_deleteKeyAndSubkeys(
 			winreg.HKEY_CURRENT_USER,
