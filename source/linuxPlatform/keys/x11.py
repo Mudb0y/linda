@@ -4,9 +4,9 @@ Every key press and release comes from XInput 2 events selected on the root wind
 keyboard's own events, which carry key repeat and the XKB state the key was pressed in, and raw
 events, which no client can hide. A raw event whose slave event does not follow is delivered on its
 own, since an application that selects slave events on its window stops them reaching the root.
-The NVDA keys and the numpad review keys are taken with passive grabs on the root, so a chord with
-the NVDA key held goes to NVDA alone while the grab is active; everything else reaches the
-application too, and is marked as having done so.
+The NVDA keys and the numpad review keys are taken with passive grabs on the window that has the
+keyboard focus, moved as the focus moves, so a chord with the NVDA key held goes to NVDA alone while
+the grab is active; everything else reaches the application too, and is marked as having done so.
 A key such a grab took that NVDA passes, as one NVDA has no command for, is sent on to the
 application, as the Windows hook lets through what its callback does not block.
 
@@ -339,6 +339,7 @@ class X11KeySource:
 		self._slaveSeen: deque[tuple[float, int, bool, int]] = deque()
 		self._rulesAtom: int | None = None
 		self._pidAtom: int | None = None
+		self._activeWindowAtom: int | None = None
 		self._xkbOpcode: int | None = None
 		#: Key code: grab modifiers, for every key grabbed now; None means any modifiers.
 		self._grabbed: dict[int, list[int] | None] = {}
@@ -481,8 +482,10 @@ class X11KeySource:
 					(xinput.AllMasterDevices, xinput.RawKeyPressMask | xinput.RawKeyReleaseMask),
 				],
 			)
-			root.change_attributes(event_mask=X.PropertyChangeMask)
+			# The root has focus events only when the focus leaves or reaches the root itself, or none.
+			root.change_attributes(event_mask=X.PropertyChangeMask | X.FocusChangeMask)
 			self._rulesAtom = self._display.intern_atom(RULES_NAMES_PROPERTY)
+			self._activeWindowAtom = self._display.intern_atom("_NET_ACTIVE_WINDOW")
 			self._pidAtom = self._display.intern_atom("_NET_WM_PID")
 			# Any resource of the connection names it to the X server; the guard needs one.
 			self._guardResource = root.create_pixmap(1, 1, self._display.screen().root_depth).id
@@ -682,20 +685,24 @@ class X11KeySource:
 		elif event.type == X.KeyRelease:
 			if event.detail == self._captureGrab:
 				self._captureGrab = None
-		elif event.type in (X.FocusOut, X.DestroyNotify):
+		elif event.type in (X.FocusOut, X.FocusIn, X.DestroyNotify):
 			# The keys are captured on the window with the focus, which this one may no longer be; a
 			# grab moves the focus only for as long as it lasts.
 			moved = event.type == X.DestroyNotify or event.mode in (X.NotifyNormal, X.NotifyWhileGrabbed)
 			window = self._captureWindow
-			if moved and window is not None and event.window.id == window.id:
+			if moved and event.type != X.FocusIn and window is not None and event.window.id == window.id:
 				# Grabbed again when next asked, once NVDA's focus has followed and the mode is known.
 				self._dropCapture()
+			if moved:
+				self._followFocus()
 		elif event.type == X.MappingNotify:
 			self._display.refresh_keyboard_mapping(event)
 			self._loadKeymap()
 		elif event.type == X.PropertyNotify:
 			if event.atom == self._rulesAtom:
 				self._loadKeymap()
+			elif event.atom == self._activeWindowAtom:
+				self._followFocus()
 
 	def _onSlave(self, data, isUp: bool) -> None:
 		now = time.monotonic()
@@ -968,7 +975,7 @@ class X11KeySource:
 	def _applyGrabs(self, nvdaModifierKeys: int, numpadReview: bool) -> None:
 		self._consumedWanted = (nvdaModifierKeys, numpadReview)
 		self._ungrabKeys()
-		self._grabKeys(self._display.screen().root)
+		self._grabKeys(self._focusWindow() or self._display.screen().root)
 
 	def _keysWanted(self) -> list[tuple[int, list[int] | None, str]]:
 		"""(key code, the modifiers it is grabbed with or None for any, a name for the user) for each
@@ -1010,7 +1017,9 @@ class X11KeySource:
 		self._grabbed = {}
 
 	def _grabKeys(self, window) -> None:
-		"""Grab the NVDA keys and the numpad review keys on window."""
+		"""Grab the NVDA keys and the numpad review keys on window: the one with the focus, so that no
+		application sees its window lose the focus while one is held, as one grabbed on the root
+		would; the root when no window may be grabbed on."""
 		self._keysWindow = window
 		refused = []
 		for keycode, modifiers, label in self._keysWanted():
@@ -1030,6 +1039,16 @@ class X11KeySource:
 				f"NVDA could not take the {label}, which another program holds; "
 				"is another screen reader running?",
 			)
+
+	def _followFocus(self) -> None:
+		"""Move the NVDA keys' grabs to the window that has the focus now, if it is another."""
+		if self._consumedWanted is None:
+			return
+		window = self._focusWindow() or self._display.screen().root
+		if self._keysWindow is not None and window.id == self._keysWindow.id:
+			return
+		self._ungrabKeys()
+		self._grabKeys(window)
 
 	def _captureSet(self, mode: CaptureMode) -> dict[int, set[int]]:
 		"""Key code: the modifier masks, without the locks, it is captured with in mode."""

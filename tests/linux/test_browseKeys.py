@@ -226,9 +226,12 @@ class KeysPage:
 		)
 		self._log = _byId(documents[0], "log")
 		assert self._log is not None, "the keys page has no key log"
+		self._focusLog = _byId(documents[0], "focusLog")
+		assert self._focusLog is not None, "the keys page has no focus log"
 		# Firefox fills the text part of its cache the first time a client asks for it.
 		self.log()
 		self.field()
+		self.focusLog()
 		time.sleep(webSession.CACHE_FILL_SECONDS)
 
 	def log(self) -> list[str]:
@@ -237,6 +240,10 @@ class KeysPage:
 
 	def field(self) -> str:
 		return self._Atspi.Text.get_text(self._field, 0, -1)
+
+	def focusLog(self) -> list[str]:
+		"""Each time the page's window lost or gained the focus, or its document was hidden or shown."""
+		return self._Atspi.Text.get_text(self._focusLog, 0, -1).split()
 
 	def waitForLog(self, expected: list[str], timeout: float = 3) -> float:
 		"""Wait until the page has logged expected; returns when it had."""
@@ -517,6 +524,33 @@ def test_keysNVDAPassesReachThePage(desktop: DesktopSession, tmp_path: Path, key
 	waitForCapture(nvda, "browse")
 	assert page.log() == [*logged, "Escape"]
 	assert not desktopSession.capsLockIsOn()
+	quitNVDA(desktop, nvda)
+
+
+def test_pageKeepsTheFocusThroughNVDAKeys(desktop: DesktopSession, tmp_path: Path):
+	nvda, page = startPage(desktop, tmp_path)
+	settled = page.focusLog()
+	noticed: dict[str, list[str]] = {}
+
+	def note(label: str) -> None:
+		noticed[label] = page.focusLog()[len(settled) + sum(len(v) for v in noticed.values()) :]
+
+	step(desktop, "control+Home", "heading level 1 Keys page")
+	step(desktop, "h", "Field and link heading level 2")
+	note("browse mode keys")
+	step(desktop, "Insert+t", "Keys page" + PREFIX_MARK)
+	step(desktop, "Caps_Lock+t", "Keys page" + PREFIX_MARK)
+	step(desktop, "Insert+Tab", "Keys page" + PREFIX_MARK)
+	note("NVDA commands")
+	# Num Lock is off on the rig's display: the review cursor's current line.
+	step(desktop, "KP_Up", "heading level 2 Field and link")
+	note("numpad review")
+	enterField(desktop, nvda)
+	desktop.typeText("ab")
+	step(desktop, "Insert+Up", "ab")
+	step(desktop, "Escape", "Browse mode")
+	note("focus mode")
+	assert all(not events for events in noticed.values()), noticed
 	quitNVDA(desktop, nvda)
 
 
