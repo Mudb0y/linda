@@ -165,8 +165,8 @@ def test_fullScreenProgramWithLaptopLayout(desktop: DesktopSession, tmp_path: Pa
 	step(desktop, "Down", "banana")
 	step(desktop, "Down", "cherry")
 	step(desktop, "Up", "banana")
-	# The status line, once and whole, after the mark on the item.
-	step(desktop, "space", "star", "1 marked")
+	# The status line, once and whole; the mark space puts on the item is not something typed.
+	step(desktop, "space", "1 marked")
 
 	# The laptop layout's review commands, with Caps Lock as the NVDA key.
 	step(desktop, "Caps_Lock+shift+period", "star  banana")
