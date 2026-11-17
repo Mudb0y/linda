@@ -483,3 +483,8 @@ source/virtualBuffers/atspi.py
   Linux runtime: added. Browse mode for web documents read over AT-SPI,
   held in NVDA's own buffer storage compiled for Linux and filled by the
   engine's renderer, which only NVDAObjects.AtSpi chooses
+source/cursorManager.py
+  Linux runtime: the find dialog's OK and Cancel end its modal loop and
+  script_find destroys it once ShowModal returns, because wxGTK's ShowModal
+  still uses the dialog's window after its loop ends and NVDA crashed when
+  that window was destroyed inside the loop

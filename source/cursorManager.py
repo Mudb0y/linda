@@ -10,6 +10,7 @@ A cursor manager provides caret navigation and selection commands for a virtual 
 """
 
 import weakref  # noqa: I001
+import sys
 
 import wx
 import core
@@ -162,9 +163,17 @@ class FindDialog(
 			caseSensitive=caseSensitive,
 			reverse=self.reverse,
 		)
+		if sys.platform == "linux" and self.IsModal():
+			# wxGTK's ShowModal still uses the dialog's window after its loop ends, and NVDA crashes
+			# when that window was destroyed inside the loop; script_find destroys it afterwards.
+			self.EndModal(wx.ID_OK)
+			return
 		self.Destroy()
 
 	def onCancel(self, evt):
+		if sys.platform == "linux" and self.IsModal():
+			self.EndModal(wx.ID_CANCEL)
+			return
 		self.Destroy()
 
 
@@ -342,6 +351,9 @@ class CursorManager(documentBase.TextContainerObject, baseObject.ScriptableObjec
 				d.findTextField.SetFocus()
 			else:
 				d.ShowModal()
+				# NVDA's exit destroys the main frame, and the dialog with it, once it has ended the loop.
+				if sys.platform == "linux" and d:
+					d.Destroy()
 				gui.mainFrame.postPopup()
 
 		wx.CallAfter(run)
