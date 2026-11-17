@@ -695,6 +695,9 @@ class Addon(AddonBase):
 			suffix=DELETEDIR_SUFFIX,
 			dir=os.path.dirname(self.path),
 		)
+		if sys.platform != "win32":
+			# Linux puts a directory in the place of an empty directory only, never of a file.
+			os.remove(tempPath)
 		try:
 			os.replace(self.path, tempPath)
 		except OSError:

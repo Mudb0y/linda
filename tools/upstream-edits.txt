@@ -80,6 +80,10 @@ source/_remoteClient/urlHandler.py
   Linux runtime: registering and removing the nvdaremote URL handler do
   nothing, as nothing on Linux opens such a link yet; raising there stopped
   NVDA from starting once Remote Access was switched on in the settings
+source/addonHandler/__init__.py
+  Linux runtime: completeRemove deletes the empty file it reserved before
+  moving the add-on's directory to that name, as Linux puts a directory in
+  the place of an empty directory only; no add-on could be removed
 source/api.py
   Linux runtime: copyToClip and getClipData use the desktop's clipboard
   through linuxPlatform.clipboard, which goes through GTK on the main

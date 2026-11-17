@@ -8,6 +8,7 @@ and its runtime directory, where the single-instance lock is:
 	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_boot.py
 """
 
+import json
 import os
 import re
 import select
@@ -255,6 +256,51 @@ def test_remoteAccessConnectsToAServerOfItsOwn(start: Start, tmp_path: Path):
 	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
 	nvda.assertClean(logNames=("nvda.log",))
 	assert "Shutting down NVDA Remote relay server" in nvda.text("nvda.log")
+
+
+def test_addOnMarkedForRemovalIsRemovedAtStart(start: Start, tmp_path: Path):
+	# What removing an add-on in the add-on store leaves for the next start to carry out.
+	configDir = tmp_path / "addOnConfig"
+	addOn = configDir / "addons" / "leaving"
+	addOn.mkdir(parents=True)
+	(configDir / "nvda.ini").write_text(CONFIG_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+	(addOn / "manifest.ini").write_text(
+		"name = leaving\n"
+		'summary = "An add-on on its way out"\n'
+		'description = "Does nothing"\n'
+		'author = "A test"\n'
+		"version = 1.0\n"
+		"minimumNVDAVersion = 2024.1\n"
+		"lastTestedNVDAVersion = 2026.3\n",
+		encoding="utf-8",
+	)
+	(addOn / "globalPlugins").mkdir()
+	(addOn / "globalPlugins" / "leaving.py").write_text("raise RuntimeError('loaded')\n", encoding="utf-8")
+	stateFile = configDir / "addonsState.json"
+	stateFile.write_text(
+		json.dumps(
+			{
+				"pendingRemovesSet": ["leaving"],
+				"pendingInstallsSet": [],
+				"disabledAddons": [],
+				"pendingEnableSet": [],
+				"pendingDisableSet": [],
+				"overrideCompatibility": [],
+				"blocked": [],
+				"PENDING_OVERRIDE_COMPATIBILITY": [],
+				"backCompatToAPIVersion": [2026, 1, 0],
+			}
+		),
+		encoding="utf-8",
+	)
+	nvda = start("addOn", "exit", configDir=configDir)
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	assert os.listdir(configDir / "addons") == []
+	assert (
+		not stateFile.exists() or json.loads(stateFile.read_text(encoding="utf-8"))["pendingRemovesSet"] == []
+	)
 
 
 @pytest.mark.parametrize("signalNumber", [signal.SIGTERM, signal.SIGHUP, signal.SIGINT])
