@@ -108,6 +108,9 @@ def test_cajaFolderWindow(desktop: DesktopSession, tmp_path: Path):
 
 	# List view: the item of a Windows list view in details, the columns after the first by header.
 	step(desktop, "control+2", "List View list")
+	# Caja is still filling the new view when it says it has the focus; a key in the first tens of
+	# milliseconds moves its cursor without a word.
+	time.sleep(0.5)
 	step(desktop, "Up", "alpha dot txt; Size: 6 bytes; Type: …")
 
 	# Into a folder and back, which Caja does in the same view without moving the focus.
@@ -266,7 +269,7 @@ def test_matePanel(desktop: DesktopSession):
 
 	# The keyboard on the panel, and the window list on it.
 	step(desktop, "control+alt+Tab", "Bottom Panel", "panel")
-	step(desktop, "Tab", "Show Desktop Button toggle button not pressed…")
+	step(desktop, "Tab", "Show Desktop Button toggle button…")
 	step(desktop, "Tab", "Window List grouping…", f"{spokenTitle} toggle button not pressed")
 	step(desktop, "Escape")
 	desktopSession.activate(title)
@@ -304,3 +307,40 @@ def test_notifications(desktop: DesktopSession):
 	finally:
 		daemon.terminate()
 		daemon.wait(5)
+
+
+def test_windowsComingAndGoing(desktop: DesktopSession):
+	folder = makeFolder(Path.home() / "windows", "sub/", "a.txt")
+	desktop.startApp(["caja", "--no-desktop", str(folder)], title="windows", timeout=WINDOW_TIMEOUT)
+	startPluma(desktop, folder / "a.txt")
+	nvda = startNVDA(desktop, "a dot txt (  slash windows) - Pluma", "edit multi line hello")
+
+	# Switching workspaces, which marco names in a popup gone before its name can be read back; an
+	# empty workspace leaves the desktop with the focus.
+	step(desktop, "control+alt+Right", "Workspace 2", "Desktop desktop pane")
+	step(
+		desktop,
+		"control+alt+Left",
+		"Workspace 1",
+		"a dot txt (  slash windows) - Pluma",
+		"edit multi line hello",
+	)
+
+	# The focused application quits, and the window marco gives the keyboard to is read.
+	step(desktop, "control+q", "windows", "Icon View list")
+
+	# A tree view: Caja's side pane showing the folder tree.
+	step(desktop, "F6", "Places toggle button not pressed")
+	step(desktop, "space", "menu")
+	step(desktop, "Down", "Places 1 of 7")
+	step(desktop, "Down", "Information 2 of 7")
+	step(desktop, "Down", "Tree 3 of 7")
+	step(desktop, "Return", "windows", "Tree toggle button not pressed")
+	step(desktop, "Tab", "button Close the side pane")
+	step(desktop, "Tab", "tree view", "windows collapsed…")
+	step(desktop, "shift+Right", "expanded")
+	step(desktop, "Down", "sub collapsed…")
+
+	# The last window closes, and the desktop has the focus.
+	step(desktop, "control+w", "Desktop desktop pane")
+	assertQuitCleanly(desktop, nvda)

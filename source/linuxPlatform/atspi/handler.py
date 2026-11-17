@@ -116,6 +116,69 @@ _retries: list[tuple[float, tuple]] = []
 _rescans: list[float] = []
 #: Roles of event sources, read once each, to know a password field before keeping what it sent.
 _roles: dict[tuple[str, str], str] = {}
+#: The name each accessible was last given by an event, by key.
+_names: dict[tuple[str, str], str] = {}
+
+
+def knownRole(node: Node) -> str | None:
+	"""The role node had when it last sent text, for an accessible gone before its event is handled."""
+	return _roles.get(node.key)
+
+
+def knownName(node: Node) -> str | None:
+	"""The name node was last given by an event, for an accessible gone before its event is handled:
+	marco's switcher is destroyed within a tenth of a second of naming a workspace."""
+	return _names.get(node.key)
+
+
+#: Application names by bus name.
+_applicationNames: dict[str, str] = {}
+#: Applications whose only objects that name themselves and vanish at once are status bars: marco's
+#: switcher, a popup that lives about 60 ms, names the window or workspace a key chose in one.
+_SWITCHER_APPLICATIONS = frozenset({"marco"})
+
+
+def _applicationName(busName: str) -> str:
+	name = _applicationNames.get(busName)
+	if name is None:
+		c = client()
+		for app in applications():
+			try:
+				_applicationNames[app.busName] = c.name(app)
+			except NodeGone:
+				continue
+		name = _applicationNames.setdefault(busName, "")
+	return name
+
+
+def roleOfVanished(node: Node) -> str | None:
+	"""The role an accessible gone before its event is handled had, where it can be known."""
+	role = knownRole(node)
+	if role is None and _applicationName(node.busName) in _SWITCHER_APPLICATIONS:
+		role = "status bar"
+		_roles[node.key] = role
+	return role
+
+
+def _focusDesktop() -> None:
+	"""Give the focus to the desktop when the window that had it went and no window took its place, as
+	Windows does when the last window closes."""
+	import api
+	import eventHandler
+
+	focus = api.getFocusObject()
+	if focus is api.getDesktopObject():
+		return
+	node = getattr(focus, "node", None)
+	try:
+		top = _topLevelOf(node) if node is not None else None
+		if top is not None and "active" in client().states(top):
+			return
+	except NodeGone:
+		pass
+	log.debug("AT-SPI focus: no window took the focus that went; the desktop has it")
+	_setForeground(None)
+	eventHandler.queueEvent("gainFocus", api.getDesktopObject())
 
 
 def client() -> Client:
@@ -347,6 +410,10 @@ def _onEvent(eventType: str, source: Node | None, detail1: int, detail2: int, an
 			anyData = None
 	elif eventType == "object:property-change:accessible-role":
 		_roles.pop(source.key, None)
+	elif eventType == "object:property-change:accessible-name" and isinstance(anyData, str):
+		if len(_names) > MAX_QUEUED:
+			_names.clear()
+		_names[source.key] = anyData
 	elif eventType in WINDOW_ACTIVATION_EVENTS:
 		global _lastWindowEventAt, _settleStartedAt
 		_lastWindowEventAt = now
@@ -389,6 +456,8 @@ def terminate() -> None:
 	_rescans.clear()
 	_processIDs.clear()
 	_roles.clear()
+	_names.clear()
+	_applicationNames.clear()
 	_topLevels.clear()
 	_focusWhileHung.clear()
 	_setForeground(None)
@@ -614,8 +683,14 @@ def _nvdaEvents(event) -> list[str]:
 		# A notification is a top-level alert that never takes the focus.
 		return ["alert"] if client().role(source) == "alert" else []
 	if eventType == "object:property-change:accessible-name":
+		try:
+			role = client().role(source)
+		except NodeGone:
+			role = roleOfVanished(source)
+			if role is None:
+				return []
 		# A GTK 3 combo box is named by its choice, which NVDA reports as its value.
-		if client().role(source) == "combo box":
+		if role == "combo box":
 			return ["valueChange"]
 		return ["nameChange"]
 	if eventType == "object:property-change:accessible-description":
@@ -654,18 +729,34 @@ def _shouldAccept(nvdaEvent: str, node: Node) -> bool:
 _processIDs: dict[str, int] = {}
 
 
+def processIDOf(node: Node) -> int:
+	"""The process of node's application, also once node itself is gone; 0 when it cannot be known."""
+	processID = _processIDs.get(node.busName)
+	if processID is not None:
+		return processID
+	c = client()
+	try:
+		processID = c.processID(node)
+	except NodeGone:
+		# Asked of the application itself, which outlives a popup that vanished.
+		app = next((app for app in applications() if app.busName == node.busName), None)
+		try:
+			processID = c.processID(app) if app is not None else 0
+		except NodeGone:
+			processID = 0
+	if processID:
+		_processIDs[node.busName] = processID
+	return processID
+
+
 def _backgroundEventsOf(node: Node) -> frozenset[str]:
 	"""The events an application's app module asks for while it is in the background, as marco's does
 	for the window switcher it shows but never activates."""
 	import appModuleHandler
 
-	processID = _processIDs.get(node.busName)
-	if processID is None:
-		try:
-			processID = client().processID(node)
-		except NodeGone:
-			return frozenset()
-		_processIDs[node.busName] = processID
+	processID = processIDOf(node)
+	if not processID:
+		return frozenset()
 	appModule = appModuleHandler.getAppModuleFromProcessID(processID)
 	return getattr(appModule, "backgroundEvents", frozenset())
 
@@ -762,6 +853,8 @@ def pumpAll() -> None:
 			_rescans.clear()
 			_setForeground(window)
 			due.append(("window:activate", window, 0, 0, None))
+		elif not _foregroundActive and not _rescans:
+			_focusDesktop()
 	with _queueLock:
 		events = list(_queue)
 		_queue.clear()

@@ -269,7 +269,7 @@ class AtSpi(NVDAObject):
 		try:
 			return _client().role(self.node)
 		except NodeGone:
-			return "invalid"
+			return handler.roleOfVanished(self.node) or "invalid"
 
 	atspiStates: frozenset[str]
 
@@ -297,7 +297,7 @@ class AtSpi(NVDAObject):
 		try:
 			name = _client().name(self.node)
 		except NodeGone:
-			return ""
+			return handler.knownName(self.node) or ""
 		if name.endswith(_LAYOUT_NAME_SUFFIXES) and self.atspiRole in ("panel", "filler"):
 			# GTK's file chooser names its boxes after their place in its own layout, "Browse Header
 			# Stack" and the like, which a user has no use for.
@@ -336,10 +336,7 @@ class AtSpi(NVDAObject):
 		return accessibleIdOf(self.node)
 
 	def _get_processID(self) -> int:
-		try:
-			return _client().processID(self.node)
-		except NodeGone:
-			return 0
+		return handler.processIDOf(self.node)
 
 	# What speech, braille and navigation read.
 
@@ -407,8 +404,10 @@ class AtSpi(NVDAObject):
 			return Role.DIALOG
 		if raw == "alert" and self.atspiParentRole == "application":
 			# GTK's message dialog is a top-level alert; Windows presents a message box as a dialog. A
-			# desktop notification is one that is not modal and never takes the focus.
-			return Role.DIALOG if "modal" in self.atspiStates else Role.ALERT
+			# desktop notification is one whose window GTK knows as a notification's.
+			if self.atspiAttributes.get("window-type") == "notification":
+				return Role.ALERT
+			return Role.DIALOG
 		if raw == "invalid":
 			return Role.UNKNOWN
 		if raw == "button" and "Hyperlink" in self.atspiInterfaces:

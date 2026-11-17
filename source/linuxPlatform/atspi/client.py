@@ -203,7 +203,11 @@ class Client:
 
 	def role(self, node: Node) -> str:
 		# GTK 4 and Qt give their own names from GetRoleName; the number is AT-SPI's.
-		return Atspi.role_get_name(call(node, Atspi.Accessible.get_role)) or ""
+		role = call(node, Atspi.Accessible.get_role)
+		if role == Atspi.Role.INVALID:
+			# What libatspi answers, without asking, for an accessible it has seen go.
+			raise NodeGone(node.path)
+		return Atspi.role_get_name(role) or ""
 
 	def name(self, node: Node) -> str:
 		return call(node, Atspi.Accessible.get_name) or ""
