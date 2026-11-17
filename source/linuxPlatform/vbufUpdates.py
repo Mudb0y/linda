@@ -163,6 +163,7 @@ def _apply(batch, *, hold: bool = True) -> None:
 					held = True
 				return
 			applies = batch.stream is not None and buffer.VBufHandle
+			log.debug(f"Update for {batch.busName} {batch.docPath}: {batch.events} {batch.info}")
 			if applies and not vbufLib.update(buffer.VBufHandle, batch.stream):
 				# The buffer stays as it was, or lacks the fields it no longer had; the next change to
 				# the document renders them again.
