@@ -296,11 +296,7 @@ class AtSpiBuffer(VirtualBuffer):
 		self._tables.clear()
 		if vbufUpdates is not None:
 			vbufUpdates.register(self)
-		focus = api.getFocusObject()
-		if focus.treeInterceptor is None and focus in self:
-			# The focus came before the buffer, when membership could not yet be answered from the
-			# buffer alone, as it is when Firefox restores the focus to a link on going back.
-			focus.treeInterceptor = self
+		self._takeFocus()
 		if info.get("busy") and vbufUpdates is not None:
 			import wx
 
@@ -327,8 +323,18 @@ class AtSpiBuffer(VirtualBuffer):
 		hold.Stop()
 		if self._terminated:
 			return
+		# The page may have focused one of its fields while it loaded.
+		self._takeFocus()
 		self._loadBufferDone()
 		self._primeActions()
+
+	def _takeFocus(self) -> None:
+		"""Make this buffer the focus's tree interceptor when the focus is in it but came before it,
+		when membership could not yet be answered from the buffer alone, as when Firefox restores the
+		focus to a link on going back or a page focuses its search box as it loads."""
+		focus = api.getFocusObject()
+		if focus.treeInterceptor is None and focus in self:
+			focus.treeInterceptor = self
 
 	def onEngineEvents(self, events: tuple[str, ...], info: dict) -> None:
 		"""On the main thread, after the update that came with events, if any, was applied."""
