@@ -162,12 +162,20 @@ def test_nvdaChordWithoutACommandReachesTheApplication(
 	while entryState()[0] != "z":
 		assert time.monotonic() < deadline, f"the field holds {entryState()[0]!r}, not 'z'"
 		time.sleep(0.05)
-	# NVDA's own commands are still NVDA's alone.
+	# NVDA's own commands are still NVDA's alone, the next one with the NVDA key still held too.
 	mark = desktop.mark()
 	desktop.press(keys.chord("t"))
 	desktop.expect("Fixture window", since=mark)
+	mark = desktop.mark()
+	subprocess.run(
+		["xdotool", "keydown", keys.nvda, "key", "--delay", "0", "y", "sleep", "0.3"]
+		+ ["key", "--delay", "0", "t", "sleep", "0.3", "keyup", keys.nvda],
+		check=True,
+	)
+	desktop.expect("Fixture window", since=mark)
 	time.sleep(0.3)
-	assert entryState()[0] == "z"
+	assert entryState()[0] == "zy"
+	assert not desktopSession.capsLockIsOn()
 	launch = keys.quit()
 	launch.assertClean(logNames=("nvda.log",))
 	assert f"Input: kb({keys.layout}):NVDA+z" in launch.text("nvda.log")

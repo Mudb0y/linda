@@ -123,6 +123,7 @@ NUMPAD_REVIEW_KEYS = (71, 72, 73, 75, 76, 77, 79, 80, 81, 78, 98, 55)
 INSERT_KEY = 110
 NUMPAD_INSERT_KEY = 82
 CAPS_LOCK_KEY = 58
+NVDA_KEYCODES = (INSERT_KEY + 8, NUMPAD_INSERT_KEY + 8, CAPS_LOCK_KEY + 8)
 #: config.configFlags.NVDAKey, which this must not import: config imports far too much for a thread
 #: started this early to wait on.
 CAPS_LOCK, NUMPAD_INSERT, EXTENDED_INSERT = 1, 2, 4
@@ -347,6 +348,9 @@ class X11KeySource:
 		self._grabbed: dict[int, list[int] | None] = {}
 		#: The window the NVDA keys and the numpad review keys are grabbed on.
 		self._keysWindow = None
+		#: The NVDA key pressed again here after a key was sent on while it was held, so that its grab
+		#: goes on as long as it is; let go of here too once the keyboard lets it go.
+		self._rearmed: int | None = None
 		#: The grabbed key whose press made a grab active, which lasts until it is released.
 		self._activeGrab: int | None = None
 		self._held = False
@@ -786,6 +790,12 @@ class X11KeySource:
 			self._rawDelivered.append((now, keycode, isUp, sourceid))
 			self._process(keycode, isUp, False, None, None, sourceid, arrival)
 
+	def _isEchoPending(self, keycode: int, isUp: bool) -> bool:
+		"""Whether a key sent here is still expected back."""
+		return any(
+			(echoKeycode, echoIsUp) == (keycode, isUp) for _sent, echoKeycode, echoIsUp in self._echoes
+		)
+
 	def _isEcho(self, keycode: int, isUp: bool, now: float) -> bool:
 		with self._lock:
 			while self._echoes and now - self._echoes[0][0] > ECHO_WAIT:
@@ -826,6 +836,14 @@ class X11KeySource:
 				if isUp:
 					self._keycodesDown.discard(keycode)
 					self._locksHeld.pop(vk, None)
+					if keycode == self._rearmed and not (
+						sourceid in self._xtestDevices and self._isEchoPending(keycode, True)
+					):
+						self._rearmed = None
+						if sourceid not in self._xtestDevices:
+							# The keyboard let it go; so does the device it was pressed again on.
+							self._echoes.append((time.monotonic(), keycode, True))
+							xtest.fake_input(self._display, X.KeyRelease, keycode)
 				else:
 					self._keycodesDown.add(keycode)
 					if vk in LOCK_MASKS:
@@ -1315,11 +1333,12 @@ class X11KeySource:
 		# Asked of the server, as a release may be on the way here; a release sent for a key already up
 		# would be expected back, and the real one taken for it.
 		down = d.query_keymap()
+		activating = self._activeGrab if self._activeGrab != keycode else None
 		releases = [
-			code
-			for code in (keycode, self._activeGrab if self._activeGrab != keycode else None)
-			if code is not None and down[code // 8] & (1 << (code % 8))
+			code for code in (keycode, activating) if code is not None and down[code // 8] & (1 << (code % 8))
 		]
+		if activating not in releases:
+			activating = None
 		state = self._xkbState()
 		missing = modifiers & ~SENT_ON_WITHOUT & ~(state.mods if state is not None else 0)
 		mapping = d.get_modifier_mapping() if missing else []
@@ -1337,7 +1356,7 @@ class X11KeySource:
 			self._echoes.extend((now, code, True) for code in held)
 		for code in releases:
 			xtest.fake_input(d, X.KeyRelease, code)
-		if state is not None and len(releases) == 2:
+		if state is not None and activating is not None:
 			# A lock key let go of unlocks what was locked as it went down.
 			self._setCapsLock(bool(state.lockedMods & X.LockMask))
 		if self._activeGrab is not None or self._captureGrab is not None:
@@ -1357,6 +1376,16 @@ class X11KeySource:
 		xtest.fake_input(d, X.KeyRelease, keycode)
 		for code in reversed(held):
 			xtest.fake_input(d, X.KeyRelease, code)
+		if activating in NVDA_KEYCODES:
+			# The NVDA key is still held: pressed again, its grab has the next key with it NVDA's again,
+			# as on Windows, where the NVDA key goes on being held through a key the hook passed.
+			nvdaKey = activating
+			with self._lock:
+				self._echoes.append((time.monotonic(), nvdaKey, False))
+			xtest.fake_input(d, X.KeyPress, nvdaKey)
+			self._rearmed = nvdaKey
+			if state is not None:
+				self._setCapsLock(bool(state.lockedMods & X.LockMask))
 		if lifted:
 			catcher = error.CatchError(error.BadAccess, error.BadWindow)
 			for mod in lifted:
