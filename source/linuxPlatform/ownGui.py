@@ -571,7 +571,38 @@ def _focusedWindow(topLevels: list[wx.Window]) -> wx.Window | None:
 	return None
 
 
+def _onlyNotebook(window: wx.Window) -> wx.Notebook | None:
+	"""The one notebook shown in window, if it has exactly one."""
+	notebooks = []
+	pending = list(window.GetChildren())
+	while pending:
+		child = pending.pop()
+		pending.extend(child.GetChildren())
+		if isinstance(child, wx.Notebook) and child.IsShown():
+			notebooks.append(child)
+	return notebooks[0] if len(notebooks) == 1 else None
+
+
+def _switchTabs(evt: wx.KeyEvent) -> bool:
+	"""Move to the next or previous tab of the dialog's notebook on Control+Tab or Control+Shift+Tab, as
+	wxMSW does from anywhere in a dialog: GTK moves the focus out of the control instead, so that the
+	add-on store's tabs could not be reached from its list. The tab chosen takes the focus, so that it
+	is read."""
+	if evt.GetKeyCode() != wx.WXK_TAB or not evt.ControlDown() or evt.AltDown():
+		return False
+	source = evt.GetEventObject()
+	dialog = wx.GetTopLevelParent(source) if isinstance(source, wx.Window) else None
+	notebook = _onlyNotebook(dialog) if isinstance(dialog, wx.Dialog) else None
+	if notebook is None or notebook.GetPageCount() < 2:
+		return False
+	notebook.AdvanceSelection(not evt.ShiftDown())
+	notebook.SetFocus()
+	return True
+
+
 def _onCharHook(evt: wx.KeyEvent) -> None:
+	if _switchTabs(evt):
+		return
 	if evt.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and not evt.HasAnyModifiers():
 		source = evt.GetEventObject()
 		focus = _focusedWindow([wx.GetTopLevelParent(source)] if isinstance(source, wx.Window) else [])
