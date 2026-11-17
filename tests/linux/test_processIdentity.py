@@ -8,7 +8,10 @@ nix develop . -c tests/linux/rig python3 -m pytest -p no:cacheprovider tests/lin
 
 import os
 import shutil
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import harness
@@ -688,3 +691,47 @@ result = {{
 	assert timings["cached"] < 50e-6, timings
 	assert timings["uncached"] < 5e-3, timings
 	assert timings["cleanup"] < 1e-3, timings
+
+
+#: Starts itself again as often as its first argument says, each copy with the switch the command line
+#: of a Chromium zygote holds, and writes each copy's process ID to the output they share.
+ZYGOTES = """
+import os, subprocess, sys, time
+
+print(os.getpid(), flush=True)
+remaining = int(sys.argv[1])
+if remaining:
+	subprocess.Popen([sys.executable, "-I", "-B", __file__, str(remaining - 1), "--type" + "=zygote"])
+time.sleep(600)
+"""
+
+
+def test_aZygotesOwnHelperIsNotAProgram(tmp_path: Path):
+	"""A sandboxed Chromium zygote forks a second zygote, whose parent is then no main process: only
+	the program that started the first is one that NVDA may say cannot be read."""
+	script = tmp_path / "zygotes.py"
+	script.write_text(ZYGOTES, encoding="utf-8")
+	main = subprocess.Popen(
+		[sys.executable, "-I", "-B", str(script), "2"],
+		stdin=subprocess.DEVNULL,
+		stdout=subprocess.PIPE,
+		text=True,
+	)
+	started = []
+	try:
+		started = [int(main.stdout.readline()) for _process in range(3)]
+		# The one that asks must have started after them, as NVDA starts after the programs it names.
+		time.sleep(0.1)
+		done = harness.runChild(
+			tmp_path,
+			"""
+from linuxPlatform.atspi import status
+result = status._chromiumMainProcesses()
+""",
+		)
+	finally:
+		for processID in started or [main.pid]:
+			os.kill(processID, signal.SIGKILL)
+		main.wait()
+	done.assertClean()
+	assert [processID for processID in done.value if processID in started] == [main.pid]

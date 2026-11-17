@@ -34,6 +34,8 @@ SCREEN_READER_ENABLED = "ScreenReaderEnabled"
 TIMEOUT_MS = 1000
 #: What the command line of Chromium's zygote holds, and no main process's.
 ZYGOTE_SWITCH = b"--type=zygote"
+#: What the command line of every process a Chromium main process starts for itself holds.
+CHILD_SWITCH = b"--type="
 #: Where the parent's process ID and the start time are among the fields _stat gives.
 PARENT_FIELD = 1
 STARTTIME_FIELD = 19
@@ -111,6 +113,11 @@ def _stat(processID: int | str) -> list[bytes]:
 		return f.read().rsplit(b")", 1)[1].split()
 
 
+def _commandLine(processID: int | str) -> bytes:
+	with open(f"/proc/{processID}/cmdline", "rb") as f:
+		return f.read(4096)
+
+
 def _chromiumMainProcesses() -> list[int]:
 	"""The main processes of Chromium and of every Electron program that started before NVDA: those
 	that started a zygote, the helper Chromium forks its pages from, whose command line says so. One
@@ -124,12 +131,14 @@ def _chromiumMainProcesses() -> list[int]:
 		if not entry.name.isdecimal():
 			continue
 		try:
-			with open(f"/proc/{entry.name}/cmdline", "rb") as f:
-				commandLine = f.read(4096)
-			if ZYGOTE_SWITCH not in commandLine:
+			if ZYGOTE_SWITCH not in _commandLine(entry.name):
 				continue
 			parent = int(_stat(entry.name)[PARENT_FIELD])
 			if parent <= 1 or parent in mains or int(_stat(parent)[STARTTIME_FIELD]) >= nvdaStarted:
+				continue
+			# A sandboxed zygote forks once more to be the first process of its own namespace, so the
+			# zygote that serves pages is the child of another zygote, not of the main process.
+			if CHILD_SWITCH in _commandLine(parent):
 				continue
 		except (OSError, ValueError, IndexError):
 			continue
