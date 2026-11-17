@@ -30,17 +30,25 @@ SETTLE = 1.0
 PAGE_BOUND = 15.0
 #: Whether the buffer gets the page's changes by itself; without the update thread a test re-renders it.
 UPDATES_ARRIVE = (harness.ROOT / "source" / "linuxPlatform" / "vbufUpdates.py").is_file()
-#: The test hook's key that renders the focused buffer's document again and applies it as an update.
-RERENDER_KEY = "Insert+control+shift+F9"
+#: The test hook's key, which does what the hook's command file says to the focused buffer.
+HOOK_KEY = "Insert+control+shift+F9"
+#: The hook's command file, beside the plugin.
+HOOK_COMMAND = "browseHook.txt"
 
-#: A global plugin for the test hooks: it stands in for the update thread, which hands the buffer each
-#: change the engine saw.
-RERENDER_PLUGIN = """
+#: A global plugin for the test hooks, standing in for the update thread, which hands the buffer each
+#: change and document event the engine saw. The command file holds one of:
+#: rerender: render the document again and apply it as an update;
+#: partial: mark the buffer as holding only the first part of its document;
+#: events NAME...: hand the buffer those document events.
+HOOK_PLUGIN = """
+import os
 import threading
 
 import api
 import globalPluginHandler
 import queueHandler
+
+COMMAND = os.path.join(os.path.dirname(__file__), "browseHook.txt")
 
 
 def _rerender(buffer):
@@ -55,12 +63,20 @@ def _rerender(buffer):
 
 
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
-	def script_rerender(self, gesture):
+	def script_browseHook(self, gesture):
 		buffer = api.getFocusObject().treeInterceptor
-		if buffer is not None and buffer.VBufHandle:
+		if buffer is None or not buffer.VBufHandle:
+			return
+		with open(COMMAND) as f:
+			command, *arguments = f.read().split()
+		if command == "rerender":
 			threading.Thread(target=_rerender, args=(buffer,), daemon=True).start()
+		elif command == "partial":
+			buffer.complete = False
+		elif command == "events":
+			buffer.onEngineEvents(tuple(arguments), {})
 
-	__gestures = {"kb:NVDA+control+shift+f9": "rerender"}
+	__gestures = {"kb:NVDA+control+shift+f9": "browseHook"}
 """
 
 
@@ -71,12 +87,18 @@ def desktop(tmp_path: Path) -> Iterator[DesktopSession]:
 
 
 def hooksDirectory(directory: Path) -> Path:
-	"""A test hooks directory with the transcript synth and the re-rendering plugin."""
+	"""A test hooks directory with the transcript synth and the hook plugin."""
 	hooks = directory / "browseHooks"
 	(hooks / "globalPlugins").mkdir(parents=True)
 	(hooks / "synthDrivers").symlink_to(harness.HERE / "synthDrivers")
-	(hooks / "globalPlugins" / "browseRerender.py").write_text(RERENDER_PLUGIN)
+	(hooks / "globalPlugins" / "browseHook.py").write_text(HOOK_PLUGIN)
 	return hooks
+
+
+def hook(desktop: DesktopSession, command: str, *expected: str) -> None:
+	"""Have the hook plugin carry out command on the focused buffer."""
+	(desktop.directory / "browseHooks" / "globalPlugins" / HOOK_COMMAND).write_text(command)
+	step(desktop, HOOK_KEY, *expected)
 
 
 def expect(desktop: DesktopSession, *texts: str, since: int, timeout: float = 5) -> None:
@@ -104,7 +126,7 @@ def browse(desktop: DesktopSession, tmp_path: Path, page: str, title: str, *sayA
 	webSession.waitForDocument(title)
 	nvda = desktop.startNVDA(
 		webSession.BROWSE_CONFIG,
-		env={"BASEDREADER_TEST_HOOKS_DIR": str(hooksDirectory(tmp_path))},
+		env={"BASEDREADER_TEST_HOOKS_DIR": str(hooksDirectory(desktop.directory))},
 	)
 	nvda.waitForLog("Buffer rendered", BUFFER_BOUND)
 	expect(desktop, title, *sayAll, since=0, timeout=BUFFER_BOUND)
@@ -177,6 +199,17 @@ def test_quickNavigationAndRefresh(desktop: DesktopSession, tmp_path: Path):
 	step(desktop, "h", "content info landmark Contact heading level 2")
 	step(desktop, "h", "no next heading")
 	step(desktop, "Insert+F5", "Refreshed")
+	# While the rest of a page is still to come, a failed search says so, until the rest arrives.
+	hook(desktop, "partial")
+	desktop.press("control+End")
+	time.sleep(SETTLE)
+	step(desktop, "h", "Loading")
+	hook(desktop, "events complete")
+	step(desktop, "h", "no next heading")
+	# A document Firefox replaced loses its buffer, and NVDA+Space makes a new one.
+	hook(desktop, "events gone")
+	step(desktop, "Insert+space", "Browse mode")
+	step(desktop, "control+Home", "heading level 1 Basic page")
 	quit(desktop, nvda)
 
 
@@ -224,7 +257,8 @@ def test_find(desktop: DesktopSession, tmp_path: Path):
 	mark = desktop.mark()
 	desktop.typeText("Contact")
 	desktop.press("Return")
-	expect(desktop, "heading level 2 Contact", since=mark)
+	# The search waits for NVDA's dialog to be gone, which GTK can take seconds over.
+	expect(desktop, "heading level 2 Contact", since=mark, timeout=PAGE_BOUND)
 	time.sleep(SETTLE)
 	step(desktop, "Down", "Write to us.")
 	step(desktop, "control+Home", "heading level 1 Welcome")
@@ -252,6 +286,6 @@ def test_pageThatChanges(desktop: DesktopSession, tmp_path: Path):
 	desktop.press("Return")
 	time.sleep(SETTLE)
 	if not UPDATES_ARRIVE:
-		step(desktop, RERENDER_KEY, "button Add paragraph")
+		hook(desktop, "rerender", "button Add paragraph")
 	step(desktop, "Down", "Added paragraph 1 with link a new link dot")
 	quit(desktop, nvda)
