@@ -646,3 +646,60 @@ def test_tablesAreGeneratedFromNVDARoles(tmp_path: Path):
 		capture_output=True,
 	)
 	assert generated.read_text() == (ENGINE_CRATE / "src" / "tables.rs").read_text()
+
+
+def _webkitDocument(title: str):
+	"""The document web named title in the WebKitGTK fixture's web process, reached through the
+	fixture's window as libatspi follows the web view's socket into it."""
+	Atspi = desktopSession._atspi()
+	desktop = Atspi.get_desktop(0)
+	stack = [desktop.get_child_at_index(i) for i in range(desktop.get_child_count())]
+	while stack:
+		obj = stack.pop()
+		if obj is None:
+			continue
+		if obj.get_role() == Atspi.Role.DOCUMENT_WEB and obj.get_name() == title:
+			return obj
+		stack.extend(obj.get_child_at_index(i) for i in range(obj.get_child_count()))
+	return None
+
+
+def test_aWebKitGTKDocumentIsRenderedOverTheBus(
+	desktop: DesktopSession, engine: ModuleType, vbufLib: ModuleType
+):
+	"""MATE Help's pages failed to render: WebKitGTK's web process has no object at the standard
+	root path, offers no server of its own, and names its objects with UUIDs rather than numbers."""
+	title = "WebKit fixture page"
+	app = desktop.startApp(desktop.fixture("webkitDocument"), title="WebKit fixture")
+	assert app.stdout.readline() == "ready\n"
+	deadline = time.monotonic() + 10
+	while (document := _webkitDocument(title)) is None:
+		assert time.monotonic() < deadline, "no WebKitGTK document"
+		time.sleep(0.1)
+	bus, path = document.app.bus_name, document.path
+	assert not path.rpartition("/")[2].isdecimal(), path
+	rendered = engine.render(bus, path, DOC_HANDLE)
+	try:
+		assert rendered.info.get("overBus"), rendered.info
+		text = bufferText(vbufLib, rendered.stream)
+		root = parseDocument(_units(rendered.stream))
+	finally:
+		rendered.stream.free()
+	at = 0
+	for expected in (
+		"Fixture heading",
+		"The first paragraph has ",
+		"a link",
+		"Second heading",
+		"First item",
+		"Second item",
+		"The last paragraph.",
+	):
+		found = text.find(expected, at)
+		assert found >= 0, f"{expected!r} not after offset {at} in {text!r}"
+		at = found + len(expected)
+	identifiers = [field.identifier for field in root.walk()]
+	assert len(identifiers) == len(set(identifiers)), "an identifier is given twice"
+	assert all(ID != 0 for _, ID in identifiers), identifiers
+	assert engine.namedPath(root.identifier[1]) == path
+	assert engine.namedId(path) == root.identifier[1]

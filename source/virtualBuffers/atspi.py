@@ -19,6 +19,7 @@ import queueHandler
 import textInfos
 import tones
 import treeInterceptorHandler
+import ui
 from controlTypes import IsCurrent, OutputReason, Role, State
 from linuxPlatform import vbufEngine, vbufLib
 from linuxPlatform.atspi import accessibleFor, handler
@@ -74,14 +75,19 @@ class Identifiers:
 
 	@staticmethod
 	def id(path: str) -> int:
-		"""The ID for path; 0, which no accessible has, for a path without a number at its end."""
+		"""The ID for path; 0, which no accessible has, for an application's root. A path ending in
+		something other than a number, as WebKitGTK's do, has the ID the engine gave it."""
 		tail = path.rpartition("/")[2]
-		if not tail.isdecimal() or int(tail) >= 2**32:
+		if tail.isdecimal() and int(tail) < 2**32:
+			return ctypes.c_int32(int(tail)).value
+		if tail.isdecimal() or tail in ("", "root") or not vbufEngine.isAvailable():
 			return 0
-		return ctypes.c_int32(int(tail)).value
+		return vbufEngine.namedId(path)
 
 	@staticmethod
 	def path(ID: int) -> str:
+		if ID < 0 and vbufEngine.isAvailable() and (named := vbufEngine.namedPath(ID)) is not None:
+			return named
 		return f"{_PATH_PREFIX}{ID & 0xFFFFFFFF}"
 
 	def of(self, node: Node) -> tuple[int, int]:
@@ -96,6 +102,9 @@ identifiers = Identifiers()
 #: accessibility cache only when a client first asks for it, and until then answers that an object has
 #: no actions and drops DoAction, so the first Enter on a link would do nothing.
 _actionsPrimed: set[str] = set()
+
+#: Documents the engine could not render, by bus name and path, which are given no buffer again.
+_unrenderable: set[tuple[str, str]] = set()
 
 #: Role.LIST is left out: the renderer gives it to HTML lists as well as to list boxes.
 _FORM_FIELD_ROLES = (
@@ -283,11 +292,14 @@ class AtSpiBuffer(VirtualBuffer):
 				vbufLib.build(handle, rendered.stream)
 			finally:
 				rendered.stream.free()
+		except RuntimeError as e:
+			# The engine's own refusal, which names the application and the call that failed.
+			log.warning(f"The engine could not render the document, which is read without browse mode: {e}")
+			self._loadFailed(handle)
+			return
 		except Exception:
-			if handle:
-				vbufLib.destroy(handle)
 			log.exception("The engine could not render the document")
-			queueHandler.queueFunction(queueHandler.eventQueue, self._engineLoadDone, None, {})
+			self._loadFailed(handle)
 			return
 		log.info(
 			f"Buffer rendered by the engine in {renderedAt - start:.3f} s, built in "
@@ -295,6 +307,11 @@ class AtSpiBuffer(VirtualBuffer):
 			f"code units: {rendered.info}",
 		)
 		queueHandler.queueFunction(queueHandler.eventQueue, self._engineLoadDone, handle, rendered.info)
+
+	def _loadFailed(self, handle: int | None) -> None:
+		if handle:
+			vbufLib.destroy(handle)
+		queueHandler.queueFunction(queueHandler.eventQueue, self._engineLoadDone, None, {})
 
 	def _engineLoadDone(self, handle: int | None, info: dict) -> None:
 		"""On the main thread: take the built buffer, unless this interceptor died while it rendered."""
@@ -305,7 +322,14 @@ class AtSpiBuffer(VirtualBuffer):
 			self._unwatch()
 			return
 		if not handle:
+			# A buffer left without content held the document in focus mode with nothing behind it, so
+			# NVDA+space and the review cursor met an empty buffer. Without one, focus and review read
+			# the document's own objects.
 			self._loadBufferDone(success=False)
+			_unrenderable.add((self.busName, self.docPath))
+			treeInterceptorHandler.killTreeInterceptor(self)
+			# Translators: Reported when a document cannot be read in browse mode, only through its objects.
+			ui.message(_("No browse mode for this document"))
 			return
 		self.VBufHandle = ctypes.c_void_p(handle)
 		self._docURL = info.get("docURL") or self._docURL
@@ -754,6 +778,8 @@ def treeInterceptorClassFor(obj) -> type | None:
 	if not (vbufLib.isAvailable() and vbufEngine.isAvailable()):
 		return None
 	try:
+		if (obj.node.busName, obj.node.path) in _unrenderable:
+			return None
 		if obj.atspiRole == "document web" and "editable" not in obj.atspiStates:
 			return AtSpiBuffer
 		if obj.atspiRole == "dialog":

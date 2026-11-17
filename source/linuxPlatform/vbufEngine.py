@@ -59,6 +59,10 @@ def _load() -> ctypes.CDLL:
 			lib.bre_vbuf_free_stream.argtypes = (ctypes.c_void_p, ctypes.c_size_t)
 			lib.bre_vbuf_free_str.restype = None
 			lib.bre_vbuf_free_str.argtypes = (ctypes.c_void_p,)
+			lib.bre_vbuf_named_id.restype = ctypes.c_int32
+			lib.bre_vbuf_named_id.argtypes = (ctypes.c_char_p,)
+			lib.bre_vbuf_named_path.restype = ctypes.c_void_p
+			lib.bre_vbuf_named_path.argtypes = (ctypes.c_int32,)
 			_lib = lib
 	return _lib
 
@@ -168,6 +172,24 @@ def next(timeoutMs: int) -> Batch | None:
 		tuple(details.get("events", ())),
 		details,
 	)
+
+
+def namedId(path: str) -> int:
+	"""The ID the engine gives the object at path, whose last part is not a number, as WebKitGTK's
+	are not; the same ID a render gives it."""
+	return _load().bre_vbuf_named_id(path.encode())
+
+
+def namedPath(ID: int) -> str | None:
+	"""The path of the object the engine gave ID, or None when it gave it to none."""
+	lib = _load()
+	pointer = lib.bre_vbuf_named_path(ID)
+	if not pointer:
+		return None
+	try:
+		return ctypes.string_at(pointer).decode()
+	finally:
+		lib.bre_vbuf_free_str(pointer)
 
 
 def unwatch(busName: str, docPath: str) -> None:

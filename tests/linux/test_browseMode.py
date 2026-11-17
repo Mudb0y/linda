@@ -432,3 +432,44 @@ def test_pageThatChanges(desktop: DesktopSession, tmp_path: Path):
 		hook(desktop, "rerender", "button Add paragraph")
 	step(desktop, "Down", "Added paragraph 1 with link a new link dot")
 	quit(desktop, nvda)
+
+
+#: Makes every render fail as the engine fails on a document it cannot reach.
+FAILING_ENGINE_PLUGIN = """
+import globalPluginHandler
+from linuxPlatform import vbufEngine
+
+
+def _render(busName, docPath, docHandle, **kwargs):
+	raise RuntimeError(f"the engine could not render {busName} {docPath}: refused by the test")
+
+
+vbufEngine.render = _render
+
+
+class GlobalPlugin(globalPluginHandler.GlobalPlugin):
+	pass
+"""
+
+
+def test_aDocumentTheEngineCannotRenderIsReadWithoutBrowseMode(desktop: DesktopSession, tmp_path: Path):
+	webSession.requireBrowseLibraries()
+	hooks = hooksDirectory(desktop.directory)
+	(hooks / "globalPlugins" / "failingEngine.py").write_text(FAILING_ENGINE_PLUGIN)
+	webSession.startFirefox(desktop, "basic.html")
+	webSession.waitForDocument("Basic page")
+	nvda = desktop.startNVDA(webSession.BROWSE_CONFIG, env={"LINDA_TEST_HOOKS_DIR": str(hooks)})
+	expect(desktop, "No browse mode for this document", since=0, timeout=BUFFER_BOUND)
+	time.sleep(SETTLE)
+	# Focus mode reads the document's own objects, and browse mode is not offered again.
+	step(desktop, "Tab", "a link to the contact section link")
+	mark = desktop.mark()
+	desktop.press("Insert+space")
+	time.sleep(SETTLE)
+	step(desktop, "Tab", "The second page link")
+	assert not [text for text in desktop.spokenSince(mark) if "browse mode" in text.lower()]
+	assert desktop.nvda.spokenTexts().count("No browse mode for this document") == 1
+	quit(desktop, nvda)
+	log = (nvda.directory / "nvda.log").read_text()
+	assert log.count("The engine could not render the document") == 1, log
+	assert "Traceback" not in log

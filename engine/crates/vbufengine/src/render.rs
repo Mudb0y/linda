@@ -31,14 +31,15 @@ pub struct Ctx {
 }
 
 /// The number at the end of the object path, cast to signed 32 bits as virtualBuffers.atspi does:
-/// the ATK bridge counts up from 1 and never reuses one, Qt counts from 2^31. A path without one
-/// is given no field.
+/// the ATK bridge counts up from 1 and never reuses one, Qt counts from 2^31. A path ending in
+/// anything else but an application's root is given a number by [`crate::named`]; the root is
+/// given no field.
 pub fn id_of(path: &str) -> Option<i32> {
-    path.rsplit('/')
-        .next()?
-        .parse::<u32>()
-        .ok()
-        .map(|n| n as i32)
+    let tail = path.rsplit('/').next()?;
+    if let Ok(n) = tail.parse::<u32>() {
+        return Some(n as i32);
+    }
+    (!tail.is_empty() && tail != "root").then(|| crate::named::id(path))
 }
 
 /// Gecko fills the second unit of each astral character with U+FEFF, so that its text has as many
@@ -892,5 +893,9 @@ mod tests {
             Some(i32::MIN)
         );
         assert_eq!(id_of("/org/a11y/atspi/accessible/root"), None);
+        let webkit = "/org/a11y/atspi/accessible/c557039c_e1fa_427b_88ec_9655898d108f";
+        let id = id_of(webkit).unwrap();
+        assert_eq!(id_of(webkit), Some(id));
+        assert_eq!(crate::named::path(id).as_deref(), Some(webkit));
     }
 }

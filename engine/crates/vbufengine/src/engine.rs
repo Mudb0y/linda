@@ -148,7 +148,12 @@ impl State {
         Ok(conn)
     }
 
-    async fn app(&self, bus_name: &str, info: &mut Map<String, Value>) -> Result<Rc<App>, String> {
+    async fn app(
+        &self,
+        bus_name: &str,
+        doc: &str,
+        info: &mut Map<String, Value>,
+    ) -> Result<Rc<App>, String> {
         if let Some(a) = self.apps.borrow().get(bus_name) {
             info.insert("connectSeconds".into(), 0.0.into());
             return Ok(a.clone());
@@ -170,9 +175,7 @@ impl State {
         let owner = app::owner(&conn, bus_name)
             .await
             .map_err(|e| e.to_string())?;
-        let address = app::activate(&Client::bus(conn.clone(), bus_name))
-            .await
-            .map_err(|e| e.to_string())?;
+        let address = private_address(&Client::bus(conn.clone(), bus_name), doc, info).await?;
         let client = if address.is_empty() {
             Client::bus(conn.clone(), bus_name)
         } else {
@@ -492,6 +495,39 @@ async fn subscribe(conn: &Connection, bus: &str) -> zbus::Result<Vec<MessageStre
     Ok(streams)
 }
 
+/// The address of the application's own server, which also activates its bridge, or an empty
+/// string when it is to be read over the bus. Not every application keeps its root at the standard
+/// path: WebKitGTK's web process keeps it under /org/a11y/webkit and offers no server of its own, so
+/// the root the document names is asked next, and an application that answers neither is read over
+/// the bus. Only a call that failed without an answer fails the render.
+async fn private_address(
+    bus: &Client,
+    doc: &str,
+    info: &mut Map<String, Value>,
+) -> Result<String, String> {
+    let answered =
+        |e: &mirror::Error| matches!(e, mirror::Error::Call(c) if !c.kind.worth_retrying());
+    let first = match app::activate(bus).await {
+        Ok(address) => return Ok(address),
+        Err(e) if answered(&e) => e,
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut refused = vec![first.to_string()];
+    if let Ok(root) = app::application_of(bus, doc).await
+        && root.bus == bus.app_bus
+        && root.path != mirror::consts::ROOT_PATH
+    {
+        info.insert("appRoot".into(), root.path.clone().into());
+        match app::activate_at(bus, &root.path).await {
+            Ok(address) => return Ok(address),
+            Err(e) if answered(&e) => refused.push(e.to_string()),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    info.insert("overBus".into(), json!(refused));
+    Ok(String::new())
+}
+
 async fn parent_of(client: &Client, path: &str) -> Option<String> {
     let msg = client
         .call(path, IFACE_PROPERTIES, "Get", &(IFACE_ACCESSIBLE, "Parent"))
@@ -596,7 +632,7 @@ async fn render_task(
     let t0 = Instant::now();
     let mut info = Map::new();
     let progressive = flags & 1 != 0;
-    let app = match st.app(&bus, &mut info).await {
+    let app = match st.app(&bus, &root, &mut info).await {
         Ok(a) => a,
         Err(e) => return reply_error(&reply, info, e),
     };

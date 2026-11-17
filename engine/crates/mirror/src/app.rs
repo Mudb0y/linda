@@ -80,17 +80,29 @@ pub async fn find_app(bus: &Connection, want: &str, timeout: Duration) -> Result
 /// must be a bus client: the same call over a peer-to-peer connection would
 /// need one to exist already.
 pub async fn activate(bus: &Client) -> Result<String, Error> {
+    activate_at(bus, ROOT_PATH).await
+}
+
+/// [`activate`] on an application whose root is at `root`, for toolkits
+/// that keep it away from the standard path.
+pub async fn activate_at(bus: &Client, root: &str) -> Result<String, Error> {
     let member = "GetApplicationBusAddress";
-    let msg = bus
-        .request(ROOT_PATH, IFACE_APPLICATION, member, &())
-        .await?;
-    bus.decode(
+    let msg = bus.request(root, IFACE_APPLICATION, member, &()).await?;
+    bus.decode(&msg, root, IFACE_APPLICATION, member, "s", decode::string)
+}
+
+/// The application object `path` says it belongs to, through
+/// `Accessible.GetApplication`.
+pub async fn application_of(client: &Client, path: &str) -> Result<ObjRef, Error> {
+    let member = "GetApplication";
+    let msg = client.request(path, IFACE_ACCESSIBLE, member, &()).await?;
+    client.decode(
         &msg,
-        ROOT_PATH,
-        IFACE_APPLICATION,
+        path,
+        IFACE_ACCESSIBLE,
         member,
-        "s",
-        decode::string,
+        "(so)",
+        decode::obj_ref,
     )
 }
 

@@ -12,6 +12,7 @@ mod tables;
 
 mod chromium;
 mod engine;
+mod named;
 mod render;
 mod walk;
 
@@ -303,4 +304,23 @@ pub unsafe extern "C" fn bre_vbuf_free_str(s: *mut c_char) {
     if !s.is_null() {
         drop(unsafe { CString::from_raw(s) });
     }
+}
+
+/// The ID the buffer gives the object at path, whose last part is not a number, as a render
+/// gives it; see named.rs.
+///
+/// # Safety
+/// path is NUL-terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bre_vbuf_named_id(path: *const c_char) -> i32 {
+    named::id(&string_arg(path))
+}
+
+/// The path of the object a render or bre_vbuf_named_id gave id, freed with bre_vbuf_free_str, or
+/// null when none was.
+#[unsafe(no_mangle)]
+pub extern "C" fn bre_vbuf_named_path(id: i32) -> *mut c_char {
+    named::path(id)
+        .and_then(|p| CString::new(p).ok())
+        .map_or(std::ptr::null_mut(), CString::into_raw)
 }

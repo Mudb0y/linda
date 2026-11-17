@@ -148,6 +148,13 @@ pub fn string(msg: &Message) -> zbus::Result<String> {
     Ok(s.to_owned())
 }
 
+/// A reply that is one object reference, `(so)`, as `GetApplication`'s.
+pub fn obj_ref(msg: &Message) -> zbus::Result<ObjRef> {
+    let body = msg.body();
+    let raw: RawRef<'_> = body.deserialize()?;
+    Ok(ObjRef::from_raw(&raw))
+}
+
 /// The reply of `Properties.Get` for an object property such as `Parent`,
 /// `(v)` holding `(so)`.
 pub fn ref_property(msg: &Message) -> zbus::Result<ObjRef> {
