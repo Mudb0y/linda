@@ -488,8 +488,11 @@ class ScreenTracker:
 	def _answersKey(self, index: int, row: Row, old: str, new: str, key: Key | None, now: float) -> bool:
 		"""Whether a change to a row is the program showing an edit the user made at the caret, which
 		typing echo and the caret commands speak."""
-		if key is None or now - key.time > KEY_SECONDS or key.kind in ("enter", "tab", "modifier"):
+		if key is None or now - key.time > KEY_SECONDS or key.kind in ("tab", "modifier"):
 			return False
+		if key.kind == "enter":
+			# The last letters typed can be read together with the Enter that followed them.
+			return row.isInput and new.startswith(old) and len(new) - len(old) <= 2
 		removed, added, _at = changedSpans(old, new)
 		typed = key.text.strip()
 		typedNow = added.strip()
