@@ -178,6 +178,9 @@
           xvfb
           xprop
           firefox
+          # Browse mode in Chromium and in programs built on it.
+          chromium
+          electron
           # The desktop the tests drive: a window manager, the programs that
           # put windows, keys and layouts on the rig's display, and MATE's own
           # programs and a Qt editor to read.
