@@ -696,13 +696,28 @@ def _presentDialogOnMap(window, *args) -> bool:
 	from gi.repository import Gdk, GLib
 
 	# The hook sees every widget mapped, as map is a signal of every widget.
-	if (
-		isinstance(window, Gtk.Window)
-		and window.get_window_type() == Gtk.WindowType.TOPLEVEL
-		and window.get_type_hint() == Gdk.WindowTypeHint.DIALOG
-	):
-		GLib.idle_add(_presentNow, window)
+	if isinstance(window, Gtk.Window) and window.get_window_type() == Gtk.WindowType.TOPLEVEL:
+		_leaveOutOfModalGrab(window)
+		if window.get_type_hint() == Gdk.WindowTypeHint.DIALOG:
+			GLib.idle_add(_presentNow, window)
 	return True
+
+
+def _leaveOutOfModalGrab(window) -> None:
+	"""Let a window that is not modal take keys while a modal dialog it is not part of is open.
+
+	A modal dialog holds GTK's grab, which sends every key of every window in its window group to the
+	dialog. wxMSW disables only the windows open as a modal dialog is shown, so that the Exit dialog
+	NVDA+q opens over the add-on store's warning, or over the welcome dialog, takes the keys as it does on
+	Windows. Here its keys went to the dialog under it, which changed that dialog's controls and pressed
+	its OK, and NVDA could not be exited or restarted from it. A window group of its own is outside that
+	grab.
+	"""
+	Gtk = _gtkModule()
+	grab = Gtk.grab_get_current()
+	if window.get_modal() or grab is None or grab.get_toplevel() is window:
+		return
+	Gtk.WindowGroup().add_window(window)
 
 
 def _presentNow(window) -> bool:
