@@ -429,13 +429,13 @@ def test_bothNVDAKeysOnAPage(desktop: DesktopSession, tmp_path: Path, key: str):
 		if mode == "browse":
 			step(desktop, f"{key}+space", "Browse mode")
 			waitForCapture(nvda, "browse")
-		log = nvda.text("nvda.log")
-		# F5 reaching Firefox would load the page again, and empty its log.
-		desktop.press(f"{key}+F5", gap=1)
-		assert inputs(nvda, "NVDA+f5") == inputs(log, "NVDA+f5") + 1
+			log = nvda.text("nvda.log")
+			# F5 reaching Firefox would load the page again, and empty its log. In focus mode NVDA+F5 has
+			# no command, and Firefox has F5, as on Windows.
+			desktop.press(f"{key}+F5", gap=1)
+			assert inputs(nvda, "NVDA+f5") == inputs(log, "NVDA+f5") + 1
+		step(desktop, f"{key}+t", "Keys page" + PREFIX_MARK)
 		if mode == "focus":
-			desktop.press(f"{key}+control+f", gap=1)
-			assert inputs(nvda, *find) == inputs(log, *find) + 1
 			step(desktop, f"{key}+space", "Browse mode")
 			waitForCapture(nvda, "browse")
 		assert page.log() == ["a", "b"]
@@ -460,6 +460,64 @@ def test_bothNVDAKeysOnAPage(desktop: DesktopSession, tmp_path: Path, key: str):
 		for line in unexpected.splitlines()
 		if line.strip()
 	), unexpected
+
+
+def tap(key: str) -> None:
+	"""Press and release key at once: xdotool's keys and those NVDA sends on come from one device, and
+	NVDA, sending on a key xdotool still held, would release it first and lose xdotool's release."""
+	subprocess.run(["xdotool", "key", "--delay", "0", key], check=True)
+
+
+@pytest.mark.parametrize("key", ("Insert", "Caps_Lock"))
+def test_keysNVDAPassesReachThePage(desktop: DesktopSession, tmp_path: Path, key: str):
+	nvda, page = startPage(desktop, tmp_path)
+	step(desktop, "control+Home", "heading level 1 Keys page")
+
+	# Passed through, a letter browse mode would take reaches the page instead.
+	step(desktop, f"{key}+F2", "Pass next key through")
+	tap("h")
+	page.waitForLog(["h"])
+	# A chord with the NVDA key that NVDA has no command for reaches the page without the NVDA key.
+	tap(f"{key}+z")
+	page.waitForLog(["h", "z"])
+	tap(f"{key}+control+y")
+	page.waitForLog(["h", "z", "Control+y"])
+	step(desktop, "Down", "Every key that reaches this page is written to the log at its end.")
+
+	# The NVDA key twice reaches the page as itself.
+	if key == "Insert":
+		tap("Insert")
+		time.sleep(0.2)
+		tap("Insert")
+		page.waitForLog(["h", "z", "Control+y", "Insert"])
+	else:
+		mark = desktop.mark()
+		tap("Caps_Lock")
+		time.sleep(0.2)
+		tap("Caps_Lock")
+		expect(desktop, "caps lock on", since=mark)
+		assert desktopSession.capsLockIsOn()
+		tap("Caps_Lock")
+		time.sleep(0.2)
+		tap("Caps_Lock")
+		expect(desktop, "caps lock on", "caps lock off", since=mark)
+		assert not desktopSession.capsLockIsOn()
+		page.waitForLog(["h", "z", "Control+y"])
+	logged = page.log()
+
+	# In focus mode, Escape passed through stays with the page.
+	enterField(desktop, nvda)
+	step(desktop, f"{key}+F2", "Pass next key through")
+	mark = desktop.mark()
+	tap("Escape")
+	page.waitForLog([*logged, "Escape"])
+	time.sleep(SETTLE)
+	assert "Browse mode" not in desktop.spokenSince(mark)
+	step(desktop, "Escape", "Browse mode")
+	waitForCapture(nvda, "browse")
+	assert page.log() == [*logged, "Escape"]
+	assert not desktopSession.capsLockIsOn()
+	quitNVDA(desktop, nvda)
 
 
 def test_polishAltGrLettersOnAPage(desktop: DesktopSession, tmp_path: Path):

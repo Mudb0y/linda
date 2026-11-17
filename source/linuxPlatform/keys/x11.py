@@ -7,6 +7,8 @@ own, since an application that selects slave events on its window stops them rea
 The NVDA keys and the numpad review keys are taken with passive grabs on the root, so a chord with
 the NVDA key held goes to NVDA alone while the grab is active; everything else reaches the
 application too, and is marked as having done so.
+A key such a grab took that NVDA passes, as one NVDA has no command for, is sent on to the
+application, as the Windows hook lets through what its callback does not block.
 
 The keys of browse mode are captured with synchronous passive grabs on the window that has the
 keyboard focus: the X server holds the whole keyboard on such a press until this source answers it,
@@ -19,6 +21,7 @@ lets the keyboard go and closes this source's connection to the X server; the so
 once it runs again.
 """
 
+import functools
 import itertools
 import json
 import os
@@ -37,8 +40,76 @@ from logHandler import log
 from xkbcommon import xkb
 from Xlib import X, display, error
 from Xlib.ext import xinput, xtest
+from Xlib.protocol import rq
 
 from . import CaptureMode, KeyEvent, keyMap
+
+XKB_EXTENSION = "XKEYBOARD"
+#: XkbUseCoreKbd: the keyboard the core protocol uses, the master keyboard.
+XKB_CORE_KEYBOARD = 0x100
+
+
+class _XkbUseExtension(rq.ReplyRequest):
+	"""The request the X server must have from a client before any other of the XKB extension."""
+
+	_request = rq.Struct(
+		rq.Card8("opcode"),
+		rq.Opcode(0),
+		rq.RequestLength(),
+		rq.Card16("wantedMajor"),
+		rq.Card16("wantedMinor"),
+	)
+	_reply = rq.Struct(
+		rq.ReplyCode(),
+		rq.Bool("supported"),
+		rq.Card16("sequence_number"),
+		rq.ReplyLength(),
+		rq.Card16("serverMajor"),
+		rq.Card16("serverMinor"),
+		rq.Pad(20),
+	)
+
+
+class _XkbGetState(rq.ReplyRequest):
+	_request = rq.Struct(
+		rq.Card8("opcode"),
+		rq.Opcode(4),
+		rq.RequestLength(),
+		rq.Card16("deviceSpec"),
+		rq.Pad(2),
+	)
+	_reply = rq.Struct(
+		rq.ReplyCode(),
+		rq.Card8("deviceID"),
+		rq.Card16("sequence_number"),
+		rq.ReplyLength(),
+		rq.Card8("mods"),
+		rq.Card8("baseMods"),
+		rq.Card8("latchedMods"),
+		rq.Card8("lockedMods"),
+		rq.Pad(20),
+	)
+
+
+class _XkbLatchLockState(rq.Request):
+	"""Set the locked modifiers without a key, so that no grab and no application sees one."""
+
+	_request = rq.Struct(
+		rq.Card8("opcode"),
+		rq.Opcode(5),
+		rq.RequestLength(),
+		rq.Card16("deviceSpec"),
+		rq.Card8("affectModLocks"),
+		rq.Card8("modLocks"),
+		rq.Bool("lockGroup"),
+		rq.Card8("groupLock"),
+		rq.Card8("affectModLatches"),
+		rq.Card8("modLatches"),
+		rq.Pad(1),
+		rq.Bool("latchGroup"),
+		rq.Int16("groupLatch"),
+	)
+
 
 #: Modifiers that make a key a command rather than typing: Control, Alt and Super, as X maps them.
 COMMAND_MODS = X.ControlMask | X.Mod1Mask | X.Mod4Mask
@@ -64,6 +135,33 @@ XI_VERSION = (2, 2)
 RULES_NAMES_PROPERTY = "_XKB_RULES_NAMES"
 #: What a keymap is built from when the root window does not say.
 DEFAULT_RULES_NAMES = ("evdev", "pc105", "us", "", "")
+#: Virtual-key codes of keys a grab took that are never sent on to the application when NVDA passes
+#: them: the modifiers, which change nothing but the state the next key comes in, and the locks, whose
+#: state the X server changed as they went down.
+NEVER_SENT_ON = frozenset(
+	keyMap.VK[name]
+	for name in (
+		"SHIFT",
+		"CONTROL",
+		"MENU",
+		"LSHIFT",
+		"RSHIFT",
+		"LCONTROL",
+		"RCONTROL",
+		"LMENU",
+		"RMENU",
+		"LWIN",
+		"RWIN",
+		"CAPITAL",
+		"NUMLOCK",
+		"SCROLL",
+	)
+)
+#: Virtual-key code of each lock key: the modifier it locks, as X maps it.
+LOCK_MASKS = {keyMap.VK["CAPITAL"]: X.LockMask, keyMap.VK["NUMLOCK"]: NUM_LOCK_MASK}
+#: Modifiers a key sent on is not given again when they were let go of: the locks, and Caps Lock held
+#: as the NVDA key, whose modifier the X server holds with it.
+SENT_ON_WITHOUT = X.LockMask | NUM_LOCK_MASK
 #: The generic modifier each left or right one also holds down, for keyState.
 GENERIC_FOR = {
 	keyMap.VK["LSHIFT"]: keyMap.VK["SHIFT"],
@@ -214,8 +312,11 @@ class X11KeySource:
 		self._stopping = False
 		self._thread: threading.Thread | None = None
 		self._decider: threading.Thread | None = None
-		#: (event, ticket) for the decider, in the order the keys came; None ends it.
-		self._decisions: queue.SimpleQueue[tuple[KeyEvent, _Ticket | None] | None] = queue.SimpleQueue()
+		#: (event, ticket, (key code, modifiers) of a press a grab of this source took) for the decider,
+		#: in the order the keys came; None ends it.
+		self._decisions: queue.SimpleQueue[tuple[KeyEvent, _Ticket | None, tuple[int, int] | None] | None] = (
+			queue.SimpleQueue()
+		)
 		self._deliver: Callable[[KeyEvent], bool] | None = None
 		self._display: display.Display | None = None
 		self._rulesNames: tuple[str, ...] | None = None
@@ -225,19 +326,24 @@ class X11KeySource:
 		self._down: set[int] = set()
 		#: Key codes held down, as their events came.
 		self._keycodesDown: set[int] = set()
+		#: Virtual-key code of each lock key held down: whether its lock was on as it went down.
+		self._locksHeld: dict[int, bool] = {}
 		self._xtestDevices: set[int] = set()
 		#: (key code, isUp) of injected keys whose echo has not come yet, with when each was sent.
 		self._echoes: deque[tuple[float, int, bool]] = deque()
 		#: Raw events waiting for their slave event: (arrival, key code, isUp, source device).
 		self._raw: deque[tuple[float, int, bool, int]] = deque()
 		#: (key code, isUp) delivered from a raw event, whose late slave event must not come twice.
-		self._rawDelivered: deque[tuple[float, int, bool]] = deque()
+		self._rawDelivered: deque[tuple[float, int, bool, int]] = deque()
 		#: (key code, isUp) of slave events that came before their raw event.
-		self._slaveSeen: deque[tuple[float, int, bool]] = deque()
+		self._slaveSeen: deque[tuple[float, int, bool, int]] = deque()
 		self._rulesAtom: int | None = None
 		self._pidAtom: int | None = None
+		self._xkbOpcode: int | None = None
 		#: Key code: grab modifiers, for every key grabbed now; None means any modifiers.
 		self._grabbed: dict[int, list[int] | None] = {}
+		#: The window the NVDA keys and the numpad review keys are grabbed on.
+		self._keysWindow = None
 		#: The grabbed key whose press made a grab active, which lasts until it is released.
 		self._activeGrab: int | None = None
 		self._held = False
@@ -296,6 +402,9 @@ class X11KeySource:
 	def holdKeyboard(self, hold: bool) -> None:
 		self._post(lambda: self._hold(hold))
 
+	def setCapsLock(self, on: bool) -> None:
+		self._post(lambda: self._setCapsLock(on))
+
 	def inject(self, vkCode: int, scanCode: int, extended: bool, isUp: bool) -> None:
 		with self._lock:
 			keycode = self._translator.keycodeFor(vkCode, extended) if self._translator else None
@@ -308,6 +417,10 @@ class X11KeySource:
 	def keyState(self, vkCode: int) -> int:
 		with self._lock:
 			state = 0x8000 if vkCode in self._down else 0
+			if vkCode in self._locksHeld:
+				# A lock key locks as it goes down, and unlocks as it comes up when it was locked: the state
+				# it leaves is the one to report while it is held, as Windows toggles as the key goes down.
+				return state | int(not self._locksHeld[vkCode])
 			led = {keyMap.VK["CAPITAL"]: "Caps Lock", keyMap.VK["NUMLOCK"]: "Num Lock"}.get(vkCode)
 			if vkCode == keyMap.VK["SCROLL"]:
 				led = "Scroll Lock"
@@ -374,6 +487,15 @@ class X11KeySource:
 			# Any resource of the connection names it to the X server; the guard needs one.
 			self._guardResource = root.create_pixmap(1, 1, self._display.screen().root_depth).id
 			self._findXtestDevices()
+			self._xkbOpcode = None
+			# python-xlib has no module for XKB, so has_extension never knows of it.
+			xkbInfo = self._display.query_extension(XKB_EXTENSION)
+			if xkbInfo is not None:
+				opcode = xkbInfo.major_opcode
+				if _XkbUseExtension(
+					display=self._display.display, opcode=opcode, wantedMajor=1, wantedMinor=0
+				).supported:
+					self._xkbOpcode = opcode
 			self._loadKeymap()
 			self._display.sync()
 		except Exception:
@@ -390,6 +512,7 @@ class X11KeySource:
 			pass
 		self._display = None
 		self._grabbed = {}
+		self._keysWindow = None
 		self._captured = {}
 		self._captureWindow = None
 		self._activeGrab = None
@@ -471,7 +594,7 @@ class X11KeySource:
 			item = self._decisions.get()
 			if item is None:
 				return
-			event, ticket = item
+			event, ticket, taken = item
 			if ticket is not None:
 				# Taken for captured from the grabs as they were; whether the server held it decides.
 				ticket.settled.wait(CAPTURE_EXPIRY)
@@ -491,6 +614,9 @@ class X11KeySource:
 			if ticket is not None:
 				ticket.verdict = passed is not False
 				self._wake()
+			elif taken is not None and passed is not False:
+				# The Windows hook passes a key its callback does not block, whatever else is held.
+				self._post(functools.partial(self._sendOn, *taken))
 
 	def _findXtestDevices(self) -> None:
 		devices = self._display.xinput_query_device(xinput.AllDevices).devices
@@ -538,8 +664,8 @@ class X11KeySource:
 			else:
 				keycode, sourceid = data.detail, data.sourceid
 			isUp = evtype == xinput.RawKeyRelease
-			for index, (_when, slaveKeycode, slaveIsUp) in enumerate(self._slaveSeen):
-				if (slaveKeycode, slaveIsUp) == (keycode, isUp):
+			for index, (_when, slaveKeycode, slaveIsUp, slaveSource) in enumerate(self._slaveSeen):
+				if (slaveKeycode, slaveIsUp, slaveSource) == (keycode, isUp, sourceid):
 					del self._slaveSeen[index]
 					return
 			pressWaiting = any((raw[1], raw[2]) == (keycode, False) for raw in self._raw)
@@ -560,7 +686,8 @@ class X11KeySource:
 			# The keys are captured on the window with the focus, which this one may no longer be; a
 			# grab moves the focus only for as long as it lasts.
 			moved = event.type == X.DestroyNotify or event.mode in (X.NotifyNormal, X.NotifyWhileGrabbed)
-			if moved and self._captureWindow is not None and event.window.id == self._captureWindow.id:
+			window = self._captureWindow
+			if moved and window is not None and event.window.id == window.id:
 				# Grabbed again when next asked, once NVDA's focus has followed and the mode is known.
 				self._dropCapture()
 		elif event.type == X.MappingNotify:
@@ -575,17 +702,18 @@ class X11KeySource:
 		keycode = data.detail
 		repeat = bool(data.flags & xinput.KeyRepeat)
 		if not repeat:
-			for index, (_arrival, rawKeycode, rawIsUp, _source) in enumerate(self._raw):
-				if (rawKeycode, rawIsUp) == (keycode, isUp):
+			# Matched by device too: a key sent here may be held on the keyboard at the same time.
+			for index, (_arrival, rawKeycode, rawIsUp, rawSource) in enumerate(self._raw):
+				if (rawKeycode, rawIsUp, rawSource) == (keycode, isUp, data.sourceid):
 					del self._raw[index]
 					break
 			else:
-				for index, (_when, rawKeycode, rawIsUp) in enumerate(self._rawDelivered):
-					if (rawKeycode, rawIsUp) == (keycode, isUp):
+				for index, (_when, rawKeycode, rawIsUp, rawSource) in enumerate(self._rawDelivered):
+					if (rawKeycode, rawIsUp, rawSource) == (keycode, isUp, data.sourceid):
 						del self._rawDelivered[index]
 						return
 				# The server sends the raw event first, but nothing promises it.
-				self._slaveSeen.append((now, keycode, isUp))
+				self._slaveSeen.append((now, keycode, isUp, data.sourceid))
 		self._process(keycode, isUp, repeat, data.mods, data.groups, data.sourceid, now)
 
 	def _onHeld(self, event) -> None:
@@ -610,7 +738,7 @@ class X11KeySource:
 		for index, (arrival, rawKeycode, rawIsUp, sourceid) in enumerate(self._raw):
 			if (rawKeycode, rawIsUp) == (keycode, False):
 				del self._raw[index]
-				self._rawDelivered.append((now, keycode, False))
+				self._rawDelivered.append((now, keycode, False, sourceid))
 				self._process(keycode, False, False, None, None, sourceid, arrival, ticket)
 				return
 		# Delivered already without being taken for captured, or never seen at all: the application
@@ -624,7 +752,7 @@ class X11KeySource:
 			self._slaveSeen.popleft()
 		while self._raw and now - self._raw[0][0] >= RAW_WAIT:
 			arrival, keycode, isUp, sourceid = self._raw.popleft()
-			self._rawDelivered.append((now, keycode, isUp))
+			self._rawDelivered.append((now, keycode, isUp, sourceid))
 			self._process(keycode, isUp, False, None, None, sourceid, arrival)
 
 	def _isEcho(self, keycode: int, isUp: bool, now: float) -> bool:
@@ -657,6 +785,8 @@ class X11KeySource:
 			levelShift = translator.isLevelShift(keycode)
 			text = "" if isUp else state.key_get_string(keycode)
 			level = translator.level(keycode)
+			lockedBefore = state.serialize_mods(xkb.StateComponent.XKB_STATE_MODS_LOCKED)
+			capsLockWasOn = bool(lockedBefore & X.LockMask)
 			if not repeat:
 				# What the server's state is after this key, for keyState until the next event says.
 				state.update_key(
@@ -664,8 +794,11 @@ class X11KeySource:
 				)
 				if isUp:
 					self._keycodesDown.discard(keycode)
+					self._locksHeld.pop(vk, None)
 				else:
 					self._keycodesDown.add(keycode)
+					if vk in LOCK_MASKS:
+						self._locksHeld[vk] = bool(lockedBefore & LOCK_MASKS[vk])
 			generic = GENERIC_FOR.get(vk)
 			for code in (vk, generic):
 				if code is None:
@@ -682,7 +815,10 @@ class X11KeySource:
 			ticket = _Ticket(keycode, arrival)
 			self._tickets.append(ticket)
 		try:
-			if self._isEcho(keycode, isUp, arrival) or levelShift:
+			# The keyboard's own events are never the echo of a key sent here, even when the same key was
+			# sent just now; a release taken for one would leave NVDA thinking it still down.
+			echo = sourceid in self._xtestDevices and self._isEcho(keycode, isUp, arrival)
+			if echo or levelShift:
 				if ticket is not None:
 					# NVDA sent it to the application; it goes there at once.
 					ticket.verdict = True
@@ -706,8 +842,10 @@ class X11KeySource:
 				typing=bool(text) and text.isprintable() and not effective & COMMAND_MODS,
 				time=arrival,
 				captured=ticket is not None,
+				capsLockWasOn=capsLockWasOn,
 			)
-			self._decisions.put((event, ticket))
+			taken = consumed and not isUp and not self._held and vk not in NEVER_SENT_ON
+			self._decisions.put((event, ticket, (keycode, effective) if taken else None))
 		finally:
 			if isUp and keycode == self._activeGrab:
 				self._activeGrab = None
@@ -829,11 +967,15 @@ class X11KeySource:
 
 	def _applyGrabs(self, nvdaModifierKeys: int, numpadReview: bool) -> None:
 		self._consumedWanted = (nvdaModifierKeys, numpadReview)
-		root = self._display.screen().root
-		for keycode, modifiers in self._grabbed.items():
-			for mod in [X.AnyModifier] if modifiers is None else modifiers:
-				root.ungrab_key(keycode, mod)
-		self._grabbed = {}
+		self._ungrabKeys()
+		self._grabKeys(self._display.screen().root)
+
+	def _keysWanted(self) -> list[tuple[int, list[int] | None, str]]:
+		"""(key code, the modifiers it is grabbed with or None for any, a name for the user) for each
+		NVDA key and numpad review key asked for."""
+		if self._consumedWanted is None:
+			return []
+		nvdaModifierKeys, numpadReview = self._consumedWanted
 		numpadMods = sorted(
 			{
 				sum(combination)
@@ -850,20 +992,39 @@ class X11KeySource:
 			wanted.append((NUMPAD_INSERT_KEY + 8, numpadMods, "numpad Insert key"))
 		if numpadReview:
 			wanted.extend((evdev + 8, numpadMods, "numpad review keys") for evdev in NUMPAD_REVIEW_KEYS)
+		return wanted
+
+	def _ungrabKeys(self) -> None:
+		window, self._keysWindow = self._keysWindow, None
+		if window is None:
+			return
+		# The window may have gone, and its grabs with it.
+		gone = error.CatchError(error.BadWindow)
+		for keycode, modifiers in self._grabbed.items():
+			for mod in modifiers or [X.AnyModifier]:
+				window.ungrab_key(keycode, mod, onerror=gone)
+		if window.id != self._display.screen().root.id and (
+			self._captureWindow is None or window.id != self._captureWindow.id
+		):
+			window.change_attributes(event_mask=X.NoEventMask, onerror=gone)
+		self._grabbed = {}
+
+	def _grabKeys(self, window) -> None:
+		"""Grab the NVDA keys and the numpad review keys on window."""
+		self._keysWindow = window
 		refused = []
-		for keycode, modifiers, label in wanted:
-			catcher = error.CatchError(error.BadAccess)
-			for mod in [X.AnyModifier] if modifiers is None else modifiers:
-				root.grab_key(keycode, mod, False, X.GrabModeAsync, X.GrabModeAsync, onerror=catcher)
+		for keycode, modifiers, label in self._keysWanted():
+			catcher = error.CatchError(error.BadAccess, error.BadWindow)
+			for mod in modifiers or [X.AnyModifier]:
+				window.grab_key(keycode, mod, False, X.GrabModeAsync, X.GrabModeAsync, onerror=catcher)
 			self._display.sync()
 			if catcher.get_error():
 				if label not in refused:
 					refused.append(label)
-				for mod in [X.AnyModifier] if modifiers is None else modifiers:
-					root.ungrab_key(keycode, mod)
+				for mod in modifiers or [X.AnyModifier]:
+					window.ungrab_key(keycode, mod, onerror=error.CatchError(error.BadWindow))
 			else:
 				self._grabbed[keycode] = modifiers
-		self._display.sync()
 		for label in refused:
 			log.warning(
 				f"NVDA could not take the {label}, which another program holds; "
@@ -916,7 +1077,8 @@ class X11KeySource:
 			for keycode, masks in self._captured.items():
 				for mask in masks:
 					window.ungrab_key(keycode, mask, onerror=gone)
-			window.change_attributes(event_mask=X.NoEventMask, onerror=gone)
+			if self._keysWindow is None or window.id != self._keysWindow.id:
+				window.change_attributes(event_mask=X.NoEventMask, onerror=gone)
 		self._captured = {}
 
 	def _applyCapture(self, mode: CaptureMode) -> None:
@@ -1017,4 +1179,99 @@ class X11KeySource:
 			self._activeGrab = None
 			self._captureGrab = None
 		xtest.fake_input(d, X.KeyRelease if isUp else X.KeyPress, keycode)
+		d.flush()
+
+	def _xkbState(self):
+		"""The X server's modifier state now, or None when it cannot say."""
+		if self._xkbOpcode is None:
+			return None
+		return _XkbGetState(
+			display=self._display.display, opcode=self._xkbOpcode, deviceSpec=XKB_CORE_KEYBOARD
+		)
+
+	def _setCapsLock(self, on: bool) -> None:
+		if self._xkbOpcode is None:
+			log.debugWarning("The X server has no XKB extension to set Caps Lock with")
+			return
+		_XkbLatchLockState(
+			display=self._display.display,
+			opcode=self._xkbOpcode,
+			deviceSpec=XKB_CORE_KEYBOARD,
+			affectModLocks=X.LockMask,
+			modLocks=X.LockMask if on else 0,
+			lockGroup=False,
+			groupLock=0,
+			affectModLatches=0,
+			modLatches=0,
+			latchGroup=False,
+			groupLatch=0,
+		)
+		self._display.flush()
+
+	def _sendOn(self, keycode: int, modifiers: int) -> None:
+		"""Give the application a press that a grab of this source took and NVDA passed, with the
+		modifiers it was pressed with, which are held for it again if they have been let go since.
+
+		The X server ignores a press of a key it has down already, so a key still held goes up first,
+		to the grab while one is active. So does the key whose press made the grab active: Caps Lock
+		held down would have the key typed in capitals, as the X server adds its modifier while it is
+		held, and the grab ends with it, as nothing sent while it lasts would reach the application. A
+		key grabbed for NVDA is let go of while it is sent, or its own grab would take it again.
+		"""
+		if self._held:
+			return
+		d = self._display
+		# Asked of the server, as a release may be on the way here; a release sent for a key already up
+		# would be expected back, and the real one taken for it.
+		down = d.query_keymap()
+		releases = [
+			code
+			for code in (keycode, self._activeGrab if self._activeGrab != keycode else None)
+			if code is not None and down[code // 8] & (1 << (code % 8))
+		]
+		state = self._xkbState()
+		missing = modifiers & ~SENT_ON_WITHOUT & ~(state.mods if state is not None else 0)
+		mapping = d.get_modifier_mapping() if missing else []
+		held = [
+			next((code for code in mapping[index] if code), None)
+			for index in range(8)
+			if missing & (1 << index)
+		]
+		held = [code for code in held if code is not None]
+		with self._lock:
+			now = time.monotonic()
+			self._echoes.extend((now, code, True) for code in releases)
+			self._echoes.extend((now, code, False) for code in held)
+			self._echoes.extend(((now, keycode, False), (now, keycode, True)))
+			self._echoes.extend((now, code, True) for code in held)
+		for code in releases:
+			xtest.fake_input(d, X.KeyRelease, code)
+		if state is not None and len(releases) == 2:
+			# A lock key let go of unlocks what was locked as it went down.
+			self._setCapsLock(bool(state.lockedMods & X.LockMask))
+		if self._activeGrab is not None or self._captureGrab is not None:
+			d.ungrab_keyboard(X.CurrentTime)
+			self._activeGrab = None
+			self._captureGrab = None
+		window = self._keysWindow
+		lifted: list[int] = []
+		if keycode in self._grabbed and window is not None:
+			lifted = self._grabbed[keycode] or [X.AnyModifier]
+		gone = error.CatchError(error.BadWindow)
+		for mod in lifted:
+			window.ungrab_key(keycode, mod, onerror=gone)
+		for code in held:
+			xtest.fake_input(d, X.KeyPress, code)
+		xtest.fake_input(d, X.KeyPress, keycode)
+		xtest.fake_input(d, X.KeyRelease, keycode)
+		for code in reversed(held):
+			xtest.fake_input(d, X.KeyRelease, code)
+		if lifted:
+			catcher = error.CatchError(error.BadAccess, error.BadWindow)
+			for mod in lifted:
+				window.grab_key(keycode, mod, False, X.GrabModeAsync, X.GrabModeAsync, onerror=catcher)
+			d.sync()
+			if catcher.get_error():
+				log.warning("NVDA could not take back a key it sent on, which another program now holds")
+				del self._grabbed[keycode]
 		d.flush()

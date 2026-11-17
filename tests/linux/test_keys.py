@@ -141,6 +141,94 @@ def test_nvdaChordReachesNVDAAlone(desktop: DesktopSession, tmp_path: Path, layo
 	assert f"Input: kb({keys.layout}):a\n" not in log
 
 
+def tap(key: str) -> None:
+	"""Press and release key at once.
+
+	xdotool's keys and those NVDA sends come from the same device, so NVDA, sending on a key xdotool
+	still holds, would release it first, and xdotool's own release would never come; a person's
+	keyboard is a device of its own.
+	"""
+	subprocess.run(["xdotool", "key", "--delay", "0", key], check=True)
+
+
+@pytest.mark.parametrize("layoutName", LAYOUTS)
+def test_nvdaChordWithoutACommandReachesTheApplication(
+	desktop: DesktopSession, tmp_path: Path, layoutName: str
+):
+	keys = KeySession(desktop, tmp_path, layoutName)
+	# NVDA has no command on z: the field has the z, without the NVDA key, as on Windows.
+	tap(keys.chord("z"))
+	deadline = time.monotonic() + 3
+	while entryState()[0] != "z":
+		assert time.monotonic() < deadline, f"the field holds {entryState()[0]!r}, not 'z'"
+		time.sleep(0.05)
+	# NVDA's own commands are still NVDA's alone.
+	mark = desktop.mark()
+	desktop.press(keys.chord("t"))
+	desktop.expect("Fixture window", since=mark)
+	time.sleep(0.3)
+	assert entryState()[0] == "z"
+	launch = keys.quit()
+	launch.assertClean(logNames=("nvda.log",))
+	assert f"Input: kb({keys.layout}):NVDA+z" in launch.text("nvda.log")
+
+
+def passedTwice(key: str) -> None:
+	"""Press key twice, as quickly as a person does to have NVDA pass it on."""
+	tap(key)
+	time.sleep(0.2)
+	tap(key)
+	time.sleep(0.3)
+
+
+def test_insertPassedThrough(desktop: DesktopSession, tmp_path: Path):
+	keys = KeySession(desktop, tmp_path, "desktop")
+	desktop.press("Home")
+	mark = desktop.mark()
+	desktop.press(keys.chord("F2"))
+	desktop.expect("Pass next key through", since=mark)
+	# Insert reaches the field, which then types over its text.
+	tap("Insert")
+	desktop.typeText("x")
+	time.sleep(0.3)
+	assert entryState() == ("xlice", 1)
+	# The NVDA key pressed twice quickly reaches the field too, which types between letters again.
+	passedTwice("Insert")
+	desktop.typeText("y")
+	time.sleep(0.3)
+	assert entryState() == ("xylice", 2)
+	keys.quit().assertClean(logNames=("nvda.log",))
+
+
+def test_capsLockPassedThrough(desktop: DesktopSession, tmp_path: Path):
+	keys = KeySession(desktop, tmp_path, "laptop")
+	desktop.press("Home")
+	mark = desktop.mark()
+	desktop.press(keys.chord("F2"))
+	desktop.expect("Pass next key through", since=mark)
+	tap("Caps_Lock")
+	time.sleep(0.3)
+	assert desktopSession.capsLockIsOn()
+	desktop.typeText("x")
+	time.sleep(0.3)
+	assert entryState() == ("XAlice", 1)
+	mark = desktop.mark()
+	passedTwice("Caps_Lock")
+	desktop.expect("caps lock off", since=mark)
+	assert not desktopSession.capsLockIsOn()
+	passedTwice("Caps_Lock")
+	desktop.expect("caps lock off", "caps lock on", since=mark)
+	assert desktopSession.capsLockIsOn()
+	passedTwice("Caps_Lock")
+	assert not desktopSession.capsLockIsOn()
+	# One press used as the NVDA key leaves the lock as it was.
+	desktop.press(keys.chord("t"))
+	desktop.typeText("y")
+	time.sleep(0.3)
+	assert entryState() == ("XyAlice", 2)
+	keys.quit().assertClean(logNames=("nvda.log",))
+
+
 @pytest.mark.parametrize("layoutName", LAYOUTS)
 def test_numpadReviewKeyLeavesTheCaret(desktop: DesktopSession, tmp_path: Path, layoutName: str):
 	keys = KeySession(desktop, tmp_path, layoutName)

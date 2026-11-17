@@ -41,9 +41,8 @@ BROWSE_KEYS_VARIABLE = "BASEDREADER_BROWSE_KEYS"
 _source: KeySource | None = None
 _delivering = threading.local()
 _lastKeyDown: KeyEvent | None = None
-#: Whether keyboardHandler used the Caps Lock press now held as the NVDA key, so that the lock it
-#: toggled in the X server is put back when it is released.
-_capsLockUsedAsNVDAKey = False
+#: Whether Caps Lock was on before the press NVDA blocked that is still held; None when none is.
+_capsLockBlockedWasOn: bool | None = None
 _watcher: threading.Thread | None = None
 _stopWatching = threading.Event()
 
@@ -178,7 +177,7 @@ def _onKey(event: KeyEvent) -> bool:
 
 	:return: True to pass the key on to the application, which matters only for a captured press.
 	"""
-	global _lastKeyDown, _capsLockUsedAsNVDAKey
+	global _lastKeyDown, _capsLockBlockedWasOn
 	if event.captured and _isCoreStuck():
 		# Its command would run only once NVDA comes back, if ever; the application is better served.
 		return True
@@ -189,16 +188,16 @@ def _onKey(event: KeyEvent) -> bool:
 		passed = deliverKey(event.vkCode, event.scanCode, event.extended, event.injected, event.isUp)
 	finally:
 		_delivering.event = None
-	if event.vkCode == VK_CAPITAL and _source is not None:
-		if not event.isUp and not event.repeat:
-			_capsLockUsedAsNVDAKey = not event.reachedApplication and not passed
-		# The release reaches the application when input help let the keyboard go while the key was
-		# held, and the lock is toggled all the same.
-		elif event.isUp and _capsLockUsedAsNVDAKey:
-			# The X server toggles the lock whatever the grab does, and the key was the NVDA key.
-			_capsLockUsedAsNVDAKey = False
-			_source.inject(VK_CAPITAL, 0x3A, False, False)
-			_source.inject(VK_CAPITAL, 0x3A, False, True)
+	if event.vkCode == VK_CAPITAL and _source is not None and not event.repeat:
+		if not event.isUp and not event.reachedApplication and not passed:
+			# On Windows a key the hook blocks toggles nothing. The X server locks Caps Lock as the key goes
+			# down, whatever the grab does, and unlocks it as the key comes up when it was locked before;
+			# it is put back both times.
+			_capsLockBlockedWasOn = event.capsLockWasOn
+			_source.setCapsLock(event.capsLockWasOn)
+		elif event.isUp and _capsLockBlockedWasOn is not None:
+			_source.setCapsLock(_capsLockBlockedWasOn)
+			_capsLockBlockedWasOn = None
 	return passed
 
 

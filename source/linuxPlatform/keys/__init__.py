@@ -48,6 +48,8 @@ class KeyEvent:
 	time: float
 	#: Whether the application gets the key only if deliver returns True for it: a captured press.
 	captured: bool = False
+	#: Whether Caps Lock was on before the key went down.
+	capsLockWasOn: bool = False
 
 
 class KeySource(Protocol):
@@ -71,6 +73,9 @@ class KeySource(Protocol):
 
 	def holdKeyboard(self, hold: bool) -> None:
 		"""Take every key from the applications, or stop doing so."""
+
+	def setCapsLock(self, on: bool) -> None:
+		"""Turn Caps Lock on or off without a key press anything sees."""
 
 	def inject(self, vkCode: int, scanCode: int, extended: bool, isUp: bool) -> None:
 		"""Send a key as if typed. Its own echo is not delivered."""
