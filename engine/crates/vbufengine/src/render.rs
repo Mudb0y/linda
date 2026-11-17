@@ -519,6 +519,8 @@ impl<'a> Renderer<'a> {
         }
         let mut selected_child: Option<String> = None;
         if render_children && !text.is_empty() {
+            let embedded = text.chars().filter(|c| *c == EMBEDDED_OBJECT).count();
+            let embedded = crate::chromium::embedded_children(o, objs, embedded);
             let mut index = 0usize;
             let mut chunk = String::new();
             for c in text.chars() {
@@ -531,7 +533,7 @@ impl<'a> Renderer<'a> {
                 }
                 let done = std::mem::take(&mut chunk);
                 self.text(&done);
-                if let Some(child) = o.children.get(index) {
+                if let Some(child) = embedded.get(index) {
                     self.node(child, child_ctx, false);
                 }
                 index += 1;

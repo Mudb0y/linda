@@ -10,6 +10,7 @@
 #[rustfmt::skip]
 mod tables;
 
+mod chromium;
 mod engine;
 mod render;
 mod walk;
