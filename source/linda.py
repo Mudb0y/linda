@@ -102,7 +102,7 @@ def main() -> NoReturn:
 		]
 		isAlreadyRunning = any(lock.holder() is not None for lock in instanceLocks)
 	except OSError as e:
-		_fail(f"cannot open the lock that keeps one NVDA per display: {e}")
+		_fail(f"cannot open the lock that keeps one copy per display: {e}")
 	if isAlreadyRunning and not appArgs.easeOfAccess:
 		if appArgs.check_running:
 			sys.exit(0)
@@ -111,7 +111,7 @@ def main() -> NoReturn:
 				singleInstance.terminateRunning(lock)
 			except OSError as e:
 				# nvda.pyw goes on after this too, and gives up when the lock does not come free.
-				_tell(f"could not stop the NVDA already running: {e}")
+				_tell(f"could not stop the copy already running: {e}")
 	if appArgs.quit or (isAlreadyRunning and appArgs.easeOfAccess):
 		sys.exit(0)
 	elif appArgs.check_running:
@@ -123,7 +123,7 @@ def main() -> NoReturn:
 		except OSError as e:
 			_fail(f"cannot take {lock.path}: {e}")
 		if not isLockTaken:
-			_fail(f"another NVDA still holds {lock.path}")
+			_fail(f"another copy still holds {lock.path}")
 	# Only now, as a copy started under the former name could still have written its configuration
 	# as it exited.
 	from linuxPlatform import xdg

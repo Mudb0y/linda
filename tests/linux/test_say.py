@@ -532,7 +532,7 @@ def test_errorLoggedAlongsideSpeechExits1(tmp_path: Path):
 	home = Home(tmp_path / "home", config="[speech\nsynth = transcript\n")
 	run = say(home, "--synth", "transcript", "Spoken despite the error.")
 	run.assertFailed(
-		1, "spoke with transcript, voice transcript, into the capture sink, but NVDA logged an error"
+		1, "spoke with transcript, voice transcript, into the capture sink, but Linda logged an error"
 	)
 	run.assertClean(ignoring={"logErrors"})
 	assert [e.split(";")[0] for e in run.result().logErrors] == ["ERROR: Error loading base configuration"]

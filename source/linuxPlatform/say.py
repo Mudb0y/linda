@@ -79,7 +79,7 @@ It reads the synthesizer and its settings from your Linda configuration and neve
 --gain followed by a number from 0 to 1 scales every sound it makes, and is 1 when not given.
 --check plays to an output that makes no sound, to check everything else.
 --list-voices lists the voices of the synthesizer, one to a line, and speaks nothing.
---sounds plays NVDA's start sound, a short beep and its error sound after the text.
+--sounds plays Linda's start sound, a short beep and its error sound after the text.
 --factory ignores your configuration, and --config-path followed by a directory reads that one instead.
 --timeout followed by a number of seconds says how long to wait for speech to finish, 30 when not given.
 It exits with 0 when the text was heard, 1 for an unexpected error, 2 for a mistake in what it was given,
@@ -589,5 +589,5 @@ def _speak(run: _Run, arguments: list[str]) -> tuple[int, str | None]:
 		)
 	log.info(said)
 	if run.errors:
-		raise run.failure(EXIT_ERROR, f"{spoke}, but NVDA logged an error")
+		raise run.failure(EXIT_ERROR, f"{spoke}, but Linda logged an error")
 	return EXIT_SPOKEN, said

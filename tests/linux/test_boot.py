@@ -954,7 +954,7 @@ def test_lockHolderThatRecordedNothingIsNeverSignalled(start: Start):
 		starter = start("start", None)
 		assert starter.waitForExit(SHUTDOWN_BOUND) == 1, starter.describe()
 		assert "has not recorded itself" in starter.text("stderr.txt")
-		assert f"linda: another NVDA still holds {lockPath}\n" in starter.text("stderr.txt")
+		assert f"linda: another copy still holds {lockPath}\n" in starter.text("stderr.txt")
 		starter.assertClean(ignoring={"returnCode", "stderr"})
 		assert bystander.poll() is None
 		assert holder.poll() is None
