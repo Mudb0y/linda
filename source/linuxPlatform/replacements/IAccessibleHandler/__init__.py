@@ -18,15 +18,19 @@ from .types import RelationType  # noqa: F401
 
 
 def initialize() -> None:
-	from linuxPlatform.atspi import handler
+	from linuxPlatform.atspi import handler, status
 
+	# Before registering for events, which newer launchers answer by switching IsEnabled on
+	# themselves: what claim finds is then the desktop's own setting, and the one to put back.
+	status.claim()
 	handler.initialize()
 
 
 def terminate() -> None:
-	from linuxPlatform.atspi import handler
+	from linuxPlatform.atspi import handler, status
 
 	handler.terminate()
+	status.release()
 
 
 def pumpAll() -> None:
