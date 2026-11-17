@@ -1,11 +1,11 @@
 """The thread that applies the engine's update batches to NVDA's buffer storage.
 
 The engine watches every document it rendered and hands out a batch whenever one changes
-(linuxPlatform.vbufEngine.next). One thread waits for those batches, applies each to its buffer's
-storage through linuxPlatform.vbufLib.update, under the storage's own lock and off the main thread, and
-only then queues the buffer's onEngineEvents on NVDA's event queue, so that whatever the buffer does
-there reads the storage as already changed. On Windows the backend did this inside the browser and
-told NVDA through vbufChangeNotify.
+(linuxPlatform.vbufEngine.next). One thread waits for those batches and queues each on NVDA's event
+queue, where the main thread applies it to its buffer's storage, through the buffer's applyUpdate or
+linuxPlatform.vbufLib.update, and then calls the buffer's onEngineEvents, which so reads the storage
+as already changed. Nothing waits on the browser there: the batch is already rendered. On Windows the
+backend applied updates inside the browser and told NVDA through vbufChangeNotify.
 """
 
 import atexit
@@ -154,7 +154,7 @@ def _dropExpiredHeld(now: float) -> None:
 
 
 def _apply(batch, *, hold: bool = True) -> None:
-	held = False
+	kept = False
 	try:
 		with _lock:
 			key = (batch.busName, batch.docPath)
@@ -164,19 +164,40 @@ def _apply(batch, *, hold: bool = True) -> None:
 				_dropExpiredHeld(now)
 				if hold and any(event in batch.events for event in _HELD_EVENTS):
 					_held.setdefault(key, []).append((now, batch))
-					held = True
+					kept = True
 				return
-			applies = batch.stream is not None and buffer.VBufHandle
-			log.debug(f"Update for {batch.busName} {batch.docPath}: {batch.events} {batch.info}")
-			if applies and not vbufLib.update(buffer.VBufHandle, batch.stream):
+		log.debug(f"Update for {batch.busName} {batch.docPath}: {batch.events} {batch.info}")
+		queueHandler.queueFunction(queueHandler.eventQueue, _applyToBuffer, buffer, batch)
+		kept = True
+	finally:
+		if batch.stream is not None and not kept:
+			batch.stream.free()
+
+
+def _applyToBuffer(buffer: "AtSpiBuffer", batch) -> None:
+	"""On the main thread, in the order the batches came: apply batch to buffer's storage, then tell
+	the buffer. NVDA keeps positions in a buffer outside its storage, say all's among them, and only
+	the main thread can keep them on their text while the storage changes under them."""
+	try:
+		with _lock:
+			registered = _buffers.get((batch.busName, batch.docPath)) is buffer
+		if not registered:
+			return
+		if batch.stream is not None and buffer.VBufHandle:
+			applyUpdate = getattr(buffer, "applyUpdate", None)
+			if applyUpdate is not None:
+				applied = applyUpdate(batch.stream)
+			else:
+				applied = vbufLib.update(buffer.VBufHandle, batch.stream)
+			if not applied:
 				# The buffer stays as it was, or lacks the fields it no longer had; the next change to
 				# the document renders them again.
 				log.debugWarning(
 					f"Update for {batch.busName} {batch.docPath} not wholly applied: {batch.info}",
 				)
-		onEngineEvents = getattr(buffer, "onEngineEvents", None)
-		if onEngineEvents is not None:
-			queueHandler.queueFunction(queueHandler.eventQueue, onEngineEvents, batch.events, batch.info)
 	finally:
-		if batch.stream is not None and not held:
+		if batch.stream is not None:
 			batch.stream.free()
+	onEngineEvents = getattr(buffer, "onEngineEvents", None)
+	if onEngineEvents is not None:
+		onEngineEvents(batch.events, batch.info)

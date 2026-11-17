@@ -385,6 +385,36 @@ class AtSpiBuffer(VirtualBuffer):
 			self.passThrough = True
 			browseMode.reportPassThrough(self)
 
+	def applyUpdate(self, stream: "vbufEngine.Stream") -> bool:
+		"""On the main thread: apply an update batch to the storage. The storage keeps the caret on its
+		text; the text say all reads next is kept on its text here, or reading would go on from the old
+		offsets, now in other words, as a page changes above the reader.
+
+		:return: Whether the whole batch was applied.
+		"""
+		handle = self.VBufHandle.value
+		reader = self._sayAllReader()
+		anchors = None
+		if reader is not None:
+			anchors = [vbufLib.anchor(handle, offset) for offset in (reader._startOffset, reader._endOffset)]
+		applied = vbufLib.update(handle, stream)
+		if anchors is not None and None not in anchors:
+			start, end = (vbufLib.place(handle, where) for where in anchors)
+			if start is not None and end is not None and start <= end:
+				reader._startOffset, reader._endOffset = start, end
+		return applied
+
+	def _sayAllReader(self) -> textInfos.offsets.OffsetsTextInfo | None:
+		"""The text say all reads next, while it reads this buffer."""
+		from speech import sayAll
+
+		handler = sayAll.SayAllHandler
+		active = handler._getActiveSayAll() if handler is not None else None
+		reader = getattr(active, "reader", None)
+		if isinstance(reader, textInfos.offsets.OffsetsTextInfo) and reader.obj is self:
+			return reader
+		return None
+
 	def _unwatch(self) -> None:
 		unwatch = getattr(vbufEngine, "unwatch", None)
 		# An engine that does not watch documents has nothing to forget.

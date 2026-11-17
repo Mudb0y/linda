@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Say all page</title>
+</head>
+<body>
+<header>
+<ul id="headlines"><li>Headline one</li></ul>
+</header>
+<main>
+<h1>Say all page</h1>
+<p>Paragraph one is read whole.</p>
+<p>Paragraph two is read whole.</p>
+<p>Paragraph three is read whole.</p>
+<p>Paragraph four is read whole.</p>
+<p>Paragraph five is read whole.</p>
+<p>Paragraph six is read whole.</p>
+<p>Paragraph seven is read whole.</p>
+<p>Paragraph eight is read whole.</p>
+</main>
+<script>
+// As a news page's rotating headlines do: what comes before the reader grows and shrinks all the
+// time, so that every line after it moves in the buffer.
+const words = ["one", "two", "three", "four", "five"];
+const headlines = document.getElementById("headlines");
+let count = 1;
+setInterval(() => {
+	count = count % words.length + 1;
+	headlines.replaceChildren(...words.slice(0, count).map(word => {
+		const item = document.createElement("li");
+		item.textContent = `Headline ${word}`;
+		return item;
+	}));
+}, 150);
+</script>
+</body>
+</html>

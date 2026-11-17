@@ -35,6 +35,8 @@ UPDATES_ARRIVE = (harness.ROOT / "source" / "linuxPlatform" / "vbufUpdates.py").
 #: uses about a twelfth on realTicker.html.
 BUSY_SECONDS = 5.0
 BUSY_SHARE = 0.3
+#: The transcript synthesizer's speech taking 10 ms a character, as a voice takes time.
+TIMED_SPEECH = {"BASEDREADER_TRANSCRIPT_MODE": "timed", "BASEDREADER_TRANSCRIPT_MS_PER_CHAR": "10"}
 #: The test hook's key, which does what the hook's command file says to the focused buffer.
 HOOK_KEY = "Insert+control+shift+F9"
 #: The hook's command file, beside the plugin.
@@ -347,6 +349,26 @@ def test_busyPageKeepsThePlaceAtAModestCost(desktop: DesktopSession):
 	time.sleep(BUSY_SECONDS)
 	share = (processorSeconds(nvda.process.pid) - before) / BUSY_SECONDS
 	assert share < BUSY_SHARE, f"NVDA used {share:.0%} of a processor on a page that keeps changing"
+	quit(desktop, nvda)
+
+
+def test_sayAllKeepsItsPlaceAsThePageChangesAboveIt(desktop: DesktopSession):
+	# Headlines above the article grow and shrink while say all reads it, which moves every line
+	# after them in the buffer; speech that takes time lets the page change between lines.
+	webSession.requireBrowseLibraries()
+	nvda = desktop.startNVDA(webSession.BROWSE_CONFIG, env=TIMED_SPEECH)
+	nvda.waitForLog("NVDA initialized", BUFFER_BOUND)
+	webSession.startFirefox(desktop, "realSayAll.html")
+	paragraphs = [f"Paragraph {n} is read whole." for n in ("one", "two", "three", "four", "five", "six")]
+	expect(desktop, "Say all page…", *paragraphs, since=0, timeout=BUFFER_BOUND)
+	time.sleep(SETTLE)
+	step(desktop, "Control_L")
+	step(desktop, "control+Home", "banner landmark…")
+	step(desktop, "h", "main landmark Say all page heading level 1")
+	mark = desktop.mark()
+	desktop.press("Insert+Down")
+	expect(desktop, *paragraphs, since=mark, timeout=PAGE_BOUND)
+	step(desktop, "Control_L")
 	quit(desktop, nvda)
 
 

@@ -116,6 +116,42 @@ def update(handle: int, stream: "Stream") -> bool:
 	return bool(lib().VBufLinux_update(handle, stream.pointer, stream.length))
 
 
+def anchor(handle: int, offset: int) -> tuple[int, int, int] | None:
+	"""Where offset is in the buffer handle, in terms an update keeps: the identifier of the deepest
+	field there and how far into that field offset is. place finds the offset again after an update.
+
+	:return: docHandle, ID and the distance, or None when no field is at offset.
+	"""
+	start, end, docHandle, ID = c_int(), c_int(), c_int(), c_int()
+	node = c_uint64()
+	found = lib().VBuf_locateControlFieldNodeAtOffset(
+		handle,
+		offset,
+		ctypes.byref(start),
+		ctypes.byref(end),
+		ctypes.byref(docHandle),
+		ctypes.byref(ID),
+		ctypes.byref(node),
+	)
+	if not found or not node:
+		return None
+	return docHandle.value, ID.value, offset - start.value
+
+
+def place(handle: int, where: tuple[int, int, int]) -> int | None:
+	"""The offset anchor gave where for, in the buffer handle as it is now: as far into the same
+	field, or its end when the field has shrunk; None when the field is gone."""
+	docHandle, ID, distance = where
+	node = c_uint64()
+	lib().VBuf_getControlFieldNodeWithIdentifier(handle, docHandle, ID, ctypes.byref(node))
+	if not node:
+		return None
+	start, end = c_int(), c_int()
+	if not lib().VBuf_getFieldNodeOffsets(handle, node, ctypes.byref(start), ctypes.byref(end)):
+		return None
+	return min(start.value + distance, max(start.value, end.value))
+
+
 def VBuf_destroyBuffer(handleRef) -> None:
 	"""Upstream passes byref() of the buffer handle, and expects it cleared."""
 	handle = handleRef._obj if hasattr(handleRef, "_obj") else handleRef.contents
