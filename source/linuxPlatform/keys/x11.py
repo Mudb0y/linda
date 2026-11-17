@@ -42,7 +42,7 @@ from Xlib import X, display, error
 from Xlib.ext import xinput, xtest
 from Xlib.protocol import rq
 
-from . import CaptureMode, KeyEvent, keyMap
+from . import CaptureMode, GestureKey, KeyEvent, keyMap
 
 XKB_EXTENSION = "XKEYBOARD"
 #: XkbUseCoreKbd: the keyboard the core protocol uses, the master keyboard.
@@ -210,6 +210,8 @@ BROWSE_CONTROL_LETTERS = ("A", "C")
 #: Modifier combinations every key that types a character is captured with in browse mode.
 CHARACTER_COMBINATIONS = ("", "shift", "altgr", "shift+altgr")
 SPACE_KEY = 57
+#: Modifier names of NVDA's gestures, as X maps them.
+GESTURE_MASKS = {"shift": X.ShiftMask, "control": X.ControlMask, "alt": X.Mod1Mask, "windows": X.Mod4Mask}
 #: evdev code: modifier combinations captured in focus mode, where Escape goes back to browse mode.
 FOCUS_KEYS: dict[int, tuple[str, ...]] = {1: ("",)}
 
@@ -312,9 +314,9 @@ class X11KeySource:
 		self._stopping = False
 		self._thread: threading.Thread | None = None
 		self._decider: threading.Thread | None = None
-		#: (event, ticket, (key code, modifiers) of a press a grab of this source took) for the decider,
-		#: in the order the keys came; None ends it.
-		self._decisions: queue.SimpleQueue[tuple[KeyEvent, _Ticket | None, tuple[int, int] | None] | None] = (
+		#: (event, ticket, key code, modifiers, whether a grab of this source took the press) for the
+		#: decider, in the order the keys came; None ends it.
+		self._decisions: queue.SimpleQueue[tuple[KeyEvent, _Ticket | None, int, int, bool] | None] = (
 			queue.SimpleQueue()
 		)
 		self._deliver: Callable[[KeyEvent], bool] | None = None
@@ -352,6 +354,13 @@ class X11KeySource:
 		self._consumedWanted: tuple[int, bool] | None = None
 		self._holdWanted = False
 		self._captureMode: CaptureMode = "off"
+		#: The mode NVDA is in at the moment of a key, asked by the decider; None when it cannot say.
+		self._modeNow: Callable[[], CaptureMode | None] | None = None
+		#: (modifier names, virtual-key code, extended) of the gestures bound in browse mode and in
+		#: focus mode beyond the fixed lists, as NVDA's gesture maps have them.
+		self._gestureKeys: dict[str, frozenset[GestureKey]] = {"browse": frozenset(), "focus": frozenset()}
+		#: Mode: its capture set, made once for each keyboard layout and set of gestures.
+		self._modeSets: dict[str, dict[int, set[int]]] = {}
 		#: Key code: the modifier masks it is captured with now, the lock combinations among them.
 		self._captured: dict[int, set[int]] = {}
 		#: The window the captured keys are grabbed on: the one with the keyboard focus.
@@ -371,8 +380,13 @@ class X11KeySource:
 		#: (time, text) of the last heartbeat sent.
 		self._lastBeat: tuple[float, str] = (0.0, "")
 
-	def start(self, deliver: Callable[[KeyEvent], bool]) -> None:
+	def start(
+		self,
+		deliver: Callable[[KeyEvent], bool],
+		modeNow: Callable[[], CaptureMode | None] | None = None,
+	) -> None:
 		self._deliver = deliver
+		self._modeNow = modeNow
 		self._connect()
 		self._startGuard()
 		self._decider = threading.Thread(target=self._decide, name="X11KeySource decider", daemon=True)
@@ -399,6 +413,9 @@ class X11KeySource:
 
 	def setCapture(self, mode: CaptureMode) -> None:
 		self._post(lambda: self._setCapture(mode))
+
+	def setCaptureGestures(self, browse: frozenset[GestureKey], focus: frozenset[GestureKey]) -> None:
+		self._post(lambda: self._setGestures(browse, focus))
 
 	def holdKeyboard(self, hold: bool) -> None:
 		self._post(lambda: self._hold(hold))
@@ -597,7 +614,7 @@ class X11KeySource:
 			item = self._decisions.get()
 			if item is None:
 				return
-			event, ticket, taken = item
+			event, ticket, keycode, modifiers, taken = item
 			if ticket is not None:
 				# Taken for captured from the grabs as they were; whether the server held it decides.
 				ticket.settled.wait(CAPTURE_EXPIRY)
@@ -609,6 +626,12 @@ class X11KeySource:
 					# The application has had the key, as NVDA did not answer in time; NVDA acting on it
 					# as well would act twice.
 					continue
+				elif not self._capturedNow(keycode, modifiers):
+					# Grabbed for either mode, and not one NVDA's mode takes at this moment.
+					ticket.verdict = True
+					self._wake()
+					event = replace(event, captured=False, reachedApplication=True)
+					ticket = None
 			try:
 				passed = self._deliver(event)
 			except Exception:
@@ -617,9 +640,9 @@ class X11KeySource:
 			if ticket is not None:
 				ticket.verdict = passed is not False
 				self._wake()
-			elif taken is not None and passed is not False:
+			elif taken and passed is not False:
 				# The Windows hook passes a key its callback does not block, whatever else is held.
-				self._post(functools.partial(self._sendOn, *taken))
+				self._post(functools.partial(self._sendOn, keycode, modifiers))
 
 	def _findXtestDevices(self) -> None:
 		devices = self._display.xinput_query_device(xinput.AllDevices).devices
@@ -649,6 +672,7 @@ class X11KeySource:
 		with self._lock:
 			self._translator = keyMap.Translator(keymap, keymap.state_new())
 			self._rulesNames = names
+		self._modeSets = {}
 		log.debug(f"Keyboard layout {layout or 'us'} {variant}".rstrip())
 		if self._captureMode != "off":
 			# Which keys type characters, and which modifier AltGr is, are the layout's.
@@ -852,7 +876,7 @@ class X11KeySource:
 				capsLockWasOn=capsLockWasOn,
 			)
 			taken = consumed and not isUp and not self._held and vk not in NEVER_SENT_ON
-			self._decisions.put((event, ticket, (keycode, effective) if taken else None))
+			self._decisions.put((event, ticket, keycode, effective, taken))
 		finally:
 			if isUp and keycode == self._activeGrab:
 				self._activeGrab = None
@@ -974,6 +998,7 @@ class X11KeySource:
 
 	def _applyGrabs(self, nvdaModifierKeys: int, numpadReview: bool) -> None:
 		self._consumedWanted = (nvdaModifierKeys, numpadReview)
+		self._modeSets = {}
 		self._ungrabKeys()
 		self._grabKeys(self._focusWindow() or self._display.screen().root)
 
@@ -1054,6 +1079,8 @@ class X11KeySource:
 		"""Key code: the modifier masks, without the locks, it is captured with in mode."""
 		if mode == "off" or self._translator is None:
 			return {}
+		if mode in self._modeSets:
+			return self._modeSets[mode]
 		masks = {"": 0, "shift": X.ShiftMask, "control": X.ControlMask, "alt": X.Mod1Mask}
 		levelThree = self._translator.levelThreeMask()
 		if levelThree:
@@ -1079,13 +1106,58 @@ class X11KeySource:
 				keycode = self._translator.keycodeFor(ord(letter), False)
 				if keycode is not None:
 					wanted.setdefault(keycode, set()).add(X.ControlMask)
+		for names, vk, extended in self._gestureKeys[mode]:
+			keycode = self._translator.keycodeFor(vk, extended)
+			if keycode is not None and names <= GESTURE_MASKS.keys():
+				wanted.setdefault(keycode, set()).add(sum(GESTURE_MASKS[name] for name in names))
+		for keycode in self._grabbed:
+			# The NVDA keys' own grabs, on the same window, would be taken over.
+			wanted.pop(keycode, None)
+		self._modeSets[mode] = wanted
 		return wanted
+
+	def _grabSet(self) -> dict[int, set[int]]:
+		"""What is grabbed while the focus is in a document in either mode: the keys of both, as which
+		mode is in force is asked at the moment of each key, for the mode can change between a key and
+		the next sooner than a grab could follow."""
+		grabbed: dict[int, set[int]] = {}
+		for mode in ("browse", "focus"):
+			for keycode, masks in self._captureSet(mode).items():
+				grabbed.setdefault(keycode, set()).update(masks)
+		return grabbed
+
+	def _capturedNow(self, keycode: int, modifiers: int) -> bool:
+		"""Whether NVDA, in the mode it is in at this moment, takes this press."""
+		mode = None
+		if self._modeNow is not None:
+			try:
+				mode = self._modeNow()
+			# Whatever NVDA's focus raises, the key stays NVDA's to decide, as it was captured for.
+			except Exception:  # noqa: BLE001
+				log.debugWarning("Asking NVDA's mode for a captured key", exc_info=True)
+		if mode is None:
+			return True
+		masks = self._captureSet(mode).get(keycode)
+		return masks is not None and modifiers & 0xFF & ~(X.LockMask | NUM_LOCK_MASK) in masks
+
+	def _setGestures(self, browse: frozenset[GestureKey], focus: frozenset[GestureKey]) -> None:
+		wanted = {"browse": browse, "focus": focus}
+		if wanted == self._gestureKeys:
+			return
+		self._gestureKeys = wanted
+		self._modeSets = {}
+		if self._captureMode != "off":
+			self._applyCapture(self._captureMode)
 
 	def _setCapture(self, mode: CaptureMode) -> None:
 		# Asked again and again while the focus is in a document: the grabs follow the focus, which
-		# may have gone to another window since they were made.
-		if mode != self._captureMode or (mode != "off" and self._captureWindow is None):
+		# may have gone to another window since they were made. Both modes' keys are grabbed in either,
+		# so a change between them changes no grab.
+		if (mode == "off") != (self._captureMode == "off") or (mode != "off" and self._captureWindow is None):
 			self._applyCapture(mode)
+		else:
+			self._captureMode = mode
+			self._logCapture(mode if self._captureWindow is not None else "off")
 
 	def _dropCapture(self) -> None:
 		"""Ungrab the captured keys, leaving the mode as it is."""
@@ -1104,7 +1176,7 @@ class X11KeySource:
 		self._captureMode = mode
 		d = self._display
 		self._dropCapture()
-		wanted = self._captureSet(mode)
+		wanted = self._grabSet() if mode != "off" else {}
 		window = self._focusWindow() if wanted else None
 		if window is None:
 			d.sync()

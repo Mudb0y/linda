@@ -527,6 +527,40 @@ def test_keysNVDAPassesReachThePage(desktop: DesktopSession, tmp_path: Path, key
 	quitNVDA(desktop, nvda)
 
 
+def test_keysFollowTheModeAtOnce(desktop: DesktopSession, tmp_path: Path):
+	config = tmp_path / "config"
+	config.mkdir()
+	browseConfig(config)
+	# Bound by the user, as the Input Gestures dialog would: F9 moves to the next heading.
+	(config / "gestures.ini").write_text("[browseMode.BrowseModeTreeInterceptor]\n\tnextHeading = kb:f9\n")
+	webSession.requireBrowseLibraries()
+	webSession.startFirefox(desktop, "keys.html")
+	nvda = desktop.startNVDA(config, env=probeHooks(tmp_path))
+	nvda.waitForLog("Buffer rendered", BUFFER_BOUND)
+	waitForCapture(nvda, "browse", timeout=BUFFER_BOUND)
+	time.sleep(SETTLE)
+	page = KeysPage()
+
+	step(desktop, "control+Home", "heading level 1 Keys page")
+	step(desktop, "F9", "Field and link heading level 2")
+	assert page.log() == []
+
+	# The first key after a change of mode goes the new mode's way, sooner than NVDA looks at its
+	# focus.
+	enterField(desktop, nvda)
+	mark = desktop.mark()
+	subprocess.run(["xdotool", "key", "Escape", "sleep", "0.03", "key", "h"], check=True)
+	expect(desktop, "Browse mode", "no next heading", since=mark)
+	assert page.log() == []
+	mark = desktop.mark()
+	subprocess.run(["xdotool", "key", "Return", "sleep", "0.03", "key", "x"], check=True)
+	expect(desktop, "Focus mode", since=mark)
+	page.waitForLog(["x"])
+	page.waitForField("x")
+	step(desktop, "Escape", "Browse mode")
+	quitNVDA(desktop, nvda)
+
+
 def test_pageKeepsTheFocusThroughNVDAKeys(desktop: DesktopSession, tmp_path: Path):
 	nvda, page = startPage(desktop, tmp_path)
 	settled = page.focusLog()
@@ -610,14 +644,16 @@ def test_blockedMainThreadLetsKeysThrough(desktop: DesktopSession, tmp_path: Pat
 	quitNVDA(desktop, nvda)
 
 
-def test_stoppedNVDALetsTheKeyboardGo(desktop: DesktopSession, tmp_path: Path):
+@pytest.mark.parametrize("mode", ("browse", "focus"))
+def test_stoppedNVDALetsTheKeyboardGo(desktop: DesktopSession, tmp_path: Path, mode: str):
 	nvda, page = startPage(desktop, tmp_path)
 	enterField(desktop, nvda)
-	step(desktop, "Escape", "Browse mode")
-	waitForCapture(nvda, "browse")
-	# Firefox's focus stays in the field, so keys that reach the page type there. h is captured, so
-	# the X server holds the keyboard on it, with xyz behind it, until the guard lets it go; none of
-	# them may be lost.
+	if mode == "browse":
+		step(desktop, "Escape", "Browse mode")
+		waitForCapture(nvda, "browse")
+	# Firefox's focus stays in the field, so keys that reach the page type there. h is captured in
+	# either mode, so the X server holds the keyboard on it, with xyz behind it, until the guard lets
+	# it go; none of them may be lost.
 	os.kill(nvda.process.pid, signal.SIGSTOP)
 	try:
 		pressed = time.monotonic()
@@ -627,6 +663,8 @@ def test_stoppedNVDALetsTheKeyboardGo(desktop: DesktopSession, tmp_path: Path):
 	finally:
 		os.kill(nvda.process.pid, signal.SIGCONT)
 	nvda.waitForLog("Keys are read from the X display again", 10)
+	if mode == "focus":
+		step(desktop, "Escape", "Browse mode")
 	waitForCapture(nvda, "browse")
 	logged = page.log()
 	step(desktop, "shift+h", "Field and link heading level 2")

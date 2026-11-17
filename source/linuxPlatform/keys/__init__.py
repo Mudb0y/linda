@@ -52,17 +52,35 @@ class KeyEvent:
 	capsLockWasOn: bool = False
 
 
+#: (modifier names as NVDA's gestures have them, virtual-key code, extended) of a gesture to capture.
+GestureKey = tuple[frozenset[str], int, bool]
+
+
 class KeySource(Protocol):
-	def start(self, deliver: Callable[[KeyEvent], bool]) -> None:
+	def start(
+		self,
+		deliver: Callable[[KeyEvent], bool],
+		modeNow: Callable[[], CaptureMode | None] | None = None,
+	) -> None:
 		"""Start watching the keyboard; deliver is called for each event, in order, on a thread of the
 		source's own, and returns True to pass the key on to the application, as the Windows hook's
 		callback does. Only a captured press waits for that answer, and not for long: a key with no
-		answer in time reaches the application."""
+		answer in time reaches the application.
+
+		:param modeNow: Which keys NVDA captures at this moment, asked on that thread for each
+			captured press: one the mode does not capture goes to the application at once, and to
+			deliver as one that reached it. None from it, or no modeNow, keeps the press captured.
+		"""
 
 	def stop(self) -> None: ...
 
 	def setCapture(self, mode: CaptureMode) -> None:
-		"""Capture the keys of this mode from now on, and stop capturing any others."""
+		"""Capture the keys of a document from now on, browse mode's and focus mode's both, or none
+		when mode is off; mode is the one in force, for the record."""
+
+	def setCaptureGestures(self, browse: frozenset[GestureKey], focus: frozenset[GestureKey]) -> None:
+		"""Capture these too, beyond the keys each mode always captures: the gestures the gesture maps
+		bind in each mode."""
 
 	def setConsumed(self, nvdaModifierKeys: int, numpadReview: bool) -> None:
 		"""Take these keys from the applications.

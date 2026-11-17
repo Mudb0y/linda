@@ -18,7 +18,7 @@ import threading
 import time
 
 from linuxPlatform import NoLinuxImplementation, keys
-from linuxPlatform.keys import CaptureMode, KeyEvent, KeySource
+from linuxPlatform.keys import CaptureMode, GestureKey, KeyEvent, KeySource
 
 _refCount = 0
 
@@ -45,6 +45,16 @@ _lastKeyDown: KeyEvent | None = None
 _capsLockBlockedWasOn: bool | None = None
 _watcher: threading.Thread | None = None
 _stopWatching = threading.Event()
+#: Set when NVDA's focus enters or leaves a document or changes its mode, to have the watcher look at
+#: once rather than at its next turn.
+_changed = threading.Event()
+#: Seconds after such a change before the watcher looks again: the focus it announces is made NVDA's
+#: only once the announcement is over.
+CHANGE_SETTLE = 0.01
+#: Virtual-key code of each modifier NVDA's gestures name, generalised as keyboardHandler has them: its
+#: name in a gesture.
+_GESTURE_MODIFIERS = {0x10: "shift", 0x11: "control", 0x12: "alt", "windows": "windows"}
+_KEYBOARD_GESTURE = re.compile(r"^kb(?:\((\w+)\))?:(.+)$")
 
 
 def initialize() -> None:
@@ -76,7 +86,7 @@ def _startSource() -> None:
 	from logHandler import log
 
 	try:
-		source.start(_onKey)
+		source.start(_onKey, _modeNow)
 	except Exception:
 		log.warning("NVDA cannot read the keyboard from the X display", exc_info=True)
 		return
@@ -91,6 +101,7 @@ def _stopSource() -> None:
 	if _source is None:
 		return
 	_stopWatching.set()
+	_changed.set()
 	if _watcher is not None:
 		_watcher.join(1)
 		_watcher = None
@@ -109,11 +120,15 @@ def _watch(source: KeySource) -> None:
 	import api
 	import config
 	import inputCore
+	import treeInterceptorHandler
 	import watchdog
 
+	treeInterceptorHandler.post_browseModeStateChange.register(_onBrowseModeStateChange)
 	nvdaKeys = None
 	held = False
 	captured: CaptureMode = "off"
+	gestures = None
+	interval = WATCH_INTERVAL
 	while True:
 		wanted = config.conf["keyboard"]["NVDAModifierKeys"]
 		if wanted != nvdaKeys:
@@ -124,14 +139,25 @@ def _watch(source: KeySource) -> None:
 		if hold != held:
 			source.holdKeyboard(hold)
 			held = hold
-		capture = "off" if watchdog.isAttemptingRecovery else captureModeFor(api.getFocusObject())
+		focus = api.getFocusObject()
+		capture = "off" if watchdog.isAttemptingRecovery else captureModeFor(focus)
+		if capture != "off":
+			interceptor = focus.treeInterceptor
+			signature = _gestureSignature(interceptor)
+			if gestures is None or gestures[0] != signature:
+				gestures = (signature, *_gesturesFor(interceptor))
+				source.setCaptureGestures(gestures[1], gestures[2])
 		# Asked again while capturing, as the source lets its grabs go when the focus leaves the window
 		# they are on, and takes them again only once asked.
 		if capture != captured or capture != "off":
 			source.setCapture(capture)
 			captured = capture
-		if _stopWatching.wait(WATCH_INTERVAL):
+		changed = _changed.wait(interval)
+		_changed.clear()
+		if _stopWatching.is_set():
 			break
+		interval = CHANGE_SETTLE if changed else WATCH_INTERVAL
+	treeInterceptorHandler.post_browseModeStateChange.unregister(_onBrowseModeStateChange)
 	if held:
 		source.holdKeyboard(False)
 	if captured != "off":
@@ -157,6 +183,75 @@ def captureModeFor(focus) -> CaptureMode:
 	if not isinstance(interceptor, browseMode.BrowseModeTreeInterceptor) or not interceptor.isReady:
 		return "off"
 	return "focus" if interceptor.passThrough else "browse"
+
+
+def _onBrowseModeStateChange() -> None:
+	_changed.set()
+
+
+def _modeNow() -> CaptureMode | None:
+	"""Which keys NVDA captures at this moment, for the key source to ask of each captured press."""
+	import api
+	import watchdog
+
+	if watchdog.isAttemptingRecovery:
+		return "off"
+	return captureModeFor(api.getFocusObject())
+
+
+def _gestureSignature(interceptor) -> tuple:
+	"""What the keys bound in interceptor follow: its class, its own bindings, the keyboard layout
+	and the gesture maps, which the Input Gestures dialog changes."""
+	import config
+	import inputCore
+
+	manager = inputCore.manager
+	return (
+		type(interceptor),
+		len(interceptor._gestureMap),
+		config.conf["keyboard"]["keyboardLayout"],
+		repr(manager.userGestureMap._map),
+		id(manager.localeGestureMap),
+	)
+
+
+def _gesturesFor(interceptor) -> tuple[frozenset[GestureKey], frozenset[GestureKey]]:
+	"""The keys bound to scripts of interceptor without the NVDA key, by its classes and by the gesture
+	maps of the locale and the user, add-ons' included: (all of them, those that work in focus mode)."""
+	import config
+	import inputCore
+	import keyboardHandler
+
+	layout = config.conf["keyboard"]["keyboardLayout"]
+	scripts = dict(interceptor._gestureMap)
+	classes = {(cls.__module__, cls.__name__) for cls in type(interceptor).__mro__}
+	manager = inputCore.manager
+	for gestureMap in (manager.localeGestureMap, manager.userGestureMap):
+		for identifier, entries in gestureMap._map.items():
+			for module, className, scriptName in entries:
+				if (module, className) in classes:
+					scripts[identifier] = (
+						getattr(type(interceptor), f"script_{scriptName}", None) if scriptName else None
+					)
+	browse: set[GestureKey] = set()
+	focus: set[GestureKey] = set()
+	for identifier, script in scripts.items():
+		match = _KEYBOARD_GESTURE.match(identifier)
+		if script is None or match is None or match[1] not in (None, layout) or "nvda" in match[2].split("+"):
+			continue
+		try:
+			gesture = keyboardHandler.KeyboardInputGesture.fromName(match[2])
+		# A name for a key this keyboard does not have.
+		except (LookupError, ValueError, NoLinuxImplementation):
+			continue
+		names = frozenset(_GESTURE_MODIFIERS.get(vk) for vk, _extended in gesture.generalizedModifiers)
+		if None in names:
+			continue
+		key = (names, gesture.vkCode, bool(gesture.isExtended))
+		browse.add(key)
+		if getattr(script, "ignoreTreeInterceptorPassThrough", False):
+			focus.add(key)
+	return frozenset(browse), frozenset(focus)
 
 
 def _isCoreStuck() -> bool:
