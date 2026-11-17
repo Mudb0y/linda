@@ -88,6 +88,8 @@ class FirefoxProcess(subprocess.Popen):
 	profile: Path
 	#: The name of its window when it took the keyboard.
 	window: str
+	#: time.monotonic() when that window was first seen on the accessibility desktop.
+	shown: float
 
 	def __init__(self, *args, **kwargs) -> None:
 		super().__init__(*args, start_new_session=True, **kwargs)
@@ -208,8 +210,8 @@ def startFirefox(
 	stops it, its content processes with it, by the process ID this started. Its output goes to a
 	file beside the profile.
 
-	:return: A FirefoxProcess, whose profile and window say where its profile is and what its window
-		was called.
+	:return: A FirefoxProcess, whose profile, window and shown say where its profile is, what its
+		window was called and when it appeared.
 	"""
 	profile = Path(tempfile.mkdtemp(prefix="firefox", dir=desktop.directory))
 	userPrefs = USER_JS.read_text()
@@ -237,6 +239,7 @@ def startFirefox(
 		names = _windowNames(app) if app is not None else []
 		window = next((name for name in names if name and (title is None or name.startswith(title))), None)
 		if window is not None:
+			process.shown = time.monotonic()
 			break
 		if process.firefoxHasExited() or time.monotonic() - started >= FIREFOX_WINDOW_TIMEOUT:
 			raise AssertionError(
