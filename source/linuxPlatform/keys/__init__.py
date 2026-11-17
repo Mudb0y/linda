@@ -79,9 +79,12 @@ class KeySource(Protocol):
 
 	def stop(self) -> None: ...
 
-	def setCapture(self, mode: CaptureMode) -> None:
+	def setCapture(self, mode: CaptureMode, processID: int | None = None) -> None:
 		"""Capture the keys of a document from now on, browse mode's and focus mode's both, or none
-		when mode is off; mode is the one in force, for the record."""
+		when mode is off; mode is the one in force, for the record.
+
+		:param processID: The process of the application whose document mode is that of, when known.
+		"""
 
 	def setCaptureGestures(self, browse: frozenset[GestureKey], focus: frozenset[GestureKey]) -> None:
 		"""Capture these too, beyond the keys each mode always captures: the gestures the gesture maps

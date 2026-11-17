@@ -430,6 +430,26 @@ def test_altTabLeavesThePageItsKeys(desktop: DesktopSession, tmp_path: Path):
 	quitNVDA(desktop, nvda)
 
 
+def test_keysFollowTheFocusToAnotherProgramsPage(desktop: DesktopSession, tmp_path: Path):
+	"""A page in another program, such as an Electron program beside Firefox, has its keys captured once
+	NVDA's focus is in it, though the page left before still holds its window. A second Firefox is a
+	process of its own."""
+	webSession.requireBrowseLibraries()
+	webSession.startFirefox(desktop, "usable.html")
+	nvda = desktop.startNVDA(browseConfig(tmp_path), env=probeHooks(tmp_path))
+	nvda.waitForLog("Buffer rendered", BUFFER_BOUND)
+	waitForCapture(nvda, "browse", timeout=BUFFER_BOUND)
+	mark = desktop.mark()
+	webSession.startFirefox(desktop, "keys.html")
+	expect(desktop, "Keys page" + PREFIX_MARK, since=mark, timeout=BUFFER_BOUND)
+	page = KeysPage()
+	step(desktop, "control+Home", "heading level 1 Keys page")
+	step(desktop, "h", "Field and link heading level 2")
+	assert captureMode(nvda) == "browse", nvda.describe()
+	assert page.log() == []
+	quitNVDA(desktop, nvda)
+
+
 def inputs(log: harness.Launch | str, *names: str) -> int:
 	"""How many times NVDA's log says a gesture was input, by any of its names: the order of the
 	modifiers in a name is the order they were pressed in."""

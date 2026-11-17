@@ -464,8 +464,8 @@ class X11KeySource:
 	def setConsumed(self, nvdaModifierKeys: int, numpadReview: bool) -> None:
 		self._post(lambda: self._applyGrabs(nvdaModifierKeys, numpadReview))
 
-	def setCapture(self, mode: CaptureMode) -> None:
-		self._post(lambda: self._setCapture(mode))
+	def setCapture(self, mode: CaptureMode, processID: int | None = None) -> None:
+		self._post(lambda: self._setCapture(mode, processID))
 
 	def setCaptureGestures(self, browse: frozenset[GestureKey], focus: frozenset[GestureKey]) -> None:
 		self._post(lambda: self._setGestures(browse, focus))
@@ -1359,7 +1359,7 @@ class X11KeySource:
 		if self._captureMode != "off":
 			self._applyCapture(self._captureMode)
 
-	def _setCapture(self, mode: CaptureMode) -> None:
+	def _setCapture(self, mode: CaptureMode, processID: int | None = None) -> None:
 		# Asked again and again while the focus is in a document: the grabs follow the focus, which
 		# may have gone to another window since they were made. Both modes' keys are grabbed in either,
 		# so a change between them changes no grab.
@@ -1367,11 +1367,12 @@ class X11KeySource:
 		window = self._captureWindow
 		# NVDA's focus follows the keyboard's to another window only once that window's application has
 		# said so: until then its mode is still the document's, which is no reason to take the keys of
-		# another application. A document in another window of the same one is.
+		# another application. A document in another window of the same one is, and so is one of
+		# another application once NVDA's focus is in it.
 		if (
 			window is not None
 			and not self._captureFocused
-			and (mode == "off" or self._windowPid(self._focusWindow()) != self._windowPid(window))
+			and (mode == "off" or self._modeIsStillAway(window, processID))
 		):
 			self._captureMode = mode
 			self._logCapture("off")
@@ -1401,6 +1402,18 @@ class X11KeySource:
 			self._captureMode = self._dormantMode
 			self._documentPending = time.monotonic() + DOCUMENT_GRACE
 		self._dormantMode = None
+
+	def _modeIsStillAway(self, window, processID: int | None) -> bool:
+		"""Whether NVDA's mode may still be that of the document on window, which has lost the keyboard
+		focus to a window of another application.
+
+		:param processID: The process of the document NVDA's mode comes from, when known.
+		"""
+		away = self._windowPid(window)
+		if processID and away and processID != away:
+			# NVDA's focus has reached another application's document; its window is where the keys go.
+			return False
+		return self._windowPid(self._focusWindow()) != away
 
 	def _windowPid(self, window) -> int | None:
 		"""The process a window belongs to, by its own _NET_WM_PID or its nearest parent's."""

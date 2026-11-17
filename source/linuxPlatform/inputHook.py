@@ -155,7 +155,7 @@ def _watch(source: KeySource) -> None:
 		# Asked again while capturing, as the source lets its grabs go when the focus leaves the window
 		# they are on, and takes them again only once asked.
 		if capture != captured or capture != "off":
-			source.setCapture(capture)
+			source.setCapture(capture, _processOf(focus) if capture != "off" else None)
 			captured = capture
 		changed = _changed.wait(interval)
 		_changed.clear()
@@ -188,6 +188,18 @@ def captureModeFor(focus) -> CaptureMode:
 	if not isinstance(interceptor, browseMode.BrowseModeTreeInterceptor) or not interceptor.isReady:
 		return "off"
 	return "focus" if interceptor.passThrough else "browse"
+
+
+def _processOf(focus) -> int | None:
+	"""The process of the focus's application, as its app module already holds it: asked off the main
+	thread, so nothing is asked of the bus."""
+	try:
+		ref = focus.__dict__.get("_appModuleRef")
+		appModule = ref() if ref is not None else None
+	# A focus that has just gone away raises whatever its kind of object raises.
+	except Exception:  # noqa: BLE001
+		return None
+	return getattr(appModule, "processID", None) or None
 
 
 def _onBrowseModeStateChange() -> None:
