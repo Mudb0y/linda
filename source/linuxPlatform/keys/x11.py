@@ -8,14 +8,15 @@ The NVDA keys and the numpad review keys are taken with passive grabs on the roo
 the NVDA key held goes to NVDA alone while the grab is active; everything else reaches the
 application too, and is marked as having done so.
 
-The keys of browse mode are captured with synchronous passive grabs on the root: the X server holds
-the whole keyboard on such a press until this source answers it, replaying the key to the
-application as typed or dropping it. NVDA's answer comes from the decider, a thread that hands every
-key to NVDA in order; the X thread only reads events and answers them, and replays a captured key
-NVDA has not answered within CAPTURE_TIMEOUT, so that a slow NVDA costs the user a delay and never a
-key. Should this whole process stop, no thread is left to answer, and the keyboard would stay held:
-a guard, a process of its own that this one feeds a heartbeat, then closes this source's connection
-to the X server, which ends its grabs; the source connects again once it runs again.
+The keys of browse mode are captured with synchronous passive grabs on the window that has the
+keyboard focus: the X server holds the whole keyboard on such a press until this source answers it,
+replaying the key to the application as typed or dropping it. NVDA's answer comes from the decider,
+a thread that hands every key to NVDA in order; the X thread only reads events and answers them,
+and replays a captured key NVDA has not answered within CAPTURE_TIMEOUT, so that a slow NVDA costs
+the user a delay and never a key. Should this whole process stop, no thread is left to answer, and
+the keyboard would stay held: a guard, a process of its own that this one feeds a heartbeat, then
+lets the keyboard go and closes this source's connection to the X server; the source connects again
+once it runs again.
 """
 
 import itertools
