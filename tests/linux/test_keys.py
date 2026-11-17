@@ -8,6 +8,8 @@ with Caps Lock as the NVDA key and the laptop layout. Run under the rig:
 """
 
 import json
+import os
+import signal
 import subprocess
 import time
 from collections.abc import Iterator
@@ -17,6 +19,9 @@ import desktopSession
 import harness
 import pytest
 from desktopSession import DesktopSession
+from Xlib import XK, display
+from Xlib.ext import xinput
+from Xlib.protocol import rq
 
 #: Expected key names, recorded from NVDA's own KeyboardInputGesture fed by the key map.
 KEY_NAMES = harness.HERE / "fixtures" / "keyNames"
@@ -141,99 +146,293 @@ def test_nvdaChordReachesNVDAAlone(desktop: DesktopSession, tmp_path: Path, layo
 	assert f"Input: kb({keys.layout}):a\n" not in log
 
 
-def tap(key: str) -> None:
-	"""Press and release key at once.
+class _DeviceFakeInput(rq.Request):
+	"""XTEST's FakeInput for an event of a given input device, which python-xlib's leaves out."""
 
-	xdotool's keys and those NVDA sends come from the same device, so NVDA, sending on a key xdotool
-	still holds, would release it first, and xdotool's own release would never come; a person's
-	keyboard is a device of its own.
+	_request = rq.Struct(
+		rq.Card8("opcode"),
+		rq.Opcode(2),
+		rq.RequestLength(),
+		rq.Card8("eventType"),
+		rq.Card8("detail"),
+		rq.Pad(2),
+		rq.Card32("time"),
+		rq.Card32("root"),
+		rq.Pad(8),
+		rq.Int16("x"),
+		rq.Int16("y"),
+		rq.Pad(7),
+		rq.Card8("deviceid"),
+	)
+
+
+#: xdotool's names for the modifiers, as X names their left keys.
+MODIFIER_KEYS = {"control": "Control_L", "shift": "Shift_L", "alt": "Alt_L", "super": "Super_L"}
+#: Seconds a person holds a key, and leaves between the keys of a chord.
+HOLD = 0.1
+GAP = 0.03
+
+
+class Keyboard:
+	"""Keys typed on the rig display's own keyboard, as a person's keyboard types them.
+
+	xdotool types through XTEST's device, which NVDA sends its own keys through too, so NVDA can let go
+	of a key xdotool holds. A person's keyboard is a device of its own: the X server then drops a
+	press NVDA sends of a key that keyboard holds, as a key is held while NVDA decides on it. This
+	types on the X server's own keyboard device instead, through XTEST's request for device events.
 	"""
-	subprocess.run(["xdotool", "key", "--delay", "0", key], check=True)
+
+	def __init__(self) -> None:
+		self._display = display.Display()
+		devices = self._display.xinput_query_device(xinput.AllDevices).devices
+		self._device = next(
+			device.deviceid
+			for device in devices
+			if device.use == xinput.SlaveKeyboard and "XTEST" not in str(device.name)
+		)
+		self._firstEvent = self._display.query_extension("XInputExtension").first_event
+		self._xtest = self._display.query_extension("XTEST").major_opcode
+
+	def _send(self, key: str, down: bool) -> None:
+		keysym = XK.string_to_keysym(MODIFIER_KEYS.get(key, key))
+		keycode = self._display.keysym_to_keycode(keysym)
+		assert keycode, f"no key on the rig's keyboard is {key}"
+		_DeviceFakeInput(
+			display=self._display.display,
+			opcode=self._xtest,
+			# DeviceKeyPress and DeviceKeyRelease, as XInput numbers them.
+			eventType=self._firstEvent + (1 if down else 2),
+			detail=keycode,
+			time=0,
+			root=0,
+			x=0,
+			y=0,
+			deviceid=self._device,
+		)
+		self._display.sync()
+
+	def down(self, key: str) -> None:
+		self._send(key, True)
+		time.sleep(GAP)
+
+	def up(self, key: str) -> None:
+		self._send(key, False)
+		time.sleep(GAP)
+
+	def press(self, *chords: str, hold: float = HOLD) -> None:
+		"""Press each chord in turn, as xdotool names them: its keys down in order, held, then up."""
+		for chord in chords:
+			keys = chord.split("+")
+			for key in keys:
+				self.down(key)
+			time.sleep(hold)
+			for key in reversed(keys):
+				self.up(key)
+
+	def type(self, text: str) -> None:
+		self.press(*text)
+
+	def close(self) -> None:
+		self._display.close()
+
+
+@pytest.fixture
+def keyboard() -> Iterator[Keyboard]:
+	board = Keyboard()
+	yield board
+	board.close()
+
+
+def waitForEntry(text: str, timeout: float = 3) -> None:
+	deadline = time.monotonic() + timeout
+	while (found := entryState()[0]) != text:
+		assert time.monotonic() < deadline, f"the field holds {found!r}, not {text!r}"
+		time.sleep(0.05)
 
 
 @pytest.mark.parametrize("layoutName", LAYOUTS)
 def test_nvdaChordWithoutACommandReachesTheApplication(
-	desktop: DesktopSession, tmp_path: Path, layoutName: str
+	desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path, layoutName: str
 ):
 	keys = KeySession(desktop, tmp_path, layoutName)
-	# NVDA has no command on z: the field has the z, without the NVDA key, as on Windows.
-	tap(keys.chord("z"))
-	deadline = time.monotonic() + 3
-	while entryState()[0] != "z":
-		assert time.monotonic() < deadline, f"the field holds {entryState()[0]!r}, not 'z'"
-		time.sleep(0.05)
+	# NVDA has no command on z: the field has the z, without the NVDA key, as on Windows. Caps Lock
+	# held down is the Lock modifier to the X server, which the key comes with, so with Caps Lock as the
+	# NVDA key it may come in capitals.
+	keyboard.press(keys.chord("z"))
+	waitForEntry("z" if layoutName == "desktop" else "Z")
 	# NVDA's own commands are still NVDA's alone, the next one with the NVDA key still held too.
 	mark = desktop.mark()
-	desktop.press(keys.chord("t"))
+	keyboard.press(keys.chord("t"))
 	desktop.expect("Fixture window", since=mark)
 	mark = desktop.mark()
-	subprocess.run(
-		["xdotool", "keydown", keys.nvda, "key", "--delay", "0", "y", "sleep", "0.3"]
-		+ ["key", "--delay", "0", "t", "sleep", "0.3", "keyup", keys.nvda],
-		check=True,
-	)
+	keyboard.down(keys.nvda)
+	keyboard.press("y")
+	time.sleep(0.3)
+	keyboard.press("t")
+	time.sleep(0.3)
+	keyboard.up(keys.nvda)
 	desktop.expect("Fixture window", since=mark)
 	time.sleep(0.3)
-	assert entryState()[0] == "zy"
+	assert entryState()[0].lower() == "zy"
 	assert not desktopSession.capsLockIsOn()
+	# The keys after a chord are grabbed again as they were: NVDA+t is NVDA's, and a letter typing.
+	mark = desktop.mark()
+	keyboard.press(keys.chord("t"))
+	desktop.expect("Fixture window", since=mark)
+	keyboard.press("a")
+	time.sleep(0.3)
+	assert entryState()[0].lower() == "zya"
 	launch = keys.quit()
 	launch.assertClean(logNames=("nvda.log",))
 	assert f"Input: kb({keys.layout}):NVDA+z" in launch.text("nvda.log")
 
 
-def passedTwice(key: str) -> None:
+def passedTwice(keyboard: Keyboard, key: str) -> None:
 	"""Press key twice, as quickly as a person does to have NVDA pass it on."""
-	tap(key)
-	time.sleep(0.2)
-	tap(key)
+	keyboard.press(key)
+	time.sleep(0.15)
+	keyboard.press(key)
 	time.sleep(0.3)
 
 
-def test_insertPassedThrough(desktop: DesktopSession, tmp_path: Path):
+def test_insertPassedThrough(desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path):
 	keys = KeySession(desktop, tmp_path, "desktop")
-	desktop.press("Home")
+	keyboard.press("Home")
 	mark = desktop.mark()
-	desktop.press(keys.chord("F2"))
+	keyboard.press(keys.chord("F2"))
 	desktop.expect("Pass next key through", since=mark)
 	# Insert reaches the field, which then types over its text.
-	tap("Insert")
-	desktop.typeText("x")
+	keyboard.press("Insert")
+	keyboard.type("x")
 	time.sleep(0.3)
 	assert entryState() == ("xlice", 1)
 	# The NVDA key pressed twice quickly reaches the field too, which types between letters again.
-	passedTwice("Insert")
-	desktop.typeText("y")
+	passedTwice(keyboard, "Insert")
+	keyboard.type("y")
 	time.sleep(0.3)
 	assert entryState() == ("xylice", 2)
+	# Passed through, a chord with the NVDA key reaches the field whole: Insert, then the letter.
+	mark = desktop.mark()
+	keyboard.press(keys.chord("F2"))
+	desktop.expect("Pass next key through", since=mark)
+	keyboard.press(keys.chord("t"))
+	time.sleep(0.3)
+	assert entryState() == ("xytice", 3)
+	assert "Fixture window" not in desktop.spokenSince(mark)
 	keys.quit().assertClean(logNames=("nvda.log",))
 
 
-def test_capsLockPassedThrough(desktop: DesktopSession, tmp_path: Path):
+def test_capsLockPassedThrough(desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path):
 	keys = KeySession(desktop, tmp_path, "laptop")
-	desktop.press("Home")
+	keyboard.press("Home")
 	mark = desktop.mark()
-	desktop.press(keys.chord("F2"))
+	keyboard.press(keys.chord("F2"))
 	desktop.expect("Pass next key through", since=mark)
-	tap("Caps_Lock")
+	keyboard.press("Caps_Lock")
 	time.sleep(0.3)
 	assert desktopSession.capsLockIsOn()
-	desktop.typeText("x")
+	keyboard.type("x")
 	time.sleep(0.3)
 	assert entryState() == ("XAlice", 1)
 	mark = desktop.mark()
-	passedTwice("Caps_Lock")
+	passedTwice(keyboard, "Caps_Lock")
 	desktop.expect("caps lock off", since=mark)
 	assert not desktopSession.capsLockIsOn()
-	passedTwice("Caps_Lock")
+	passedTwice(keyboard, "Caps_Lock")
 	desktop.expect("caps lock off", "caps lock on", since=mark)
 	assert desktopSession.capsLockIsOn()
-	passedTwice("Caps_Lock")
+	passedTwice(keyboard, "Caps_Lock")
 	assert not desktopSession.capsLockIsOn()
 	# One press used as the NVDA key leaves the lock as it was.
-	desktop.press(keys.chord("t"))
-	desktop.typeText("y")
+	keyboard.press(keys.chord("t"))
+	keyboard.type("y")
 	time.sleep(0.3)
 	assert entryState() == ("XyAlice", 2)
+	keys.quit().assertClean(logNames=("nvda.log",))
+
+
+#: A global plugin for these tests only: a command that blocks NVDA's main thread.
+BLOCK_PLUGIN = """
+import time
+
+import globalPluginHandler
+from logHandler import log
+from scriptHandler import script
+
+
+class GlobalPlugin(globalPluginHandler.GlobalPlugin):
+	@script(gesture="kb:NVDA+shift+f11")
+	def script_blockMainThread(self, gesture):
+		log.info("Blocking the main thread")
+		time.sleep(3)
+		log.info("The main thread is free again")
+"""
+
+
+def blockHooks(directory: Path) -> dict[str, str]:
+	hooks = directory / "hooks"
+	(hooks / "globalPlugins").mkdir(parents=True)
+	(hooks / "synthDrivers").symlink_to(harness.HERE / "synthDrivers")
+	(hooks / "globalPlugins" / "blockProbe.py").write_text(BLOCK_PLUGIN)
+	return {"BASEDREADER_TEST_HOOKS_DIR": str(hooks)}
+
+
+def test_blockedMainThreadLeavesTheNVDAKeysWorking(
+	desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path
+):
+	keys = KeySession(desktop, tmp_path, "desktop", env=blockHooks(tmp_path))
+	keyboard.press(keys.chord("shift+F11"))
+	desktop.nvda.waitForLog("Blocking the main thread", 5)
+	blocked = time.monotonic()
+	# The NVDA key's grabs are answered off the main thread, so they hold the keyboard no longer while
+	# it is blocked: the chord is NVDA's, and the letters after it reach the field at once.
+	mark = desktop.mark()
+	keyboard.press(keys.chord("t"))
+	keyboard.type("xy")
+	waitForEntry("xy", timeout=1)
+	assert time.monotonic() - blocked < 2.5, "the keys were not all typed while NVDA was blocked"
+	desktop.nvda.waitForLog("The main thread is free again", 5)
+	desktop.expect("Fixture window", since=mark)
+	keys.quit().assertClean(logNames=("nvda.log",))
+
+
+@pytest.mark.parametrize("chord", (False, True), ids=("nvdaKey", "chordAfterAPassedKey"))
+def test_stoppedNVDALetsTheKeyboardGo(
+	desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path, chord: bool
+):
+	keys = KeySession(desktop, tmp_path, "desktop")
+	launch = desktop.nvda
+	if chord:
+		# z has no command, so the field has it, and every key is grabbed while Insert is still held.
+		keyboard.down("Insert")
+		keyboard.press("z")
+		waitForEntry("z")
+		typed = "zxy"
+	else:
+		typed = "xy"
+	os.kill(launch.process.pid, signal.SIGSTOP)
+	try:
+		pressed = time.monotonic()
+		if chord:
+			# Held by the X server for NVDA's answer, with y behind it, until the guard lets them go.
+			keyboard.type("xy")
+		else:
+			# Insert held for NVDA's answer, with x and y behind it; the field gets all three, Insert
+			# turning on typing over.
+			keyboard.press("Insert")
+			keyboard.type("xy")
+		waitForEntry(typed, timeout=pressed + 3 - time.monotonic())
+	finally:
+		if chord:
+			keyboard.up("Insert")
+		os.kill(launch.process.pid, signal.SIGCONT)
+	launch.waitForLog("Keys are read from the X display again", 10)
+	time.sleep(0.5)
+	mark = desktop.mark()
+	keyboard.press(keys.chord("t"))
+	desktop.expect("Fixture window", since=mark)
+	time.sleep(0.3)
+	assert entryState()[0] == typed
 	keys.quit().assertClean(logNames=("nvda.log",))
 
 

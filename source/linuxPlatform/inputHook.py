@@ -278,8 +278,9 @@ def _onKey(event: KeyEvent) -> bool:
 	:return: True to pass the key on to the application, which matters only for a captured press.
 	"""
 	global _lastKeyDown, _capsLockBlockedWasOn
-	if event.captured and _isCoreStuck():
+	if event.captured and not event.nvdaKeyGrab and _isCoreStuck():
 		# Its command would run only once NVDA comes back, if ever; the application is better served.
+		# A chord with the NVDA key is NVDA's whatever, as on Windows, where it waits for NVDA too.
 		return True
 	if not event.isUp:
 		_lastKeyDown = event

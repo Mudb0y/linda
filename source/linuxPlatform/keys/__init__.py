@@ -2,10 +2,10 @@
 
 A key source watches the keyboard for the whole session and hands each press and release to
 linuxPlatform.inputHook, which gives it to keyboardHandler as the Windows keyboard hook would. The
-keys NVDA uses as the NVDA key and the numpad review keys are taken from the applications, so that a
-command reaches NVDA alone, and a key taken with them that NVDA passes is sent on; every other key
-reaches the application and NVDA both, and NVDA's scripts for it then read what the application did
-instead of sending the key on.
+keys NVDA uses as the NVDA key and the numpad review keys are taken from the applications, and every
+key pressed while one of them is held, so that a command reaches NVDA alone; a key taken so that NVDA
+passes reaches the application as it was typed. Every other key reaches the application and NVDA
+both, and NVDA's scripts for it then read what the application did instead of sending the key on.
 
 On a web page the keys browse mode uses, the arrows and the letters among them, and those focus mode
 uses, as Escape, are captured: the application gets such a key only when NVDA's answer for it says
@@ -52,6 +52,9 @@ class KeyEvent:
 	captured: bool = False
 	#: Whether Caps Lock was on before the key went down.
 	capsLockWasOn: bool = False
+	#: Whether the press is an NVDA key or numpad review key, or came while one was held: NVDA's
+	#: unless deliver passes it, however long NVDA's core takes to run its command.
+	nvdaKeyGrab: bool = False
 
 
 #: (modifier names as NVDA's gestures have them, virtual-key code, extended) of a gesture to capture.
@@ -66,8 +69,8 @@ class KeySource(Protocol):
 	) -> None:
 		"""Start watching the keyboard; deliver is called for each event, in order, on a thread of the
 		source's own, and returns True to pass the key on to the application, as the Windows hook's
-		callback does. Only a captured press waits for that answer, and not for long: a key with no
-		answer in time reaches the application.
+		callback does. Only a captured press waits for that answer, and not for long: with no answer in
+		time, a key of browse mode reaches the application, and one with the NVDA key stays NVDA's.
 
 		:param modeNow: Which keys NVDA captures at this moment, asked on that thread for each
 			captured press: one the mode does not capture goes to the application at once, and to

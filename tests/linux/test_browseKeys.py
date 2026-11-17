@@ -22,6 +22,7 @@ import harness
 import pytest
 import webSession
 from desktopSession import PREFIX_MARK, DesktopSession
+from test_keys import Keyboard
 
 #: Seconds from NVDA's start to the page's buffer being built.
 BUFFER_BOUND = 60.0
@@ -469,61 +470,91 @@ def test_bothNVDAKeysOnAPage(desktop: DesktopSession, tmp_path: Path, key: str):
 	), unexpected
 
 
-def tap(key: str) -> None:
-	"""Press and release key at once: xdotool's keys and those NVDA sends on come from one device, and
-	NVDA, sending on a key xdotool still held, would release it first and lose xdotool's release."""
-	subprocess.run(["xdotool", "key", "--delay", "0", key], check=True)
+@pytest.fixture
+def keyboard() -> Iterator[Keyboard]:
+	board = Keyboard()
+	yield board
+	board.close()
+
+
+def stepOn(keyboard: Keyboard, desktop: DesktopSession, chord: str, *expected: str) -> None:
+	"""step, with the chord typed on the rig's keyboard rather than by xdotool."""
+	mark = desktop.mark()
+	keyboard.press(chord)
+	expect(desktop, *expected, since=mark)
+	time.sleep(SETTLE)
 
 
 @pytest.mark.parametrize("key", ("Insert", "Caps_Lock"))
-def test_keysNVDAPassesReachThePage(desktop: DesktopSession, tmp_path: Path, key: str):
+def test_keysNVDAPassesReachThePage(desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path, key: str):
 	nvda, page = startPage(desktop, tmp_path)
-	step(desktop, "control+Home", "heading level 1 Keys page")
+	stepOn(keyboard, desktop, "control+Home", "heading level 1 Keys page")
 
 	# Passed through, a letter browse mode would take reaches the page instead.
-	step(desktop, f"{key}+F2", "Pass next key through")
-	tap("h")
+	stepOn(keyboard, desktop, f"{key}+F2", "Pass next key through")
+	keyboard.press("h")
 	page.waitForLog(["h"])
-	# A chord with the NVDA key that NVDA has no command for reaches the page without the NVDA key.
-	tap(f"{key}+z")
-	page.waitForLog(["h", "z"])
-	tap(f"{key}+control+y")
-	page.waitForLog(["h", "z", "Control+y"])
-	step(desktop, "Down", "Every key that reaches this page is written to the log at its end.")
+	# A chord with the NVDA key that NVDA has no command for reaches the page without the NVDA key;
+	# Caps Lock held is the Lock modifier to the X server, which the letter comes with.
+	z, y = ("z", "y") if key == "Insert" else ("Z", "Y")
+	keyboard.press(f"{key}+z")
+	page.waitForLog(["h", z])
+	keyboard.press(f"{key}+control+y")
+	page.waitForLog(["h", z, f"Control+{y}"])
+	stepOn(keyboard, desktop, "Down", "Every key that reaches this page is written to the log at its end.")
+	logged = page.log()
 
 	# The NVDA key twice reaches the page as itself.
 	if key == "Insert":
-		tap("Insert")
-		time.sleep(0.2)
-		tap("Insert")
-		page.waitForLog(["h", "z", "Control+y", "Insert"])
+		keyboard.press("Insert")
+		time.sleep(0.15)
+		keyboard.press("Insert")
+		logged.append("Insert")
+		page.waitForLog(logged)
 	else:
 		mark = desktop.mark()
-		tap("Caps_Lock")
-		time.sleep(0.2)
-		tap("Caps_Lock")
+		keyboard.press("Caps_Lock")
+		time.sleep(0.15)
+		keyboard.press("Caps_Lock")
 		expect(desktop, "caps lock on", since=mark)
 		assert desktopSession.capsLockIsOn()
-		tap("Caps_Lock")
-		time.sleep(0.2)
-		tap("Caps_Lock")
+		keyboard.press("Caps_Lock")
+		time.sleep(0.15)
+		keyboard.press("Caps_Lock")
 		expect(desktop, "caps lock on", "caps lock off", since=mark)
 		assert not desktopSession.capsLockIsOn()
-		page.waitForLog(["h", "z", "Control+y"])
-	logged = page.log()
+		time.sleep(SETTLE)
+		assert page.log() == logged
 
 	# In focus mode, Escape passed through stays with the page.
 	enterField(desktop, nvda)
-	step(desktop, f"{key}+F2", "Pass next key through")
+	stepOn(keyboard, desktop, f"{key}+F2", "Pass next key through")
 	mark = desktop.mark()
-	tap("Escape")
-	page.waitForLog([*logged, "Escape"])
+	keyboard.press("Escape")
+	logged.append("Escape")
+	page.waitForLog(logged)
 	time.sleep(SETTLE)
 	assert "Browse mode" not in desktop.spokenSince(mark)
-	step(desktop, "Escape", "Browse mode")
+	stepOn(keyboard, desktop, "Escape", "Browse mode")
 	waitForCapture(nvda, "browse")
-	assert page.log() == [*logged, "Escape"]
+	assert page.log() == logged
 	assert not desktopSession.capsLockIsOn()
+	quitNVDA(desktop, nvda)
+
+
+def test_keyUnderAHeldBrowseKeyIsDecidedByItself(desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path):
+	nvda, page = startPage(desktop, tmp_path)
+	stepOn(keyboard, desktop, "control+Home", "heading level 1 Keys page")
+	# h is NVDA's, and held; Control+L, pressed while it is, has no command in browse mode and reaches
+	# Firefox, which shows the page a shortcut it does not reserve before taking it.
+	mark = desktop.mark()
+	keyboard.down("h")
+	expect(desktop, "Field and link heading level 2", since=mark)
+	keyboard.press("control+l")
+	keyboard.up("h")
+	expect(desktop, "combo box Search with Google or enter address" + PREFIX_MARK, since=mark)
+	waitForCapture(nvda, "off")
+	assert page.log() == ["Control+l"]
 	quitNVDA(desktop, nvda)
 
 
