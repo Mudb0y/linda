@@ -350,8 +350,9 @@ class AtSpi(NVDAObject):
 			return Role.EDITABLETEXT
 		if raw == "label":
 			return Role.STATICTEXT
-		if raw == "filler":
-			# GTK's boxes: layout, and a container Dialog.getDialogText descends into.
+		if raw == "filler" or (raw == "viewport" and not self.atspiName):
+			# GTK's boxes and the viewport that scrolls a box: layout, and a container
+			# Dialog.getDialogText descends into.
 			return Role.PANEL
 		if raw == "panel":
 			toolkit = self.toolkit

@@ -45,7 +45,8 @@ ROLES: dict[str, Role] = {
 	"document text": Role.DOCUMENT,
 	"document web": Role.DOCUMENT,
 	"drawing area": Role.CANVAS,
-	"editbar": Role.EDITBAR,
+	# The calculator's display, an edit field Windows' calculator would show as text.
+	"editbar": Role.EDITABLETEXT,
 	"embedded": Role.EMBEDDEDOBJECT,
 	"entry": Role.EDITABLETEXT,
 	"file chooser": Role.FILECHOOSER,
