@@ -91,6 +91,15 @@ def openWelcomeDialog(desktop: DesktopSession) -> None:
 	step(desktop, "Return", WELCOME, DESKTOP_LAYOUT)
 
 
+def heardFromTheNewCopy(desktop: DesktopSession, mark: int, text: str) -> None:
+	"""Wait for text from the copy a restart started, which speaks into the first copy's transcript;
+	expect stops reading it once the first copy has exited."""
+	deadline = time.monotonic() + TAKEOVER_BOUND
+	while text not in desktop.spokenSince(mark):
+		assert time.monotonic() < deadline, f"the new copy did not say {text!r}\n{desktop.nvda.describe()}"
+		time.sleep(0.05)
+
+
 def assertExitedCleanly(nvda: harness.Launch, *logNames: str) -> None:
 	assert nvda.process.returncode == 0, nvda.describe()
 	nvda.assertClean(logNames=logNames or ("nvda.log",))
@@ -104,7 +113,7 @@ def test_addonStoreWarningClosesAndTheStoreIsReadAndCloses(desktop: DesktopSessi
 	step(desktop, "Insert+q", REFUSED)
 	# Enter on its check box presses OK, as on Windows.
 	step(desktop, "Return", STORE)
-	step(desktop, "control+Tab", "… tab selected 4 of 4")
+	step(desktop, "control+Tab", "Installed incompatible add-ons tab selected 4 of 4")
 	step(desktop, "Escape", *AT_START)
 
 	mark = openAddonStore(desktop, WARNING, WARNING_CHECK_BOX)
@@ -132,8 +141,10 @@ def test_exitDialogOverAModalDialogRestartsNVDA(desktop: DesktopSession):
 	desktop.press("Return")
 	assert nvda.waitForExit(EXIT_BOUND) == 0, nvda.describe()
 	# The new copy speaks into the same transcript.
-	desktop.expect("Fixture window", since=mark, timeout=TAKEOVER_BOUND)
-	step(desktop, "Insert+t", "Fixture window")
+	heardFromTheNewCopy(desktop, mark, "Fixture window")
+	mark = desktop.mark()
+	desktop.press("Insert+t")
+	heardFromTheNewCopy(desktop, mark, "Fixture window")
 	saved = (nvda.directory / "config" / "nvda.ini").read_text(encoding="utf-8")
 	assert "keyboardLayout" not in saved, saved
 	harness.stopRunningCopy()
