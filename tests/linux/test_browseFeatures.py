@@ -420,6 +420,21 @@ class TestSemantics:
 		stepSaying(semantics, "Tab", "Size grouping")
 		step(semantics, "Escape", "Browse mode")
 
+	def test_radioButtons(self, semantics: Session):
+		"""Enter checks a radio button and says so once; in focus mode the arrows say each button's
+		place in its group, and the label holding it is not said before it."""
+		desktop = semantics.desktop
+		stepSaying(semantics, "Control_L+Home", "Semantics")
+		step(semantics, "r", "Size grouping clickable Small radio button not checked")
+		mark = step(semantics, "Return", "checked")
+		time.sleep(SETTLE)
+		assert desktop.spokenSince(mark) == ["checked"], desktop.spokenSince(mark)
+		step(semantics, "Insert+space", "Focus mode")
+		mark = step(semantics, "Down", "Large radio button checked 2 of 2")
+		assert desktop.spokenSince(mark) == ["Large radio button checked 2 of 2"], desktop.spokenSince(mark)
+		step(semantics, "Tab", "Details button button")
+		step(semantics, "Insert+space", "Browse mode")
+
 
 class TestElementsList:
 	"""NVDA+F7 lists the page's links, headings, form fields, buttons and landmarks in NVDA's own
