@@ -6,6 +6,7 @@ terminal.py [title]
 The shell's prompt is "$ ". Its functions run the other terminal fixtures by short names, so that a
 test types little:
 	menu    runs terminalMenu.py, a full-screen list in curses
+	ai      runs terminalAssistant.py, an imitation of a coding assistant, with its arguments
 	secret  asks for a password that is not shown, then says how long it was
 	lines N prints N numbered lines
 """
@@ -21,6 +22,7 @@ TITLE = "Terminal fixture"
 PROMPT = "$ "
 FUNCTIONS = {
 	"menu": f"'{sys.executable}' '{HERE / 'terminalMenu.py'}'",
+	"ai": f"'{sys.executable}' '{HERE / 'terminalAssistant.py'}' \"$@\"",
 	"secret": "read -r -s -p 'Password: ' p; echo; echo \"${#p} characters\"",
 	"lines": "seq -f 'line %g' \"$1\"",
 }
