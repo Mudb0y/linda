@@ -29,7 +29,9 @@ from desktopSession import DesktopSession
 from test_browseUsable import (
 	EXIT_BOUND,
 	FREEZE_MARKS,
+	LARGE_FIRST_LINE_BOUND,
 	LARGE_LAST_LINE,
+	LARGE_NAME_BOUND,
 	LARGE_TITLE,
 	SAY_ALL_BOUND,
 	SETTLE,
@@ -44,10 +46,9 @@ from test_browseUsable import (
 
 #: The address bar's name, which its focus announcement holds.
 ADDRESS_BAR = "Address and search bar"
-#: Seconds from Return in the address bar to the large page's first line; Chromium builds its
-#: accessibility tree for the page only once the page has loaded.
-LARGE_FIRST_LINE_BOUND = 8.0
-#: Seconds after Return by which the whole large page is in the buffer.
+#: Seconds after Return by which the whole large page is in the buffer. Chromium exposes a large page
+#: as it parses it, so most of it comes as a change after the first render, which the engine then
+#: walks for some 15 s.
 LARGE_COMPLETE_DELAY = 25.0
 #: What NVDA logs when it switched the accessibility status on, and off again.
 STATUS_ON = "Accessibility status: switched IsEnabled on"
@@ -251,18 +252,21 @@ class TestChromium:
 		mark = session.desktop.mark()
 		session.desktop.press("Return", gap=0)
 		returned = time.monotonic()
-		waitForRecord(
+		name = waitForRecord(
 			session,
 			lambda spoken: spoken.startswith(LARGE_TITLE),
 			since=mark,
-			timeout=LARGE_FIRST_LINE_BOUND,
+			timeout=STEP_BOUND,
 			what="the page's name",
+		)
+		assert name["t"] - returned <= LARGE_NAME_BOUND, (
+			f"the page's name came {name['t'] - returned:.2f} s after Return"
 		)
 		firstLine = waitForRecord(
 			session,
 			lambda spoken: "Section 0" in spoken,
 			since=mark,
-			timeout=LARGE_FIRST_LINE_BOUND,
+			timeout=STEP_BOUND,
 			what="the page's first line",
 		)
 		assert firstLine["t"] - returned <= LARGE_FIRST_LINE_BOUND, (
