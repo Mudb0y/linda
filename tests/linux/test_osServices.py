@@ -42,7 +42,7 @@ def startCore():
 
 #: The rig's environment holds LANG=C.UTF-8 and no other locale variable. A test that gives a child
 #: its own locale clears all of them first, so that only the variables it names decide.
-NO_LOCALE = {name: "" for name in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LC_MEASUREMENT", "LANG")}
+NO_LOCALE = {name: "" for name in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LC_MEASUREMENT", "LC_TIME", "LANG")}
 
 
 def run(tmpPath: Path, body: str, env: dict[str, str] | None = None) -> harness.ChildResult:
@@ -1049,6 +1049,97 @@ def test_measurementSystemFollowsTheMeasurementLocale(tmp_path):
 	)
 	done.assertClean()
 	assert done.value == [[env, imperial] for env, imperial in cases]
+
+
+#: Asks winKernel for a time without seconds, the same with them, and a long date, for a fixed
+#: moment, under each environment in the name cases, after NVDA has set the process's locale to Polish.
+TIME_AND_DATE = """
+import datetime
+import time
+
+import languageHandler
+import winKernel
+
+# NVDA sets the process's locale to its interface language; the user's clock must not follow it.
+languageHandler.setLocale("pl")
+when = datetime.datetime(2026, 11, 17, 17, 3, 9)
+result = {"cases": []}
+for env in cases:
+	for name in ("LC_ALL", "LC_TIME", "LANG"):
+		os.environ.pop(name, None)
+	os.environ.update(env)
+	result["cases"].append(
+		[
+			winKernel.GetTimeFormatEx(winKernel.LOCALE_NAME_USER_DEFAULT, winKernel.TIME_NOSECONDS, when, None),
+			winKernel.GetTimeFormatEx(winKernel.LOCALE_NAME_USER_DEFAULT, None, when, None),
+			winKernel.GetDateFormatEx(winKernel.LOCALE_NAME_USER_DEFAULT, winKernel.DATE_LONGDATE, when, None),
+		],
+	)
+"""
+
+
+def test_timeAndDateFollowTheTimeLocale(tmp_path):
+	# Each case: the environment, then the time without seconds, the time with them and the long date.
+	cases = [
+		({"LANG": "en_GB.UTF-8"}, ["17:03", "17:03:09", "Tuesday, 17 November 2026"]),
+		({"LANG": "en_US.UTF-8"}, ["5:03 PM", "5:03:09 PM", "Tuesday, November 17, 2026"]),
+		({"LANG": "pl_PL.UTF-8"}, ["17:03", "17:03:09", "wtorek, 17 listopada 2026"]),
+		(
+			{"LANG": "en_US.UTF-8", "LC_TIME": "pl_PL.UTF-8"},
+			["17:03", "17:03:09", "wtorek, 17 listopada 2026"],
+		),
+		(
+			{"LC_ALL": "en_GB.UTF-8", "LC_TIME": "en_US.UTF-8"},
+			["17:03", "17:03:09", "Tuesday, 17 November 2026"],
+		),
+		# The C locale names no language, and ICU writes for it as for American English.
+		({}, ["5:03 PM", "5:03:09 PM", "Tuesday, November 17, 2026"]),
+	]
+	done = run(
+		tmp_path,
+		f"cases = {[env for env, _written in cases]!r}"
+		+ TIME_AND_DATE
+		+ """
+os.environ["LANG"] = "en_GB.UTF-8"
+
+
+def now():
+	return time.strftime("%H:%M")
+
+
+# The time on the clock when none is given: the minute may turn between the two readings.
+before = now()
+result["now"] = winKernel.GetTimeFormatEx(None, winKernel.TIME_NOSECONDS, None, None) in (before, now())
+result["shortDate"] = winKernel.GetDateFormatEx(None, 0, when, None)
+result["named"] = winKernel.GetDateFormatEx("pl-PL", winKernel.DATE_LONGDATE, when, None)
+try:
+	winKernel.GetDateFormatEx(None, 0, when, "yyyy")
+except NotImplementedError as e:
+	result["picture"] = type(e).__name__
+""",
+		env=NO_LOCALE,
+	)
+	done.assertClean(ignoring={"noLinuxImplementation"})
+	value = done.value
+	assert value["cases"] == [written for _env, written in cases]
+	assert value["now"] is True
+	assert value["shortDate"] == "17/11/2026"
+	assert value["named"] == "wtorek, 17 listopada 2026"
+	# Windows' format pictures are read by nothing that runs on Linux.
+	assert value["picture"] == "NoLinuxImplementation"
+	assert done.noLinuxImplementation == ["winKernel.GetDateFormatEx with a format picture"]
+
+
+def test_timeAndDateWithoutIcuAreTheCLibrarys(tmp_path):
+	done = run(
+		tmp_path,
+		"cases = [{'LANG': 'en_GB.UTF-8'}, {'LANG': 'en_GB.UTF-8'}]" + TIME_AND_DATE,
+		env={**NO_LOCALE, "BASEDREADER_ICU_LIB_DIR": "", "BASEDREADER_ICU_VERSION_MAJOR": ""},
+	)
+	done.assertClean()
+	# In the language NVDA set the process's locale to, which is all the C library can write in.
+	assert done.value["cases"] == [["17:03", "17:03:09", "wtorek 17.11.2026"]] * 2
+	assert len(warnings(done, "dates and times")) == 1, done.logRecords
 
 
 def test_localeHelpersAnswerInEnglishFromIcu(tmp_path):

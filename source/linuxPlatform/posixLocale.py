@@ -3,10 +3,13 @@
 NVDA's languageHandler asks Windows these questions; on Linux this module answers them.
 """
 
+import calendar
 import ctypes
+import datetime
 import functools
 import locale
 import os
+import time
 from collections.abc import Callable, Collection
 
 from logHandler import log
@@ -23,6 +26,13 @@ _IMPERIAL = 2
 _ICU_DISPLAY_CONTEXTS = (0x103, 0x301)
 #: ICU's ULOC_FULLNAME_CAPACITY, the longest locale ID it writes, with room for the NUL.
 _ICU_LOCALE_ID_CAPACITY = 157
+#: ICU's UDateFormatStyle: how fully a date or a time is written, or that it is left out.
+_ICU_FULL = 0
+_ICU_MEDIUM = 2
+_ICU_SHORT = 3
+_ICU_NONE = -1
+#: ICU's locale for the C and POSIX locales, which name no language.
+_ICU_POSIX_LOCALE = "en_US_POSIX"
 
 
 def _nvdaName(posixName: str) -> str | None:
@@ -38,6 +48,11 @@ def _nvdaName(posixName: str) -> str | None:
 def _messagesLocale() -> str:
 	"""The environment's locale for messages, by glibc's precedence."""
 	return next((value for name in ("LC_ALL", "LC_MESSAGES", "LANG") if (value := os.environ.get(name))), "")
+
+
+def _timeLocale() -> str:
+	"""The environment's locale for dates and times, by glibc's precedence."""
+	return next((value for name in ("LC_ALL", "LC_TIME", "LANG") if (value := os.environ.get(name))), "")
 
 
 def messagesLanguages() -> list[str]:
@@ -287,3 +302,151 @@ def languageDescription(code: str) -> str | None:
 		return description
 	displayLocale = next(iter(messagesLanguages()), "en")
 	return _icuName("localeDisplayName", code, displayLocale)
+
+
+class _IcuDates:
+	"""The ICU functions that write dates and times."""
+
+	def __init__(self, bind: Callable[..., Callable[..., int]]) -> None:
+		""":param bind: winBindings.icu.bindFormattingFunction."""
+		status = ctypes.POINTER(ctypes.c_int)
+		# (timeStyle, dateStyle, locale, zone, zoneLength, pattern, patternLength, status) -> a format.
+		self.dateFormatOpen = bind(
+			"udat_open",
+			ctypes.c_void_p,
+			ctypes.c_int,
+			ctypes.c_int,
+			ctypes.c_char_p,
+			utf16.Utf16Pointer,
+			ctypes.c_int32,
+			utf16.Utf16Pointer,
+			ctypes.c_int32,
+			status,
+		)
+		# (format, milliseconds since 1970, buffer, capacity, position, status) -> length.
+		self.dateFormat = bind(
+			"udat_format",
+			ctypes.c_int32,
+			ctypes.c_void_p,
+			ctypes.c_double,
+			utf16.Utf16Pointer,
+			ctypes.c_int32,
+			ctypes.c_void_p,
+			status,
+		)
+		self.dateFormatClose = bind("udat_close", None, ctypes.c_void_p)
+
+
+@functools.cache
+def _icuDates() -> _IcuDates | None:
+	"""ICU's date and time functions, or None when they are not available, which is said once."""
+	from winBindings import icu
+
+	if not icu.ICU_AVAILABLE:
+		log.warning(
+			f"ICU is not available, so dates and times are written as the C library writes them;"
+			f" {icu.LIB_DIR_VARIABLE} and {icu.VERSION_MAJOR_VARIABLE} name the library",
+		)
+		return None
+	try:
+		return _IcuDates(icu.bindFormattingFunction)
+	except (OSError, AttributeError):
+		log.warning(
+			"ICU cannot write dates and times, so they are written as the C library writes them",
+			exc_info=True,
+		)
+		return None
+
+
+def _icuDateTime(when: time.struct_time, timeStyle: int, dateStyle: int, localeName: str) -> str | None:
+	"""when as ICU writes it for a locale, or None when ICU is not available or cannot."""
+	icu = _icuDates()
+	if icu is None:
+		return None
+	# when is the time on the user's clock. ICU is told it is UTC, so that it writes those hours without
+	# finding the user's time zone itself, which it does from the name of the file /etc/localtime links to.
+	zone = utf16.Utf16Buffer("UTC")
+	status = ctypes.c_int(0)
+	formatter = icu.dateFormatOpen(
+		timeStyle,
+		dateStyle,
+		localeName.encode(),
+		zone,
+		-1,
+		None,
+		0,
+		ctypes.byref(status),
+	)
+	if status.value > 0 or not formatter:
+		log.debugWarning(f"ICU cannot write dates for {localeName}: error {status.value}")
+		return None
+	try:
+		milliseconds = calendar.timegm(when) * 1000.0
+		size = 128
+		while True:
+			buffer = (ctypes.c_uint16 * size)()
+			status = ctypes.c_int(0)
+			length = icu.dateFormat(formatter, milliseconds, buffer, size, None, ctypes.byref(status))
+			if length <= size or status.value <= 0:
+				break
+			size = length
+	finally:
+		icu.dateFormatClose(formatter)
+	if status.value > 0 or length <= 0:
+		log.debugWarning(f"ICU cannot write a date for {localeName}: error {status.value}")
+		return None
+	text = memoryview(buffer)[:length].tobytes().decode(utf16.ENCODING)
+	# CLDR puts a narrow no-break space before AM and PM, which synthesizers and braille tables need not know.
+	return text.replace("\u202f", " ").replace("\xa0", " ")
+
+
+def _writeDateTime(
+	windowsLocale: str | None,
+	when: datetime.datetime | None,
+	timeStyle: int,
+	dateStyle: int,
+	fallbackFormat: str,
+) -> str:
+	name = _nvdaName(_timeLocale() if windowsLocale is None else windowsLocale) or _ICU_POSIX_LOCALE
+	fields = time.localtime() if when is None else when.timetuple()
+	text = _icuDateTime(fields, timeStyle, dateStyle, name)
+	if text is None:
+		# Without ICU, as the C library writes it for NVDA's interface language.
+		text = time.strftime(fallbackFormat, fields)
+	return text
+
+
+def formatTime(
+	windowsLocale: str | None,
+	when: datetime.datetime | None,
+	picture: str | None,
+	seconds: bool,
+) -> str:
+	"""A time of day as the user's locale for dates and times writes it, for winKernel.GetTimeFormatEx.
+
+	:param windowsLocale: A locale name such as "pl-PL", or None for the user's own, which is read from
+		the environment rather than from the process's locale, which NVDA sets to its interface language.
+	:param when: A time on the user's clock, or None for now.
+	:param picture: A Windows format picture, which nothing on Linux reads.
+	"""
+	if picture is not None:
+		raise NoLinuxImplementation("winKernel.GetTimeFormatEx with a format picture")
+	if seconds:
+		return _writeDateTime(windowsLocale, when, _ICU_MEDIUM, _ICU_NONE, "%X")
+	return _writeDateTime(windowsLocale, when, _ICU_SHORT, _ICU_NONE, "%H:%M")
+
+
+def formatDate(
+	windowsLocale: str | None,
+	when: datetime.datetime | None,
+	picture: str | None,
+	long: bool,
+) -> str:
+	"""A date as the user's locale for dates and times writes it, for winKernel.GetDateFormatEx: in
+	full, with the day of the week and the month by name, when long, and in figures otherwise. The
+	parameters are formatTime's."""
+	if picture is not None:
+		raise NoLinuxImplementation("winKernel.GetDateFormatEx with a format picture")
+	if long:
+		return _writeDateTime(windowsLocale, when, _ICU_NONE, _ICU_FULL, "%A %x")
+	return _writeDateTime(windowsLocale, when, _ICU_NONE, _ICU_SHORT, "%x")

@@ -13,6 +13,7 @@ When working on this file, consider moving to winAPI.
 import contextlib  # noqa: I001
 import ctypes
 import ctypes.wintypes
+import sys
 from ctypes import byref, sizeof, Structure, WinError
 from ctypes.wintypes import BOOL, DWORD, HANDLE, LARGE_INTEGER, LCID, LPVOID
 from typing import (
@@ -309,6 +310,10 @@ def SystemTimeToTzSpecificLocalTime(
 
 
 def GetDateFormatEx(Locale, dwFlags, date, lpFormat):
+	if sys.platform != "win32":
+		from linuxPlatform import posixLocale
+
+		return posixLocale.formatDate(Locale, date, lpFormat, long=bool((dwFlags or 0) & DATE_LONGDATE))
 	if date is not None:
 		date = _SYSTEMTIME(date.year, date.month, 0, date.day, date.hour, date.minute, date.second, 0)
 		lpDate = byref(date)
@@ -323,6 +328,10 @@ def GetDateFormatEx(Locale, dwFlags, date, lpFormat):
 def GetTimeFormatEx(Locale, dwFlags, date, lpFormat):
 	if dwFlags is None:
 		dwFlags = 0
+	if sys.platform != "win32":
+		from linuxPlatform import posixLocale
+
+		return posixLocale.formatTime(Locale, date, lpFormat, seconds=not dwFlags & TIME_NOSECONDS)
 	if date is not None:
 		date = _SYSTEMTIME(date.year, date.month, 0, date.day, date.hour, date.minute, date.second, 0)
 		lpTime = byref(date)

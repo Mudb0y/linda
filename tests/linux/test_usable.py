@@ -9,6 +9,7 @@ Without BASEDREADER_RIG_WM=marco, DesktopSession starts marco itself. The transc
 synthesizer is given, after symbols are spoken as words, so "Alt+P" is "Alt plus P".
 """
 
+import re
 import subprocess
 import time
 from collections.abc import Iterator
@@ -140,6 +141,29 @@ def test_usableSession(desktop: DesktopSession):
 	step(desktop, "Insert+q", "Exit NVDA…")
 	desktop.press("Return")
 	nvda.waitForExit(EXIT_BOUND)
+	assertExitedCleanly(nvda)
+
+
+def test_dateTimeKeySaysTheTimeAndTwiceTheDate(desktop: DesktopSession):
+	nvda = startSession(desktop, GTK)
+	desktop.expect(
+		"Fixture window", "Press me button Does nothing Alt plus P", since=0, timeout=STARTUP_BOUND
+	)
+	mark = desktop.mark()
+	desktop.press("Insert+F12")
+	time.sleep(SETTLE * 2)
+	spoken = desktop.spokenSince(mark)
+	# The rig's locale is C, whose time is written as American English writes it.
+	assert len(spoken) == 1 and re.fullmatch(r"\d{1,2}:\d\d [AP]M", spoken[0]), spoken
+	mark = desktop.mark()
+	desktop.press("Insert+F12", "Insert+F12", gap=0.1)
+	time.sleep(SETTLE * 2)
+	spoken = desktop.spokenSince(mark)
+	# Midnight may fall between the key and this line.
+	years = {time.strftime("%Y"), time.strftime("%Y", time.localtime(time.time() - 60))}
+	assert len(spoken) == 2 and re.fullmatch(r"\w+day, \w+ \d{1,2}, \d{4}", spoken[1]), spoken
+	assert spoken[1][-4:] in years, spoken
+	desktop.close()
 	assertExitedCleanly(nvda)
 
 

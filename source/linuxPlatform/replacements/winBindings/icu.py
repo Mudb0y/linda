@@ -11,6 +11,7 @@ Reaching for one that is not defined, or for any other name this module lacks, r
 linuxPlatform.NoLinuxAttribute naming it, which is both NoLinuxImplementation and AttributeError.
 """
 
+import functools
 import os
 from collections.abc import Callable
 from ctypes import CDLL, POINTER, c_char_p, c_int32, c_void_p
@@ -77,6 +78,13 @@ def __getattr__(name: str) -> NoReturn:
 	)
 
 
+def _bind(library: CDLL, name: str, restype: type | None, argtypes: tuple[type, ...]) -> Callable[..., Any]:
+	function = library[f"{name}_{_versionMajor}"]
+	function.restype = restype
+	function.argtypes = argtypes
+	return function
+
+
 def bindFunction(name: str, restype: type | None, *argtypes: type) -> Callable[..., Any]:
 	"""A function of the loaded libicuuc by its C name without the version suffix, typed as given.
 
@@ -85,10 +93,22 @@ def bindFunction(name: str, restype: type | None, *argtypes: type) -> Callable[.
 
 	:raises AttributeError: If the library has no such function.
 	"""
-	function = dll[f"{name}_{_versionMajor}"]
-	function.restype = restype
-	function.argtypes = argtypes
-	return function
+	return _bind(dll, name, restype, argtypes)
+
+
+@functools.cache
+def _formattingLibrary() -> CDLL:
+	return CDLL(os.path.join(os.environ[LIB_DIR_VARIABLE], f"libicui18n.so.{_versionMajor}"))
+
+
+def bindFormattingFunction(name: str, restype: type | None, *argtypes: type) -> Callable[..., Any]:
+	"""As bindFunction, for a function of libicui18n, where ICU keeps what writes dates and numbers.
+	That library is loaded from beside libicuuc when the first function is asked for.
+
+	:raises OSError: If the library does not load.
+	:raises AttributeError: If the library has no such function.
+	"""
+	return _bind(_formattingLibrary(), name, restype, argtypes)
 
 
 if ICU_AVAILABLE:

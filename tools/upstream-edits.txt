@@ -480,6 +480,11 @@ source/winInputHook.py
   Linux runtime: initialize and terminate go to linuxPlatform.inputHook,
   which installs no hook; its deliverKey and deliverMouse hand events to
   the callbacks set here, as the hook procedures do on Windows
+source/winKernel.py
+  Linux runtime: GetTimeFormatEx and GetDateFormatEx go to
+  linuxPlatform.posixLocale, which has ICU write the time and the date for
+  the locale the environment names for dates and times. Through them works
+  the date and time command, NVDA+F12
 source/winUser.py
   Linux runtime: getKeyState, keybd_event and getKeyNameText go to
   linuxPlatform.inputHook, which answers from the X key source and sends
