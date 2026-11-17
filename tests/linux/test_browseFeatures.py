@@ -405,14 +405,18 @@ class TestSemantics:
 		stepSaying(semantics, "b", "Details button button has details")
 
 	def test_focusMode(self, semantics: Session):
-		"""On focus an invalid field says its error message, and a fieldset is a grouping."""
+		"""On focus an invalid field says its error message, an empty one its placeholder, and a
+		fieldset is a grouping."""
 		stepSaying(semantics, "Control_L+Home", "Semantics")
 		step(semantics, "e", "Email…")
 		step(
 			semantics,
 			"Return",
 			"Focus mode",
-			"Email edit required invalid entry has auto complete Enter a full address blank",
+			(
+				"Email edit required invalid entry has auto complete Enter a full address "
+				"you at example dot com blank"
+			),
 		)
 		step(semantics, "Escape", "Browse mode")
 		for _ in range(3):
@@ -459,3 +463,4 @@ class TestElementsList:
 		time.sleep(SETTLE)
 		stepSaying(semantics, "Shift+Tab", "Page two 1 of 1 level 1")
 		stepSaying(semantics, "Return", "Page two link")
+

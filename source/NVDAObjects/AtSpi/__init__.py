@@ -619,6 +619,11 @@ class AtSpi(NVDAObject):
 			return str(int(current)) if current == int(current) else f"{current:g}"
 		return None
 
+	def _get_placeholder(self) -> str | None:
+		"""The hint an empty field shows, which NVDA says on focus in place of its text: Firefox gives a
+		page's placeholder as an object attribute, as IAccessible2 gives it on Windows."""
+		return self.atspiAttributes.get("placeholder-text") or None
+
 	def _get_errorMessage(self) -> str | None:
 		"""The text of what the page names as the error message of a field, as IA2's error relation gives
 		it on Windows."""
