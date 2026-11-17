@@ -1,13 +1,14 @@
 """NVDA's virtual buffer storage, compiled for Linux, behind the VBuf_* names NVDAHelper.localLib has.
 
 The library is upstream's nvdaHelper/vbufBase/storage.cpp with a C entry point per VBuf_* function and
-two for filling it from a render stream, which the engine's renderer writes (linuxPlatform.vbufEngine).
+two for filling it from render streams, which the engine's renderer writes (linuxPlatform.vbufEngine):
+one builds a buffer, the other applies an update batch to it.
 It is found through BASEDREADER_VBUF_LIB, never on the library path. Text crosses its interface as
 UTF-16 code units, so buffer offsets are the code units NVDA counts on Windows.
 
 Each function takes Python arguments as upstream's ctypes bindings do, so virtualBuffers/__init__.py
 calls them unchanged; the library takes the buffer's lock in each, and ctypes releases the GIL around
-each call.
+each call. A handle that is not a live buffer, or a node that is not in it, gets 0, as a failed call.
 """
 
 import ctypes
@@ -50,7 +51,7 @@ def _bind(dll: ctypes.CDLL) -> None:
 		"VBufLinux_create": (c_void_p, ()),
 		"VBufLinux_destroy": (None, (c_void_p,)),
 		"VBufLinux_build": (c_int, (c_void_p, c_void_p, c_size_t)),
-		"VBufLinux_replaceSubtree": (c_int, (c_void_p, c_int, c_int, c_void_p, c_size_t)),
+		"VBufLinux_update": (c_int, (c_void_p, c_void_p, c_size_t)),
 		"VBufLinux_free": (None, (c_void_p,)),
 		"VBuf_getFieldNodeOffsets": (c_int, (c_void_p, c_uint64, pInt, pInt)),
 		"VBuf_isFieldNodeAtOffset": (c_int, (c_void_p, c_uint64, c_int)),
@@ -93,7 +94,7 @@ def create() -> int:
 def build(handle: int, stream: "Stream") -> None:
 	"""Fill the empty buffer handle from the render stream, which stays the caller's.
 
-	:raise ValueError: The stream is malformed; the buffer holds what was built before the fault.
+	:raise ValueError: The stream is malformed, or the buffer was not empty; it is left empty.
 	"""
 	if not lib().VBufLinux_build(handle, stream.pointer, stream.length):
 		raise ValueError("malformed render stream")
@@ -103,9 +104,16 @@ def destroy(handle: int) -> None:
 	lib().VBufLinux_destroy(handle)
 
 
-def replaceSubtree(handle: int, docHandle: int, ID: int, stream: "Stream") -> bool:
-	"""Replace the control field docHandle, ID with the stream, which renders it anew."""
-	return bool(lib().VBufLinux_replaceSubtree(handle, docHandle, ID, stream.pointer, stream.length))
+def update(handle: int, stream: "Stream") -> bool:
+	"""Apply the update batch in stream, which stays the caller's, to the buffer handle.
+
+	Every field a batch replaces goes in one step, and the caret stays where it was relative to the
+	deepest of its fields that is still there.
+
+	:return: Whether everything was applied. A malformed batch changes nothing; a batch that names a
+		field the buffer no longer has applies the rest.
+	"""
+	return bool(lib().VBufLinux_update(handle, stream.pointer, stream.length))
 
 
 def VBuf_destroyBuffer(handleRef) -> None:
