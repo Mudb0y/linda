@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/mirror", "crates/bench", "crates/pwsink", "crates/pwsink/core"]
+members = ["crates/mirror", "crates/bench", "crates/pwsink", "crates/pwsink/core", "crates/vbufengine"]
 
 [workspace.package]
 version = "0.1.0"

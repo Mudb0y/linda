@@ -2,7 +2,9 @@
 
 Upstream binds nvdaHelperLocal.dll. This has the entry points that code staying on Linux names.
 The beep generator and the three text boundary functions are implemented here, with upstream's
-calling convention, so their callers work unchanged; the others raise NoLinuxImplementation.
+calling convention, so their callers work unchanged; so are the virtual buffer functions, from
+linuxPlatform.vbufLib, when BASEDREADER_VBUF_LIB names the library. The others raise
+NoLinuxImplementation.
 Entry points that only Windows-only modules call (in-process helpers for Office, SysListView32,
 IAccessible2 and UI Automation) are left out, and reaching for one, or for any other name upstream's
 module has and this one lacks, raises linuxPlatform.NoLinuxAttribute naming it: audited as
@@ -51,6 +53,18 @@ VBuf_getTextLength = _notImplemented("VBuf_getTextLength")
 VBuf_locateControlFieldNodeAtOffset = _notImplemented("VBuf_locateControlFieldNodeAtOffset")
 VBuf_locateTextFieldNodeAtOffset = _notImplemented("VBuf_locateTextFieldNodeAtOffset")
 VBuf_setSelectionOffsets = _notImplemented("VBuf_setSelectionOffsets")
+
+
+def _bindVirtualBuffers() -> None:
+	"""NVDA's buffer storage, compiled for Linux, when the dev shell or the package names it.
+	VBuf_createBuffer stays unimplemented: a Linux buffer is built from the engine's render stream."""
+	from linuxPlatform import vbufLib
+
+	if vbufLib.isAvailable():
+		globals().update(vbufLib.entryPoints())
+
+
+_bindVirtualBuffers()
 
 displayModel_getCaretRect = _notImplemented("displayModel_getCaretRect")
 displayModel_getFocusRect = _notImplemented("displayModel_getFocusRect")

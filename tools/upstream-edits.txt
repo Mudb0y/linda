@@ -479,3 +479,7 @@ tests/unit/__init__.py
   Windows, and on Linux NVDAHelper.localLib stays the Linux replacement; the
   configuration directory is a temporary one, holding a copy of the test
   braille tables, so that nothing is written under tests/unit
+source/virtualBuffers/atspi.py
+  Linux runtime: added. Browse mode for web documents read over AT-SPI,
+  held in NVDA's own buffer storage compiled for Linux and filled by the
+  engine's renderer, which only NVDAObjects.AtSpi chooses

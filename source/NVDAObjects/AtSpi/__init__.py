@@ -858,7 +858,15 @@ class AtSpi(NVDAObject):
 			pass
 
 	def scrollIntoView(self) -> None:
-		raise NotImplementedError
+		# Browse mode scrolls on every caret move; an object without Component simply stays put.
+		if "Component" not in self.atspiInterfaces:
+			return
+		from linuxPlatform.atspi import accessibleFor
+
+		try:
+			accessibleFor.scrollTo(self.node)
+		except NodeGone:
+			pass
 
 	def _get_actionCount(self) -> int:
 		if "Action" not in self.atspiInterfaces:
@@ -911,6 +919,15 @@ class AtSpi(NVDAObject):
 		):
 			return AtspiTextInfo
 		return super().TextInfo
+
+	def _get_treeInterceptorClass(self):
+		if self.role == Role.DOCUMENT:
+			from virtualBuffers.atspi import treeInterceptorClassFor
+
+			cls = treeInterceptorClassFor(self)
+			if cls is not None:
+				return cls
+		return super().treeInterceptorClass
 
 	def findStatusBar(self) -> "AtSpi | None":
 		"""The first status bar inside this object, usually a top-level window, found by its role."""

@@ -84,6 +84,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "basedreader-vbufengine"
+version = "0.1.0"
+dependencies = [
+ "basedreader-mirror",
+ "futures-util",
+ "serde_json",
+ "zbus",
+]
+
+[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
