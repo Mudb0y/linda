@@ -127,6 +127,9 @@ if sys.platform != "win32":
 		the focus until it moves."""
 
 		def _get_name(self):
+			name = super().name
+			if name:
+				return name
 			obj = self.parent
 			for _level in range(2):
 				if obj is None:
@@ -138,6 +141,16 @@ if sys.platform != "win32":
 
 		def _get_value(self):
 			return ownGui.focusedListItemText()
+
+	class NvdaGtkWxListItem(NVDAObject):
+		"""An item of a wx list control, which wxGTK reports focused a moment before it reports it
+		selected, so that it would be read as not selected. NVDA's own lists select the item they focus."""
+
+		def _get_states(self):
+			states = super().states
+			if controlTypes.State.FOCUSED in states:
+				states = states | {controlTypes.State.SELECTED}
+			return states
 
 	class NvdaGtkGroupingLabel(NVDAObject):
 		"""The label GTK keeps inside a group box, which Windows does not have as an object of its own and
@@ -378,15 +391,13 @@ class AppModule(appModuleHandler.AppModule):
 				TableCell in clsList
 				and getattr(obj, "atspiRole", None) == "table cell"
 				and not obj.name
-				and {controlTypes.State.CHECKABLE, controlTypes.State.CHECKED} & obj.states
+				and ownGui.focusIsCheckList()
 			):
 				clsList.insert(0, NvdaGtkCheckListItem)
-			elif (
-				obj.role == controlTypes.Role.LIST
-				and getattr(obj, "atspiRole", None) == "list"
-				and not obj.name
-			):
+			elif obj.role == controlTypes.Role.LIST and getattr(obj, "atspiRole", None) == "list":
 				clsList.insert(0, NvdaGtkWxList)
+			elif obj.role == controlTypes.Role.LISTITEM and getattr(obj, "atspiRole", None) == "list item":
+				clsList.insert(0, NvdaGtkWxListItem)
 			elif obj.role == controlTypes.Role.STATICTEXT and getattr(obj, "atspiRole", None) == "label":
 				parent = obj.parent
 				if (

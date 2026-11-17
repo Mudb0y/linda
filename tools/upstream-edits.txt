@@ -104,8 +104,9 @@ source/appModules/nvda.py
   NvdaDialogEmptyDescription makes it on Windows. Of NVDA's own objects, a
   read-only field that takes the focus is a read-only edit field, as on
   Windows; a check list's check box cell is a check box named by its row's
-  text; an unnamed wx list is named by its scroll pane and gives its
-  focused item as its value; and the label GTK keeps inside a group box is
+  text; a wx list is named by its scroll pane when it has no name and
+  gives its focused item as its value, and its focused item is selected,
+  as GTK says only a moment later; and the label GTK keeps inside a group box is
   invisible, so that a dialog's text leaves it out. The focus GTK gives a
   dialog's default button as it shows it, before the control NVDA chose is
   focused, is not reported
@@ -201,7 +202,9 @@ source/gui/__init__.py
   ask for the thread's menu mode on Linux, which wxGTK has no flag for, but
   for a flag SysTrayIcon.onActivate sets while its PopupMenu runs. showGui
   does not move the pointer to the middle of the screen before the NVDA
-  menu opens, and onActivate has GTK select the menu's first item once it
+  menu opens, and waits until no NVDA key is held, as X keeps the keyboard
+  grabbed for NVDA's key capture while one is and the menu cannot then take
+  the keyboard; onActivate has GTK select the menu's first item once it
   is shown, as wx pops it up for the pointer with nothing selected. On
   import, linuxPlatform.ownGui takes out the MSAA repairs of NVDA's own
   controls, whose wx.Accessible wxGTK cannot construct, so that the settings

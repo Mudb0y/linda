@@ -223,7 +223,7 @@ class MainFrame(wx.Frame):
 		if sys.platform != "win32":
 			# X has no pointer warp that a keyboard user needs here, and Wayland none at all: the menu
 			# takes the keyboard wherever it pops up.
-			self.sysTrayIcon.onActivate(None)
+			ownGui.whenNvdaKeysReleased(lambda: self.sysTrayIcon.onActivate(None))
 			return
 		# The menu pops up at the location of the mouse, which means it pops up at an unpredictable location.
 		# Therefore, move the mouse to the center of the screen so that the menu will always pop up there.

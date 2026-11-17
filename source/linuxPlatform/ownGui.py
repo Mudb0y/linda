@@ -38,6 +38,7 @@ import ctypes
 import gc
 import time
 import weakref
+from collections.abc import Callable
 
 import controlTypes
 import wx
@@ -47,6 +48,9 @@ from logHandler import log
 #: Milliseconds between looks for a menu being shown, and how many looks it gets to appear.
 _MENU_INTERVAL = 20
 _MENU_ATTEMPTS = 25
+#: Milliseconds between looks for the NVDA keys being released, and how many looks to take.
+_RELEASE_INTERVAL = 20
+_RELEASE_ATTEMPTS = 150
 #: Seconds from a dialog becoming active to the focus NVDA chose for it, at most.
 _FIRST_FOCUS_TIMEOUT = 1.0
 
@@ -89,6 +93,8 @@ class _Gtk:
 			(gtk, "gtk_widget_get_accessible", pointer, (pointer,)),
 			(atk, "atk_object_get_role", ctypes.c_int, (pointer,)),
 			(atk, "atk_role_get_name", ctypes.c_char_p, (ctypes.c_int,)),
+			(gtk, "gtk_window_get_focus", pointer, (pointer,)),
+			(gtk, "gtk_widget_is_ancestor", ctypes.c_int, (pointer, pointer)),
 			(atk, "atk_object_set_name", None, (pointer, ctypes.c_char_p)),
 			(atk, "atk_object_add_relationship", ctypes.c_int, (pointer, ctypes.c_int, pointer)),
 			(atk, "atk_relation_type_for_name", ctypes.c_int, (ctypes.c_char_p,)),
@@ -142,6 +148,16 @@ class _Gtk:
 
 	def mnemonicWidget(self, label: int) -> int | None:
 		return self._functions["gtk_label_get_mnemonic_widget"](label)
+
+	def focus(self, window: int) -> int | None:
+		"""The widget that has the focus in a top-level GTK window."""
+		return self._functions["gtk_window_get_focus"](window)
+
+	def contains(self, widget: int, descendant: int) -> bool:
+		return descendant == widget or bool(self._functions["gtk_widget_is_ancestor"](descendant, widget))
+
+	def setMnemonicWidget(self, label: int, widget: int) -> None:
+		self._functions["gtk_label_set_mnemonic_widget"](label, widget)
 
 	def setLabel(self, label: int, widget: int) -> None:
 		"""Give widget's accessible label as its label, which GTK keeps, before any it would work out
@@ -321,16 +337,33 @@ def isPassingFocus(obj) -> bool:
 	return False
 
 
+def _focusAndItsParent() -> tuple[wx.Window | None, wx.Window | None]:
+	# The active window first; a dialog just shown may not be active yet as NVDA reads it.
+	topLevels = sorted(
+		(window for window in wx.GetTopLevelWindows() if window.IsShown()),
+		key=lambda window: not window.IsActive(),
+	)
+	focus = _focusedWindow(topLevels)
+	return focus, focus.GetParent() if focus else None
+
+
 def focusedListItemText() -> str:
 	"""The text of the focused item of the wx list control that has the focus, if one has it."""
-	focus = wx.Window.FindFocus()
-	for window in (focus, focus.GetParent() if focus else None):
+	for window in _focusAndItsParent():
 		if isinstance(window, wx.ListCtrl):
 			index = window.GetFocusedItem()
 			if index < 0:
 				index = window.GetFirstSelected()
 			return window.GetItemText(index) if index >= 0 else ""
 	return ""
+
+
+def focusIsCheckList() -> bool:
+	"""Whether one of NVDA's check lists has the focus."""
+	return any(
+		isinstance(window, (wx.CheckListBox, nvdaControls.AutoWidthColumnCheckListCtrl))
+		for window in _focusAndItsParent()
+	)
 
 
 def _setFocusOnceActive(self) -> None:
@@ -385,6 +418,21 @@ def _initSettingsDialog(self, *args, **kwargs) -> None:
 	_repairLabels(self)
 
 
+def _newSettingsDialog(cls, *args, **kwargs):
+	"""A new settings dialog, made after collecting garbage when one destroyed is still alive.
+
+	A destroyed dialog lives on in reference cycles until the collector next runs, and while it lives
+	upstream refuses to open another, so that a settings dialog opened soon after one was closed did
+	not open at all.
+	"""
+	if any(
+		isinstance(dialog, cls) and state is settingsDialogs.SettingsDialog.DialogState.DESTROYED
+		for dialog, state in list(settingsDialogs.SettingsDialog._instances.items())
+	):
+		gc.collect()
+	return _upstreamSettingsDialogNew(cls, *args, **kwargs)
+
+
 def _ignoredOnceDestroyed(handler):
 	"""A handler that does nothing for a dialog being destroyed.
 
@@ -400,9 +448,36 @@ def _ignoredOnceDestroyed(handler):
 	return ignoring
 
 
+def _focusedWindow(topLevels: list[wx.Window]) -> wx.Window | None:
+	"""The window that has the focus, as GTK says when wx has lost track of it, as it does once a
+	choice's list has been open: the window of the first of topLevels that holds GTK's focus."""
+	focus = wx.Window.FindFocus()
+	if focus is not None:
+		return focus
+	try:
+		gtk = _gtkCalls()
+		for topLevel in topLevels:
+			focused = gtk.focus(_widget(topLevel))
+			if not focused:
+				continue
+			pending = list(topLevel.GetChildren())
+			found = None
+			while pending:
+				child = pending.pop()
+				if gtk.contains(_widget(child), focused):
+					found = child
+					pending = list(child.GetChildren())
+			if found is not None:
+				return found
+	except (OSError, AttributeError):
+		log.debugWarning("Could not find the focus through GTK", exc_info=True)
+	return None
+
+
 def _onCharHook(evt: wx.KeyEvent) -> None:
 	if evt.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and not evt.HasAnyModifiers():
-		focus = wx.Window.FindFocus()
+		source = evt.GetEventObject()
+		focus = _focusedWindow([wx.GetTopLevelParent(source)] if isinstance(source, wx.Window) else [])
 		dialog = wx.GetTopLevelParent(focus) if focus else None
 		if isinstance(focus, _ENTER_PRESSES_DEFAULT) and isinstance(dialog, wx.Dialog):
 			button = dialog.GetDefaultItem() or dialog.FindWindow(dialog.GetAffirmativeId())
@@ -448,6 +523,7 @@ def _leaveNothing() -> None:
 
 
 _upstreamSettingsDialogInit = settingsDialogs.SettingsDialog.__init__
+_upstreamSettingsDialogNew = settingsDialogs.SettingsDialog.__new__
 _upstreamBuildSettingsPanel = settingsDialogs.SettingsPanel._buildGui
 _upstreamAssociateElements = guiHelper.associateElements
 _upstreamSetFocus = wx.Window.SetFocus
@@ -463,6 +539,7 @@ def install() -> None:
 	nvdaControls.AutoWidthColumnCheckListCtrl.notifyIAccessible = _notifyCheckListCtrl
 	nvdaControls.EnhancedInputSlider.SetValue = _setSliderValue
 	settingsDialogs.SettingsDialog.__init__ = _initSettingsDialog
+	settingsDialogs.SettingsDialog.__new__ = staticmethod(_newSettingsDialog)
 	settingsDialogs.SettingsPanel._buildGui = _buildSettingsPanel
 	for cls, name in (
 		(settingsDialogs.SettingsPanel, "onPanelActivated"),
@@ -483,6 +560,25 @@ def initialize(app: wx.App) -> None:
 	# wx.App sets its own target as it starts.
 	_logTarget = _NvdaLogTarget()
 	wx.Log.SetActiveTarget(_logTarget)
+
+
+def whenNvdaKeysReleased(callback: Callable[[], None], attemptsLeft: int = _RELEASE_ATTEMPTS) -> None:
+	"""Call callback once no NVDA modifier key is held, or once waiting has taken too long.
+
+	While an NVDA key is held, X keeps the keyboard grabbed for NVDA's key capture, and a menu, which
+	needs a grab of its own, fails to open: NVDA+n would open nothing for a person who is still
+	holding Insert as the command runs.
+	"""
+	import keyboardHandler
+
+	held = any(
+		keyboardHandler.isNVDAModifierKey(vkCode, extended)
+		for vkCode, extended in list(keyboardHandler.currentModifiers)
+	)
+	if held and attemptsLeft > 1:
+		wx.CallLater(_RELEASE_INTERVAL, whenNvdaKeysReleased, callback, attemptsLeft - 1)
+		return
+	callback()
 
 
 def selectFirstMenuItemWhenShown() -> None:

@@ -1,0 +1,318 @@
+"""NVDA's own windows, used from the keyboard as a person setting NVDA up with nobody's help uses
+them: the synthesizer, the voice and its settings ring, the welcome dialog of a first start, the
+settings dialog and its keyboard panel, the NVDA menu and saving the configuration. Every key is
+pressed on the rig's display under marco.
+
+nix develop . -c tests/linux/rig env BASEDREADER_RIG_WM=marco python3 -m pytest -q tests/linux/test_ownGui.py
+
+Without BASEDREADER_RIG_WM=marco, DesktopSession starts marco itself. The transcript holds what the
+synthesizer is given, after symbols are spoken as words, so "Alt+P" is "Alt plus P".
+"""
+
+import time
+from collections.abc import Iterator
+from pathlib import Path
+
+import desktopSession
+import harness
+import pytest
+from desktopSession import DesktopSession
+
+SESSION_CONFIG = harness.HERE / "fixtures" / "sessionConfig" / "nvda.ini"
+#: Seconds from starting NVDA to its first words; a start under the rig takes about three.
+STARTUP_BOUND = 60.0
+#: Seconds NVDA has to exit once its exit dialog is answered.
+EXIT_BOUND = 10.0
+#: Seconds to wait for anything more after what a step expects.
+SETTLE = 0.5
+#: Seconds to leave NVDA after a key whose effect cannot be heard, as when it speaks through a
+#: synthesizer other than the transcript.
+UNHEARD_STEP = 1.0
+
+GTK = ("gtkFixture", "Fixture window")
+AT_START = ("Fixture window", "Press me button Does nothing Alt plus P")
+
+#: A synthesizer that writes the transcript as the test synthesizer does, with what the voice
+#: settings show for a synthesizer such as eSpeak: two voices, two variants, a check box and four
+#: sliders.
+VOICED_TRANSCRIPT = """\
+from collections import OrderedDict
+
+from autoSettingsUtils.utils import StringParameterInfo
+from synthDriverHandler import SynthDriver as BaseSynthDriver
+from synthDriverHandler import VoiceInfo
+from synthDrivers.transcript import SynthDriver as TranscriptSynthDriver
+
+
+class SynthDriver(TranscriptSynthDriver):
+	name = "voicedTranscript"
+	description = "Voiced transcript (testing)"
+	supportedSettings = (
+		BaseSynthDriver.VoiceSetting(),
+		BaseSynthDriver.VariantSetting(),
+		BaseSynthDriver.RateSetting(),
+		BaseSynthDriver.RateBoostSetting(),
+		BaseSynthDriver.PitchSetting(),
+		BaseSynthDriver.InflectionSetting(),
+		BaseSynthDriver.VolumeSetting(),
+	)
+
+	def __init__(self):
+		super().__init__()
+		self._settings.update(voice="alpha", variant="plain", rateBoost=False)
+
+	def _getAvailableVoices(self):
+		return OrderedDict(alpha=VoiceInfo("alpha", "Alpha", "en"), beta=VoiceInfo("beta", "Beta", "en"))
+
+	def _getAvailableVariants(self):
+		return OrderedDict(
+			plain=StringParameterInfo("plain", "Plain"),
+			bright=StringParameterInfo("bright", "Bright"),
+		)
+
+	def _get_variant(self):
+		return self._settings["variant"]
+
+	def _set_variant(self, value):
+		self._settings["variant"] = value
+
+	def _get_rateBoost(self):
+		return self._settings["rateBoost"]
+
+	def _set_rateBoost(self, value):
+		self._settings["rateBoost"] = value
+
+	def _get_inflection(self):
+		return self._settings["inflection"]
+
+	def _set_inflection(self, value):
+		self._settings["inflection"] = value
+"""
+
+
+@pytest.fixture
+def desktop(tmp_path: Path) -> Iterator[DesktopSession]:
+	with DesktopSession(tmp_path / "desktop") as session:
+		yield session
+
+
+def sessionConfig(
+	directory: Path, *, replace: dict[str, str] | None = None, drop: tuple[str, ...] = ()
+) -> Path:
+	"""The session configuration with each line that starts with a key of replace replaced by its value,
+	and each line that starts with an entry of drop left out."""
+	lines = []
+	for line in SESSION_CONFIG.read_text(encoding="utf-8").splitlines():
+		stripped = line.strip()
+		if any(stripped.startswith(prefix) for prefix in drop):
+			continue
+		for prefix, replacement in (replace or {}).items():
+			if stripped.startswith(prefix):
+				line = line[: len(line) - len(line.lstrip())] + replacement
+		lines.append(line)
+	directory.mkdir(parents=True, exist_ok=True)
+	path = directory / "nvda.ini"
+	path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+	return path
+
+
+def start(desktop: DesktopSession, config: Path, env: dict[str, str] | None = None) -> harness.Launch:
+	app = desktop.startApp(desktop.fixture(GTK[0]), title=GTK[1])
+	# On the accessibility desktop before it has presented itself and has the keyboard.
+	assert app.stdout.readline() == "ready\n"
+	desktopSession.activate(GTK[1])
+	return desktop.startNVDA(config, env=env)
+
+
+def step(desktop: DesktopSession, chord: str, *expected: str, timeout: float = 5) -> int:
+	"""Press chord and wait for expected, in order; return the mark taken before the key."""
+	mark = desktop.mark()
+	desktop.press(chord)
+	desktop.expect(*expected, since=mark, timeout=timeout)
+	return mark
+
+
+def downToKeyboard(desktop: DesktopSession) -> None:
+	"""Arrow down the settings dialog's categories from General to Keyboard, each spoken."""
+	for index, category in enumerate(
+		("Speech", "Braille", "Audio", "Privacy and Security", "Vision", "Magnifier", "Keyboard"),
+		start=2,
+	):
+		step(desktop, "Down", f"{category} {index} of …")
+
+
+def savedConfig(nvda: harness.Launch) -> str:
+	return (nvda.directory / "config" / "nvda.ini").read_text(encoding="utf-8")
+
+
+def waitForLog(nvda: harness.Launch, text: str, timeout: float = 10) -> None:
+	deadline = time.monotonic() + timeout
+	while text not in nvda.text("nvda.log"):
+		assert time.monotonic() < deadline, f"the log never said {text!r}\n{nvda.describe()}"
+		time.sleep(0.1)
+
+
+def assertExitedCleanly(nvda: harness.Launch) -> None:
+	assert nvda.process.returncode == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	# The harness allows this report, which a person starting NVDA from a terminal used to see.
+	assert "AutoSettings.__del__" not in nvda.text("stderr.txt"), nvda.text("stderr.txt")
+
+
+def test_synthesizerIsChosenInItsDialogAndKeptForTheNextStart(desktop: DesktopSession):
+	nvda = start(desktop, SESSION_CONFIG)
+	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
+	step(
+		desktop,
+		"Insert+control+s",
+		"Select Synthesizer dialog",
+		"Synthesizer: combo box Transcript (testing) collapsed Alt plus S",
+	)
+	# The list is in the order of the descriptions; openevv describes itself as Open EVV.
+	step(desktop, "Up", "Open EVV")
+	step(desktop, "Up", "e Speak NG")
+	step(desktop, "Down", "Open EVV")
+	desktop.press("Return")
+	waitForLog(nvda, "Loaded synthDriver openevv")
+
+	# Answered without hearing it: the transcript has stopped with its synthesizer.
+	desktop.press("Insert+q")
+	time.sleep(UNHEARD_STEP)
+	desktop.press("Return")
+	nvda.waitForExit(EXIT_BOUND)
+	assertExitedCleanly(nvda)
+	assert "synth = openevv" in savedConfig(nvda), savedConfig(nvda)
+
+	again = desktop.startNVDA(nvda.directory / "config")
+	waitForLog(again, "Loaded synthDriver openevv", timeout=STARTUP_BOUND)
+	assert "Loaded synthDriver transcript" not in again.text("nvda.log")
+	desktop.close()
+	assertExitedCleanly(again)
+
+
+def test_voiceSettingsSpeakEachControlAndItsChanges(desktop: DesktopSession, tmp_path: Path):
+	hooks = tmp_path / "hooks"
+	(hooks / "synthDrivers").mkdir(parents=True)
+	for name in ("transcript.py", "_transcriptRecords.py"):
+		(hooks / "synthDrivers" / name).symlink_to(harness.HERE / "synthDrivers" / name)
+	(hooks / "synthDrivers" / "voicedTranscript.py").write_text(VOICED_TRANSCRIPT, encoding="utf-8")
+	(hooks / "globalPlugins").symlink_to(harness.HERE / "fixtures" / "globalPlugins")
+	config = sessionConfig(tmp_path / "config", replace={"synth =": "synth = voicedTranscript"})
+	nvda = start(desktop, config, env={"BASEDREADER_TEST_HOOKS_DIR": str(hooks)})
+	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
+
+	mark = step(
+		desktop,
+		"Insert+control+v",
+		"NVDA Settings: Speech (normal configuration) dialog",
+		"Synthesizer grouping",
+		"Synthesizer edit read only Voiced transcript (testing)",
+	)
+	time.sleep(SETTLE)
+	assert not [text for text in desktop.spokenSince(mark) if text.startswith("OK button")]
+	step(desktop, "Tab", "Change... button Alt plus H")
+	step(desktop, "Tab", "Voice: combo box Alpha collapsed Alt plus V")
+	step(desktop, "Down", "Beta")
+	step(desktop, "Tab", "Variant: combo box Plain collapsed Alt plus A")
+	step(desktop, "Down", "Bright")
+	step(desktop, "Tab", "Rate: slider 50")
+	step(desktop, "Right", "51")
+	step(desktop, "Tab", "Rate boost check box not checked Alt plus T")
+	step(desktop, "space", "checked")
+	step(desktop, "Tab", "Pitch: slider 50")
+	step(desktop, "Left", "49")
+	step(desktop, "Tab", "Inflection: slider 50")
+	step(desktop, "Tab", "Volume: slider 50")
+	step(desktop, "Tab", "Automatic language switching (when supported) check box checked Alt plus O")
+	step(desktop, "space", "not checked")
+	# Enter on a check box presses OK, as on Windows.
+	step(desktop, "Return", *AT_START)
+
+	# The settings ring starts at the rate.
+	step(desktop, "Insert+control+Right", "Rate boost on")
+	step(desktop, "Insert+control+Down", "Rate boost off")
+	step(desktop, "Insert+control+Left", "Rate 51")
+	mark = step(desktop, "Insert+control+Up", "Rate …")
+	assert desktop.spokenSince(mark)[-1] != "Rate 51", desktop.spokenSince(mark)
+	desktop.close()
+	assertExitedCleanly(nvda)
+
+
+def test_welcomeDialogOfAFirstStartSetsUpTheKeyboard(desktop: DesktopSession, tmp_path: Path):
+	config = sessionConfig(tmp_path / "config", drop=("showWelcomeDialogAtStartup", "NVDAModifierKeys"))
+	nvda = start(desktop, config)
+	welcome = "Welcome to NVDA dialog Welcome to NVDA! Most commands for controlling NVDA require you…"
+	desktop.expect(
+		welcome,
+		"Options grouping",
+		"Keyboard layout: combo box desktop collapsed Alt plus K",
+		since=0,
+		timeout=STARTUP_BOUND,
+	)
+	spoken = desktop.spokenSince(0)
+	texts = [text for text in spoken if text.startswith("Welcome to NVDA dialog")]
+	assert len(texts) == 1, spoken
+	assert texts[0].endswith("access other NVDA functions."), texts[0]
+
+	step(desktop, "Down", "laptop")
+	# Enter in the open list chooses from it, and leaves the dialog open.
+	step(desktop, "alt+Down", "laptop 2 of 2")
+	step(desktop, "Return", "Keyboard layout: combo box laptop collapsed Alt plus K")
+	step(desktop, "Tab", "Use Caps Lock as an NVDA modifier key check box not checked Alt plus U")
+	step(desktop, "space", "checked")
+	step(desktop, "shift+Tab", "Keyboard layout: combo box laptop collapsed Alt plus K")
+	# Enter on the closed list presses OK, as on Windows.
+	step(desktop, "Return", *AT_START)
+	step(desktop, "Caps_Lock+t", "Fixture window")
+	saved = savedConfig(nvda)
+	assert "keyboardLayout = laptop" in saved and "NVDAModifierKeys = 7" in saved, saved
+	desktop.close()
+	assertExitedCleanly(nvda)
+
+
+def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSession, tmp_path: Path):
+	# Insert and numpad Insert only, upstream's default.
+	config = sessionConfig(tmp_path / "config", drop=("NVDAModifierKeys",))
+	nvda = start(desktop, config)
+	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
+
+	# Escape closes a submenu, and then the menu.
+	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
+	step(desktop, "Down", "Tools sub Menu T 2 of 9")
+	step(desktop, "Right", "View log L 1 of 6")
+	step(desktop, "Escape", "Tools sub Menu T 2 of 9")
+	step(desktop, "Escape", *AT_START)
+
+	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
+	step(desktop, "Return", "Settings... S 1 of 4")
+	mark = step(
+		desktop,
+		"Return",
+		"NVDA Settings: General (normal configuration) dialog",
+		"Categories: list General",
+	)
+	time.sleep(SETTLE)
+	assert not [text for text in desktop.spokenSince(mark) if text.startswith("OK button")]
+	downToKeyboard(desktop)
+	step(desktop, "Tab", "Keyboard layout: combo box desktop collapsed Alt plus K")
+	step(desktop, "Down", "laptop")
+	step(desktop, "alt+a", "Apply button Alt plus A")
+	step(desktop, "shift+Tab", "Cancel button Alt plus C")
+	step(desktop, "Escape", *AT_START)
+
+	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
+	step(desktop, "Return", "Settings... S 1 of 4")
+	step(desktop, "Return", "Categories: list General")
+	downToKeyboard(desktop)
+	# Applied, and kept although the dialog was then cancelled.
+	step(desktop, "Tab", "Keyboard layout: combo box laptop collapsed Alt plus K")
+	step(desktop, "Tab", "Select NVDA Modifier Keys table", "caps lock check box not checked 1 of 3")
+	step(desktop, "space", "checked")
+	step(desktop, "Return", *AT_START)
+	step(desktop, "Caps_Lock+t", "Fixture window")
+
+	step(desktop, "Insert+control+c", "Configuration saved")
+	saved = savedConfig(nvda)
+	assert "keyboardLayout = laptop" in saved and "NVDAModifierKeys = 7" in saved, saved
+	desktop.close()
+	assertExitedCleanly(nvda)
