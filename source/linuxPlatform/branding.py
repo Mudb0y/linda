@@ -32,6 +32,11 @@ def _englishName(match: re.Match[str]) -> str:
 	return f"{match['article']} {NAME}" if match["article"] else NAME
 
 
+def inEnglish(text: str) -> str:
+	"""English text that NVDA writes of itself without a translation, naming Linda."""
+	return _ENGLISH_UPSTREAM_WORD.sub(_englishName, text)
+
+
 class RenamingTranslations(gettext.NullTranslations):
 	"""A translation that names Linda wherever the one it wraps names NVDA."""
 
@@ -56,7 +61,7 @@ class RenamingTranslations(gettext.NullTranslations):
 			if any(mark in message for mark in _UPSTREAM_MARKS):
 				renamed = message
 			elif isEnglish:
-				renamed = _ENGLISH_UPSTREAM_WORD.sub(_englishName, message)
+				renamed = inEnglish(message)
 			else:
 				renamed = _UPSTREAM_WORD.sub(NAME, message)
 			cache[message] = renamed

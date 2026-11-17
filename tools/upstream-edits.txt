@@ -139,7 +139,8 @@ source/argsParsing.py
   Linux runtime: help goes to standard output and a command-line error to standard
   error with exit status 2, as argparse does, instead of a Windows message
   box; the help for -f names the default log under the XDG state directory,
-  where logHandler puts it on Linux, instead of %TEMP%
+  where logHandler puts it on Linux, instead of %TEMP%; the help, which is
+  English and never translated, says Linda where upstream's says NVDA
 source/audio/soundSplit.py
   Linux runtime: sound split sets other applications' volumes through
   Windows' audio session manager, and linuxPlatform implements no
@@ -163,12 +164,12 @@ source/browseMode.py
   Linux runtime: _extractStyles imports the UI Automation Word
   document class only on Windows; Linux has no UI Automation and uses an
   empty tuple, which no isinstance test matches
-source/buildVersion.py
-  Linux runtime: name is Linda, the name NVDA has on Linux, so that the
-  main window, the notification area icon and versionInfo say it
   Linux runtime: the elements list's tree passes on Tab and keys with Alt
   or Control, which wx on GTK hands it as characters to search for, so
   that they move between the dialog's controls as on Windows
+source/buildVersion.py
+  Linux runtime: name is Linda, the name NVDA has on Linux, so that the
+  main window, the notification area icon and versionInfo say it
 source/config/__init__.py
   every platform: winreg comes from linuxPlatform.windowsOnly, which on
   Windows is the real module.

@@ -33,7 +33,10 @@ class NoConsoleOptionParser(argparse.ArgumentParser):
 		"""Shows help in a standard Windows message dialog"""
 		if sys.platform != "win32":
 			# Linux starts NVDA from a terminal or a session script, which reads standard output.
-			return super().print_help(file)
+			from linuxPlatform import branding
+
+			(file or sys.stdout).write(branding.inEnglish(self.format_help()))
+			return
 		winUser.MessageBox(0, self.format_help(), "Help", 0)
 
 	def error(self, message: str):

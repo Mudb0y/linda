@@ -646,6 +646,8 @@ def test_helpGoesToStandardOutput(tmp_path):
 	done.assertClean()
 	assert done.value == 0
 	assert "--config-path" in done.stdout
+	assert "Quit already running copy of Linda" in done.stdout
+	assert "NVDA" not in done.stdout
 
 
 def test_windowsOnlyOptionsStillParse(tmp_path):
