@@ -239,3 +239,33 @@ def test_gtkDialogs(desktop: DesktopSession):
 	step(desktop, "Return", "About Pluma dialog Pluma 1.…", "Credits toggle button not pressed Alt plus R")
 	step(desktop, "Escape", "star a dot txt (  slash dialogs) - Pluma", "edit multi line…")
 	assertQuitCleanly(desktop, nvda)
+
+
+def test_matePanel(desktop: DesktopSession):
+	folder = makeFolder(Path.home() / "panel", "a.txt")
+	desktop.startApp(["mate-panel"], title="Bottom Panel", timeout=WINDOW_TIMEOUT)
+	title = startPluma(desktop, folder / "a.txt")
+	spokenTitle = "a dot txt (  slash panel) - Pluma"
+	nvda = startNVDA(desktop, spokenTitle, "edit multi line hello")
+
+	# The main menu; its Applications submenu is filled from mate-menus, which the rig does not have.
+	step(desktop, "alt+F1", "Top Panel", "Applications sub Menu 1 of 3")
+	step(desktop, "Right", "Places sub Menu Alt plus P 2 of 3")
+	step(desktop, "Down", "Home Folder H 1 of…")
+	step(desktop, "Escape", spokenTitle, "edit multi line hello")
+
+	step(desktop, "alt+F2", "Run Application dialog", "combo box collapsed", "edit blank")
+	for letter in "plu":
+		mark = desktop.mark()
+		desktop.typeText(letter)
+		desktop.expect(letter, since=mark)
+	step(desktop, "Tab", "Run in terminal check box not checked…")
+	step(desktop, "Escape", spokenTitle, "edit multi line hello")
+
+	# The keyboard on the panel, and the window list on it.
+	step(desktop, "control+alt+Tab", "Bottom Panel", "panel")
+	step(desktop, "Tab", "Show Desktop Button toggle button not pressed…")
+	step(desktop, "Tab", "Window List grouping…", f"{spokenTitle} toggle button not pressed")
+	step(desktop, "Escape")
+	desktopSession.activate(title)
+	assertQuitCleanly(desktop, nvda)
