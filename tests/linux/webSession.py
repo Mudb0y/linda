@@ -6,14 +6,18 @@ the desktop session's close stops that process, and waits for or kills the rest 
 through it, so that no content process outlives the test.
 """
 
+import contextlib
 import html
+import http.server
 import json
 import os
 import re
 import signal
 import subprocess
 import tempfile
+import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import desktopSession
@@ -45,7 +49,88 @@ KEY_LOG_TIMEOUT = 10.0
 #: time; until then the answer from that part is empty, and nothing announces when it is filled.
 CACHE_FILL_SECONDS = 0.5
 
+#: Where a page served by servePages stops for a while before the rest of it is sent.
+PAUSE_MARK = "<!-- pause -->"
+#: Seconds each pause lasts.
+PAUSE_SECONDS = 0.3
+#: The two addresses pages are served from, which Firefox takes for two sites, so that a page from
+#: one shows a frame from the other in a process of its own.
+SITE_ADDRESSES = ("127.0.0.1", "127.0.0.2")
+#: Spaces sent after each part of a page, enough for Firefox to parse the part before the next comes.
+_FLUSH = " " * 2048
+
 _primedApplications: set[int] = set()
+
+
+class _PageHandler(http.server.BaseHTTPRequestHandler):
+	protocol_version = "HTTP/1.1"
+
+	def do_GET(self) -> None:
+		name = self.path.split("?", 1)[0].lstrip("/")
+		path = PAGES / name
+		if "/" in name or not path.is_file():
+			self.send_error(404)
+			return
+		data = path.read_bytes()
+		if not name.endswith(".html"):
+			self.send_response(200)
+			self.send_header("Content-Length", str(len(data)))
+			self.end_headers()
+			self.wfile.write(data)
+			return
+		self.send_response(200)
+		self.send_header("Content-Type", "text/html; charset=utf-8")
+		self.send_header("Transfer-Encoding", "chunked")
+		self.end_headers()
+		text = data.decode("utf-8")
+		for index, base in enumerate(self.server.sites):
+			text = text.replace(f"{{site{index}}}", base)
+		for index, part in enumerate(text.split(PAUSE_MARK)):
+			if index:
+				time.sleep(PAUSE_SECONDS)
+			chunk = (part + _FLUSH).encode("utf-8")
+			self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+			self.wfile.flush()
+		self.wfile.write(b"0\r\n\r\n")
+
+	def log_message(self, format: str, *args: object) -> None:
+		pass
+
+
+class PageServer:
+	"""The pages under PAGES over HTTP, from each of SITE_ADDRESSES."""
+
+	def __init__(self, servers: list[http.server.ThreadingHTTPServer]) -> None:
+		self._servers = servers
+
+	def url(self, name: str, site: int = 0) -> str:
+		"""The address of the page name from the site-th of SITE_ADDRESSES."""
+		host, port = self._servers[site].server_address[:2]
+		return f"http://{host}:{port}/{name}"
+
+
+@contextlib.contextmanager
+def servePages() -> Iterator[PageServer]:
+	"""Serve the pages under PAGES on the rig's loopback while the block runs. An HTML page is sent in
+	the parts its PAUSE_MARK comments divide it into, PAUSE_SECONDS apart, as a slow site sends one.
+	In an HTML page, "{site0}" and "{site1}" stand for the two sites' addresses, so that one page can
+	show another from the other site, as "{site1}/frame.html"."""
+	harness.requireRig()
+	servers = []
+	try:
+		for address in SITE_ADDRESSES:
+			server = http.server.ThreadingHTTPServer((address, 0), _PageHandler)
+			server.daemon_threads = True
+			servers.append(server)
+		sites = [f"http://{host}:{port}" for host, port, *_ in (s.server_address for s in servers)]
+		for server in servers:
+			server.sites = sites
+			threading.Thread(target=server.serve_forever, daemon=True).start()
+		yield PageServer(servers)
+	finally:
+		for server in servers:
+			server.shutdown()
+			server.server_close()
 
 
 def pageURL(name: str) -> str:
