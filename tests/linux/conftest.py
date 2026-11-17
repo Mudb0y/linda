@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import harness
+import network
 import pytest
 from pipewireFixture import runningPipewire  # noqa: F401
 
@@ -36,6 +37,9 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Itera
 	name = f"{item.path.name}::{getattr(item, 'originalname', item.name)}"
 	if report.skipped and not hasattr(report, "wasxfail") and name not in EXPECTED_SKIPS:
 		reason = report.longrepr[2] if isinstance(report.longrepr, tuple) else report.longrepr
+		# A rig without the internet is the usual one, so a test that needs it skips honestly.
+		if network.SKIP_REASON in str(reason):
+			return
 		report.outcome = "failed"
 		report.longrepr = f"{name} skipped, which in the rig only EXPECTED_SKIPS may: {reason}"
 
