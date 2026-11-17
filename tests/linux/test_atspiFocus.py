@@ -229,6 +229,26 @@ def test_startSpeaksTheActiveWindowAndItsFocus(desktop: DesktopSession, tmp_path
 	_closeClean(desktop, nvda)
 
 
+def test_startWhileTheActiveApplicationIsBusySpeaksItsFocusOnceItAnswers(
+	desktop: DesktopSession,
+	tmp_path: Path,
+):
+	gtk = desktop.startApp(desktop.fixture("gtkFixture"), title=GTK_TITLE)
+	assert gtk.stdout.readline() == "ready\n"
+	_waitUntilActive(GTK_TITLE)
+	gtk.send_signal(signal.SIGSTOP)
+	try:
+		nvda, probe = _startNVDA(desktop, tmp_path)
+		nvda.waitForLog("NVDA initialized", STARTUP_BOUND)
+		# Longer than one call is waited for, so that NVDA has given up on it as it started.
+		time.sleep(1)
+	finally:
+		gtk.send_signal(signal.SIGCONT)
+	desktop.expect(GTK_TITLE, PRESS_ME, since=0, timeout=15)
+	probe.close()
+	_closeClean(desktop, nvda)
+
+
 def test_altTabSpeaksTitleAndFocusOnce(desktop: DesktopSession, tmp_path: Path):
 	desktop.startApp(desktop.fixture("qtFixture"), title=QT_TITLE)
 	gtk = desktop.startApp(desktop.fixture("gtkFixture"), title=GTK_TITLE)

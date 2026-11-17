@@ -244,11 +244,12 @@ def eventObject(node: Node):
 
 
 def _scanForActiveWindow() -> Node | None:
-	"""The top-level that says it is active, asking every application that answers."""
+	"""The top-level that says it is active, asking every application that answers.
+
+	An application marked hung is not skipped here: the client refuses it at once for a while and then
+	lets one call through, which is how one that was busy as NVDA started is found again."""
 	c = client()
 	for app in applications():
-		if c.isHung(app.busName):
-			continue
 		try:
 			for window in c.children(app):
 				if "active" in c.states(window):
@@ -428,15 +429,45 @@ def _onEvent(eventType: str, source: Node | None, detail1: int, detail2: int, an
 	)
 
 
+#: Milliseconds between further looks for the focus after start, while none has been found. NVDA looks
+#: once as it starts; an application too busy to answer then is not asked again until the client's
+#: probe time has passed, and an idle one sends no event that would bring its focus.
+INITIAL_FOCUS_RETRY_MS = int((_clientModule.PROBE_AFTER_SECONDS + 0.5) * 1000)
+INITIAL_FOCUS_RETRIES = 4
+
+
+def _lookForInitialFocus(retriesLeft: int = INITIAL_FOCUS_RETRIES) -> None:
+	import core
+	import eventHandler
+
+	if _exiting or not _listening or eventHandler.lastQueuedFocusObject is not None or retriesLeft <= 0:
+		return
+	log.debug("AT-SPI focus: none found yet; looking again")
+	core._setInitialFocus()
+	core.callLater(INITIAL_FOCUS_RETRY_MS, _lookForInitialFocus, retriesLeft - 1)
+
+
+def _onPostNvdaStartup() -> None:
+	import core
+
+	core.callLater(INITIAL_FOCUS_RETRY_MS, _lookForInitialFocus)
+
+
 def initialize() -> None:
 	global _listening, _exiting
 	_exiting = False
 	client().listen(EVENT_TYPES, _onEvent)
 	_listening = True
+	import core
+
+	core.postNvdaStartup.register(_onPostNvdaStartup)
 
 
 def terminate() -> None:
 	global _listening, _desktopNode, _settleStartedAt
+	import core
+
+	core.postNvdaStartup.unregister(_onPostNvdaStartup)
 	if _listening:
 		client().stopListening(EVENT_TYPES)
 	_listening = False
