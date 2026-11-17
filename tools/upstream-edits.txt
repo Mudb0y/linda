@@ -13,8 +13,105 @@
 # For a Python file, the check works out from the code whether Windows runs
 # a change, and fails unless every platform is said exactly when it does.
 
+.github/CODEOWNERS
+  repository: deleted. It asks NV Access's teams to review changes
+.github/CONTRIBUTING.md
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/FUNDING.yml
+  repository: deleted. It asks for donations to NV Access on a
+  repository that is not NV Access's
+.github/ISSUE_TEMPLATE/01-bug_report.yaml
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/ISSUE_TEMPLATE/02-feature_request.yaml
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/ISSUE_TEMPLATE/03-special_case_issue.yaml
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/ISSUE_TEMPLATE/04-developer_facing_changes.yaml
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/ISSUE_TEMPLATE/05-addon_integration_request.yaml
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/ISSUE_TEMPLATE/06-adr_major_project.yaml
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/ISSUE_TEMPLATE/11-bug_report.md
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/ISSUE_TEMPLATE/12-feature_request.md
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/ISSUE_TEMPLATE/13-special_case_issue.md
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/ISSUE_TEMPLATE/14-developer_facing_changes.md
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/ISSUE_TEMPLATE/15-addon_integration_request.md
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/ISSUE_TEMPLATE/16-adr_major_project.md
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/ISSUE_TEMPLATE/config.yml
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/PULL_REQUEST_TEMPLATE.md
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/PULL_REQUEST_TEMPLATE/revert.md
+  repository: deleted. NV Access's form or process for NVDA, which a
+  report or a change for Linda does not fit
+.github/instructions/cpp.instructions.md
+  repository: deleted with the rest of NV Access's .github directory
+.github/instructions/python.instructions.md
+  repository: deleted with the rest of NV Access's .github directory
+.github/instructions/review.instructions.md
+  repository: deleted with the rest of NV Access's .github directory
+.github/instructions/userGuide.instructions.md
+  repository: deleted with the rest of NV Access's .github directory
+.github/workflows/add-new-language.yml
+  repository: deleted. NV Access's workflow for NVDA, which would run in
+  Linda's repository
+.github/workflows/assign-milestone-on-close.yml
+  repository: deleted. NV Access's workflow for NVDA, which would run in
+  Linda's repository
+.github/workflows/autofix.yml
+  repository: deleted. NV Access's workflow for NVDA, which would run in
+  Linda's repository
+.github/workflows/clearCaches.yml
+  repository: deleted. NV Access's workflow for NVDA, which would run in
+  Linda's repository
+.github/workflows/codeql.yml
+  repository: deleted. NV Access's workflow for NVDA, which would run in
+  Linda's repository
+.github/workflows/fetch-crowdin-translations.yml
+  repository: deleted. NV Access's workflow for NVDA, which would run in
+  Linda's repository
+.github/workflows/monitor-localisation-file-changes.yml
+  repository: deleted. NV Access's workflow for NVDA, which would run in
+  Linda's repository
+.github/workflows/prekAutoUpdate.yml
+  repository: deleted. NV Access's workflow for NVDA, which would run in
+  Linda's repository
+.github/workflows/regenerate_english_userDocs_translation_source.yml
+  repository: deleted. NV Access's workflow for NVDA, which would run in
+  Linda's repository
+.github/workflows/testAndPublish.yml
+  repository: deleted. NV Access's workflow for NVDA, which would run in
+  Linda's repository
 .gitignore
   repository: ignores for the dev shell output and the Rust build directory
+CODE_OF_CONDUCT.md
+  repository: deleted. It has NV Access's staff enforce it and receive
+  the reports, which they do not do for Linda
+security.md
+  repository: deleted. It sends reports of vulnerabilities to NV Access,
+  which does not maintain Linda
 source/NVDAObjects/AtSpi/__init__.py
   Linux runtime: added. NVDAObjects for AT-SPI accessibles, the counterpart
   of NVDAObjects.IAccessible and NVDAObjects.UIA, which only Linux imports
