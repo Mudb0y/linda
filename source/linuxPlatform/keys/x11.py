@@ -352,6 +352,12 @@ class X11KeySource:
 		self._down: set[int] = set()
 		#: Key codes held down, as their events came.
 		self._keycodesDown: set[int] = set()
+		#: Key codes held down on a keyboard, not by XTEST, which keys are sent through.
+		self._keyboardDown: set[int] = set()
+		#: Key codes held down by XTEST.
+		self._xtestDown: set[int] = set()
+		#: (key code, isUp) of keys to send once the keyboard has let go of the first one's key.
+		self._unsent: deque[tuple[int, bool]] = deque()
 		#: Virtual-key code of each lock key held down: whether its lock was on as it went down.
 		self._locksHeld: dict[int, bool] = {}
 		self._xtestDevices: set[int] = set()
@@ -461,7 +467,6 @@ class X11KeySource:
 			if keycode is None:
 				log.debugWarning(f"No key on this keyboard sends virtual key {vkCode:#x}")
 				return
-			self._echoes.append((time.monotonic(), keycode, isUp))
 		self._post(lambda: self._fake(keycode, isUp))
 
 	def keyState(self, vkCode: int) -> int:
@@ -583,6 +588,7 @@ class X11KeySource:
 		self._serverGrab = None
 		self._chordKey = None
 		self._held = False
+		self._unsent.clear()
 		for ticket in self._tickets:
 			ticket.answered = True
 			ticket.settled.set()
@@ -897,11 +903,14 @@ class X11KeySource:
 				state.update_key(
 					keycode, xkb.KeyDirection.XKB_KEY_UP if isUp else xkb.KeyDirection.XKB_KEY_DOWN
 				)
+				devices = self._xtestDown if sourceid in self._xtestDevices else self._keyboardDown
 				if isUp:
 					self._keycodesDown.discard(keycode)
+					devices.discard(keycode)
 					self._locksHeld.pop(vk, None)
 				else:
 					self._keycodesDown.add(keycode)
+					devices.add(keycode)
 					if vk in LOCK_MASKS:
 						self._locksHeld[vk] = bool(lockedBefore & LOCK_MASKS[vk])
 			generic = GENERIC_FOR.get(vk)
@@ -961,6 +970,8 @@ class X11KeySource:
 				self._grabKey = None
 			if isUp and keycode == self._chordKey and keycode not in self._keycodesDown:
 				self._releaseChord()
+			if isUp and sourceid not in self._xtestDevices and self._unsent and self._unsent[0][0] == keycode:
+				self._sendUnsent()
 
 	def _answer(self, now: float) -> float | None:
 		"""Answer the press the keyboard is held on once NVDA has, or once it is overdue.
@@ -1419,10 +1430,32 @@ class X11KeySource:
 			self._grabKey = self._serverGrab = None
 
 	def _fake(self, keycode: int, isUp: bool) -> None:
-		"""Send a key through XTEST. Sent while a grab of this source holds the keyboard, the key comes to
-		that grab, which replays it to the application as one sent here."""
+		"""Send a key through XTEST, or as soon as it can reach the application.
+
+		The X server drops a press of a key that another device holds down, as the keyboard does the key
+		of a script that sends on the gesture it ran for; such a press, and everything sent after it,
+		waits for the keyboard to let the key go. A release of a key only the keyboard holds is dropped
+		here, as the server would drop it. Sent while a grab of this source holds the keyboard, the key
+		comes to that grab, which replays it to the application as one sent here.
+		"""
+		if self._unsent or (not isUp and keycode in self._keyboardDown):
+			self._unsent.append((keycode, isUp))
+			return
+		if isUp and keycode in self._keyboardDown and keycode not in self._xtestDown:
+			return
+		with self._lock:
+			self._echoes.append((time.monotonic(), keycode, isUp))
 		xtest.fake_input(self._display, X.KeyRelease if isUp else X.KeyPress, keycode)
 		self._display.flush()
+
+	def _sendUnsent(self) -> None:
+		"""Send what waited for the keyboard to let a key go, up to the next key it still holds."""
+		unsent, self._unsent = self._unsent, deque()
+		while unsent:
+			self._fake(*unsent.popleft())
+			if self._unsent:
+				self._unsent.extend(unsent)
+				return
 
 	def _setCapsLock(self, on: bool) -> None:
 		if self._xkbOpcode is None:

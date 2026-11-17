@@ -526,6 +526,11 @@ def test_keysNVDAPassesReachThePage(desktop: DesktopSession, keyboard: Keyboard,
 		time.sleep(SETTLE)
 		assert page.log() == logged
 
+	# Escape in browse mode is sent on to the page by NVDA's script for it, once the key is let go.
+	keyboard.press("Escape")
+	logged.append("Escape")
+	page.waitForLog(logged)
+
 	# In focus mode, Escape passed through stays with the page.
 	enterField(desktop, nvda)
 	stepOn(keyboard, desktop, f"{key}+F2", "Pass next key through")
