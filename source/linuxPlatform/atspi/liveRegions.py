@@ -34,6 +34,8 @@ PARENT_CACHE_LIMIT = 5000
 DEPTH_LIMIT = 64
 
 _parents: collections.OrderedDict[tuple[str, str], Node | None] = collections.OrderedDict()
+#: Whether each ancestor met is a document, by key; a page's objects keep their role.
+_isDocument: collections.OrderedDict[tuple[str, str], bool] = collections.OrderedDict()
 #: Seconds within which an alert announced again is the same showing: the browser can say it twice.
 ALERT_REPEAT_SECONDS = 1.0
 #: The alert spoken last, by key, and when.
@@ -53,6 +55,15 @@ def _parent(node: Node) -> Node | None:
 	if len(_parents) > PARENT_CACHE_LIMIT:
 		_parents.popitem(last=False)
 	return parent
+
+
+def _isDocumentNode(node: Node) -> bool:
+	key = node.key
+	if key not in _isDocument:
+		_isDocument[key] = _client().role(node) == "document web"
+		if len(_isDocument) > PARENT_CACHE_LIMIT:
+			_isDocument.popitem(last=False)
+	return _isDocument[key]
 
 
 def _ancestors(node: Node) -> list[Node]:
@@ -82,7 +93,7 @@ def _isInForegroundPage(node: Node) -> bool:
 	topLevel = ancestors[-2]
 	if topLevel != handler._foreground or not handler._foregroundActive:
 		return False
-	documents = [a for a in ancestors if c.role(a) == "document web"]
+	documents = [a for a in ancestors if _isDocumentNode(a)]
 	if not documents:
 		return False
 	return "showing" in c.states(documents[-1])
@@ -320,4 +331,5 @@ def handle(event) -> bool:
 def forget() -> None:
 	global _lastAlert
 	_parents.clear()
+	_isDocument.clear()
 	_lastAlert = None
