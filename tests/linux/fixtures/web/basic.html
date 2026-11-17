@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Basic page</title></head>
+<body>
+<h1>Basic page</h1>
+<p>The first paragraph has <a href="#contact">a link to the contact section</a> on this page.</p>
+<nav aria-label="Pages"><ul><li><a href="second.html">The second page</a></li><li><a href="basic.html">This page again</a></li></ul></nav>
+<main>
+<h2>Text</h2>
+<p>An emoji 😀 sits in this sentence.</p>
+<p lang="pl">Zażółć gęślą jaźń. Ten akapit jest po polsku.</p>
+<blockquote><p>A quoted sentence.</p></blockquote>
+<hr>
+<h2>Lists</h2>
+<ul><li>First item</li><li>Second item</li></ul>
+<h2>Tables</h2>
+<table><tr><td>Layout cell one</td><td>Layout cell two</td></tr><tr><td>Layout cell three</td><td>Layout cell four</td></tr></table>
+<table border="1"><caption>Prices</caption>
+<tr><th>Fruit</th><th>Price</th></tr>
+<tr><td>Apple</td><td>2</td></tr>
+<tr><td>Pear</td><td>3</td></tr>
+</table>
+<h2>Form</h2>
+<form>
+<p><label for="name">Your name</label> <input id="name" type="text"></p>
+<p><label><input type="checkbox" id="subscribe"> Subscribe</label></p>
+<fieldset><legend>Size</legend>
+<label><input type="radio" name="size" value="small" checked> Small</label>
+<label><input type="radio" name="size" value="large"> Large</label>
+</fieldset>
+<p><label for="colour">Colour</label> <select id="colour"><option>Red</option><option>Green</option></select></p>
+<p><button type="button">Press me</button></p>
+</form>
+<h2>Images</h2>
+<p><img src="picture.png" width="40" height="20" alt="A small square"> has alt text.</p>
+<p><img src="picture.png" width="40" height="20"> has no alt text.</p>
+<p><a href="second.html"><img src="picture.png" width="40" height="20"></a> is a link with only an unlabelled image.</p>
+<h3>Frame and application</h3>
+<iframe title="Inner frame" srcdoc="<p>Text inside the frame.</p>" width="300" height="60"></iframe>
+<div role="application" aria-label="Embedded application"><p>Text inside the application.</p></div>
+</main>
+<aside aria-label="Related"><p>Complementary text.</p></aside>
+<footer><h2 id="contact">Contact</h2><p>Write to us.</p></footer>
+</body></html>

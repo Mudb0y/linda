@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Keys page</title></head>
+<body>
+<h1>Keys page</h1>
+<p>Every key that reaches this page is written to the log at its end.</p>
+<h2>Field and link</h2>
+<p><label for="field">Field</label> <input id="field" type="text"></p>
+<p><a href="#log">Go to the log</a></p>
+<div id="log" aria-label="Key log"></div>
+<script>
+// Modifiers alone are left out: a shortcut such as Control+L would otherwise log its Control
+// before the browser takes the L.
+const modifiers = new Set(["Alt", "AltGraph", "CapsLock", "Control", "Fn", "Hyper", "Meta", "NumLock", "OS", "ScrollLock", "Shift", "Super"]);
+document.addEventListener("keydown", (event) => {
+	if (modifiers.has(event.key)) {
+		return;
+	}
+	let name = event.key === " " ? "Space" : event.key;
+	if (event.shiftKey && name.length > 1) {
+		name = "Shift+" + name;
+	}
+	for (const [held, prefix] of [[event.metaKey, "Meta+"], [event.altKey, "Alt+"], [event.ctrlKey, "Control+"]]) {
+		if (held) {
+			name = prefix + name;
+		}
+	}
+	const log = document.getElementById("log");
+	log.textContent = log.textContent ? log.textContent + " " + name : name;
+}, true);
+</script>
+</body></html>

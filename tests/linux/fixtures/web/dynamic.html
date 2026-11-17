@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Dynamic page</title>
+<style>.gone{display:none}</style>
+</head>
+<body>
+<h1>Dynamic page</h1>
+<p id="adder"><button id="add-paragraph">Add paragraph</button></p>
+<div id="changes" role="group" aria-label="Changes">
+<button id="insert-section-top">Insert section</button>
+<button id="remove-paragraph">Remove paragraph</button>
+<button id="replace-text">Replace text</button>
+<button id="append-text">Append text</button>
+<button id="expand-region">Expand region</button>
+<button id="collapse-region">Collapse region</button>
+<button id="aria-hidden">Hide section</button>
+<button id="change-href-and-label">Change link</button>
+<button id="live-update">Update live text</button>
+<button id="script-focus">Move focus</button>
+<button id="input-value">Set field value</button>
+<button id="clear-list">Clear list</button>
+<button id="bulk-add-200">Add 200 items</button>
+<button id="table-row">Change table row</button>
+<button id="hash-navigation">Go to tail</button>
+<button id="spa-navigation">Switch view</button>
+</div>
+<main id="main">
+<h2 id="h2">Content</h2>
+<p id="p1">First paragraph that stays.</p>
+<p id="p2">Second paragraph that will be removed.</p>
+<p id="p3">Third paragraph whose text will be replaced.</p>
+<p id="p4">Fourth paragraph that will grow</p>
+<button id="disc" aria-expanded="false" aria-controls="region">Show more</button>
+<div id="region" class="gone"><h2>Revealed region</h2><p>Revealed text with <a href="#r">a link</a>.</p></div>
+<section id="sec" aria-label="Hideable"><p>Section that becomes aria-hidden.</p></section>
+<p><a id="lnk" href="#one">A link whose target changes</a></p>
+<div id="live" aria-live="polite">Live text zero.</div>
+<p><label for="inp">Field</label> <input id="inp" type="text" value="before"></p>
+<ul id="list"></ul>
+<table id="tbl" border="1"><tr><th>Key</th><th>Value</th></tr><tr id="row1"><td>a</td><td>1</td></tr></table>
+<p id="tail">Tail paragraph.</p>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+for (let i = 0; i < 50; i++) {
+	const li = document.createElement("li");
+	li.textContent = "Initial item " + i;
+	$("list").appendChild(li);
+}
+let added = 0;
+const changes = {
+	"add-paragraph": () => {
+		// Right after the button, so that the line below the button is always the newest paragraph.
+		const p = document.createElement("p");
+		added += 1;
+		p.innerHTML = "Added paragraph " + added + " with <a href=\"#q\">a new link</a>.";
+		$("adder").after(p);
+	},
+	"insert-section-top": () => {
+		const s = document.createElement("section");
+		s.innerHTML = "<h2>Inserted heading</h2><ul><li>One</li><li>Two</li></ul>";
+		$("h2").after(s);
+	},
+	"remove-paragraph": () => { $("p2")?.remove(); },
+	"replace-text": () => { $("p3").textContent = "Third paragraph with new text."; },
+	"append-text": () => { $("p4").appendChild(document.createTextNode(" and grew by this much.")); },
+	"expand-region": () => { $("disc").setAttribute("aria-expanded", "true"); $("region").classList.remove("gone"); },
+	"collapse-region": () => { $("disc").setAttribute("aria-expanded", "false"); $("region").classList.add("gone"); },
+	"aria-hidden": () => { $("sec").setAttribute("aria-hidden", "true"); },
+	"change-href-and-label": () => { $("lnk").href = "#two"; $("lnk").setAttribute("aria-label", "Relabelled link"); },
+	"live-update": () => { $("live").textContent = "Live text one."; },
+	"script-focus": () => { $("disc").focus(); },
+	"input-value": () => { $("inp").value = "after"; },
+	"clear-list": () => { $("list").replaceChildren(); },
+	"bulk-add-200": () => {
+		const f = document.createDocumentFragment();
+		for (let i = 0; i < 200; i++) {
+			const li = document.createElement("li");
+			li.innerHTML = "Bulk item " + i + " <a href=\"#b" + i + "\">link</a>";
+			f.appendChild(li);
+		}
+		$("list").appendChild(f);
+	},
+	"table-row": () => { $("row1").innerHTML = "<td>b</td><td>2</td>"; },
+	"hash-navigation": () => { location.hash = "#tail"; },
+	"spa-navigation": () => {
+		history.pushState({}, "", "?view=2");
+		document.title = "Dynamic page, view two";
+		$("main").innerHTML = "<h1 id=\"nh\" tabindex=\"-1\">View two</h1><p>New view content with <a href=\"#v\">a link</a>.</p><ul><li>Alpha</li><li>Beta</li></ul>";
+		$("nh").focus();
+	},
+};
+for (const [id, change] of Object.entries(changes)) {
+	$(id).addEventListener("click", () => {
+		console.log("dynamic change " + id);
+		change();
+	});
+}
+</script>
+</body>
+</html>

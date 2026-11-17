@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Usable page</title></head>
+<body>
+<h1>Welcome</h1>
+<p>This page tests browse mode.</p>
+<p>Read <a href="#news">the news</a> or open <a href="second.html">the second page</a>.</p>
+<h2 id="news">News</h2>
+<p>Nothing new today.</p>
+<form><label for="name">Your name</label> <input id="name" type="text">
+<button type="button" id="add">Add item</button></form>
+<ul id="items"><li>First item</li></ul>
+<h2>Contact</h2>
+<p>Write to us.</p>
+<script>
+document.getElementById("add").addEventListener("click", () => {
+	const li = document.createElement("li");
+	li.textContent = "Added " + document.getElementById("name").value;
+	document.getElementById("items").append(li);
+});
+</script>
+</body></html>
