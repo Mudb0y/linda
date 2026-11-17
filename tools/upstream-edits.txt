@@ -79,6 +79,11 @@ source/appModuleHandler.py
   teardown, which Linux has none of. The status bar is found by its AT-SPI
   role under the foreground window, where upstream raises NotImplementedError
   and NVDA then looks at whatever lies at the window's bottom corner
+source/appModules/caja.py
+  Linux runtime: added. The app module for MATE's file manager, which speaks
+  the folder Caja opens in the same view and makes the file it selects
+  there the focus, as Windows Explorer moves the focus into a folder it
+  opens; no Windows program is named caja
 source/appModules/marco.py
   Linux runtime: added. The app module for MATE's window manager, which
   speaks the window or workspace its switcher names while Alt+Tab is held,
