@@ -113,7 +113,11 @@ source/appModules/nvda.py
   text; a wx list is named by its scroll pane when it has no name and
   gives its focused item as its value, and its focused item is selected,
   as GTK says only a moment later; and the label GTK keeps inside a group box is
-  invisible, so that a dialog's text leaves it out. The focus GTK gives a
+  invisible, so that a dialog's text leaves it out. A wx tree control, such
+  as the Input Gestures dialog's, which wxGTK draws itself and shows GTK as
+  an empty panel, is a tree view whose focus goes to its selected item, an
+  object made from what wx says of it, which presents each move, expansion
+  and collapse that linuxPlatform.ownGui hears from wx. The focus GTK gives a
   dialog's default button as it shows it, before the control NVDA chose is
   focused, is not reported
   Once NVDA's exit has begun, focus and state changes in its own windows

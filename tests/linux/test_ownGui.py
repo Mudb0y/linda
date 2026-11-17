@@ -270,6 +270,64 @@ def test_welcomeDialogOfAFirstStartSetsUpTheKeyboard(desktop: DesktopSession, tm
 	assertExitedCleanly(nvda)
 
 
+def openInputGestures(desktop: DesktopSession, *expected: str) -> None:
+	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
+	step(desktop, "p", "Settings... S 1 of 4")
+	step(desktop, "n", "Input Gestures dialog", "tree view", *expected)
+
+
+def findNavigatorObjectScript(desktop: DesktopSession) -> None:
+	"""Filter the Input Gestures tree and move to the script that reports the navigator object."""
+	step(desktop, "shift+Tab", "Filter by: edit Alt plus F blank")
+	desktop.typeText("current time")
+	step(desktop, "Tab", "tree view")
+	step(desktop, "Down", "Configuration (1 result) expanded 1 of …")
+	step(desktop, "Down", "level 2 Pressing once reverts…")
+	step(desktop, "Down", "level 1 Object navigation (1 result) expanded 2 of …")
+	step(desktop, "Down", "level 2 Reports the current navigator object…")
+
+
+def test_inputGesturesAreReadAndChangedFromTheKeyboard(desktop: DesktopSession):
+	nvda = start(desktop, SESSION_CONFIG)
+	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
+
+	# The tree, which wxGTK draws itself, is read from wx: each move, expansion and collapse.
+	openInputGestures(desktop, "level 1 Audio collapsed 1 of …")
+	step(desktop, "Down", "Braille collapsed 2 of …")
+	step(desktop, "Right", "expanded")
+	step(desktop, "Down", "level 2 …")
+	step(desktop, "Left", "level 1 Braille expanded 2 of …")
+	step(desktop, "Left", "collapsed")
+
+	# A gesture added from the keyboard, choosing one of the forms of the key, works once saved.
+	findNavigatorObjectScript(desktop)
+	step(desktop, "alt+a", "level 3 Enter input gesture: 3 of 3")
+	step(desktop, "shift+F12", "shift plus f 12 (desktop keyboard) 1 of 2")
+	step(desktop, "Down", "shift plus f 12 (keyboard, all layouts) 2 of 2")
+	step(desktop, "Return", "shift plus f 12 (keyboard, all layouts) 3 of 3…")
+	# Enter in the tree presses OK, as it does on Windows.
+	step(desktop, "Return", *AT_START)
+	step(desktop, "shift+F12", "Press me button…")
+	assert "navigatorObject_current = kb:f12+shift" in (nvda.directory / "config" / "gestures.ini").read_text(
+		encoding="utf-8"
+	)
+
+	# Removed with Delete, it does nothing once saved.
+	openInputGestures(desktop, "level 1 Audio collapsed 1 of …")
+	findNavigatorObjectScript(desktop)
+	step(desktop, "Right", "expanded")
+	step(desktop, "Down", "level 3 shift plus f 12 (keyboard, all layouts) 1 of 3")
+	# The item that takes its place is read.
+	step(desktop, "Delete", "NVDA plus numpad 5 (keyboard, all layouts) 1 of 2…")
+	step(desktop, "alt+o", *AT_START)
+	mark = desktop.mark()
+	desktop.press("shift+F12")
+	time.sleep(UNHEARD_STEP)
+	assert not [t for t in desktop.spokenSince(mark) if t.startswith("Press me")], desktop.spokenSince(mark)
+	desktop.close()
+	assertExitedCleanly(nvda)
+
+
 def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSession, tmp_path: Path):
 	# Insert and numpad Insert only, upstream's default.
 	config = sessionConfig(tmp_path / "config", drop=("NVDAModifierKeys",))

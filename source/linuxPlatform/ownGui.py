@@ -35,6 +35,11 @@ that of the window that has it, and GTK stamps a window with the time of the las
 windows received. Once one of NVDA's dialogs had taken keys, every later one was stamped with that
 time, older than the keys typed in the browser since, and was left behind it.
 
+wxGTK draws its tree control itself and gives GTK only an empty panel, so the Input Gestures dialog
+was silent: a tree's moves, expansions and collapses are passed from wx to NVDA's focus, which the
+NVDA app module makes the tree's selected item. A popup menu NVDA opens from its dialogs opens on
+its first item too, and the menu of a captured gesture's forms waits for the NVDA keys to be let go.
+
 wx's own log goes to NVDA's log, where wxMSW's goes to the debugger rather than to the user;
 wxGTK would print it on standard error.
 """
@@ -364,6 +369,84 @@ def focusedListItemText() -> str:
 	return ""
 
 
+def focusedTree() -> wx.TreeCtrl | None:
+	"""The wx tree control that has the focus, if one has it."""
+	focus, _parent = _focusAndItsParent()
+	return focus if isinstance(focus, wx.TreeCtrl) else None
+
+
+def _onTreeEvent(evt: wx.TreeEvent) -> None:
+	evt.Skip()
+	tree = evt.GetEventObject()
+	if not isinstance(tree, wx.TreeCtrl):
+		return
+	isStateChange = evt.GetEventType() in (wx.wxEVT_TREE_ITEM_EXPANDED, wx.wxEVT_TREE_ITEM_COLLAPSED)
+	# After the tree has finished with the event, so that the item it reports is the new one.
+	wx.CallAfter(_presentTreeChange, weakref.ref(tree), isStateChange)
+
+
+def hasSelection(tree: wx.TreeCtrl) -> bool:
+	"""Whether an item of tree is selected; wx's generic tree may report its hidden root instead of none."""
+	selection = tree.GetSelection()
+	return selection.IsOk() and not (tree.HasFlag(wx.TR_HIDE_ROOT) and selection == tree.GetRootItem())
+
+
+def _selectedGesturesData(self):
+	"""_GesturesTree.getSelectedItemData, which on GTK must not be asked about no selection.
+
+	wxMSW raises AssertionError for the index of the item no selection gives, which upstream catches;
+	wx's generic tree gives the empty index of its hidden root, on which upstream asserts, so that the key
+	handler that asked raised and every key in the tree was lost until something was selected.
+	"""
+	if not hasSelection(self):
+		return None
+	return _upstreamSelectedGesturesData(self)
+
+
+def _postInitInputGestures(self) -> None:
+	_upstreamPostInitInputGestures(self)
+	# A Windows tree view puts its focus on the first item when it has none selected; wx's generic tree
+	# leaves it nowhere, which a screen reader cannot present.
+	tree = self.tree
+	if not hasSelection(tree):
+		first, _cookie = tree.GetFirstChild(tree.GetRootItem())
+		if first.IsOk():
+			tree.SelectItem(first)
+
+
+def _doRefreshAndPresent(self, *args, **kwargs) -> None:
+	_upstreamDoRefresh(self, *args, **kwargs)
+	# A gesture removed or added changes the tree under its selection, which wx does not report.
+	wx.CallAfter(_presentTreeChange, weakref.ref(self), False)
+
+
+def _addCapturedOnceKeysReleased(self, *args) -> None:
+	# The gesture captured may have been an NVDA key chord, and the menu of its forms cannot open while
+	# that key is held.
+	whenNvdaKeysReleased(lambda: None if _isGone(self) else _upstreamAddCaptured(self, *args))
+
+
+def _popupMenuOnFirstItem(self, menu, *args, **kwargs):
+	selectFirstMenuItemWhenShown()
+	return _upstreamPopupMenu(self, menu, *args, **kwargs)
+
+
+def _presentTreeChange(treeRef: weakref.ref, isStateChange: bool) -> None:
+	"""Have NVDA's focus, when it is an item of the tree, present the tree's change.
+
+	wxGTK draws its generic tree control itself and tells GTK nothing about its items, so NVDA hears of
+	a move, an expansion or a collapse only from wx.
+	"""
+	import api
+
+	tree = treeRef()
+	if tree is None or _isGone(tree):
+		return
+	present = getattr(api.getFocusObject(), "presentWxTreeChange", None)
+	if present is not None:
+		present(tree, isStateChange)
+
+
 def focusIsCheckList() -> bool:
 	"""Whether one of NVDA's check lists has the focus."""
 	return any(
@@ -537,8 +620,28 @@ _upstreamAssociateElements = guiHelper.associateElements
 _upstreamSetFocus = wx.Window.SetFocus
 
 
+_upstreamSelectedGesturesData = None
+_upstreamPostInitInputGestures = None
+_upstreamAddCaptured = None
+_upstreamDoRefresh = None
+_upstreamPopupMenu = wx.Window.PopupMenu
+
+
 def install() -> None:
 	"""Make the changes, once gui has imported the modules they are made to."""
+	global _upstreamSelectedGesturesData, _upstreamPostInitInputGestures, _upstreamAddCaptured
+	global _upstreamDoRefresh
+	from gui import inputGestures
+
+	_upstreamSelectedGesturesData = inputGestures._GesturesTree.getSelectedItemData
+	_upstreamDoRefresh = inputGestures._GesturesTree.doRefresh
+	inputGestures._GesturesTree.doRefresh = _doRefreshAndPresent
+	_upstreamPostInitInputGestures = inputGestures.InputGesturesDialog.postInit
+	_upstreamAddCaptured = inputGestures.InputGesturesDialog._addCaptured
+	inputGestures._GesturesTree.getSelectedItemData = _selectedGesturesData
+	inputGestures.InputGesturesDialog.postInit = _postInitInputGestures
+	inputGestures.InputGesturesDialog._addCaptured = _addCapturedOnceKeysReleased
+	wx.Window.PopupMenu = _popupMenuOnFirstItem
 	wx.Window.SetAccessible = _setNoAccessible
 	wx.Window.SetFocus = _setFocusOnceActive
 	nvdaControls.ListCtrlAccessible = _NoAccessible
@@ -594,6 +697,9 @@ def initialize(app: wx.App) -> None:
 
 	app.Bind(wx.EVT_CHAR_HOOK, _onCharHook)
 	GObject.add_emission_hook(_gtkModule().Window, "map", _presentDialogOnMap)
+	# Tree events travel up to the application unless a handler keeps them, which none of NVDA's does.
+	for binder in (wx.EVT_TREE_SEL_CHANGED, wx.EVT_TREE_ITEM_EXPANDED, wx.EVT_TREE_ITEM_COLLAPSED):
+		app.Bind(binder, _onTreeEvent)
 	# wx.App sets its own target as it starts.
 	_logTarget = _NvdaLogTarget()
 	wx.Log.SetActiveTarget(_logTarget)

@@ -57,6 +57,8 @@ class NvdaDialogEmptyDescription(IAccessible):
 
 if sys.platform != "win32":
 	import core
+	import eventHandler
+	import globalVars
 	import wx
 	from linuxPlatform import ownGui
 	from linuxPlatform.atspi import client as atspiClient
@@ -162,6 +164,115 @@ if sys.platform != "win32":
 
 		def _get_states(self):
 			return super().states | {controlTypes.State.INVISIBLE}
+
+	class NvdaGtkWxTree(NVDAObject):
+		"""A wx tree control, such as the Input Gestures dialog's, which wxGTK draws itself and presents
+		as an empty panel; the focus it is given is given to its selected item, read from wx."""
+
+		def _get_role(self):
+			return controlTypes.Role.TREEVIEW
+
+		def _get_focusRedirect(self):
+			tree = ownGui.focusedTree()
+			if tree is None:
+				return None
+			if not ownGui.hasSelection(tree):
+				return None
+			return NvdaGtkWxTreeItem(
+				chooseBestAPI=False, tree=tree, item=tree.GetSelection(), treeObject=self
+			)
+
+		def presentWxTreeChange(self, tree: wx.TreeCtrl, isStateChange: bool) -> None:
+			"""Called by linuxPlatform.ownGui when the tree has changed while it has no item selected."""
+			if ownGui.hasSelection(tree):
+				eventHandler.queueEvent("gainFocus", self)
+
+	class NvdaGtkWxTreeItem(NVDAObject):
+		"""The selected item of a wx tree control, made from what wx knows of it."""
+
+		def __init__(self, tree: wx.TreeCtrl, item: wx.TreeItemId, treeObject: NVDAObject):
+			super().__init__()
+			self._tree = tree
+			self._item = item
+			self._treeObject = treeObject
+			#: The text the item had when it became the focus.
+			self._text = tree.GetItemText(item)
+
+		def _isEqual(self, other):
+			return self._tree is other._tree and self._item == other._item
+
+		def _get_processID(self):
+			return globalVars.appPid
+
+		def _get_windowHandle(self):
+			return None
+
+		def _get_parent(self):
+			return self._treeObject
+
+		def _get_role(self):
+			return controlTypes.Role.TREEVIEWITEM
+
+		def _get_name(self):
+			return self._tree.GetItemText(self._item) if not self._isGone() else ""
+
+		def _get_states(self):
+			states = {
+				controlTypes.State.FOCUSABLE,
+				controlTypes.State.SELECTABLE,
+			}
+			if self._isGone():
+				return states
+			if self._tree.GetSelection() == self._item:
+				states |= {controlTypes.State.FOCUSED, controlTypes.State.SELECTED}
+			if self._tree.ItemHasChildren(self._item):
+				states.add(
+					controlTypes.State.EXPANDED
+					if self._tree.IsExpanded(self._item)
+					else controlTypes.State.COLLAPSED,
+				)
+			return states
+
+		def _get_positionInfo(self):
+			if self._isGone():
+				return {}
+			tree = self._tree
+			parent = tree.GetItemParent(self._item)
+			level = 0
+			ancestor = parent
+			while ancestor.IsOk() and not (tree.HasFlag(wx.TR_HIDE_ROOT) and ancestor == tree.GetRootItem()):
+				level += 1
+				ancestor = tree.GetItemParent(ancestor)
+			index = 0
+			count = 0
+			if parent.IsOk():
+				child, cookie = tree.GetFirstChild(parent)
+				while child.IsOk():
+					count += 1
+					if child == self._item:
+						index = count
+					child, cookie = tree.GetNextChild(parent, cookie)
+			info = {"level": level + 1}
+			if index:
+				info.update(indexInGroup=index, similarItemsInGroup=count)
+			return info
+
+		def _isGone(self) -> bool:
+			return not self._tree or self._tree.IsBeingDeleted() or not self._item.IsOk()
+
+		def presentWxTreeChange(self, tree: wx.TreeCtrl, isStateChange: bool) -> None:
+			"""Called by linuxPlatform.ownGui when tree has changed while this is NVDA's focus."""
+			if tree is not self._tree:
+				return
+			selection = tree.GetSelection()
+			if isStateChange and selection == self._item:
+				eventHandler.queueEvent("stateChange", self)
+			elif selection == self._item and tree.GetItemText(selection) == self._text:
+				# Refreshed with nothing to tell, as after the selection that was just presented.
+				return
+			else:
+				# Given again, the focus goes to the item now selected.
+				eventHandler.queueEvent("gainFocus", self._treeObject)
 
 	def _shownWxDialog(title: str) -> wx.Dialog | None:
 		for window in wx.GetTopLevelWindows():
@@ -399,6 +510,12 @@ class AppModule(appModuleHandler.AppModule):
 				and ownGui.focusIsCheckList()
 			):
 				clsList.insert(0, NvdaGtkCheckListItem)
+			elif (
+				obj.role == controlTypes.Role.PANEL
+				and controlTypes.State.FOCUSED in obj.states
+				and ownGui.focusedTree() is not None
+			):
+				clsList.insert(0, NvdaGtkWxTree)
 			elif obj.role == controlTypes.Role.LIST and getattr(obj, "atspiRole", None) == "list":
 				clsList.insert(0, NvdaGtkWxList)
 			elif obj.role == controlTypes.Role.LISTITEM and getattr(obj, "atspiRole", None) == "list item":
