@@ -8,22 +8,164 @@ could not be toggled. GTK's own accessibility already covers what those repairs 
 check list is a table whose cells carry their checked state, and GTK reports the state and value
 changes it makes itself.
 
-It also gives a settings dialog its first focus once the dialog is shown. NVDA puts it on a
-control while the dialog is being built, before it is shown, which wxMSW keeps and GTK does not:
-GTK focuses the OK button as it shows the dialog.
+It names controls by their labels. Windows names a control after the static text before it; wxGTK
+guesses the same by making a label the mnemonic widget of the next control made after it, which
+picks the wrong control when that one is a slider, whose widget is a box around the scale, and
+which lands on the box around a list or a multi-line field rather than the list or field itself.
+Each label NVDA pairs with a control is made that control's label, and a label wx paired with a box
+is moved to the control inside it. Mnemonics follow, so Alt with a label's letter reaches the
+control as it does on Windows.
+
+It gives a dialog the focus NVDA gave it while building it. NVDA puts the focus on a control before
+the dialog is shown, which wxMSW keeps and GTK does not: GTK focuses the default button as it shows
+the dialog. The focus is given again once the dialog is first active.
+
+Enter in a dialog presses its default button from a choice, a check box, a radio button or a
+slider, as Windows' dialog manager does; GTK opens the choice's list or toggles the box instead.
 
 selectFirstMenuItemWhenShown makes a popup menu open on its first item. wx pops a menu up as GTK
 does for the pointer, with nothing selected, so that the focus lands on the menu's unnamed window
 and the first arrow key is spent selecting an item. A menu opened from the keyboard should open on
 its first item, as Windows opens NVDA's menu and as GTK opens a context menu from the Menu key.
+Escape in a submenu closes that submenu only, as on Windows; GTK closes every menu.
+
+wx's own log goes to NVDA's log, where wxMSW's goes to the debugger rather than to the user;
+wxGTK would print it on standard error.
 """
 
+import atexit
+import ctypes
+import gc
+import time
+import weakref
+
+import controlTypes
 import wx
-from gui import nvdaControls, settingsDialogs
+from gui import guiHelper, nvdaControls, settingsDialogs
+from logHandler import log
 
 #: Milliseconds between looks for a menu being shown, and how many looks it gets to appear.
 _MENU_INTERVAL = 20
 _MENU_ATTEMPTS = 25
+#: Seconds from a dialog becoming active to the focus NVDA chose for it, at most.
+_FIRST_FOCUS_TIMEOUT = 1.0
+
+#: Accessible roles of the boxes wx puts around a control's GTK widget, which a label should skip.
+_WRAPPER_ROLES = frozenset({"filler", "scroll pane", "panel"})
+#: Accessible roles inside such a box that are not the control.
+_NOT_THE_CONTROL_ROLES = frozenset({"scroll bar", "label", "separator"})
+
+#: Controls from which Enter presses the dialog's default button, as on Windows.
+_ENTER_PRESSES_DEFAULT = (wx.Choice, wx.CheckBox, wx.RadioButton, wx.Slider)
+
+
+class _GList(ctypes.Structure):
+	pass
+
+
+_GList._fields_ = [
+	("data", ctypes.c_void_p),
+	("next", ctypes.POINTER(_GList)),
+	("prev", ctypes.POINTER(_GList)),
+]
+
+
+class _Gtk:
+	"""The few GTK and ATK calls wx gives no way to make, on the libraries wx has already loaded."""
+
+	def __init__(self) -> None:
+		gtk = ctypes.CDLL("libgtk-3.so.0")
+		atk = ctypes.CDLL("libatk-1.0.so.0")
+		gobject = ctypes.CDLL("libgobject-2.0.so.0")
+		glib = ctypes.CDLL("libglib-2.0.so.0")
+		pointer = ctypes.c_void_p
+		self._functions = {}
+		for library, name, result, arguments in (
+			(gtk, "gtk_label_get_mnemonic_widget", pointer, (pointer,)),
+			(gtk, "gtk_label_set_mnemonic_widget", None, (pointer, pointer)),
+			(gtk, "gtk_label_get_type", ctypes.c_size_t, ()),
+			(gtk, "gtk_container_get_type", ctypes.c_size_t, ()),
+			(gtk, "gtk_container_get_children", ctypes.POINTER(_GList), (pointer,)),
+			(gtk, "gtk_widget_get_accessible", pointer, (pointer,)),
+			(atk, "atk_object_get_role", ctypes.c_int, (pointer,)),
+			(atk, "atk_role_get_name", ctypes.c_char_p, (ctypes.c_int,)),
+			(atk, "atk_object_set_name", None, (pointer, ctypes.c_char_p)),
+			(atk, "atk_object_add_relationship", ctypes.c_int, (pointer, ctypes.c_int, pointer)),
+			(atk, "atk_relation_type_for_name", ctypes.c_int, (ctypes.c_char_p,)),
+			(gobject, "g_type_check_instance_is_a", ctypes.c_int, (pointer, ctypes.c_size_t)),
+			(glib, "g_list_free", None, (ctypes.POINTER(_GList),)),
+		):
+			function = getattr(library, name)
+			function.restype = result
+			function.argtypes = arguments
+			self._functions[name] = function
+		self._labelType = self._functions["gtk_label_get_type"]()
+		self._containerType = self._functions["gtk_container_get_type"]()
+		self._labelledBy = self._functions["atk_relation_type_for_name"](b"labelled-by")
+		self._labelFor = self._functions["atk_relation_type_for_name"](b"label-for")
+
+	def isLabel(self, widget: int) -> bool:
+		return bool(self._functions["g_type_check_instance_is_a"](widget, self._labelType))
+
+	def role(self, widget: int) -> str:
+		accessible = self._functions["gtk_widget_get_accessible"](widget)
+		if not accessible:
+			return ""
+		role = self._functions["atk_object_get_role"](accessible)
+		return (self._functions["atk_role_get_name"](role) or b"").decode()
+
+	def children(self, widget: int) -> list[int]:
+		if not self._functions["g_type_check_instance_is_a"](widget, self._containerType):
+			return []
+		head = self._functions["gtk_container_get_children"](widget)
+		children = []
+		node = head
+		while node:
+			children.append(node.contents.data)
+			node = node.contents.next
+		if head:
+			self._functions["g_list_free"](head)
+		return children
+
+	def control(self, widget: int) -> int:
+		"""The widget whose accessible is the control, inside the boxes wx may have put it in."""
+		for _depth in range(4):
+			if self.role(widget) not in _WRAPPER_ROLES:
+				break
+			inner = [
+				child for child in self.children(widget) if self.role(child) not in _NOT_THE_CONTROL_ROLES
+			]
+			if not inner:
+				break
+			widget = inner[0]
+		return widget
+
+	def mnemonicWidget(self, label: int) -> int | None:
+		return self._functions["gtk_label_get_mnemonic_widget"](label)
+
+	def setLabel(self, label: int, widget: int) -> None:
+		"""Give widget's accessible label as its label, which GTK keeps, before any it would work out
+		from the mnemonic labels wx sets and sets again."""
+		labelAccessible = self._functions["gtk_widget_get_accessible"](label)
+		accessible = self._functions["gtk_widget_get_accessible"](widget)
+		if labelAccessible and accessible:
+			self._functions["atk_object_add_relationship"](accessible, self._labelledBy, labelAccessible)
+			self._functions["atk_object_add_relationship"](labelAccessible, self._labelFor, accessible)
+
+	def setAccessibleName(self, widget: int, name: str) -> None:
+		accessible = self._functions["gtk_widget_get_accessible"](widget)
+		if accessible:
+			self._functions["atk_object_set_name"](accessible, name.encode())
+
+
+_gtk: _Gtk | None = None
+
+
+def _gtkCalls() -> _Gtk:
+	global _gtk
+	if _gtk is None:
+		_gtk = _Gtk()
+	return _gtk
 
 
 class _NoAccessible:
@@ -37,12 +179,22 @@ def _setNoAccessible(window: wx.Window, accessible: object) -> None:
 	pass
 
 
-def _skipEvent(self, evt: wx.CommandEvent) -> None:
+def _announceCheckedItem() -> None:
+	"""Have the focus, a check list's item, say its new state, as NVDA's own WinEvent makes it say on
+	Windows. wx toggles the item in its own model, of which GTK tells no one."""
+	import api
+	import eventHandler
+
+	eventHandler.queueEvent("stateChange", api.getFocusObject())
+
+
+def _notifyCheckListBox(self, evt: wx.CommandEvent) -> None:
 	evt.Skip()
+	wx.CallAfter(_announceCheckedItem)
 
 
-def _notifyNothing(self, index: int) -> None:
-	pass
+def _notifyCheckListCtrl(self, index: int) -> None:
+	wx.CallAfter(_announceCheckedItem)
 
 
 def _setSliderValue(self, i: int) -> None:
@@ -56,6 +208,157 @@ def _isGone(window: wx.Window) -> bool:
 	return not window or window.IsBeingDeleted()
 
 
+def _widget(window: wx.Window) -> int:
+	"""The address of a window's GTK widget; GetHandle gives its X window."""
+	return int(window.GetGtkWidget())
+
+
+def _labelControl(label: wx.StaticText, control: wx.Window) -> None:
+	# Kept, because wx pairs labels again whenever a control is moved in the tab order, as the driver
+	# settings are, and the mnemonic has to be set again after it.
+	label._basedreaderControl = weakref.ref(control)
+	try:
+		gtk = _gtkCalls()
+		if gtk.isLabel(_widget(label)):
+			inner = gtk.control(_widget(control))
+			gtk.setLabel(_widget(label), inner)
+			gtk.setMnemonicWidget(_widget(label), inner)
+	except (OSError, AttributeError):
+		log.debugWarning("Could not label a control through GTK", exc_info=True)
+
+
+def _repairLabels(window: wx.Window) -> None:
+	"""Set the mnemonic of each label NVDA paired with a control to that control again, label the
+	control inside each box wx paired a label with, and name a read-only field that stands alone in a
+	group box after the box, as Windows names it."""
+	try:
+		gtk = _gtkCalls()
+		pending = list(window.GetChildren())
+		while pending:
+			child = pending.pop()
+			pending.extend(child.GetChildren())
+			if isinstance(child, wx.StaticText):
+				label = _widget(child)
+				if not gtk.isLabel(label):
+					continue
+				control = getattr(child, "_basedreaderControl", lambda: None)()
+				if control is not None and not _isGone(control):
+					gtk.setMnemonicWidget(label, gtk.control(_widget(control)))
+					continue
+				paired = gtk.mnemonicWidget(label)
+				if paired:
+					inner = gtk.control(paired)
+					if inner != paired:
+						# The box keeps the label wx gave it, so that a dialog's text still leaves the
+						# label out as the label of the object after it.
+						gtk.setLabel(label, inner)
+			elif (
+				isinstance(child, wx.TextCtrl)
+				and child.HasFlag(wx.TE_READONLY)
+				and isinstance(child.GetParent(), wx.StaticBox)
+			):
+				gtk.setAccessibleName(gtk.control(_widget(child)), child.GetParent().GetLabelText())
+	except (OSError, AttributeError):
+		log.debugWarning("Could not repair labels through GTK", exc_info=True)
+
+
+def _associateElements(firstElement, secondElement) -> wx.BoxSizer:
+	sizer = _upstreamAssociateElements(firstElement, secondElement)
+	if isinstance(firstElement, wx.StaticText) and isinstance(secondElement, wx.Window):
+		_labelControl(firstElement, secondElement)
+	return sizer
+
+
+def _buildSettingsPanel(self) -> None:
+	_upstreamBuildSettingsPanel(self)
+	_repairLabels(self)
+
+
+def _repairingLabels(method):
+	"""method, followed by _repairLabels on the panel it was called on."""
+
+	def repairing(self, *args, **kwargs):
+		result = method(self, *args, **kwargs)
+		_repairLabels(self)
+		# wx pairs the labels of a panel again as GTK first shows it, which happens after this returns.
+		wx.CallAfter(lambda: None if _isGone(self) else _repairLabels(self))
+		return result
+
+	return repairing
+
+
+#: The label of the default button of the dialog whose first focus is still to come, and the time
+#: by which it is no longer awaited.
+_awaitedFirstFocus: tuple[str, float] | None = None
+
+
+def _awaitFirstFocus(dialog: wx.TopLevelWindow) -> None:
+	global _awaitedFirstFocus
+	if not isinstance(dialog, wx.Dialog):
+		return
+	button = dialog.GetDefaultItem() or dialog.FindWindow(dialog.GetAffirmativeId())
+	if isinstance(button, wx.Button):
+		_awaitedFirstFocus = (button.GetLabelText(), time.monotonic() + _FIRST_FOCUS_TIMEOUT)
+
+
+def isPassingFocus(obj) -> bool:
+	"""Whether obj is the default button of a dialog of NVDA's that GTK focused as it showed it, before
+	the control NVDA chose takes the focus, so that the focus there should not be reported.
+
+	Any other focused object ends the wait, as does the time it may take.
+	"""
+	global _awaitedFirstFocus
+	if _awaitedFirstFocus is None:
+		return False
+	label, deadline = _awaitedFirstFocus
+	if time.monotonic() >= deadline:
+		_awaitedFirstFocus = None
+		return False
+	if obj.role == controlTypes.Role.BUTTON and obj.name == label:
+		return True
+	if controlTypes.State.FOCUSED in obj.states:
+		_awaitedFirstFocus = None
+	return False
+
+
+def focusedListItemText() -> str:
+	"""The text of the focused item of the wx list control that has the focus, if one has it."""
+	focus = wx.Window.FindFocus()
+	for window in (focus, focus.GetParent() if focus else None):
+		if isinstance(window, wx.ListCtrl):
+			index = window.GetFocusedItem()
+			if index < 0:
+				index = window.GetFirstSelected()
+			return window.GetItemText(index) if index >= 0 else ""
+	return ""
+
+
+def _setFocusOnceActive(self) -> None:
+	_upstreamSetFocus(self)
+	topLevel = wx.GetTopLevelParent(self)
+	if topLevel is None or topLevel is self or topLevel.IsShown():
+		return
+	target = weakref.ref(self)
+	if getattr(topLevel, "_basedreaderFocusTarget", None) is None:
+
+		def focusOnceActive(evt: wx.ActivateEvent) -> None:
+			evt.Skip()
+			if not evt.GetActive():
+				return
+			topLevel.Unbind(wx.EVT_ACTIVATE, handler=focusOnceActive)
+			target = topLevel._basedreaderFocusTarget
+			topLevel._basedreaderFocusTarget = None
+			window = target() if target else None
+			if window is None:
+				return
+			_awaitFirstFocus(topLevel)
+			# After wx has given the focus to whatever it last saw focused, as it does on activation.
+			wx.CallAfter(lambda: None if _isGone(window) or _isGone(topLevel) else _upstreamSetFocus(window))
+
+		topLevel.Bind(wx.EVT_ACTIVATE, focusOnceActive)
+	topLevel._basedreaderFocusTarget = target
+
+
 def _initSettingsDialog(self, *args, **kwargs) -> None:
 	postInit = type(self).postInit
 
@@ -64,6 +367,9 @@ def _initSettingsDialog(self, *args, **kwargs) -> None:
 		if not evt.GetActive():
 			return
 		self.Unbind(wx.EVT_ACTIVATE, handler=postInitOnceActive)
+		# wx pairs labels again as GTK first shows the dialog.
+		_repairLabels(self)
+		_awaitFirstFocus(self)
 		# After wx has given the focus back to whatever it last saw focused, as it does on activation.
 		wx.CallAfter(lambda: None if _isGone(self) else postInit(self))
 
@@ -74,6 +380,9 @@ def _initSettingsDialog(self, *args, **kwargs) -> None:
 
 	self.postInit = postInitOnceShown
 	_upstreamSettingsDialogInit(self, *args, **kwargs)
+	# postInit chooses the focus, over any control focused while the dialog was being built.
+	self._basedreaderFocusTarget = None
+	_repairLabels(self)
 
 
 def _ignoredOnceDestroyed(handler):
@@ -91,31 +400,101 @@ def _ignoredOnceDestroyed(handler):
 	return ignoring
 
 
+def _onCharHook(evt: wx.KeyEvent) -> None:
+	if evt.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and not evt.HasAnyModifiers():
+		focus = wx.Window.FindFocus()
+		dialog = wx.GetTopLevelParent(focus) if focus else None
+		if isinstance(focus, _ENTER_PRESSES_DEFAULT) and isinstance(dialog, wx.Dialog):
+			button = dialog.GetDefaultItem() or dialog.FindWindow(dialog.GetAffirmativeId())
+			if isinstance(button, wx.Button) and button.IsShown() and button.IsEnabled():
+				click = wx.CommandEvent(wx.wxEVT_BUTTON, button.GetId())
+				click.SetEventObject(button)
+				button.GetEventHandler().ProcessEvent(click)
+				return
+	evt.Skip()
+
+
+class _NvdaLogTarget(wx.Log):
+	def DoLogTextAtLevel(self, level: int, msg: str) -> None:
+		if level <= wx.LOG_Error:
+			log.error(f"wx: {msg}")
+		elif level == wx.LOG_Warning:
+			log.warning(f"wx: {msg}")
+		elif level <= wx.LOG_Info:
+			log.info(f"wx: {msg}")
+		else:
+			log.debug(f"wx: {msg}")
+
+
+_logTarget: _NvdaLogTarget | None = None
+
+
+def _quietAutoSettingsAtExit() -> None:
+	"""Let the driver settings that live until the interpreter is torn down go quietly.
+
+	NVDAHighlighter keeps its settings in a class attribute and globalVars.settingsRing keeps the last
+	synth, so AutoSettings.__del__ runs only as the interpreter takes config apart, when there is no
+	extension point left to leave, and its AttributeError was printed on standard error.
+	"""
+	from autoSettingsUtils.autoSettings import AutoSettings
+
+	for obj in gc.get_objects():
+		if isinstance(obj, AutoSettings):
+			obj._unregisterConfigSaveAction = _leaveNothing
+
+
+def _leaveNothing() -> None:
+	pass
+
+
 _upstreamSettingsDialogInit = settingsDialogs.SettingsDialog.__init__
+_upstreamBuildSettingsPanel = settingsDialogs.SettingsPanel._buildGui
+_upstreamAssociateElements = guiHelper.associateElements
+_upstreamSetFocus = wx.Window.SetFocus
 
 
 def install() -> None:
 	"""Make the changes, once gui has imported the modules they are made to."""
 	wx.Window.SetAccessible = _setNoAccessible
+	wx.Window.SetFocus = _setFocusOnceActive
 	nvdaControls.ListCtrlAccessible = _NoAccessible
 	settingsDialogs.SettingsPanelAccessible = _NoAccessible
-	nvdaControls.CustomCheckListBox.notifyIAccessible = _skipEvent
-	nvdaControls.AutoWidthColumnCheckListCtrl.notifyIAccessible = _notifyNothing
+	nvdaControls.CustomCheckListBox.notifyIAccessible = _notifyCheckListBox
+	nvdaControls.AutoWidthColumnCheckListCtrl.notifyIAccessible = _notifyCheckListCtrl
 	nvdaControls.EnhancedInputSlider.SetValue = _setSliderValue
 	settingsDialogs.SettingsDialog.__init__ = _initSettingsDialog
+	settingsDialogs.SettingsPanel._buildGui = _buildSettingsPanel
+	for cls, name in (
+		(settingsDialogs.SettingsPanel, "onPanelActivated"),
+		(settingsDialogs.AutoSettingsMixin, "updateDriverSettings"),
+		(settingsDialogs.AutoSettingsMixin, "refreshGui"),
+	):
+		setattr(cls, name, _repairingLabels(getattr(cls, name)))
+	guiHelper.associateElements = _associateElements
 	for cls in (settingsDialogs.MultiCategorySettingsDialog, settingsDialogs.NVDASettingsDialog):
 		cls.onCategoryChange = _ignoredOnceDestroyed(cls.onCategoryChange)
+	atexit.register(_quietAutoSettingsAtExit)
+
+
+def initialize(app: wx.App) -> None:
+	"""Make the changes that need the application, once it exists."""
+	global _logTarget
+	app.Bind(wx.EVT_CHAR_HOOK, _onCharHook)
+	# wx.App sets its own target as it starts.
+	_logTarget = _NvdaLogTarget()
+	wx.Log.SetActiveTarget(_logTarget)
 
 
 def selectFirstMenuItemWhenShown() -> None:
-	"""Select the first item of the popup menu about to be shown, once GTK has mapped it.
+	"""Select the first item of the popup menu about to be shown, once GTK has mapped it, and make
+	Escape in its submenus close only them.
 
 	Called just before a blocking PopupMenu; wx runs the calls queued here inside that menu's loop.
 	"""
 	wx.CallAfter(_selectFirstMenuItem, _MENU_ATTEMPTS)
 
 
-def _shownPopupMenus() -> list:
+def _gtkModule():
 	# Imported only once wx is running GTK: importing it initialises GTK, which gui must not do as it
 	# is imported, before wx.App exists.
 	import gi
@@ -123,18 +502,57 @@ def _shownPopupMenus() -> list:
 	gi.require_version("Gtk", "3.0")
 	from gi.repository import Gtk
 
+	return Gtk
+
+
+def _popupMenus(*, shown: bool) -> list:
+	Gtk = _gtkModule()
 	return [
 		window.get_child()
 		for window in Gtk.Window.list_toplevels()
 		if window.get_window_type() == Gtk.WindowType.POPUP
-		and window.get_mapped()
 		and isinstance(window.get_child(), Gtk.Menu)
+		and (window.get_mapped() or not shown)
 	]
+
+
+def _shownPopupMenus() -> list:
+	return _popupMenus(shown=True)
+
+
+#: The submenus whose Escape this module already handles. Holding them keeps their Python wrappers,
+#: so that a submenu is found to be one of them however often it is looked up.
+_submenusWithEscape: list = []
+
+
+def _closeOnlyThisSubmenu(menu, event) -> bool:
+	Gtk = _gtkModule()
+	from gi.repository import Gdk
+
+	# A submenu left with Left or Escape still gets the keys, with nothing selected in it; Escape then
+	# closes the whole menu, as it does from the top of a menu on Windows.
+	if event.keyval != Gdk.KEY_Escape or menu.get_selected_item() is None:
+		return False
+	menu.emit("move-current", Gtk.MenuDirectionType.PARENT)
+	return True
+
+
+def _handleEscapeInSubmenus() -> None:
+	Gtk = _gtkModule()
+	for menu in _popupMenus(shown=False):
+		if any(menu is known for known in _submenusWithEscape) or not isinstance(
+			menu.get_attach_widget(),
+			Gtk.MenuItem,
+		):
+			continue
+		_submenusWithEscape.append(menu)
+		menu.connect("key-press-event", _closeOnlyThisSubmenu)
 
 
 def _selectFirstMenuItem(attemptsLeft: int) -> None:
 	menus = _shownPopupMenus()
 	if menus:
+		_handleEscapeInSubmenus()
 		menu = menus[0]
 		if menu.get_selected_item() is None:
 			menu.select_first(True)

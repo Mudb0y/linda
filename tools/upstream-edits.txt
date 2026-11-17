@@ -101,7 +101,14 @@ source/appModules/nvda.py
   passes to the first item at once. A frame of NVDA's own titled as a shown
   wx.Dialog is a dialog, whose text is read as on Windows, since wxGTK shows
   every wx dialog as a frame; a settings dialog's description is empty, as
-  NvdaDialogEmptyDescription makes it on Windows
+  NvdaDialogEmptyDescription makes it on Windows. Of NVDA's own objects, a
+  read-only field that takes the focus is a read-only edit field, as on
+  Windows; a check list's check box cell is a check box named by its row's
+  text; an unnamed wx list is named by its scroll pane and gives its
+  focused item as its value; and the label GTK keeps inside a group box is
+  invisible, so that a dialog's text leaves it out. The focus GTK gives a
+  dialog's default button as it shows it, before the control NVDA chose is
+  focused, is not reported
   Once NVDA's exit has begun, focus and state changes in its own windows
   are dropped, as asking GTK about a window being torn down, through NVDA's
   own accessibility bridge, can hang the exit
@@ -198,8 +205,11 @@ source/gui/__init__.py
   is shown, as wx pops it up for the pointer with nothing selected. On
   import, linuxPlatform.ownGui takes out the MSAA repairs of NVDA's own
   controls, whose wx.Accessible wxGTK cannot construct, so that the settings
-  dialog opens, and defers a settings dialog's first focus until GTK has
-  shown it
+  dialog opens, and defers a dialog's first focus until GTK has shown it;
+  it also labels controls through GTK, makes Enter press a dialog's default
+  button and Escape close only a submenu, as on Windows. initialize hands
+  ownGui the wx application, which it binds Enter on and sends wx's own log
+  through to NVDA's
   every platform: the help menu's web pages, the donation page and the
   documentation open through startfile from linuxPlatform.windowsOnly,
   which is os.startfile on Windows and on Linux opens them with the

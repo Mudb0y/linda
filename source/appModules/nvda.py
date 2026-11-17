@@ -58,7 +58,9 @@ class NvdaDialogEmptyDescription(IAccessible):
 if sys.platform != "win32":
 	import core
 	import wx
+	from linuxPlatform import ownGui
 	from NVDAObjects import NVDAObject
+	from NVDAObjects.AtSpi import TableCell
 	from NVDAObjects.behaviors import Dialog
 
 	class NvdaGtkDialog(NVDAObject):
@@ -74,6 +76,75 @@ if sys.platform != "win32":
 
 		def _get_description(self):
 			return ""
+
+	class NvdaGtkReadOnlyField(NVDAObject):
+		"""A read-only field that takes the focus, such as the synthesizer's name in the speech settings,
+		which GTK presents as text that cannot be edited and Windows as a read-only edit field, whose
+		text is read when it is focused."""
+
+		def _get_role(self):
+			return controlTypes.Role.EDITABLETEXT
+
+		def _get_states(self):
+			return super().states | {controlTypes.State.READONLY}
+
+	class NvdaGtkCheckListItem(NVDAObject):
+		"""The check box of an item in one of NVDA's check lists, such as the NVDA modifier keys, which
+		GTK presents as a table whose rows have a check box cell and a text cell; Windows presents each
+		item as a check box named by its text."""
+
+		def _get_role(self):
+			return controlTypes.Role.CHECKBOX
+
+		def _get_name(self):
+			textCell = self.next
+			return textCell.name if textCell is not None else ""
+
+		def _get_states(self):
+			return (super().states | {controlTypes.State.CHECKABLE}) - {
+				controlTypes.State.SELECTED,
+				controlTypes.State.SELECTABLE,
+			}
+
+		def _get_positionInfo(self):
+			try:
+				return {
+					"indexInGroup": TableCell._get_rowNumber(self),
+					"similarItemsInGroup": TableCell._get_rowCount(self),
+				}
+			except (LookupError, AttributeError):
+				return {}
+
+		def _get_rowNumber(self):
+			return None
+
+		def _get_columnNumber(self):
+			return None
+
+	class NvdaGtkWxList(NVDAObject):
+		"""A wx list control, such as the settings dialog's categories, which wxGTK draws itself and
+		presents with its label on the scroll pane around it, and without saying which of its items has
+		the focus until it moves."""
+
+		def _get_name(self):
+			obj = self.parent
+			for _level in range(2):
+				if obj is None:
+					break
+				if obj.role == controlTypes.Role.SCROLLPANE:
+					return obj.name
+				obj = obj.parent
+			return ""
+
+		def _get_value(self):
+			return ownGui.focusedListItemText()
+
+	class NvdaGtkGroupingLabel(NVDAObject):
+		"""The label GTK keeps inside a group box, which Windows does not have as an object of its own and
+		which would otherwise be read as part of a dialog's text."""
+
+		def _get_states(self):
+			return super().states | {controlTypes.State.INVISIBLE}
 
 	def _shownWxDialog(title: str) -> wx.Dialog | None:
 		for window in wx.GetTopLevelWindows():
@@ -248,6 +319,10 @@ class AppModule(appModuleHandler.AppModule):
 			# The unnamed window GTK puts the NVDA menu in has the focus only until the first item is
 			# selected, a moment later.
 			return
+		if sys.platform != "win32" and ownGui.isPassingFocus(obj):
+			# GTK focuses a dialog's default button as it shows it, before NVDA focuses the control it
+			# chose, as wxMSW does before the dialog is shown.
+			return
 		nextHandler()
 
 	# Silence invisible unknowns for stateChange as well.
@@ -296,6 +371,30 @@ class AppModule(appModuleHandler.AppModule):
 				clsList.insert(0, NvdaGtkDialog)
 				if isinstance(dialog, gui.settingsDialogs.SettingsDialog):
 					clsList.insert(0, NvdaGtkSettingsDialog)
+			elif obj.role == controlTypes.Role.STATICTEXT and getattr(obj, "atspiRole", None) == "text":
+				if controlTypes.State.FOCUSABLE in obj.states:
+					clsList.insert(0, NvdaGtkReadOnlyField)
+			elif (
+				TableCell in clsList
+				and getattr(obj, "atspiRole", None) == "table cell"
+				and not obj.name
+				and {controlTypes.State.CHECKABLE, controlTypes.State.CHECKED} & obj.states
+			):
+				clsList.insert(0, NvdaGtkCheckListItem)
+			elif (
+				obj.role == controlTypes.Role.LIST
+				and getattr(obj, "atspiRole", None) == "list"
+				and not obj.name
+			):
+				clsList.insert(0, NvdaGtkWxList)
+			elif obj.role == controlTypes.Role.STATICTEXT and getattr(obj, "atspiRole", None) == "label":
+				parent = obj.parent
+				if (
+					parent is not None
+					and parent.role == controlTypes.Role.GROUPING
+					and parent.name == obj.name
+				):
+					clsList.insert(0, NvdaGtkGroupingLabel)
 			return
 		if obj.windowClassName == "#32770" and obj.role == controlTypes.Role.DIALOG:
 			clsList.insert(0, NvdaDialog)

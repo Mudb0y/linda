@@ -958,6 +958,8 @@ def initialize():
 		# otherwise the system default will be used
 		mainFrame.SetLayoutDirection(wxLang.LayoutDirection)
 	wx.GetApp().SetTopWindow(mainFrame)
+	if sys.platform != "win32":
+		ownGui.initialize(wx.GetApp())
 	import monkeyPatches
 
 	monkeyPatches.applyWxMonkeyPatches(mainFrame, winUser, wx)
