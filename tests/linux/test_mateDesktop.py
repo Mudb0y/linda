@@ -1,0 +1,154 @@
+"""MATE's own programs walked with the keyboard, as someone using Basedreader as their only screen reader
+walks them: what NVDA says for each step, compared with what it says for the same kind of control on
+Windows. One walk per program, with keys pressed on the rig's display under marco.
+
+nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_mateDesktop.py
+
+The transcript holds what the synthesizer is given after symbols are spoken as words, so "a.txt" is
+"a dot txt" and "Alt+N" is "Alt plus N".
+"""
+
+import time
+from collections.abc import Iterator
+from pathlib import Path
+
+import desktopSession
+import harness
+import pytest
+from desktopSession import DesktopSession
+
+SESSION_CONFIG = harness.HERE / "fixtures" / "sessionConfig" / "nvda.ini"
+#: Seconds from starting NVDA to its first words; a start under the rig takes about three.
+STARTUP_BOUND = 60.0
+#: Seconds to wait for a window a program opens.
+WINDOW_TIMEOUT = 30.0
+#: Files in the folder that must not slow NVDA down.
+BIG_FOLDER_FILES = 3000
+
+
+@pytest.fixture
+def desktop(tmp_path: Path) -> Iterator[DesktopSession]:
+	with DesktopSession(tmp_path / "desktop") as session:
+		yield session
+
+
+def step(desktop: DesktopSession, chord: str, *expected: str, timeout: float = 5) -> int:
+	"""Press chord and wait for expected, in order; return the mark taken before the key."""
+	mark = desktop.mark()
+	desktop.press(chord)
+	desktop.expect(*expected, since=mark, timeout=timeout)
+	return mark
+
+
+def waitForWindow(title: str, timeout: float = WINDOW_TIMEOUT) -> None:
+	"""Wait for a top-level window named title, from a program that may hand its work to a copy of
+	itself already running, and give it the keyboard."""
+	deadline = time.monotonic() + timeout
+	while title not in desktopSession.topLevelNames():
+		assert time.monotonic() < deadline, f"no window {title!r}: {desktopSession.topLevelNames()}"
+		time.sleep(0.1)
+	desktopSession.activate(title)
+
+
+def startNVDA(desktop: DesktopSession, *expected: str) -> harness.Launch:
+	"""Start NVDA and wait for expected, or with nothing expected, until it has started."""
+	nvda = desktop.startNVDA(SESSION_CONFIG)
+	if expected:
+		desktop.expect(*expected, since=0, timeout=STARTUP_BOUND)
+	else:
+		nvda.waitForLog("NVDA initialized", STARTUP_BOUND)
+	return nvda
+
+
+def assertQuitCleanly(desktop: DesktopSession, nvda: harness.Launch) -> None:
+	desktop.close()
+	assert nvda.process.returncode == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+
+
+def makeFolder(path: Path, *files: str) -> Path:
+	path.mkdir(parents=True, exist_ok=True)
+	for name in files:
+		if name.endswith("/"):
+			(path / name).mkdir()
+		else:
+			(path / name).write_text("hello\n")
+	return path
+
+
+def test_cajaFolderWindow(desktop: DesktopSession, tmp_path: Path):
+	folder = makeFolder(tmp_path / "docs", "sub/", "alpha.txt", "beta.txt")
+	(folder / "sub" / "inner.txt").write_text("x")
+	desktop.startApp(["caja", "--no-desktop", str(folder)], title="docs", timeout=WINDOW_TIMEOUT)
+	desktopSession.activate("docs")
+	nvda = startNVDA(desktop, "docs", "Icon View list")
+
+	# Icon view: Windows Explorer's items in icon mode, each a list item with its place.
+	step(desktop, "Down", "sub 1 of 3")
+	step(desktop, "Right", "alpha dot txt 2 of 3")
+	step(desktop, "Right", "beta dot txt 3 of 3")
+
+	# The context menu opens on no item, as GTK's do, and closing it gives the file back.
+	step(desktop, "shift+F10", "menu")
+	step(desktop, "Down", "Open…")
+	step(desktop, "Escape", "docs", "beta dot txt 3 of 3")
+
+	# Renaming.
+	step(desktop, "F2", "beta dot txt edit…")
+	step(desktop, "Escape", "beta dot txt 3 of 3")
+
+	# The properties dialog, where the file's type is a label the keyboard reaches, read with its title.
+	step(
+		desktop, "alt+Return", "beta dot txt Properties dialog", "Name: edit Alt plus N selected beta dot txt"
+	)
+	step(desktop, "Tab", "Type: text slash plain…")
+	step(desktop, "Escape", "docs", "beta dot txt 3 of 3")
+
+	# List view: the item of a Windows list view in details, the columns after the first by header.
+	step(desktop, "control+2", "List View list")
+	step(desktop, "Up", "alpha dot txt; Size: 6 bytes; Type: …")
+
+	# Into a folder and back, which Caja does in the same view without moving the focus.
+	step(desktop, "control+1", "Icon View list")
+	step(desktop, "Home", "sub 1 of 3")
+	step(desktop, "Return", "sub")
+	step(desktop, "Down", "inner dot txt 1 of 1")
+	step(desktop, "alt+Up", "docs", "sub 1 of 3")
+
+	# The menu bar.
+	step(desktop, "alt+f", "New Tab Ctrl plus T T 1 of…")
+	step(desktop, "Right", "Cut Ctrl plus X T…")
+	step(desktop, "Escape", "sub 1 of 3")
+	assertQuitCleanly(desktop, nvda)
+
+
+def test_cajaBigFolder(desktop: DesktopSession, tmp_path: Path):
+	folder = tmp_path / "big"
+	folder.mkdir()
+	for number in range(BIG_FOLDER_FILES):
+		(folder / f"file{number:04d}.txt").write_text("x")
+	desktop.startApp(["caja", "--no-desktop", str(folder)], title="big", timeout=WINDOW_TIMEOUT)
+	desktopSession.activate("big")
+	nvda = startNVDA(desktop, "big", "Icon View list")
+	step(desktop, "Down", "file 0000 dot txt 1 of 3000")
+	step(desktop, "End", "file 2999 dot txt 3000 of 3000")
+	step(desktop, "Home", "file 0000 dot txt 1 of 3000")
+	# Caja is busy for a second building its list view, and the keys pressed meanwhile reach it late.
+	step(desktop, "control+2", "List View list", timeout=10)
+	step(desktop, "End", "file 2999 dot txt; Size: 1 byte; …", timeout=10)
+	step(desktop, "Up", "file 2998 dot txt; Size: 1 byte; …")
+	step(desktop, "Insert+t", "big")
+	assertQuitCleanly(desktop, nvda)
+
+
+def test_cajaDesktop(desktop: DesktopSession, tmp_path: Path):
+	makeFolder(Path.home() / "Desktop", "notes.txt", "photos/")
+	desktop.startApp(
+		["caja", "--force-desktop", "--no-default-window"], title="Desktop", timeout=WINDOW_TIMEOUT
+	)
+	nvda = startNVDA(desktop)
+	step(desktop, "control+alt+d", "Desktop", "Icon View list")
+	step(desktop, "Down", "Computer 1 of 5")
+	step(desktop, "End", "Trash 5 of 5")
+	step(desktop, "Insert+t", "Desktop")
+	assertQuitCleanly(desktop, nvda)

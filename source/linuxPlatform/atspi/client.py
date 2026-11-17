@@ -301,6 +301,15 @@ class Client:
 	def cellTable(self, node: Node) -> Node | None:
 		return self.node(call(node, Atspi.TableCell.get_table))
 
+	def cellAt(self, table: Node, row: int, column: int) -> Node | None:
+		return self.node(call(table, Atspi.Table.get_accessible_at, row, column))
+
+	def columnHeader(self, table: Node, column: int) -> str:
+		"""The text of a table's column header: its header object's name, or the column's description."""
+		header = self.node(call(table, Atspi.Table.get_column_header, column))
+		name = self.name(header) if header else ""
+		return name or call(table, Atspi.Table.get_column_description, column) or ""
+
 	def columnHeaderNames(self, node: Node) -> list[str]:
 		headers = call(node, Atspi.TableCell.get_column_header_cells) or []
 		return call(node, lambda: [h.get_name() or "" for h in headers])
