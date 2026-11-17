@@ -3,12 +3,14 @@
 A key source watches the keyboard for the whole session and hands each press and release to
 linuxPlatform.inputHook, which gives it to keyboardHandler as the Windows keyboard hook would. The
 keys NVDA uses as the NVDA key and the numpad review keys are taken from the applications, so that a
-command reaches NVDA alone; every other key reaches the application and NVDA both, and NVDA's
-scripts for it then read what the application did instead of sending the key on.
+command reaches NVDA alone, and a key taken with them that NVDA passes is sent on; every other key
+reaches the application and NVDA both, and NVDA's scripts for it then read what the application did
+instead of sending the key on.
 
-On a web page in browse mode the keys browse mode uses, the arrows and the letters among them, are
-captured: the application gets such a key only when NVDA's answer for it says to pass it on, as the
-Windows hook's return value does. In focus mode only Escape is captured.
+On a web page the keys browse mode uses, the arrows and the letters among them, and those focus mode
+uses, as Escape, are captured: the application gets such a key only when NVDA's answer for it says
+to pass it on, as the Windows hook's return value does, or when the mode NVDA is in as it comes does
+not use it.
 """
 
 import os

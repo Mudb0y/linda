@@ -1210,6 +1210,8 @@ class X11KeySource:
 					)
 					catchers.append((keycode, base | lock, catcher))
 		self._captureWindow = window
+		# The window has the focus, which the NVDA keys follow too, the more surely for a second look.
+		self._followFocus()
 		d.sync()
 		refused = 0
 		for keycode, mask, catcher in catchers:
@@ -1229,8 +1231,8 @@ class X11KeySource:
 			log.debug(f"Keys captured for {mode} mode")
 
 	def _focusWindow(self):
-		"""The window to grab captured keys on, watched for the focus leaving it; None when there is
-		none to grab them on.
+		"""The window to grab captured keys and the NVDA keys on, watched for the focus leaving it; None
+		when there is none to grab them on.
 
 		A grab on the window that has the keyboard focus moves no focus as it activates; one on any
 		other window, the root included, takes the focus from the application for as long as the key

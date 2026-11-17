@@ -112,8 +112,7 @@ def _stopSource() -> None:
 def _watch(source: KeySource) -> None:
 	"""Keep the keys the source takes in step with the configuration, which the settings dialog, the
 	welcome dialog and profile switches all change, hold the keyboard while input help is on, so
-	that the keys it describes do nothing, and capture browse mode's keys while the focus is in a
-	document in browse mode.
+	that the keys it describes do nothing, and capture a document's keys while the focus is in one.
 
 	A thread of its own, so that the keyboard is let go during watchdog recovery even when the main
 	thread is frozen."""
