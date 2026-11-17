@@ -36,8 +36,11 @@ SYMBOL_WORDS = frozenset({"dot", "equals"})
 #: Characters that frame and mark the fixture's rows, none of which may reach the synth.
 DECORATION = re.compile("[─-▟←-⯿•·]")
 
-ASSISTANT = harness._loadFile("terminalAssistant", harness.HERE / "fixtures" / "apps" / "terminalAssistant.py")
-QUESTION_END = ASSISTANT.MENU_HINT.strip()
+ASSISTANT = harness._loadFile(
+	"terminalAssistant", harness.HERE / "fixtures" / "apps" / "terminalAssistant.py"
+)
+#: The last row of the question, whose middle dot NVDA does not say.
+QUESTION_END = ASSISTANT.MENU_HINT.split("\u00b7")[0].strip() + "\N{HORIZONTAL ELLIPSIS}"
 
 
 @pytest.fixture
@@ -101,6 +104,13 @@ def submit(desktop: DesktopSession, until: str) -> tuple[int, float]:
 	return mark, pressed
 
 
+def waitForWord(desktop: DesktopSession, mark: int, word: str) -> None:
+	deadline = time.monotonic() + REPLY_BOUND
+	while word not in words(spoken(desktop, mark)):
+		assert time.monotonic() < deadline, spoken(desktop, mark)
+		time.sleep(0.02)
+
+
 def assertHeardOnce(said: list[str], expected: list[str]) -> None:
 	"""said is expected, word for word: nothing repeated by a redraw, nothing lost, nothing that only
 	animates, in order."""
@@ -110,7 +120,7 @@ def assertHeardOnce(said: list[str], expected: list[str]) -> None:
 
 
 def paragraphTimes(tmp_path: Path) -> dict[str, float]:
-	"""When each paragraph of the reply started to appear, by its first piece."""
+	"""When each paragraph of the reply started to appear."""
 	times = {}
 	for line in (tmp_path / "assistant.jsonl").read_text().splitlines():
 		entry = json.loads(line)
@@ -146,9 +156,15 @@ def test_replyAndMenuWithDrawnCursor(desktop: DesktopSession, tmp_path: Path):
 
 	# The reply's first words come soon after they appear.
 	first = ASSISTANT.REPLY[1][1]
-	appeared = paragraphTimes(tmp_path)[first[: len(first.split(" ")[0])]]
+	appeared = paragraphTimes(tmp_path)[first]
 	firstWord = first.split(" ")[0]
-	spokenAt = next(r["t"] for r in records(nvda) if r["kind"] == "speak" and r["t"] > appeared and firstWord in harness.transcriptRecords().spokenText(r))
+	spokenAt = next(
+		r["t"]
+		for r in records(nvda)
+		if r["kind"] == "speak"
+		and r["t"] > appeared
+		and firstWord in harness.transcriptRecords().spokenText(r)
+	)
 	assert spokenAt - appeared <= FIRST_WORDS_BOUND, spokenAt - appeared
 
 	# Moving the mark speaks the option it moves to, alone.
@@ -182,8 +198,7 @@ def test_silencingAndRealCursor(desktop: DesktopSession, tmp_path: Path):
 	# Control while only the status row animates: it stops nothing, and leaves nothing silent.
 	time.sleep(1.5)
 	desktop.press("Control_L")
-	first = ASSISTANT.REPLY[1][1]
-	desktop.expect(f"{first.split(' ')[0]}\N{HORIZONTAL ELLIPSIS}", since=mark, timeout=REPLY_BOUND)
+	waitForWord(desktop, mark, "look")
 
 	# Control while the reply is said stops it at once, drops what waited, and what comes later is
 	# said.
@@ -207,14 +222,16 @@ def test_silencingAndRealCursor(desktop: DesktopSession, tmp_path: Path):
 		answer = [
 			r
 			for r in records(nvda)
-			if r["kind"] == "speak" and r["t"] >= pressed and harness.transcriptRecords().spokenText(r) == "blank"
+			if r["kind"] == "speak"
+			and r["t"] >= pressed
+			and harness.transcriptRecords().spokenText(r) == "blank"
 		]
 		time.sleep(0.01)
 	assert answer and answer[0]["t"] - pressed <= KEY_BOUND, records(nvda)[-10:]
 
 	desktop.expect(QUESTION_END, since=afterCancel, timeout=REPLY_BOUND)
 	time.sleep(SETTLE)
-	said = words(spoken(desktop, mark))
+	said = words([text for text in spoken(desktop, mark) if text != "blank"])
 	# In order, nothing twice, and something after each key.
 	position = 0
 	for word in said:
@@ -238,6 +255,8 @@ def test_silencingAndRealCursor(desktop: DesktopSession, tmp_path: Path):
 	desktop.press("KP_Prior")
 	time.sleep(SETTLE)
 	reviewed = spoken(desktop, mark)
-	assert len(reviewed) == 2 and all(reviewed) and not any(DECORATION.search(text) for text in reviewed), reviewed
+	assert len(reviewed) == 2 and all(reviewed) and not any(DECORATION.search(text) for text in reviewed), (
+		reviewed
+	)
 
 	assertExitedCleanly(desktop, nvda)
