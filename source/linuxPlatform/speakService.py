@@ -13,6 +13,10 @@ it again, behind Orca, once Orca has it or has gone.
 The bus is served on a thread of its own, so that a call is answered whatever NVDA's main thread is
 doing; what is spoken is queued to the main thread.
 
+Programs that stop speech through it, such as FastSM and the Prism library behind TeamTalk, look for
+the InterruptSpeech command of Orca's speech module first, so that module answers too, with that
+command alone.
+
 BASEDREADER_SPEAK_SERVICE=off in the environment leaves the service out.
 """
 
@@ -24,6 +28,10 @@ from logHandler import log
 BUS_NAME = "org.gnome.Orca.Service"
 OBJECT_PATH = "/org/gnome/Orca/Service"
 INTERFACE = "org.gnome.Orca.Service"
+MODULE_INTERFACE = "org.gnome.Orca.Module"
+#: The speech module, under the name Orca gives it.
+SPEECH_MODULE = "SpeechAndVerbosityManager"
+INTERRUPT_COMMAND = "InterruptSpeech"
 #: The environment variable that turns the service off when it is "off".
 SWITCH_VARIABLE = "BASEDREADER_SPEAK_SERVICE"
 #: Characters of a message that are spoken; NVDA's speech can take seconds over a book's worth.
@@ -72,6 +80,22 @@ _INTROSPECTION = f"""
 			<arg direction="out" name="return" type="b"/>
 		</method>
 	</interface>
+	<interface name="{MODULE_INTERFACE}">
+		<method name="ListCommands">
+			<arg direction="out" name="return" type="a(ss)"/>
+		</method>
+		<method name="ListRuntimeGetters">
+			<arg direction="out" name="return" type="a(ss)"/>
+		</method>
+		<method name="ListRuntimeSetters">
+			<arg direction="out" name="return" type="a(ss)"/>
+		</method>
+		<method name="ExecuteCommand">
+			<arg direction="in" name="command" type="s"/>
+			<arg direction="in" name="notifyUser" type="b"/>
+			<arg direction="out" name="return" type="b"/>
+		</method>
+	</interface>
 </node>
 """
 
@@ -80,6 +104,12 @@ _COMMANDS = (
 	("GetVersion", "Returns the screen reader's version."),
 	("PresentMessage", "Presents message to the user."),
 )
+
+
+def _interrupt() -> None:
+	import speech
+
+	speech.cancelSpeech()
 
 
 def _isOrca(pid: int) -> bool:
@@ -132,7 +162,7 @@ class _Service:
 		self._loop = GLib.MainLoop.new(self._context, False)
 		self._connection = None
 		self._subscriptions: list[int] = []
-		self._registration = 0
+		self._registrations: list[int] = []
 		#: Whether NVDA has the name.
 		self.isOwner = False
 		#: The connections of an Orca process that NVDA gave the name up for, while that one has not
@@ -168,10 +198,16 @@ class _Service:
 				f"Speak service: no session bus, so scripts that ask Orca to speak are not heard: {e}"
 			)
 			return False
-		interface = Gio.DBusNodeInfo.new_for_xml(_INTROSPECTION).lookup_interface(INTERFACE)
-		self._registration = self._connection.register_object(
-			OBJECT_PATH, interface, self._onCall, None, None
-		)
+		nodeInfo = Gio.DBusNodeInfo.new_for_xml(_INTROSPECTION)
+		for path, interface in (
+			(OBJECT_PATH, INTERFACE),
+			(f"{OBJECT_PATH}/{SPEECH_MODULE}", MODULE_INTERFACE),
+		):
+			self._registrations.append(
+				self._connection.register_object(
+					path, nodeInfo.lookup_interface(interface), self._onCall, None, None
+				),
+			)
 		for member, argument, handler in (
 			("NameOwnerChanged", None, self._onNameOwnerChanged),
 			("NameAcquired", BUS_NAME, self._onNameAcquired),
@@ -200,8 +236,9 @@ class _Service:
 		self._connection = None
 		for subscription in self._subscriptions:
 			connection.signal_unsubscribe(subscription)
-		if self._registration:
-			connection.unregister_object(self._registration)
+		for registration in self._registrations:
+			connection.unregister_object(registration)
+		self._registrations.clear()
 		try:
 			connection.close_sync(None)
 		except GLib.Error:
@@ -288,7 +325,9 @@ class _Service:
 		from gi.repository import GLib
 
 		try:
-			if method == "PresentMessage":
+			if interface == MODULE_INTERFACE:
+				invocation.return_value(self._onModuleCall(method, parameters))
+			elif method == "PresentMessage":
 				(text,) = parameters.unpack()
 				_queueMessage(text)
 				invocation.return_value(GLib.Variant("(b)", (True,)))
@@ -297,7 +336,7 @@ class _Service:
 
 				invocation.return_value(GLib.Variant("(s)", (buildVersion.version,)))
 			elif method == "ListModules":
-				invocation.return_value(GLib.Variant("(as)", ([],)))
+				invocation.return_value(GLib.Variant("(as)", ([SPEECH_MODULE],)))
 			elif method == "ListCommands":
 				invocation.return_value(GLib.Variant("(a(ss))", (list(_COMMANDS),)))
 			else:
@@ -305,6 +344,21 @@ class _Service:
 		except Exception:
 			log.exception(f"Speak service: {method} failed")
 			invocation.return_dbus_error("org.freedesktop.DBus.Error.Failed", f"{method} failed")
+
+	def _onModuleCall(self, method: str, parameters):
+		from gi.repository import GLib
+
+		if method == "ListCommands":
+			return GLib.Variant("(a(ss))", ([(INTERRUPT_COMMAND, "Interrupts speech.")],))
+		if method in ("ListRuntimeGetters", "ListRuntimeSetters"):
+			return GLib.Variant("(a(ss))", ([],))
+		command, _notifyUser = parameters.unpack()
+		if command != INTERRUPT_COMMAND:
+			return GLib.Variant("(b)", (False,))
+		import queueHandler
+
+		queueHandler.queueFunction(queueHandler.eventQueue, _interrupt)
+		return GLib.Variant("(b)", (True,))
 
 	def stop(self) -> None:
 		from gi.repository import GLib

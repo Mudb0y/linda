@@ -516,9 +516,6 @@ def initialize() -> None:
 	import core
 
 	core.postNvdaStartup.register(_onPostNvdaStartup)
-	from linuxPlatform import messageService
-
-	messageService.initialize()
 
 
 def terminate() -> None:
@@ -526,9 +523,6 @@ def terminate() -> None:
 	import core
 
 	core.postNvdaStartup.unregister(_onPostNvdaStartup)
-	from linuxPlatform import messageService
-
-	messageService.terminate()
 	if _listening:
 		client().stopListening(EVENT_TYPES)
 	_listening = False
