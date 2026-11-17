@@ -185,6 +185,33 @@ class TestLiveRegions:
 		time.sleep(1.5)
 		assert not any(text.startswith("Log line") for text in desktop.spokenSince(last))
 
+	def test_logWhileTypingInAField(self, live: Session):
+		"""In focus mode in a field, as in a chat, the log's new lines are read and typing still
+		echoes."""
+		desktop = live.desktop
+		press(live, "Start log", "Log line …")
+		stepSaying(live, "e", "Message edit")
+		step(live, "Return", "Focus mode")
+		mark = desktop.mark()
+		desktop.typeText("hi")
+		desktop.expect("h", "i", since=mark)
+		desktop.expect("Log line …", since=mark, timeout=2.0)
+		step(live, "Escape", "Browse mode")
+		press(live, "Stop log")
+
+	def test_nothingWhileAnotherWindowIsInFront(self, live: Session):
+		desktop = live.desktop
+		press(live, "Start log", "Log line …")
+		step(live, "Insert+n", "…")
+		time.sleep(1.0)
+		mark = desktop.mark()
+		time.sleep(2.0)
+		spoken = desktop.spokenSince(mark)
+		desktop.press("Escape")
+		time.sleep(1.0)
+		press(live, "Stop log")
+		assert not any(text.startswith("Log line") for text in spoken), spoken
+
 	def test_nothingFromABackgroundTab(self, live: Session):
 		desktop = live.desktop
 		press(live, "Start log", "Log line …")
