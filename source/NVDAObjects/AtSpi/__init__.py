@@ -382,6 +382,8 @@ class AtSpi(NVDAObject):
 				return Role.GROUPING
 			# Gecko gives a fieldset and an ARIA group this role, which IAccessible2 calls a grouping.
 			if toolkit == GECKO:
+				if self.atspiAttributes.get("xml-roles", "").split(" ")[0] == "figure":
+					return Role.FIGURE
 				return Role.GROUPING
 			return Role.PANEL
 		if raw == "menu":
