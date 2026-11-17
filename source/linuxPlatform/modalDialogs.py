@@ -40,14 +40,30 @@ RETURN_TIMEOUT = 3.0
 #: The exit status when the dialogs are given up on.
 GIVEN_UP_STATUS = 1
 
-ModalDialog = wx.Dialog | Gtk.Dialog
+ModalDialog = wx.Dialog | Gtk.Dialog | Gtk.Menu
 
 #: Dialogs ended so far, by every unwinding: core's runs again after each, and a quit signal's first.
 _ended = 0
 
 
+def _shownMenus() -> list[Gtk.Menu]:
+	"""The popup menus showing, the NVDA menu among them, without their submenus."""
+	return [
+		window.get_child()
+		for window in Gtk.Window.list_toplevels()
+		if window.get_window_type() == Gtk.WindowType.POPUP
+		and isinstance(window.get_child(), Gtk.Menu)
+		and window.get_mapped()
+		and not isinstance(window.get_child().get_attach_widget(), Gtk.MenuItem)
+	]
+
+
 def _openDialogs() -> list[ModalDialog]:
-	"""The modal dialogs showing, wx's and GTK's own, the innermost last."""
+	"""The modal dialogs showing, wx's and GTK's own, the innermost last, and after them any popup menu.
+
+	A popup menu is closed like a dialog: NVDA's exit, run from inside the menu, destroyed the NVDA
+	menu while it was showing, and with the add-on store open that crashed NVDA as the store was closed.
+	"""
 	native = [
 		window
 		for window in Gtk.Window.list_toplevels()
@@ -61,11 +77,12 @@ def _openDialogs() -> list[ModalDialog]:
 	if grab is not None and any(grab is dialog for dialog in native):
 		dialogs.remove(grab)
 		dialogs.append(grab)
-	return dialogs
+	# A menu is shown over the window it was opened from, and nothing modal opens while it shows.
+	return [*dialogs, *_shownMenus()]
 
 
 def areNoneOpen() -> bool:
-	"""Whether no modal dialog is showing, so that NVDA's exit runs in the main loop itself.
+	"""Whether no modal dialog or popup menu is showing, so that NVDA's exit runs in the main loop itself.
 
 	Even one of wx's dialogs, which EndModal ends on wxGTK as on Windows, is ended here first: the exit
 	otherwise ran inside that dialog's loop, and once the loop had returned the main loop slept with
@@ -77,7 +94,9 @@ def areNoneOpen() -> bool:
 
 def _end(dialog: ModalDialog, returnCode: int) -> None:
 	log.debug(f"ending modal {dialog} during exit process")
-	if isinstance(dialog, Gtk.Dialog):
+	if isinstance(dialog, Gtk.Menu):
+		dialog.cancel()
+	elif isinstance(dialog, Gtk.Dialog):
 		# wx returns ID_CANCEL, or wx.CANCEL from wx.MessageBox, for this whatever dialog it is.
 		dialog.response(Gtk.ResponseType.CANCEL)
 	else:
@@ -146,6 +165,10 @@ class _Unwinding:
 			log.exception("Error ending modal dialogs")
 			_giveUp("an error ended the unwinding")
 		_ended += 1
+		if isinstance(innermost, Gtk.Menu):
+			# wx's PopupMenu returns as the menu hides, and a combo box's list has no call to wait for.
+			self._waitingFor = []
+			return True
 		self._waitingFor = [innermost, *dialogs[:-1]]
 		self._depth = GLib.main_depth()
 		self._deadline = time.monotonic() + RETURN_TIMEOUT
