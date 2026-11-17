@@ -11,6 +11,7 @@ children stop at CHILD_LIMIT and never enter an object that manages its descenda
 counted by their roles only, and only in small containers.
 """
 
+import os
 import re
 
 import api
@@ -323,10 +324,14 @@ class AtSpi(NVDAObject):
 			return None
 
 	def _get_atspiRelations(self) -> dict[str, list[Node]]:
+		relations: dict[str, list[Node]] = {}
 		try:
-			return {r.type: r.targets for r in _client().relations(self.node)}
+			# Qt gives one relation per target, so a type can come more than once.
+			for relation in _client().relations(self.node):
+				relations.setdefault(relation.type, []).extend(relation.targets)
 		except NodeGone:
-			return {}
+			pass
+		return relations
 
 	toolkit: str
 
@@ -346,8 +351,17 @@ class AtSpi(NVDAObject):
 	def _get_role(self) -> Role:
 		raw = self.atspiRole
 		if raw == "text":
-			# GTK 3 uses one role for entries, text views and labels in some places.
-			return Role.EDITABLETEXT if "editable" in self.atspiStates else Role.STATICTEXT
+			# GTK 3 uses one role for entries, text views and labels in some places. A text the keyboard
+			# reaches but cannot change is a read-only field, as Windows shows a read-only edit control:
+			# a document reader's text, a chat history, a log.
+			states = self.atspiStates
+			if "editable" in states:
+				return Role.EDITABLETEXT
+			# NVDA's own app module presents its single-line read-only fields, which wx makes multi-line
+			# text views, itself.
+			if "focusable" in states and "Text" in self.atspiInterfaces and self.processID != os.getpid():
+				return Role.EDITABLETEXT
+			return Role.STATICTEXT
 		if raw == "password text":
 			# Windows presents a password field as an edit field with the protected state.
 			return Role.EDITABLETEXT
@@ -387,7 +401,9 @@ class AtSpi(NVDAObject):
 			if rowTable is None:
 				return Role.TABLECELL
 			_node, tableRole, columns = rowTable
-			return Role.TREEVIEWITEM if tableRole == "tree table" and columns == 1 else Role.LISTITEM
+			if tableRole == "tree" or (tableRole == "tree table" and columns == 1):
+				return Role.TREEVIEWITEM
+			return Role.LISTITEM
 		if raw == "layered pane" and "Selection" in self.atspiInterfaces:
 			# Caja's icon view, of a folder and of the desktop: Windows' list view in icon mode.
 			return Role.LIST
@@ -447,9 +463,10 @@ class AtSpi(NVDAObject):
 			return False
 
 	def _get__rowTable(self) -> tuple[Node, str, int] | None:
-		"""For a cell of a GTK 3 tree view, which takes the focus for its whole row: the tree view, its raw
-		role, and how many columns it has."""
-		if self.toolkit != GTK3:
+		"""For a cell of a GTK 3 tree view or a Qt tree, which take the focus for a whole row: the view, its
+		raw role, and how many columns it has."""
+		toolkit = self.toolkit
+		if toolkit not in (GTK3, QT):
 			return None
 		parent = self.atspiParentNode
 		if parent is None:
@@ -457,7 +474,9 @@ class AtSpi(NVDAObject):
 		c = _client()
 		try:
 			tableRole = c.role(parent)
-			if tableRole not in ("table", "tree table") or "manages-descendants" not in c.states(parent):
+			# A Qt table is a grid whose cells are spoken one at a time, as NVDA speaks a table's.
+			rowRoles = ("table", "tree table") if toolkit == GTK3 else ("tree",)
+			if tableRole not in rowRoles or "manages-descendants" not in c.states(parent):
 				return None
 			if "Table" not in c.interfaces(parent):
 				return None
@@ -475,12 +494,17 @@ class AtSpi(NVDAObject):
 		"""The names of the objects this one is labelled by."""
 		c = _client()
 		labels = []
+		groups = []
 		for node in self.atspiRelations.get("labelled-by", []):
 			try:
-				labels.append(c.name(node))
+				name = c.name(node)
+				if name:
+					# Qt labels each control in a group box by the box too, which NVDA already says as
+					# the focus's ancestor.
+					(groups if c.role(node) in ("panel", "filler", "grouping") else labels).append(name)
 			except NodeGone:
 				continue
-		return " ".join(label for label in labels if label)
+		return " ".join(labels or groups)
 
 	def _get__comboBoxNamedByChoice(self) -> bool:
 		"""GTK 3 and Qt name a combo box by its current choice, which NVDA calls its value; GTK 4 names
@@ -611,6 +635,9 @@ class AtSpi(NVDAObject):
 		states = mapStates(raw, role, self.atspiAttributes)
 		if self.atspiRole == "password text":
 			states.add(State.PROTECTED)
+		if role == Role.EDITABLETEXT and self.atspiRole == "text" and "editable" not in raw:
+			# GTK says nothing of a text view that cannot be changed beyond leaving editable out.
+			states.add(State.READONLY)
 		if self.atspiRole == "menu" and role == Role.MENUITEM:
 			states.add(State.HASPOPUP)
 		if role in MENU_ROLES:
@@ -1101,8 +1128,8 @@ class TableRowItem(AtSpi):
 			if rowTable is None or rowTable[2] <= 1:
 				return self._cellText(self.node)
 			table, _tableRole, columns = rowTable
-			row, _column = _client().cellPosition(self.node)
-			return self._rowText(table, row, min(columns, ROW_COLUMN_LIMIT))
+			row, column = _client().cellPosition(self.node)
+			return self._rowText(table, row, column, min(columns, ROW_COLUMN_LIMIT))
 		except NodeGone:
 			return ""
 
@@ -1114,7 +1141,14 @@ class TableRowItem(AtSpi):
 		# Caja puts its file name and icon in two cells inside the first column's.
 		return _descendantText(cell) if c.childCount(cell) else ""
 
-	def _rowText(self, table: Node, row: int, columns: int) -> str:
+	def _rowText(self, table: Node, row: int, focusedColumn: int, columns: int) -> str:
+		"""The text of each of the row's columns, those after the first behind their headers.
+
+		Every column is read from the table, the focused cell's own included: GTK 3 focuses the cell of
+		whichever column the cursor is in, and Caja the inner cell of its name column. The focused cell's
+		text stands in for its column's only when the table gives nothing there, and is added where no
+		column already holds it.
+		"""
 		import config
 		from config.configFlags import ReportTableHeaders
 
@@ -1123,19 +1157,32 @@ class TableRowItem(AtSpi):
 			ReportTableHeaders.ROWS_AND_COLUMNS,
 			ReportTableHeaders.COLUMNS,
 		)
-		texts = []
+		ownText = self._cellText(self.node)
+		cellTexts: list[str] = []
 		for column in range(columns):
-			cell = self.node if column == 0 else c.cellAt(table, row, column)
-			if cell is None:
-				continue
-			text = self._cellText(cell)
+			cell = c.cellAt(table, row, column)
+			text = self._cellText(cell) if cell is not None else ""
+			if not text and column == focusedColumn:
+				text = ownText
+			cellTexts.append(text)
+		if ownText and not any(ownText in text for text in cellTexts):
+			cellTexts[min(max(focusedColumn, 0), len(cellTexts) - 1)] = ownText
+		texts = []
+		for column, text in enumerate(cellTexts):
 			if not text:
 				continue
-			header = c.columnHeader(table, column) if withHeaders and column > 0 else ""
+			# The first column with text names the row, as a Windows list view's first column does; a
+			# column of check boxes before it has none.
+			header = c.columnHeader(table, column) if withHeaders and texts else ""
 			texts.append(f"{header}: {text}" if header else text)
 		return "; ".join(texts)
 
 	def _get_positionInfo(self) -> dict[str, int]:
+		rowTable = self._rowTable
+		if rowTable is not None and rowTable[1] == "tree":
+			# A Qt tree numbers its rows through every open branch, which is no item's place among its
+			# siblings, and gives no level.
+			return {}
 		try:
 			return self._tableCellPosition()
 		except NodeGone:
