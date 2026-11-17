@@ -571,6 +571,14 @@ class AtSpiBuffer(VirtualBuffer):
 			return True
 		return super()._shouldIgnoreFocus(obj)
 
+	def event_gainFocus(self, obj, nextHandler):
+		# The handler read obj's states to judge the focus before the browser's state changes for the
+		# same click had arrived; browse mode caches them now as what the next change is spoken against.
+		obj.invalidateCache()
+		return super().event_gainFocus(obj, nextHandler)
+
+	event_gainFocus.ignoreIsReady = True
+
 	def event_caret(self, obj, nextHandler):
 		if self.passThrough:
 			return nextHandler()
