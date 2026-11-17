@@ -38,8 +38,9 @@ STEP_BOUND = 5.0
 SETTLE = 0.5
 #: Seconds NVDA has to exit once its exit dialog is answered.
 EXIT_BOUND = 10.0
-#: The address bar's name, which its focus announcement holds.
-ADDRESS_BAR = "Search with Google or enter address"
+#: The end of the address bar's name, which its focus announcement holds. Firefox names the search
+#: engine before it, "Search with Google or enter address", only once it has loaded its search engines.
+ADDRESS_BAR = "or enter address"
 #: What the large page's title is, as tests/linux/bench/makePage.py writes it.
 LARGE_TITLE = "Basedreader bench large page"
 #: How every title of Firefox's window ends.

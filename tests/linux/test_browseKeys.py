@@ -34,6 +34,9 @@ BLOCK_SECONDS = 5
 #: key source has it, and how much later a key may arrive than that.
 CAPTURE_TIMEOUT = 0.1
 ARRIVAL_SLACK = 0.15
+#: How Firefox's address bar is announced, as far as it is always the same: Firefox names the search
+#: engine in it, "Search with Google or enter address", only once it has loaded its search engines.
+ADDRESS_BAR = "combo box Search"
 
 #: A global plugin for these tests only: a command that blocks NVDA's main thread, and, in place of
 #: Windows' default sound for a key browse mode traps, a log record.
@@ -366,7 +369,7 @@ def test_browseAndFocusModeKeys(desktop: DesktopSession, tmp_path: Path):
 	step(desktop, "Insert+shift+space", "Single letter navigation on")
 	assert page.log() == ["a", "b", "h"]
 
-	step(desktop, "control+l", "combo box Search with Google or enter address" + PREFIX_MARK)
+	step(desktop, "control+l", ADDRESS_BAR + PREFIX_MARK)
 	waitForCapture(nvda, "off")
 	# Firefox shows a page the shortcuts it does not reserve before acting on them, as it does with no
 	# screen reader running; once is right.
@@ -594,7 +597,7 @@ def test_keyUnderAHeldBrowseKeyIsDecidedByItself(desktop: DesktopSession, keyboa
 	expect(desktop, "Field and link heading level 2", since=mark)
 	keyboard.press("control+l")
 	keyboard.up("h")
-	expect(desktop, "combo box Search with Google or enter address" + PREFIX_MARK, since=mark)
+	expect(desktop, ADDRESS_BAR + PREFIX_MARK, since=mark)
 	waitForCapture(nvda, "off")
 	assert page.log() == ["Control+l"]
 	quitNVDA(desktop, nvda)
