@@ -558,8 +558,9 @@ def test_largePageComesTopFirstWithoutHoldingFirefox(
 
 
 #: Text realFrames.html reads as, in this order: a frame from another site, which Firefox runs in a
-#: process of its own, and one from the same site, each in its place; and a link holding only an
-#: image with empty alt text, which Firefox leaves out, read by its address as fillVBuf reads it.
+#: process of its own, and one from the same site, each in its place; and links holding only an
+#: image with empty alt text, which Firefox leaves out, or an empty container, read by their
+#: addresses as fillVBuf reads them.
 FRAMES_TEXT = (
 	"Frames page",
 	"Before the frames.",
@@ -570,6 +571,8 @@ FRAMES_TEXT = (
 	"Text of the same site frame.",
 	"screen-readers",
 	"A link that holds only an image",
+	"star",
+	"A link that holds only an empty container.",
 	"After the frames.",
 )
 
