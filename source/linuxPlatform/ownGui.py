@@ -542,7 +542,14 @@ def _focusedWindow(topLevels: list[wx.Window]) -> wx.Window | None:
 	"""The window that has the focus, as GTK says when wx has lost track of it, as it does once a
 	choice's list has been open: the window of the first of topLevels that holds GTK's focus."""
 	focus = wx.Window.FindFocus()
-	if focus is not None:
+	# After NVDA's menu wx may still name the hidden window it popped the menu up from, so that Enter
+	# on the check box a dialog opened from the menu focuses toggled it instead of pressing OK.
+	topLevel = wx.GetTopLevelParent(focus) if focus is not None else None
+	if (
+		topLevel is not None
+		and topLevel.IsShown()
+		and (not topLevels or any(topLevel is window for window in topLevels))
+	):
 		return focus
 	try:
 		gtk = _gtkCalls()
