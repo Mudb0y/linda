@@ -108,8 +108,8 @@ source/appModules/nvda.py
   wx.Dialog is a dialog, whose text is read as on Windows, since wxGTK shows
   every wx dialog as a frame; a settings dialog's description is empty, as
   NvdaDialogEmptyDescription makes it on Windows. Of NVDA's own objects, a
-  read-only field that takes the focus is a read-only edit field, as on
-  Windows; a check list's check box cell is a check box named by its row's
+  read-only field that takes the focus is a read-only edit field read with
+  the caret, as on Windows, so that the log viewer is read by line; a check list's check box cell is a check box named by its row's
   text; a wx list is named by its scroll pane when it has no name and
   gives its focused item as its value, and its focused item is selected,
   as GTK says only a moment later; and the label GTK keeps inside a group box is

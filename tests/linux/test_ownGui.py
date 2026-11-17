@@ -328,6 +328,25 @@ def test_inputGesturesAreReadAndChangedFromTheKeyboard(desktop: DesktopSession):
 	assertExitedCleanly(nvda)
 
 
+def test_logViewerIsReadByLine(desktop: DesktopSession):
+	nvda = start(desktop, SESSION_CONFIG)
+	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
+	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
+	step(desktop, "t", "View log L 1 of …")
+	mark = step(desktop, "l", "NVDA Log Viewer", "edit read only DEBUG - …")
+	# Each line is read as the caret moves, as in a read-only edit field on Windows.
+	for key in ("Down", "Down", "Up"):
+		mark = desktop.mark()
+		desktop.press(key)
+		deadline = time.monotonic() + 5
+		while not [text for text in desktop.spokenSince(mark) if text.strip()]:
+			assert time.monotonic() < deadline, f"{key} read nothing in the log viewer"
+			time.sleep(0.05)
+	step(desktop, "Escape", *AT_START)
+	desktop.close()
+	assertExitedCleanly(nvda)
+
+
 def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSession, tmp_path: Path):
 	# Insert and numpad Insert only, upstream's default.
 	config = sessionConfig(tmp_path / "config", drop=("NVDAModifierKeys",))

@@ -64,7 +64,7 @@ if sys.platform != "win32":
 	from linuxPlatform.atspi import client as atspiClient
 	from NVDAObjects import NVDAObject
 	from NVDAObjects.AtSpi import TableCell, TableRowItem
-	from NVDAObjects.behaviors import Dialog
+	from NVDAObjects.behaviors import Dialog, EditableTextWithAutoSelectDetection
 
 	class NvdaGtkDialog(NVDAObject):
 		"""One of NVDA's own wx dialogs, which wxGTK shows as a frame, so that its text is read as a
@@ -501,6 +501,8 @@ class AppModule(appModuleHandler.AppModule):
 					clsList.insert(0, NvdaGtkSettingsDialog)
 			elif obj.role == controlTypes.Role.STATICTEXT and getattr(obj, "atspiRole", None) == "text":
 				if controlTypes.State.FOCUSABLE in obj.states:
+					# Read with the caret, as a read-only edit field is on Windows: the log viewer's text.
+					clsList.insert(0, EditableTextWithAutoSelectDetection)
 					clsList.insert(0, NvdaGtkReadOnlyField)
 			elif (
 				# The cell of a GTK 3 tree view is a row item, and that of any other table a TableCell.

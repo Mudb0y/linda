@@ -47,6 +47,7 @@ wxGTK would print it on standard error.
 import atexit
 import ctypes
 import gc
+import importlib.util
 import time
 import weakref
 from collections.abc import Callable
@@ -661,6 +662,11 @@ def install() -> None:
 	guiHelper.associateElements = _associateElements
 	for cls in (settingsDialogs.MultiCategorySettingsDialog, settingsDialogs.NVDASettingsDialog):
 		cls.onCategoryChange = _ignoredOnceDestroyed(cls.onCategoryChange)
+	categories = settingsDialogs.NVDASettingsDialog.categoryClasses
+	if settingsDialogs.MathSettingsPanel in categories and importlib.util.find_spec("libmathcat_py") is None:
+		# MathCAT's library is built for Windows only, and its panel cannot be made without it: choosing the
+		# category raised and left the previous panel's controls in the tab order.
+		categories.remove(settingsDialogs.MathSettingsPanel)
 	atexit.register(_quietAutoSettingsAtExit)
 
 
