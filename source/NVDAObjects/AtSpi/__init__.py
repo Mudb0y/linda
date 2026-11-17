@@ -58,6 +58,7 @@ STATUS_BAR_SEARCH_LIMIT = 400
 GTK3 = "gtk"
 GTK4 = "GTK"
 QT = "Qt"
+GECKO = "Gecko"
 
 #: Roles whose number comes from the Value interface.
 VALUE_ROLES = frozenset({Role.SLIDER, Role.SPINBUTTON, Role.SCROLLBAR, Role.PROGRESSBAR, Role.DIAL})
@@ -378,6 +379,9 @@ class AtSpi(NVDAObject):
 				return Role.STATUSBAR
 			# A GTK 3 frame and a Qt group box are panels named by their label: Windows' group box.
 			if self.atspiName and toolkit in (GTK3, QT):
+				return Role.GROUPING
+			# Gecko gives a fieldset and an ARIA group this role, which IAccessible2 calls a grouping.
+			if toolkit == GECKO:
 				return Role.GROUPING
 			return Role.PANEL
 		if raw == "menu":
