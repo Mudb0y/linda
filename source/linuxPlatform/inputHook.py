@@ -121,6 +121,7 @@ def _watch(source: KeySource) -> None:
 	import inputCore
 	import treeInterceptorHandler
 	import watchdog
+	from logHandler import log
 
 	treeInterceptorHandler.post_browseModeStateChange.register(_onBrowseModeStateChange)
 	nvdaKeys = None
@@ -141,11 +142,16 @@ def _watch(source: KeySource) -> None:
 		focus = api.getFocusObject()
 		capture = "off" if watchdog.isAttemptingRecovery else captureModeFor(focus)
 		if capture != "off":
-			interceptor = focus.treeInterceptor
-			signature = _gestureSignature(interceptor)
-			if gestures is None or gestures[0] != signature:
-				gestures = (signature, *_gesturesFor(interceptor))
-				source.setCaptureGestures(gestures[1], gestures[2])
+			try:
+				interceptor = focus.treeInterceptor
+				signature = _gestureSignature(interceptor)
+				if gestures is None or gestures[0] != signature:
+					gestures = (signature, *_gesturesFor(interceptor))
+					source.setCaptureGestures(gestures[1], gestures[2])
+			# This thread must go on whatever a focus going away or an add-on's gesture map raises: it lets
+			# the keyboard go during recovery. The keys captured anyway are browse mode's own.
+			except Exception:  # noqa: BLE001
+				log.debugWarning("Finding the keys bound in browse mode", exc_info=True)
 		# Asked again while capturing, as the source lets its grabs go when the focus leaves the window
 		# they are on, and takes them again only once asked.
 		if capture != captured or capture != "off":
