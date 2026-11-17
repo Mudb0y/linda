@@ -16,18 +16,44 @@ textbox role, not a field, holding a paragraph of spans, focused as the channel 
 const messages = document.getElementById("messages");
 const field = document.getElementById("message");
 
+function paragraph() {
+	const block = document.createElement("div");
+	block.append(document.createElement("br"));
+	return block;
+}
+
+// Shift+Enter starts a paragraph of its own after the caret's, as such editors do, rather than the line
+// break the browser would put into the same one.
+function newParagraph() {
+	const selection = window.getSelection();
+	let block = selection.anchorNode;
+	while (block && block.parentNode !== field) {
+		block = block.parentNode;
+	}
+	const next = paragraph();
+	if (block) {
+		block.after(next);
+	} else {
+		field.append(next);
+	}
+	selection.collapse(next, 0);
+}
+
 field.addEventListener("keydown", (event) => {
-	if (event.key !== "Enter" || event.shiftKey) {
+	if (event.key !== "Enter") {
 		return;
 	}
 	event.preventDefault();
-	const text = field.textContent.trim();
+	if (event.shiftKey) {
+		newParagraph();
+		return;
+	}
+	const text = Array.from(field.children, (block) => block.textContent.trim()).filter(Boolean).join(" ");
 	if (text) {
 		const item = document.createElement("li");
 		item.textContent = "You: " + text;
 		messages.append(item);
-		field.replaceChildren(document.createElement("div"));
-		field.firstChild.append(document.createElement("br"));
+		field.replaceChildren(paragraph());
 	}
 });
 window.addEventListener("load", () => setTimeout(() => field.focus(), 500));

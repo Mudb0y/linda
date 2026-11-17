@@ -14,8 +14,9 @@ ARIA roles Chromium gives with them, as NVDA does for Chromium's IAccessible2 ob
 A rich text editor, an editable element such as the one chat programs write messages in, keeps its
 text in the paragraphs inside it, and its own text has an embedded object character for each of
 them. Read as it is, the editor says that character and nothing of what was typed, and its caret is
-nowhere. Its text is therefore read as one, its paragraphs' text with a line break after each, as
-NVDA reads such an editor on Windows.
+nowhere. Its text is therefore read as one, its paragraphs' text with a line break between them, as
+NVDA reads such an editor on Windows. Its caret, selection and text change in the paragraph, which
+alone reports them, and the editor takes those reports as its own.
 """
 
 import sys
@@ -23,6 +24,7 @@ import sys
 import appModuleHandler
 
 if sys.platform == "linux":
+	import api
 	import aria
 	import controlTypes
 	import textInfos
@@ -37,6 +39,8 @@ if sys.platform == "linux":
 	EMBEDDED_OBJECT = "￼"
 	#: How deep paragraphs, spans and links nest inside an editor before the rest is left out.
 	MAX_DEPTH = 12
+	#: How far inside an editor the paragraph and the run of text that report its caret are.
+	INSIDE_DEPTH = 4
 	#: How many characters of an editor are read; a message is far shorter.
 	MAX_CHARACTERS = 100000
 
@@ -196,6 +200,30 @@ if sys.platform == "linux":
 					return found
 			raise RuntimeError("no caret in this editor")
 
+		def selection(self) -> tuple[int, int] | None:
+			"""The selected part of the whole text, from the start of the first paragraph's selection to
+			the end of the last's, or None when nothing is selected."""
+			client = handler.client()
+			found: list[int] = []
+			for node, depth in self.depths.items():
+				if depth == 0 and len(self.depths) > 1:
+					# Its own selection covers whole paragraphs, as embedded object characters.
+					continue
+				try:
+					selections = client.selections(node)
+				except NodeGone:
+					continue
+				for start, end in selections:
+					if start == end:
+						continue
+					for offset in (start, end):
+						mapped = self.offsetOf(node, offset)
+						if mapped is not None:
+							found.append(mapped)
+			if not found:
+				return None
+			return (min(found), max(found))
+
 	class EditorTextInfo(OffsetsTextInfo):
 		"""The text of a rich text editor, its paragraphs' text read as one. The whole text is read
 		again for each TextInfo, which an editor of a message or two allows."""
@@ -229,6 +257,9 @@ if sys.platform == "linux":
 				pass
 
 		def _getSelectionOffsets(self) -> tuple[int, int]:
+			selection = self.editorText.selection()
+			if selection is not None:
+				return selection
 			caret = self._getCaretOffset()
 			return (caret, caret)
 
@@ -264,6 +295,25 @@ if sys.platform == "linux":
 		def _get_TextInfo(self):
 			return EditorTextInfo
 
+	def _editorHolding(obj) -> RichTextEditor | None:
+		"""The focus, when it is a rich text editor and obj is inside it."""
+		focus = api.getFocusObject()
+		if not isinstance(focus, RichTextEditor) or not isinstance(obj, AtSpi) or obj is focus:
+			return None
+		node = obj.node
+		if node.busName != focus.node.busName:
+			return None
+		try:
+			for _ in range(INSIDE_DEPTH):
+				node = handler.client().parent(node)
+				if node is None:
+					return None
+				if node == focus.node:
+					return focus
+		except NodeGone:
+			pass
+		return None
+
 	class WebLandmark(AtSpi):
 		def _get_landmark(self) -> str | None:
 			xmlRoles = self.atspiAttributes.get("xml-roles", "").split(" ")
@@ -282,6 +332,37 @@ if sys.platform == "linux":
 				and "Text" in obj.atspiInterfaces
 			):
 				clsList.insert(0, RichTextEditor)
+
+		# A rich text editor's caret, selection and text change in the paragraph that holds them, which
+		# alone reports them; the editor, which has the focus, takes them as its own, so that it says
+		# what a key selected.
+		def event_caret(self, obj, nextHandler):
+			editor = _editorHolding(obj)
+			if editor is None:
+				nextHandler()
+			else:
+				editor.event_caret()
+
+		def event_textChange(self, obj, nextHandler):
+			editor = _editorHolding(obj)
+			if editor is None:
+				nextHandler()
+			else:
+				editor.event_textChange()
+
+		def event_textInsert(self, obj, nextHandler):
+			editor = _editorHolding(obj)
+			if editor is None:
+				nextHandler()
+			else:
+				editor.event_textInsert()
+
+		def event_textRemove(self, obj, nextHandler):
+			editor = _editorHolding(obj)
+			if editor is None:
+				nextHandler()
+			else:
+				editor.event_textRemove()
 
 		def event_foreground(self, obj, nextHandler):
 			if isinstance(obj, AtSpi):

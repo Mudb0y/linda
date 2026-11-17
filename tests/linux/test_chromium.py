@@ -486,11 +486,21 @@ class TestChromiumComposer:
 		step(session, "Left", "o")
 		step(session, "Insert+Up", "hello")
 
+	def test_shiftEnterStartsAParagraph(self, session: Session):
+		session.desktop.press("End", "shift+Return")
+		time.sleep(SETTLE)
+		typeEchoed(session, "yo")
+		step(session, "Up", "hello")
+		step(session, "Down", "yo")
+		step(session, "End", "blank")
+		step(session, "shift+Home", "yo selected")
+		step(session, "ctrl+Home", "hello")
+
 	def test_enterSendsTheMessage(self, session: Session):
-		session.desktop.press("End", "Return")
+		session.desktop.press("ctrl+End", "Return")
 		time.sleep(SETTLE)
 		step(session, "Escape", "Browse mode")
-		step(session, "shift+i", "Messages list with 2 items 2. You: hello")
+		step(session, "shift+i", "Messages list with 2 items 2. You: hello yo")
 		step(session, "e", "form Message  number general edit multi line…")
 		step(session, "Return", "Focus mode")
 
