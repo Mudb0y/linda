@@ -436,8 +436,11 @@ class AtSpiBuffer(VirtualBuffer):
 		if not lib.VBuf_getFieldNodeOffsets(self.VBufHandle, found, ctypes.byref(start), ctypes.byref(end)):
 			return False
 		pos = self.makeTextInfo(textInfos.offsets.Offsets(start.value, start.value))
-		inApplication = self._iterNodesByAttribs({"role": _role(*_APPLICATION_ROLES)}, "up", pos)
-		return next(inApplication, None) is None
+		application = next(self._iterNodesByAttribs({"role": _role(*_APPLICATION_ROLES)}, "up", pos), None)
+		if application is None:
+			return True
+		# A dialog's own buffer has the dialog as its root, which is not an application inside it.
+		return application.vbufFieldIdentifier == identifiers.of(self.rootNVDAObject.node)
 
 	def _get_isAlive(self):
 		# Never a call into the browser (#7818). A hung browser keeps its buffer, as on Windows.
@@ -587,12 +590,18 @@ class AtSpiBuffer(VirtualBuffer):
 
 def treeInterceptorClassFor(obj) -> type | None:
 	"""The buffer class for a document object, or None: Gecko's web documents that are not editable,
-	as mozilla.py chooses on Windows, while both the storage and the renderer are there."""
+	as mozilla.py chooses on Windows, while both the storage and the renderer are there; and a dialog
+	on a page read in browse mode, which the page's buffer leaves out as an application, as
+	behaviors.WebDialog gives it a buffer of its own on Windows."""
 	if not (vbufLib.isAvailable() and vbufEngine.isAvailable()):
 		return None
 	try:
 		if obj.atspiRole == "document web" and "editable" not in obj.atspiStates:
 			return AtSpiBuffer
+		if obj.atspiRole == "dialog":
+			parentBuffer = getattr(obj.parent, "treeInterceptor", None)
+			if isinstance(parentBuffer, AtSpiBuffer):
+				return AtSpiBuffer
 	except NodeGone:
 		pass
 	return None

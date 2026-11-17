@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Consent page</title></head>
+<body>
+<main>
+<h1>Video site</h1>
+<p>The videos would be here.</p>
+</main>
+<div id="consent" role="dialog" aria-modal="true" aria-labelledby="consentTitle">
+<h2 id="consentTitle">Before you continue</h2>
+<p>We use cookies to keep the site working.</p>
+<p>Choose whether you agree.</p>
+<button type="button" id="reject">Reject all</button>
+<button type="button" id="accept">Accept all</button>
+</div>
+<script>
+// As a site's consent window does: it takes the focus at once, and leaves the page when answered.
+function answer() {
+	document.getElementById("consent").remove();
+	const heading = document.querySelector("h1");
+	heading.tabIndex = -1;
+	heading.focus();
+}
+document.getElementById("reject").addEventListener("click", answer);
+document.getElementById("accept").addEventListener("click", answer);
+window.addEventListener("load", () => document.getElementById("reject").focus());
+</script>
+</body></html>

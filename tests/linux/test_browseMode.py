@@ -303,6 +303,26 @@ def test_pageStillLoadingIsReadWhole(desktop: DesktopSession):
 		quit(desktop, nvda)
 
 
+@pytest.mark.xfail(
+	strict=True,
+	reason="NVDAObjects.AtSpi asks virtualBuffers.atspi for a buffer class only for a document, not a dialog",
+)
+def test_dialogOverThePageIsReadInBrowseMode(desktop: DesktopSession):
+	# As on Windows, a dialog on a page gets a buffer of its own, which keeps reading inside it.
+	nvda = startFirst(desktop)
+	webSession.startFirefox(desktop, "realDialog.html")
+	expect(desktop, "Consent page…", "Reject all button", since=0, timeout=BUFFER_BOUND)
+	time.sleep(SETTLE)
+	step(desktop, "control+Home", "heading level 2 Before you continue")
+	step(desktop, "Down", "We use cookies to keep the site working.")
+	step(desktop, "control+End", "button Reject all button Accept all")
+	step(desktop, "Tab", "Accept all button")
+	# Answered, the dialog leaves the page, whose own buffer takes the focus.
+	step(desktop, "Return", "main landmark Video site heading level 1…")
+	step(desktop, "Down", "The videos would be here.")
+	quit(desktop, nvda)
+
+
 def test_pageThatChanges(desktop: DesktopSession, tmp_path: Path):
 	nvda = browse(
 		desktop,
