@@ -57,6 +57,16 @@ def isOneCharacter(text: str) -> bool:
 	return start.value == 0 and end.value == length
 
 
+def _typedPart(text: str, key) -> str:
+	"""What a key typed, out of an insert that also carries blanks before it. VTE inserts a space it had
+	not yet counted as text together with the character typed after it, as " x", when a program has
+	drawn a prompt ending in a space and moved the cursor away and back."""
+	typed = key.text if key is not None else ""
+	if not typed or typed.isspace() or len(text) <= len(typed) or not text.endswith(typed):
+		return text
+	return typed if text[: -len(typed)].isspace() else text
+
+
 def handleTextChange(
 	obj,
 	kind: Literal["insert", "delete"],
@@ -98,6 +108,7 @@ def handleTextChange(
 			return
 		character = PROTECTED_CHARACTER
 	else:
+		text = _typedPart(text, key)
 		if text in NOT_ECHOED or not isOneCharacter(text):
 			return
 		character = text

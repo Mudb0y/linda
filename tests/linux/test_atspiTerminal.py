@@ -177,6 +177,10 @@ def test_fullScreenProgramWithLaptopLayout(desktop: DesktopSession, tmp_path: Pa
 	step(desktop, "Caps_Lock+ctrl+End", "Filter:")
 	step(desktop, "Caps_Lock+l", "star  banana")
 
+	# The first letter after the input line's prompt, which VTE reports together with the prompt's
+	# trailing space.
+	step(desktop, "k", "k")
+
 	# Leaving it gives back the shell's screen, of which only what is new is spoken.
 	mark = desktop.mark()
 	desktop.press("Escape")
