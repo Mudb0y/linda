@@ -1246,6 +1246,10 @@ class HtmlMessageDialog(MessageDialog):
 		# its initial content, both of which can fire those events.
 		self._actionHandlers: dict[str, Callable[[], None]] = {}
 		super().__init__(*args, **kwargs)
+		if sys.platform != "win32":
+			from linuxPlatform import htmlMessage
+
+			htmlMessage.addActionButtons(self)
 		# The WebView (IE backend) consumes Escape natively before JavaScript keydown fires.
 		# Use a wx accelerator table, which is translated before the message reaches the focused
 		# child window, so Escape reliably triggers Close() regardless of what IE does with it.
@@ -1271,6 +1275,20 @@ class HtmlMessageDialog(MessageDialog):
 		return self
 
 	def _createMessageControl(self) -> "wx.html2.WebView":
+		if sys.platform != "win32":
+			from linuxPlatform import htmlMessage
+
+			# wxGTK has no IE backend, so New gave None.
+			control = htmlMessage.createControl(self)
+			control.SetInitialSize(self.scaleSize(self._DEFAULT_WEBVIEW_SIZE))
+			if isinstance(control, htmlMessage.TextMessageControl):
+				return control
+			import wx.html2
+
+			control.EnableContextMenu(False)
+			control.EnableHistory(False)
+			control.Bind(wx.html2.EVT_WEBVIEW_NAVIGATING, self._onNavigating)
+			return control
 		import wx.html2
 
 		control = wx.html2.WebView.New(self, backend=self._webViewBackend)
@@ -1298,6 +1316,9 @@ class HtmlMessageDialog(MessageDialog):
 		url = evt.GetURL()
 		if url.lower().startswith("data:text/html"):
 			# Edge fires this URL for SetPage; allow it so content loads.
+			return
+		if sys.platform != "win32" and url.lower() == "about:blank":
+			# WebKitGTK's SetPage.
 			return
 		evt.Veto()
 		if url.lower().startswith(self._ACTION_URL_PREFIX):

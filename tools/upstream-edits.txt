@@ -384,6 +384,11 @@ source/gui/message.py
   linuxPlatform.noteNoLinuxImplementation; raising would stop the dialog's
   show handler before it focuses the default button. Every error and warning message box, the
   configuration error at start-up among them, has one.
+  HtmlMessageDialog shows its message through linuxPlatform.htmlMessage,
+  as text in a read-only field with a button for each nvda-action link,
+  because wxGTK has no Internet Explorer WebView and WebView.New gave None,
+  so every browseable message failed as it opened; _onNavigating lets
+  WebKitGTK's about:blank through for the WebView that module can still make.
   every platform: wx.html2 is imported in
   HtmlMessageDialog._createMessageControl rather than with the module, and
   _webViewBackend holds wx.html2.WebViewBackendIE's value written out, with
