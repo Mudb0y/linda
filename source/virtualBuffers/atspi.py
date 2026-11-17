@@ -182,6 +182,9 @@ class AtSpiBufferTextInfo(VirtualBufferTextInfo):
 			states.add(popupState)
 		if sortState := _SORT_STATES.get(attrs.get("sort")):
 			states.add(sortState)
+		if "atspi::action_click" in attrs:
+			# The renderer marks an object whose first action is click, as IAccessibleAction_click.
+			states.add(State.CLICKABLE)
 		landmark = next((r for r in xmlRoles if r in aria.landmarkRoles), None)
 		if landmark and role != Role.LANDMARK and landmark != xmlRoles[0]:
 			landmark = None
