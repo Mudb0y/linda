@@ -84,6 +84,17 @@ def _end(dialog: ModalDialog, returnCode: int) -> None:
 		dialog.EndModal(returnCode)
 
 
+def _destroyOnceReturned(dialog: ModalDialog) -> None:
+	"""Destroy one of wx's dialogs that was ended, now that the call that showed it has returned.
+
+	Left alive, it is no longer modal, and NVDA's exit closes it like any other window: the welcome
+	dialog then ended itself again from its close handler, which wx refuses for a dialog that is not
+	modal.
+	"""
+	if isinstance(dialog, wx.Dialog) and dialog and not dialog.IsBeingDeleted() and not dialog.IsModal():
+		dialog.Destroy()
+
+
 def _giveUp(reason: str) -> NoReturn:
 	import config
 
@@ -124,6 +135,8 @@ class _Unwinding:
 				_giveUp(
 					f"the call that showed {self._waitingFor[0]} has not returned after {RETURN_TIMEOUT} s"
 				)
+			if self._waitingFor:
+				_destroyOnceReturned(self._waitingFor[0])
 			if innermost is None or self._until():
 				return self._finish()
 			if _ended >= MAX_DIALOGS:
