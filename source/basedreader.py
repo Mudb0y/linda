@@ -7,6 +7,7 @@ the rest through linuxPlatform.say and exits instead.
 """
 
 import os
+import signal
 import sys
 from typing import NoReturn
 
@@ -167,6 +168,12 @@ def main() -> NoReturn:
 		# The lock is never released by hand: the kernel drops it as the process ends, so a new copy waits
 		# for this one to be entirely gone, as it waits on the mutex on Windows.
 		log.info("NVDA exit")
+	# The copy a restart started sends SIGTERM as it takes over, and as the interpreter finalises it puts
+	# the handler's signals back to their default action, so that a copy slower to finalise than the new
+	# one to start was ended by the signal instead of exiting cleanly. It is leaving anyway, and the new
+	# copy kills it if it lingers. Ignored rather than blocked, as any of this process's threads may
+	# take a signal that the main thread blocks.
+	signal.signal(signal.SIGTERM, signal.SIG_IGN)
 	# logHandler's hook writes to the log, which the interpreter takes apart before the objects whose
 	# finalisers fail as it exits, so its own hook failed instead and hid what went wrong. Python's
 	# hook writes to standard error, which on Linux is where the caller looks.
