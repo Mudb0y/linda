@@ -5,6 +5,7 @@ them, and nothing of it is left once the session closes.
 BASEDREADER_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_webSession.py
 """
 
+import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -40,6 +41,19 @@ def _firefoxProcesses() -> list[str]:
 		if "firefox" in program.lower() and state not in "ZX":
 			found.append(f"{entry.name}: {command}")
 	return found
+
+
+@pytest.mark.parametrize(
+	("name", "fileName"),
+	[("BASEDREADER_VBUF_LIB", "libnvdaVbuf.so"), ("BASEDREADER_VBUF_ENGINE", "libbre_vbuf.so")],
+)
+def test_browseLibraryIsNamed(name: str, fileName: str):
+	"""The dev shell names both libraries, built by Nix unless the caller named its own builds: one
+	that is missing leaves NVDA reading web pages without browse mode, and says nothing."""
+	path = Path(os.environ.get(name, ""))
+	assert path.name == fileName, f"{name} is {str(path)!r}"
+	with open(path, "rb") as library:
+		assert library.read(4) == b"\x7fELF", path
 
 
 def test_documentAppearsWithAFreshProfile(desktop: DesktopSession):

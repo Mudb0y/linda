@@ -103,9 +103,12 @@
       };
 
       pwsink = pkgs.callPackage ./nix/pwsink.nix { };
+      # Browse mode's two libraries: the virtual buffer's storage and the renderer that fills it.
+      vbuf = pkgs.callPackage ./nix/vbuf.nix { };
+      vbufengine = pkgs.callPackage ./nix/vbufengine.nix { };
 
       basedreader = pkgs.callPackage ./nix/basedreader.nix {
-        inherit python runtimeEnv louisTables nvdaCldr pwsink;
+        inherit python runtimeEnv louisTables nvdaCldr pwsink vbuf vbufengine;
       };
       app = name: description: {
         type = "app";
@@ -155,7 +158,7 @@
         espeak-ng = espeak;
         openevv-libeci = openevvLibeci;
         openevv-driver = openevvDriver;
-        inherit pwsink;
+        inherit pwsink vbuf vbufengine;
       };
 
       devShells.${system}.default = pkgs.mkShell (runtimeEnv // {
@@ -278,6 +281,11 @@
           # on standard error without hicolor, the icon theme every desktop
           # falls back on.
           BASEDREADER_RIG_XDG_DATA_DIRS=$GSETTINGS_SCHEMAS_PATH:${pkgs.hicolor-icon-theme}/share:$BASEDREADER_RIG_XDG_DATA_DIRS
+          # Browse mode's libraries, as the package's wrappers name them. Set here rather than as
+          # attributes, which nix develop would put over the caller's own: a run that names a
+          # library built in the checkout keeps it.
+          export BASEDREADER_VBUF_LIB=''${BASEDREADER_VBUF_LIB:-${vbuf}/lib/libnvdaVbuf.so}
+          export BASEDREADER_VBUF_ENGINE=''${BASEDREADER_VBUF_ENGINE:-${vbufengine}/lib/libbre_vbuf.so}
         '';
       });
     };

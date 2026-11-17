@@ -21,6 +21,10 @@
   # The PipeWire sink's library. Without it linuxPlatform.audioOutput keeps
   # its own choice of sink.
   pwsink ? null,
+  # Browse mode's storage and renderer. Without both, NVDA reads web documents without a virtual
+  # buffer.
+  vbuf ? null,
+  vbufengine ? null,
 }:
 
 let
@@ -53,7 +57,17 @@ let
     // lib.optionalAttrs (pwsink != null) {
       BASEDREADER_AUDIO_SINK = "pipewire";
       BASEDREADER_PWSINK_LIB = "${pwsink}/lib/libpwsink.so";
+    }
+    // lib.optionalAttrs (vbuf != null && vbufengine != null) {
+      BASEDREADER_VBUF_LIB = "${vbuf}/lib/libnvdaVbuf.so";
+      BASEDREADER_VBUF_ENGINE = "${vbufengine}/lib/libbre_vbuf.so";
     };
+
+  # The libraries the wrappers name. One that is not there is not loaded, and NVDA carries on
+  # without what it gives, so the install check fails instead.
+  wrapperLibraries = lib.attrValues (
+    lib.filterAttrs (name: _: lib.hasSuffix "_LIB" name || lib.hasSuffix "_ENGINE" name) wrapperEnv
+  );
 
   # NVDA's release, from the lines source/buildVersion.py sets it with.
   versionLines = lib.splitString "\n" (builtins.readFile ../source/buildVersion.py);
@@ -142,6 +156,12 @@ stdenvNoCC.mkDerivation {
   nativeInstallCheckInputs = [ strace ];
   installCheckPhase = ''
     runHook preInstallCheck
+    for library in ${lib.escapeShellArgs wrapperLibraries}; do
+      if [ ! -f "$library" ]; then
+        echo "error: the wrappers name $library, which is not a file"
+        exit 1
+      fi
+    done
     for program in ${lib.escapeShellArgs (lib.attrNames programs)}; do
       env ${lib.concatMapStringsSep " " (n: "${n}=/caller") callerVariablesCleared} \
         strace -f -v -s 65536 -e trace=execve -e inject=execve:error=ENOENT:when=2 -o execve.log \
