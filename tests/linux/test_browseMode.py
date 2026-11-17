@@ -12,6 +12,7 @@ The two libraries are built with:
 """
 
 import json
+import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -30,6 +31,10 @@ SETTLE = 1.0
 PAGE_BOUND = 15.0
 #: Whether the buffer gets the page's changes by itself; without the update thread a test re-renders it.
 UPDATES_ARRIVE = (harness.ROOT / "source" / "linuxPlatform" / "vbufUpdates.py").is_file()
+#: Seconds a busy page is left to change, and the share of one processor NVDA may use meanwhile; it
+#: uses about a twelfth on realTicker.html.
+BUSY_SECONDS = 5.0
+BUSY_SHARE = 0.3
 #: The test hook's key, which does what the hook's command file says to the focused buffer.
 HOOK_KEY = "Insert+control+shift+F9"
 #: The hook's command file, beside the plugin.
@@ -301,6 +306,31 @@ def test_pageStillLoadingIsReadWhole(desktop: DesktopSession):
 		)
 		time.sleep(SETTLE)
 		quit(desktop, nvda)
+
+
+def processorSeconds(pid: int) -> float:
+	"""The processor time process pid has used so far, user and system."""
+	fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+	return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+
+def test_busyPageKeepsThePlaceAtAModestCost(desktop: DesktopSession):
+	# A clock, a carousel and a feed change the top of the page thirteen times a second.
+	nvda = startFirst(desktop)
+	webSession.startFirefox(desktop, "realTicker.html")
+	expect(desktop, "Ticker page…", "The last paragraph of the ticker page.", since=0, timeout=BUFFER_BOUND)
+	time.sleep(SETTLE)
+	step(desktop, "control+Home", "banner landmark Time now:…")
+	step(desktop, "h", "main landmark Ticker page heading level 1")
+	step(desktop, "Down", "The first paragraph stays where it is.")
+	step(desktop, "Down", "The second paragraph stays where it is.")
+	time.sleep(BUSY_SECONDS)
+	step(desktop, "Up", "The first paragraph stays where it is.")
+	before = processorSeconds(nvda.process.pid)
+	time.sleep(BUSY_SECONDS)
+	share = (processorSeconds(nvda.process.pid) - before) / BUSY_SECONDS
+	assert share < BUSY_SHARE, f"NVDA used {share:.0%} of a processor on a page that keeps changing"
+	quit(desktop, nvda)
 
 
 @pytest.mark.xfail(

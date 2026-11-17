@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Ticker page</title></head>
+<body>
+<header><p>Time now: <span id="clock">0</span></p>
+<div id="slide" aria-roledescription="slide"><p>Slide 0 of the carousel.</p></div></header>
+<main>
+<h1>Ticker page</h1>
+<p>The first paragraph stays where it is.</p>
+<p>The second paragraph stays where it is.</p>
+<ul id="feed"></ul>
+<p>The third paragraph stays where it is.</p>
+<p>The last paragraph of the ticker page.</p>
+</main>
+<script>
+// As a news front page does: a clock ticks ten times a second, a carousel turns twice a second and a
+// feed gains an item every second, above the place the reader is.
+let tick = 0;
+setInterval(() => {
+	tick += 1;
+	document.getElementById("clock").textContent = String(tick);
+}, 100);
+let slide = 0;
+setInterval(() => {
+	slide += 1;
+	document.getElementById("slide").innerHTML = `<p>Slide ${slide} of the carousel.</p>`;
+}, 500);
+let item = 0;
+setInterval(() => {
+	item += 1;
+	const entry = document.createElement("li");
+	entry.textContent = `Feed item ${item}.`;
+	document.getElementById("feed").prepend(entry);
+}, 1000);
+</script>
+</body></html>
