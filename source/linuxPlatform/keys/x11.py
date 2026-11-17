@@ -194,6 +194,12 @@ CAPTURE_EXPIRY = 0.25
 #: What a grab was made for, which says what becomes of a press under it that NVDA does not answer in
 #: time: an NVDA key's, kept for NVDA, or browse mode's, replayed to the application.
 NVDA_GRAB, CAPTURE_GRAB = "nvda", "capture"
+#: Seconds the X server holds the keyboard on a key of a document whose window has just got the focus
+#: back, for NVDA's focus to reach the document, before the key is decided without it.
+DOCUMENT_WAIT = 0.5
+#: Seconds a document's keys stay grabbed on a window the focus came back to without NVDA's focus
+#: saying that it is in the document again.
+DOCUMENT_GRACE = 1.5
 #: Each captured combination is grabbed once with each of these, so that the locks do not make the
 #: grab miss. AnyModifier would cover them too, but the window manager's own grabs refuse it.
 LOCK_COMBINATIONS = (0, X.LockMask, NUM_LOCK_MASK, X.LockMask | NUM_LOCK_MASK)
@@ -325,6 +331,8 @@ class _Ticket:
 	answered: bool = False
 	#: Whether it was replayed to the application.
 	replayed: bool = False
+	#: Whether it came while NVDA's focus had not yet reached the document its window holds.
+	documentPending: bool = False
 	#: Set once the X server's held press has come, or once it is known that none will.
 	settled: threading.Event = field(default_factory=threading.Event)
 
@@ -405,6 +413,13 @@ class X11KeySource:
 		self._captured: dict[int, set[int]] = {}
 		#: The window the captured keys are grabbed on: the one with the keyboard focus.
 		self._captureWindow = None
+		#: Whether that window has the focus; the keys stay grabbed there while it has not, taking none.
+		self._captureFocused = False
+		#: The mode of the document in that window as the focus left it; None while it has the focus.
+		self._dormantMode: CaptureMode | None = None
+		#: Until when the keys grabbed now are those of a document NVDA's focus has not reached again;
+		#: None while they are not.
+		self._documentPending: float | None = None
 		self._loggedCapture: CaptureMode = "off"
 		#: Presses under a grab not yet answered, in the order they came.
 		self._tickets: deque[_Ticket] = deque()
@@ -584,9 +599,12 @@ class X11KeySource:
 		self._keysWindow = None
 		self._captured = {}
 		self._captureWindow = None
+		self._captureFocused = False
+		self._dormantMode = None
 		self._grabKey = None
 		self._serverGrab = None
 		self._chordKey = None
+		self._documentPending = None
 		self._held = False
 		self._unsent.clear()
 		for ticket in self._tickets:
@@ -647,7 +665,7 @@ class X11KeySource:
 				self._handle(d.next_event())
 			now = time.monotonic()
 			self._flushRaw(now)
-			deadlines = [self._answer(now), self._beat(now)]
+			deadlines = [self._answer(now), self._beat(now), self._documentExpiry(now)]
 			if self._raw:
 				deadlines.append(self._raw[0][0] + RAW_WAIT)
 			due = min((t for t in deadlines if t is not None), default=None)
@@ -683,7 +701,12 @@ class X11KeySource:
 					ticket = None
 				elif event.vkCode in KEPT_UNDER_GRAB:
 					kept = True
-				elif ticket.kind == CAPTURE_GRAB and not self._capturedNow(keycode, modifiers):
+				elif ticket.kind == CAPTURE_GRAB and not self._capturedNow(
+					keycode,
+					modifiers,
+					# Answered in time, before the X thread replays it by itself.
+					ticket.arrival + DOCUMENT_WAIT - CAPTURE_TIMEOUT / 2 if ticket.documentPending else None,
+				):
 					# Grabbed for either mode, and not one NVDA's mode takes at this moment.
 					ticket.verdict = True
 					self._wake()
@@ -768,9 +791,11 @@ class X11KeySource:
 			# grab moves the focus only for as long as it lasts.
 			moved = event.type == X.DestroyNotify or event.mode in (X.NotifyNormal, X.NotifyWhileGrabbed)
 			window = self._captureWindow
-			if moved and event.type != X.FocusIn and window is not None and event.window.id == window.id:
-				# Grabbed again when next asked, once NVDA's focus has followed and the mode is known.
-				self._dropCapture()
+			if moved and window is not None and event.window.id == window.id:
+				if event.type == X.DestroyNotify:
+					self._dropCapture()
+				elif event.detail not in (X.NotifyInferior, X.NotifyPointer, X.NotifyPointerRoot):
+					self._focusCapture(event.type == X.FocusIn)
 			if moved:
 				self._followFocus()
 		elif event.type == X.MappingNotify:
@@ -852,7 +877,14 @@ class X11KeySource:
 			kind = NVDA_GRAB
 		else:
 			kind = self._grabKind
-		ticket = _Ticket(keycode, arrival, kind=kind, grab=self._grabKey, effective=effective)
+		ticket = _Ticket(
+			keycode,
+			arrival,
+			kind=kind,
+			grab=self._grabKey,
+			effective=effective,
+			documentPending=kind == CAPTURE_GRAB and self._documentPending is not None,
+		)
 		self._tickets.append(ticket)
 		return ticket
 
@@ -990,8 +1022,9 @@ class X11KeySource:
 			held = next((ticket for ticket in self._tickets if ticket.frozen), None)
 			if held is None:
 				return self._tickets[0].arrival + CAPTURE_EXPIRY if self._tickets else None
-			if held.verdict is None and now < held.arrival + CAPTURE_TIMEOUT:
-				return held.arrival + CAPTURE_TIMEOUT
+			limit = held.arrival + (DOCUMENT_WAIT if held.documentPending else CAPTURE_TIMEOUT)
+			if held.verdict is None and now < limit:
+				return limit
 			# Presses before the held one were never held, as the server holds them in order.
 			while (ticket := self._tickets.popleft()) is not held:
 				ticket.answered = True
@@ -1151,6 +1184,8 @@ class X11KeySource:
 		return effective in modifiers
 
 	def _captureMatches(self, keycode: int, effective: int) -> bool:
+		if not self._captureFocused:
+			return False
 		masks = self._captured.get(keycode)
 		return masks is not None and effective & 0xFF in masks
 
@@ -1290,15 +1325,26 @@ class X11KeySource:
 				grabbed.setdefault(keycode, set()).update(masks)
 		return grabbed
 
-	def _capturedNow(self, keycode: int, modifiers: int) -> bool:
-		"""Whether NVDA, in the mode it is in at this moment, takes this press."""
-		mode = None
-		if self._modeNow is not None:
-			try:
-				mode = self._modeNow()
-			# Whatever NVDA's focus raises, the key stays NVDA's to decide, as it was captured for.
-			except Exception:  # noqa: BLE001
-				log.debugWarning("Asking NVDA's mode for a captured key", exc_info=True)
+	def _askMode(self) -> CaptureMode | None:
+		if self._modeNow is None:
+			return None
+		try:
+			return self._modeNow()
+		# Whatever NVDA's focus raises, the key stays NVDA's to decide, as it was captured for.
+		except Exception:  # noqa: BLE001
+			log.debugWarning("Asking NVDA's mode for a captured key", exc_info=True)
+			return None
+
+	def _capturedNow(self, keycode: int, modifiers: int, waitUntil: float | None = None) -> bool:
+		"""Whether NVDA, in the mode it is in at this moment, takes this press.
+
+		:param waitUntil: Until when to wait for NVDA's focus to reach a document, for a key typed in a
+			window that held one, before NVDA's focus has followed the window.
+		"""
+		mode = self._askMode()
+		while mode == "off" and waitUntil is not None and time.monotonic() < waitUntil:
+			time.sleep(0.01)
+			mode = self._askMode()
 		if mode is None:
 			return True
 		masks = self._captureSet(mode).get(keycode)
@@ -1317,11 +1363,78 @@ class X11KeySource:
 		# Asked again and again while the focus is in a document: the grabs follow the focus, which
 		# may have gone to another window since they were made. Both modes' keys are grabbed in either,
 		# so a change between them changes no grab.
-		if (mode == "off") != (self._captureMode == "off") or (mode != "off" and self._captureWindow is None):
+		self._documentPending = None
+		window = self._captureWindow
+		# NVDA's focus follows the keyboard's to another window only once that window's application has
+		# said so: until then its mode is still the document's, which is no reason to take the keys of
+		# another application. A document in another window of the same one is.
+		if (
+			window is not None
+			and not self._captureFocused
+			and (mode == "off" or self._windowPid(self._focusWindow()) != self._windowPid(window))
+		):
+			self._captureMode = mode
+			self._logCapture("off")
+			return
+		if (mode == "off") != (self._captureMode == "off") or (
+			mode != "off" and (window is None or not self._captureFocused)
+		):
 			self._applyCapture(mode)
 		else:
 			self._captureMode = mode
-			self._logCapture(mode if self._captureWindow is not None else "off")
+			self._logCapture(mode if window is not None else "off")
+
+	def _focusCapture(self, focused: bool) -> None:
+		"""Follow the focus leaving or reaching the window a document's keys are grabbed on.
+
+		They stay grabbed while the focus is elsewhere, where they take no key, so as to be there the
+		moment it comes back: NVDA's focus follows only once the application has told it, and a key
+		typed before then, as the first after Alt+Tab, would reach the document. Each such key is held
+		until NVDA's focus is in the document again, or for DOCUMENT_WAIT, and decided by its mode then.
+		"""
+		self._captureFocused = focused
+		if not focused:
+			if self._captureMode != "off":
+				self._dormantMode = self._captureMode
+			return
+		if self._captureMode == "off" and self._dormantMode is not None:
+			self._captureMode = self._dormantMode
+			self._documentPending = time.monotonic() + DOCUMENT_GRACE
+		self._dormantMode = None
+
+	def _windowPid(self, window) -> int | None:
+		"""The process a window belongs to, by its own _NET_WM_PID or its nearest parent's."""
+		root = self._display.screen().root
+		try:
+			for _level in range(4):
+				if window is None:
+					return None
+				pid = window.get_full_property(self._pidAtom, X.AnyPropertyType)
+				if pid is not None and len(pid.value):
+					return int(pid.value[0])
+				parent = window.query_tree().parent
+				if isinstance(parent, int) or parent.id == root.id:
+					return None
+				window = parent
+		except error.BadWindow:
+			return None
+		return None
+
+	def _documentExpiry(self, now: float) -> float | None:
+		"""Let go of the keys of a document kept grabbed on a window the focus came back to, once NVDA's
+		focus has not reached the document in DOCUMENT_GRACE: the focus is not in it.
+
+		:return: When to look again, or None while no such keys are grabbed.
+		"""
+		if self._documentPending is None:
+			return None
+		if now < self._documentPending:
+			return self._documentPending
+		self._documentPending = None
+		self._dropCapture()
+		self._captureMode = "off"
+		self._logCapture("off")
+		return None
 
 	def _dropCapture(self) -> None:
 		"""Ungrab the captured keys, leaving the mode as it is."""
@@ -1335,6 +1448,8 @@ class X11KeySource:
 			if self._keysWindow is None or window.id != self._keysWindow.id:
 				window.change_attributes(event_mask=X.NoEventMask, onerror=gone)
 		self._captured = {}
+		self._captureFocused = False
+		self._dormantMode = None
 
 	def _applyCapture(self, mode: CaptureMode) -> None:
 		self._captureMode = mode
@@ -1356,6 +1471,7 @@ class X11KeySource:
 					)
 					catchers.append((keycode, base | lock, catcher))
 		self._captureWindow = window
+		self._captureFocused = True
 		# The window has the focus, which the NVDA keys follow too, the more surely for a second look.
 		self._followFocus()
 		d.sync()

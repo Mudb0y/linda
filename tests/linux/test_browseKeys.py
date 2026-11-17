@@ -410,6 +410,23 @@ def test_altTabLeavesThePageItsKeys(desktop: DesktopSession, tmp_path: Path):
 	step(desktop, "control+Home", "heading level 1 Keys page")
 	step(desktop, "h", "Field and link heading level 2")
 	assert page.log() == []
+
+	# The first key after Alt+Tab is the new window's, though NVDA's focus follows the window only once
+	# its application has told it: typing in the fixture, and NVDA's on the page.
+	mark = desktop.mark()
+	subprocess.run(["xdotool", "key", "alt+Tab", "sleep", "0.03", "key", "y"], check=True)
+	expect(desktop, "Fixture window" + PREFIX_MARK, since=mark)
+	waitForCapture(nvda, "off")
+	deadline = time.monotonic() + 3
+	while "y" not in (text := gtkEntryText()):
+		assert time.monotonic() < deadline, f"y did not reach the fixture's field, which holds {text!r}"
+		time.sleep(0.05)
+	time.sleep(SETTLE)
+	mark = desktop.mark()
+	subprocess.run(["xdotool", "key", "alt+Tab", "sleep", "0.03", "key", "h"], check=True)
+	expect(desktop, "no next heading", since=mark)
+	time.sleep(SETTLE)
+	assert page.log() == []
 	quitNVDA(desktop, nvda)
 
 
