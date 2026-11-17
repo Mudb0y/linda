@@ -21,9 +21,10 @@ def initialize() -> None:
 	from linuxPlatform.atspi import handler, status
 
 	# Before registering for events, which newer launchers answer by switching IsEnabled on
-	# themselves: what claim finds is then the desktop's own setting, and the one to put back.
+	# themselves: what claim finds is then what the desktop had before NVDA.
 	status.claim()
 	handler.initialize()
+	status.reportUnreadable()
 
 
 def terminate() -> None:

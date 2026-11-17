@@ -501,3 +501,32 @@ class TestChromiumComposer:
 		nvda.waitForExit(EXIT_BOUND)
 		assert nvda.process.returncode == 0, nvda.describe()
 		nvda.assertClean(logNames=("nvda.log",))
+
+
+class TestChromiumStartedFirst:
+	"""Chromium started while the accessibility status was off, before NVDA, as a program is between one
+	screen reader quitting and the next starting: it stays off the accessibility bus, and NVDA says that
+	it must be restarted."""
+
+	def test_nvdaSaysItMustBeRestarted(self, tmp_path_factory: pytest.TempPathFactory):
+		webSession.requireBrowseLibraries()
+		directory = tmp_path_factory.mktemp("startedFirst")
+		with DesktopSession(directory / "desktop") as desktop:
+			chromiumSession.clearAccessibilityStatus()
+			browser = chromiumSession.startUnseenChromium(desktop, "usable.html")
+			nvda = desktop.startNVDA(webSession.BROWSE_CONFIG, env=TIMED_SPEECH)
+			nvda.waitForLog("NVDA initialized", STARTUP_BOUND)
+			desktop.expect(
+				"chromium was started before accessibility was on and cannot be read until it is restarted",
+				since=0,
+				timeout=STEP_BOUND * 2,
+			)
+			assert webSession._application(browser) is None, "Chromium joined the accessibility bus after all"
+			mark = desktop.mark()
+			desktop.press("Insert+q")
+			desktop.expect("Exit NVDA…", since=mark, timeout=STEP_BOUND)
+			time.sleep(SETTLE)
+			desktop.press("Return")
+			nvda.waitForExit(EXIT_BOUND)
+			assert nvda.process.returncode == 0, nvda.describe()
+			nvda.assertClean(logNames=("nvda.log",))

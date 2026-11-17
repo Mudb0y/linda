@@ -53,6 +53,8 @@ CHROMIUM_SWITCHES = (
 ELECTRON_SWITCHES = ("--disable-gpu",)
 #: Seconds the launcher has to follow a client that comes or goes.
 STATUS_TIMEOUT = 3.0
+#: Seconds a Chromium started while the status is off is given to show its window after its zygote.
+SHOWN_DELAY = 3.0
 
 
 def plainEnvironment() -> dict[str, str]:
@@ -164,6 +166,51 @@ def startChromium(desktop: DesktopSession, page: str) -> webSession.FirefoxProce
 	)
 	process.profile = profile
 	return process
+
+
+def startUnseenChromium(desktop: DesktopSession, page: str) -> webSession.FirefoxProcess:
+	"""Start Chromium on page with a fresh profile while the accessibility status is off, and wait until
+	it has started its zygote, by which time it has read the status and stayed off the accessibility bus."""
+	assert accessibilityStatus() is False, "the accessibility status is on"
+	profile = Path(tempfile.mkdtemp(prefix="chromium", dir=desktop.directory))
+	logPath = desktop.directory / f"{profile.name}.log"
+	with open(logPath, "w") as log:
+		process = webSession.FirefoxProcess(
+			["chromium", f"--user-data-dir={profile}", *CHROMIUM_SWITCHES, webSession.pageURL(page)],
+			stdin=subprocess.DEVNULL,
+			stdout=log,
+			stderr=subprocess.STDOUT,
+			env=plainEnvironment(),
+		)
+	desktop._apps.append(process)
+	process.profile = profile
+	started = time.monotonic()
+	while not _hasZygote(process.pid):
+		if process.firefoxHasExited() or time.monotonic() - started >= WINDOW_TIMEOUT:
+			raise AssertionError(
+				f"Chromium started no zygote within {WINDOW_TIMEOUT} s, {harness.describeExit(process.returncode)}\n"
+				f"{logPath.read_text(errors='replace')[-3000:]}",
+			)
+		time.sleep(0.1)
+	# Until its window is shown, as a person would wait.
+	time.sleep(SHOWN_DELAY)
+	return process
+
+
+def _hasZygote(processID: int) -> bool:
+	for entry in os.scandir("/proc"):
+		if not entry.name.isdecimal():
+			continue
+		try:
+			with open(f"/proc/{entry.name}/cmdline", "rb") as f:
+				if b"--type=zygote" not in f.read(4096):
+					continue
+			with open(f"/proc/{entry.name}/stat", "rb") as f:
+				if int(f.read().rsplit(b")", 1)[1].split()[1]) == processID:
+					return True
+		except (OSError, ValueError, IndexError):
+			continue
+	return False
 
 
 def startElectron(
