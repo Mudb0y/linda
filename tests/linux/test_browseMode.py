@@ -231,6 +231,7 @@ def test_followingLinks(desktop: DesktopSession, tmp_path: Path):
 	# Firefox marks a link to a place on the page visited once it is followed.
 	step(desktop, "k", "the news visited link")
 	step(desktop, "k", "the second page link")
+	mark = desktop.mark()
 	step(
 		desktop,
 		"Return",
@@ -239,6 +240,8 @@ def test_followingLinks(desktop: DesktopSession, tmp_path: Path):
 		"You followed the link.",
 		timeout=PAGE_BOUND,
 	)
+	# The link going away with its page is not news.
+	assert "unavailable" not in desktop.spokenSince(mark), desktop.spokenSince(mark)
 	# Firefox gives the focus back to the link followed, and reading starts there.
 	step(desktop, "alt+Left", "Usable page", "visited link the second page…", timeout=PAGE_BOUND)
 	quit(desktop, nvda)

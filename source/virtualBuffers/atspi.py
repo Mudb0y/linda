@@ -684,6 +684,10 @@ class AtSpiBuffer(VirtualBuffer):
 	def event_stateChange(self, obj, nextHandler):
 		if not self.isAlive:
 			return treeInterceptorHandler.killTreeInterceptor(self)
+		# The link followed goes away with its page, and an object that is gone has none of the states
+		# that make it available; Firefox on Windows tells nothing of it.
+		if State.DEFUNCT in obj.states:
+			return
 		return nextHandler()
 
 
