@@ -428,16 +428,9 @@ def _onEvent(eventType: str, source: Node | None, detail1: int, detail2: int, an
 	)
 
 
-#: App modules written for MATE's programs, which share no name with a Windows program NVDA has one for.
-MATE_APP_MODULES = frozenset({"caja"})
-
-
 def initialize() -> None:
 	global _listening, _exiting
 	_exiting = False
-	from linuxPlatform import processes
-
-	processes.portedAppModules = processes.portedAppModules | MATE_APP_MODULES
 	client().listen(EVENT_TYPES, _onEvent)
 	_listening = True
 
