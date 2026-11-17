@@ -28,7 +28,8 @@ def _unwrap(name: str) -> str:
 #: until it is ported and named here. Add-on app modules are not limited, since their authors chose the
 #: program and the platform they serve.
 #: marco's and caja's were written for MATE's programs, not for Windows programs of those names.
-portedAppModules: frozenset[str] = frozenset({"nvda", "marco", "caja"})
+#: chromium's, electron's and discord's serve those programs on Linux only.
+portedAppModules: frozenset[str] = frozenset({"nvda", "marco", "caja", "chromium", "electron", "discord"})
 
 
 def isAppModuleUsable(name: str, origin: str | None, bundledDirectory: str) -> bool:

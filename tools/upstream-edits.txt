@@ -93,6 +93,17 @@ source/appModules/caja.py
   the folder Caja opens in the same view and makes the file it selects
   there the focus, as Windows Explorer moves the focus into a folder it
   opens; no Windows program is named caja
+source/appModules/chromium.py
+  Linux runtime: added. The app module for Chromium, which makes sure
+  Chromium builds a page's accessible tree and names a page's landmarks for
+  their kind; on Windows, where Chromium is chrome.exe, it is the default
+source/appModules/discord.py
+  Linux runtime: added. Discord's app module is Chromium's; on Windows,
+  where Discord.exe would load it, it is the default
+source/appModules/electron.py
+  Linux runtime: added. A program on a shared Electron that cannot be named
+  goes by Electron's name and gets Chromium's app module; on Windows, where
+  electron.exe would load it, it is the default
 source/appModules/marco.py
   Linux runtime: added. The app module for MATE's window manager, which
   speaks the window or workspace its switcher names while Alt+Tab is held,
