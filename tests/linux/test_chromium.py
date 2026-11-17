@@ -63,19 +63,36 @@ class Session:
 	directory: Path
 
 
+@pytest.fixture(scope="class")
+def chromium(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Session]:
+	webSession.requireBrowseLibraries()
+	directory = tmp_path_factory.mktemp("chromium")
+	with DesktopSession(directory / "desktop") as desktop:
+		chromiumSession.clearAccessibilityStatus()
+		nvda = desktop.startNVDA(webSession.BROWSE_CONFIG, env=TIMED_SPEECH)
+		nvda.waitForLog("NVDA initialized", STARTUP_BOUND)
+		browser = chromiumSession.startChromium(desktop, "usable.html")
+		yield Session(desktop, nvda, browser, directory)
+
+
+@pytest.fixture(scope="class")
+def electron(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Session]:
+	webSession.requireBrowseLibraries()
+	directory = tmp_path_factory.mktemp("electron")
+	with DesktopSession(directory / "desktop") as desktop:
+		chromiumSession.clearAccessibilityStatus()
+		nvda = desktop.startNVDA(webSession.BROWSE_CONFIG, env=TIMED_SPEECH)
+		nvda.waitForLog("NVDA initialized", STARTUP_BOUND)
+		program = chromiumSession.startElectron(desktop, "electronChat", window=CHAT_TITLE)
+		yield Session(desktop, nvda, program, directory)
+
+
 class TestChromium:
 	"""Chromium on the usable page, from NVDA's start to its exit."""
 
-	@pytest.fixture(scope="class")
-	def session(self, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Session]:
-		webSession.requireBrowseLibraries()
-		directory = tmp_path_factory.mktemp("chromium")
-		with DesktopSession(directory / "desktop") as desktop:
-			chromiumSession.clearAccessibilityStatus()
-			nvda = desktop.startNVDA(webSession.BROWSE_CONFIG, env=TIMED_SPEECH)
-			nvda.waitForLog("NVDA initialized", STARTUP_BOUND)
-			browser = chromiumSession.startChromium(desktop, "usable.html")
-			yield Session(desktop, nvda, browser, directory)
+	@pytest.fixture
+	def session(self, chromium: Session) -> Session:
+		return chromium
 
 	@pytest.fixture(autouse=True)
 	def recoverAfterAFailure(self, request: pytest.FixtureRequest, session: Session) -> Iterator[None]:
@@ -255,20 +272,27 @@ class TestChromium:
 		assert chromiumSession.accessibilityStatus() is False
 
 
+def toTop(session: Session) -> None:
+	"""Control+Home on the Electron fixture, wherever the reader was."""
+	mark = session.desktop.mark()
+	session.desktop.press("ctrl+Home")
+	waitForRecord(
+		session,
+		lambda spoken: spoken.endswith("bullet link general"),
+		since=mark,
+		timeout=STEP_BOUND,
+		what="the top of the page",
+	)
+	time.sleep(SETTLE)
+
+
 class TestElectron:
 	"""An Electron program shaped like a chat program, from NVDA's start to its exit: its window is a
 	web page in browse mode, as such a program's is in NVDA on Windows."""
 
-	@pytest.fixture(scope="class")
-	def session(self, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Session]:
-		webSession.requireBrowseLibraries()
-		directory = tmp_path_factory.mktemp("electron")
-		with DesktopSession(directory / "desktop") as desktop:
-			chromiumSession.clearAccessibilityStatus()
-			nvda = desktop.startNVDA(webSession.BROWSE_CONFIG, env=TIMED_SPEECH)
-			nvda.waitForLog("NVDA initialized", STARTUP_BOUND)
-			program = chromiumSession.startElectron(desktop, "electronChat", window=CHAT_TITLE)
-			yield Session(desktop, nvda, program, directory)
+	@pytest.fixture
+	def session(self, electron: Session) -> Session:
+		return electron
 
 	@pytest.fixture(autouse=True)
 	def recoverAfterAFailure(self, request: pytest.FixtureRequest, session: Session) -> Iterator[None]:
@@ -293,7 +317,11 @@ class TestElectron:
 		step(session, "Down", "bullet link random")
 		step(session, "Down", "out of list main landmark heading level 1 general")
 		step(session, "Down", "Messages list with 2 items 1. Ala: Hello everyone")
-		step(session, "ctrl+Home", "Channels navigation landmark list with 2 items bullet link general")
+		step(
+			session,
+			"ctrl+Home",
+			"out of list Channels navigation landmark list with 2 items bullet link general",
+		)
 		step(session, "h", "main landmark general heading level 1")
 		step(session, "l", "Messages list with 2 items 1. Ala: Hello everyone")
 		step(session, "i", "2. Bartek: Good morning")
@@ -303,12 +331,15 @@ class TestElectron:
 		step(session, "shift+b", "New message button")
 
 	def test_aButtonAddsAMessage(self, session: Session):
+		toTop(session)
+		step(session, "b", "main landmark New message button")
 		session.desktop.press("Return")
 		time.sleep(SETTLE)
 		step(session, "shift+i", "Messages list with 3 items 3. Ala: Message 1")
 
 	def test_sendingAMessageInFocusMode(self, session: Session):
-		step(session, "e", "form Message general edit")
+		toTop(session)
+		step(session, "e", "main landmark form Message general edit")
 		step(session, "Return", "Focus mode")
 		typeEchoed(session, "hi")
 		session.desktop.press("Return")
@@ -317,6 +348,8 @@ class TestElectron:
 		step(session, "shift+i", "Messages list with 4 items 4. You: hi")
 
 	def test_tabMovesBetweenControls(self, session: Session):
+		toTop(session)
+		step(session, "l", "main landmark Messages list…")
 		step(session, "Tab", "Message general edit blank", "Focus mode")
 		step(session, "Tab", "New message button", "Browse mode")
 		step(session, "shift+Tab", "Message general edit blank", "Focus mode")
