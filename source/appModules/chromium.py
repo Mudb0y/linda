@@ -45,22 +45,23 @@ if sys.platform == "linux":
 	MAX_CHARACTERS = 100000
 
 	class Run:
-		"""Characters flatStart to flatEnd of an editor's text: those of node from nodeStart on, or,
-		when separator, a line break after node's last character."""
+		"""Characters flatStart to flatEnd of an editor's text, standing for nodeLength of node's own
+		characters from nodeStart on: as many as they are for its text, one for the name of a picture in
+		it, and none for a line break put between paragraphs."""
 
-		__slots__ = ("flatEnd", "flatStart", "node", "nodeStart", "separator")
+		__slots__ = ("flatEnd", "flatStart", "node", "nodeLength", "nodeStart")
 
-		def __init__(self, flatStart: int, flatEnd: int, node: Node, nodeStart: int, separator: bool = False):
+		def __init__(self, flatStart: int, flatEnd: int, node: Node, nodeStart: int, nodeLength: int):
 			self.flatStart = flatStart
 			self.flatEnd = flatEnd
 			self.node = node
 			self.nodeStart = nodeStart
-			self.separator = separator
+			self.nodeLength = nodeLength
 
 		def nodeOffset(self, flatOffset: int) -> int:
-			if self.separator:
-				return self.nodeStart
-			return self.nodeStart + flatOffset - self.flatStart
+			if self.nodeLength == self.flatEnd - self.flatStart:
+				return self.nodeStart + flatOffset - self.flatStart
+			return self.nodeStart + (self.nodeLength if flatOffset >= self.flatEnd else 0)
 
 	def _embeddedChild(node: Node, offset: int, children: list[Node], index: int) -> Node | None:
 		"""The child the embedded object character at offset in node's text stands for, by its
@@ -103,15 +104,17 @@ if sys.platform == "linux":
 			self._add(root, 0)
 			self.text = "".join(self._parts)
 
-		def _append(self, text: str, node: Node, nodeStart: int, separator: bool = False) -> None:
+		def _append(self, text: str, node: Node, nodeStart: int, nodeLength: int | None = None) -> None:
 			if not text:
 				return
-			if self._break is not None and not separator:
+			if nodeLength is None:
+				nodeLength = len(text)
+			if self._break is not None and nodeLength:
 				breakNode, end = self._break
 				self._break = None
 				if not self._parts[-1].endswith("\n"):
-					self._append("\n", breakNode, end, separator=True)
-			self.runs.append(Run(self.length, self.length + len(text), node, nodeStart, separator))
+					self._append("\n", breakNode, end, 0)
+			self.runs.append(Run(self.length, self.length + len(text), node, nodeStart, nodeLength))
 			self._parts.append(text)
 			self.length += len(text)
 
@@ -145,11 +148,16 @@ if sys.platform == "linux":
 				except NodeGone:
 					hasText = False
 				if not hasText:
-					self._append(EMBEDDED_OBJECT, node, offset)
+					# A picture, as a chat program shows an emoji, said by its name.
+					try:
+						name = client.name(child) if child is not None else ""
+					except NodeGone:
+						name = ""
+					self._append(name or EMBEDDED_OBJECT, node, offset, 1)
 					continue
 				block = _isBlock(child)
 				if block and self._break is None and self._parts and not self._parts[-1].endswith("\n"):
-					self._append("\n", node, offset, separator=True)
+					self._append("\n", node, offset, 0)
 				before = self.length
 				self._add(child, depth + 1)
 				if block and self.length > before:
@@ -159,11 +167,14 @@ if sys.platform == "linux":
 						self._break = (child, 0)
 			self._append(text[runStart:], node, runStart)
 
+		def runAt(self, offset: int) -> Run | None:
+			return next((run for run in self.runs if run.flatStart <= offset < run.flatEnd), None)
+
 		def locate(self, offset: int) -> tuple[Node, int]:
 			"""The object and its own offset for the character at offset, or for the end."""
-			for run in self.runs:
-				if run.flatStart <= offset < run.flatEnd:
-					return run.node, run.nodeOffset(offset)
+			run = self.runAt(offset)
+			if run is not None:
+				return run.node, run.nodeOffset(offset)
 			if self.runs:
 				last = self.runs[-1]
 				return last.node, last.nodeOffset(last.flatEnd)
@@ -173,12 +184,13 @@ if sys.platform == "linux":
 			"""The offset in the whole text of node's own nodeOffset."""
 			ending = None
 			for run in self.runs:
-				if run.node != node or run.separator:
+				if run.node != node or not run.nodeLength:
 					continue
-				length = run.flatEnd - run.flatStart
-				if run.nodeStart <= nodeOffset < run.nodeStart + length:
-					return run.flatStart + nodeOffset - run.nodeStart
-				if nodeOffset == run.nodeStart + length:
+				if run.nodeStart <= nodeOffset < run.nodeStart + run.nodeLength:
+					if run.nodeLength == run.flatEnd - run.flatStart:
+						return run.flatStart + nodeOffset - run.nodeStart
+					return run.flatStart
+				if nodeOffset == run.nodeStart + run.nodeLength:
 					ending = run.flatEnd
 			if ending is not None:
 				return ending
@@ -265,6 +277,13 @@ if sys.platform == "linux":
 
 		def _setSelectionOffsets(self, start: int, end: int) -> None:
 			self._setCaretOffset(start)
+
+		def _getCharacterOffsets(self, offset: int) -> tuple[int, int]:
+			run = self.editorText.runAt(offset)
+			if run is not None and run.nodeLength == 1 and run.flatEnd - run.flatStart > 1:
+				# A picture's name is one character of the editor's.
+				return (run.flatStart, run.flatEnd)
+			return super()._getCharacterOffsets(offset)
 
 		def _getLineOffsets(self, offset: int) -> tuple[int, int]:
 			text = self.editorText.text

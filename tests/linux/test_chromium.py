@@ -496,11 +496,20 @@ class TestChromiumComposer:
 		step(session, "shift+Home", "yo selected")
 		step(session, "ctrl+Home", "hello")
 
+	def test_anEmojiIsReadByItsName(self, session: Session):
+		session.desktop.press("ctrl+End", "space", "ctrl+i", "space")
+		time.sleep(SETTLE)
+		typeEchoed(session, "ok")
+		step(session, "Insert+Up", "yo smiling face ok")
+		step(session, "ctrl+Left", "ok")
+		step(session, "Left", "space")
+		step(session, "Left", "smiling face")
+
 	def test_enterSendsTheMessage(self, session: Session):
 		session.desktop.press("ctrl+End", "Return")
 		time.sleep(SETTLE)
 		step(session, "Escape", "Browse mode")
-		step(session, "shift+i", "Messages list with 2 items 2. You: hello yo")
+		step(session, "shift+i", "Messages list with 2 items 2. You: hello yo ok")
 		step(session, "e", "form Message  number general edit multi line…")
 		step(session, "Return", "Focus mode")
 

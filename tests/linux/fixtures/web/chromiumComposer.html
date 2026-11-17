@@ -39,7 +39,29 @@ function newParagraph() {
 	selection.collapse(next, 0);
 }
 
+// Control+I puts in an emoji, a picture named for it, as chat programs show one in a message.
+function emoji() {
+	const picture = document.createElement("img");
+	picture.alt = "smiling face";
+	picture.width = picture.height = 16;
+	picture.src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+	const holder = document.createElement("span");
+	holder.contentEditable = "false";
+	holder.append(picture);
+	const range = window.getSelection().getRangeAt(0);
+	range.insertNode(holder);
+	range.setStartAfter(holder);
+	range.collapse(true);
+	window.getSelection().removeAllRanges();
+	window.getSelection().addRange(range);
+}
+
 field.addEventListener("keydown", (event) => {
+	if (event.key === "i" && event.ctrlKey) {
+		event.preventDefault();
+		emoji();
+		return;
+	}
 	if (event.key !== "Enter") {
 		return;
 	}
@@ -48,7 +70,9 @@ field.addEventListener("keydown", (event) => {
 		newParagraph();
 		return;
 	}
-	const text = Array.from(field.children, (block) => block.textContent.trim()).filter(Boolean).join(" ");
+	const text = Array.from(field.children, (block) => block.textContent.replace(/\s+/g, " ").trim())
+		.filter(Boolean)
+		.join(" ");
 	if (text) {
 		const item = document.createElement("li");
 		item.textContent = "You: " + text;
