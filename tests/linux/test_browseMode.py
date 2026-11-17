@@ -305,6 +305,9 @@ def test_pageStillLoadingIsReadWhole(desktop: DesktopSession):
 			timeout=BUFFER_BOUND,
 		)
 		time.sleep(SETTLE)
+		# What the page adds as it loads goes into the document's text, which is not typing.
+		echoed = [text for text in desktop.spokenSince(0) if "\ufffc" in text]
+		assert not echoed, f"the loading page was echoed as typed: {desktop.spokenSince(0)}"
 		quit(desktop, nvda)
 
 

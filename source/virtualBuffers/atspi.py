@@ -47,6 +47,8 @@ _PATH_PREFIX = "/org/a11y/atspi/accessible/"
 LOAD_QUIET_SECONDS = 0.4
 LOAD_HOLD_SECONDS = 2.0
 
+_EMBEDDED_OBJECT = "\ufffc"
+
 
 class Identifiers:
 	"""docHandle and ID for AT-SPI identities: a small number per bus name, and the number at the end
@@ -476,6 +478,17 @@ class AtSpiBuffer(VirtualBuffer):
 		# a script moves the focus; the virtual caret follows it there.
 		if obj != self.rootNVDAObject and obj in self:
 			self._handleScrollTo(obj)
+
+	def event_typedCharacter(self, obj, nextHandler, ch):
+		# Firefox writes an embedded object character into a loading document's text for each object
+		# the page adds, which the echo of text inserted into the focus would read as typed. Nothing is
+		# typed into a document that is not editable.
+		if obj == self.rootNVDAObject or ch == _EMBEDDED_OBJECT:
+			return
+		nextHandler()
+
+	# The document has the focus while it loads, before the buffer is ready.
+	event_typedCharacter.ignoreIsReady = True
 
 	def script_trapNonCommandGesture(self, gesture):
 		tones.beep(500, 30)
