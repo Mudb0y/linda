@@ -27,7 +27,31 @@ const IFACE_TABLE: &str = "org.a11y.atspi.Table";
 const IFACE_TABLE_CELL: &str = "org.a11y.atspi.TableCell";
 const IFACE_VALUE: &str = "org.a11y.atspi.Value";
 const IFACE_HYPERLINK: &str = "org.a11y.atspi.Hyperlink";
+const IFACE_ACTION: &str = "org.a11y.atspi.Action";
 const RELATION_LABELLED_BY: u32 = 2;
+const RELATION_DETAILS: u32 = 19;
+const RELATION_ERROR_MESSAGE: u32 = 21;
+const STATE_INVALID_ENTRY: u32 = 36;
+/// Roles whose objects are plainly clickable, as controlTypes.clickableRoles has them, or that are
+/// never: their actions are not asked for.
+const NOT_CLICKABLE_ROLES: [&str; 16] = [
+    "link",
+    "push button",
+    "button",
+    "check box",
+    "radio button",
+    "toggle button",
+    "menu item",
+    "check menu item",
+    "radio menu item",
+    "page tab",
+    "slider",
+    "document web",
+    "entry",
+    "password text",
+    "combo box",
+    "internal frame",
+];
 
 pub fn iface_bit(name: &str) -> u32 {
     interface_bits([name])
@@ -53,6 +77,10 @@ pub enum Field {
     LinkUri,
     /// The language the object's text is in, which a page gives with lang.
     Locale,
+    /// How many actions it has, for one that may be clickable without its role saying so.
+    Actions,
+    /// The name of its first action, which GetActions gives only translated.
+    ActionName,
     /// How many objects a subtree holds, up to SUBTREE_LIMIT, by Collection.GetMatches, which stops
     /// counting there; a smaller one is then fetched whole with Tree.
     Size,
@@ -73,7 +101,7 @@ const PARENT_TREE_CHILDREN: usize = 16;
 
 /// What a subtree's GetTree carries for each object. An interface's property is there only for an
 /// object that has the interface.
-const TREE_PROPERTIES: [&str; 11] = [
+const TREE_PROPERTIES: [&str; 12] = [
     "Name",
     "Description",
     "Parent",
@@ -85,6 +113,7 @@ const TREE_PROPERTIES: [&str; 11] = [
     "Value.CurrentValue",
     "TableCell.Position",
     "Locale",
+    "Action.NActions",
 ];
 
 /// The match rule `(aiia{ss}iaiiasib)` matching everything; the bridge parses it for GetTree and
@@ -157,6 +186,14 @@ pub struct Obj {
     pub link_uri: Option<String>,
     /// Its language, asked only of an object with text of its own; empty when it has none.
     pub locale: Option<String>,
+    /// How many actions it has and its first action's name, asked only where clickable is not
+    /// plain from its role.
+    pub n_actions: Option<i32>,
+    pub action: Option<String>,
+    /// The objects whose text says what is wrong with it, for a field marked invalid.
+    pub error_targets: Vec<String>,
+    /// Whether another object holds details about it, for one the page gave aria-details.
+    pub has_details: bool,
     /// Where it comes in the document: its index in each ancestor up to the walk's start.
     pub key: Vec<u32>,
     /// Fields asked for, and fields answered or given up.
@@ -665,6 +702,12 @@ impl Walk {
                 o.queued |= bit(Field::Locale);
                 o.done |= bit(Field::Locale);
             }
+            if let Some(n) = e.actions {
+                o.interfaces |= iface_bit(IFACE_ACTION);
+                o.n_actions = Some(n);
+                o.queued |= bit(Field::Actions);
+                o.done |= bit(Field::Actions);
+            }
             o.queued |= given;
             o.done |= given;
             taken.push(e.path);
@@ -720,6 +763,15 @@ impl Walk {
             {
                 more.push(Field::Locale);
             }
+            if i & iface_bit(IFACE_ACTION) != 0
+                && o.known(Field::Role)
+                && !NOT_CLICKABLE_ROLES.contains(&role_name(o.role))
+            {
+                more.push(Field::Actions);
+                if o.n_actions.is_some_and(|n| n > 0) {
+                    more.push(Field::ActionName);
+                }
+            }
             if i & iface_bit(IFACE_TABLE) != 0 {
                 more.extend([Field::TableRows, Field::TableColumns]);
             }
@@ -740,6 +792,11 @@ impl Walk {
             {
                 more.push(Field::Value);
             }
+        }
+        if (o.known(Field::States) && has(o.states, STATE_INVALID_ENTRY))
+            || (o.known(Field::Attributes) && o.attr("details-from").is_some())
+        {
+            more.push(Field::Relations);
         }
         if o.known(Field::Attributes)
             && o.known(Field::Role)
@@ -863,6 +920,12 @@ fn issue(client: Rc<Client>, id: u64, path: String, f: Field) -> LocalBoxFuture<
                     .call(p, IFACE_PROPERTIES, "Get", &(IFACE_ACCESSIBLE, "Locale"))
                     .await
             }
+            Field::Actions => {
+                client
+                    .call(p, IFACE_PROPERTIES, "Get", &(IFACE_ACTION, "NActions"))
+                    .await
+            }
+            Field::ActionName => client.call(p, IFACE_ACTION, "GetName", &(0i32,)).await,
             Field::Size => {
                 client
                     .call(
@@ -919,12 +982,19 @@ fn row_column_span(msg: &Message) -> zbus::Result<[i32; 4]> {
     Ok([r, c, rs, cs])
 }
 
-fn labelled_by(msg: &Message) -> zbus::Result<bool> {
+fn relations(o: &mut Obj, msg: &Message) -> zbus::Result<()> {
     let body = msg.body();
     let set: Vec<(u32, Vec<(&str, ObjectPath<'_>)>)> = body.deserialize()?;
-    Ok(set
-        .iter()
-        .any(|(kind, targets)| *kind == RELATION_LABELLED_BY && !targets.is_empty()))
+    let targets = |kind: u32| -> Vec<String> {
+        set.iter()
+            .filter(|(k, _)| *k == kind)
+            .flat_map(|(_, t)| t.iter().map(|(_, p)| p.as_str().to_owned()))
+            .collect()
+    };
+    o.label_visible = !targets(RELATION_LABELLED_BY).is_empty();
+    o.error_targets = targets(RELATION_ERROR_MESSAGE);
+    o.has_details = !targets(RELATION_DETAILS).is_empty();
+    Ok(())
 }
 
 fn decode_into(o: &mut Obj, f: Field, msg: &Message) -> zbus::Result<()> {
@@ -953,9 +1023,11 @@ fn decode_into(o: &mut Obj, f: Field, msg: &Message) -> zbus::Result<()> {
             o.row_headers = decode::children(msg)?.into_iter().map(|r| r.path).collect()
         }
         Field::Value => o.value = Some(number_property(msg)?),
-        Field::Relations => o.label_visible = labelled_by(msg)?,
+        Field::Relations => relations(o, msg)?,
         Field::LinkUri => o.link_uri = Some(decode::string(msg)?),
         Field::Locale => o.locale = Some(decode::string_property(msg)?),
+        Field::Actions => o.n_actions = Some(number_property(msg)? as i32),
+        Field::ActionName => o.action = Some(decode::string(msg)?),
         Field::Size | Field::Tree => {}
     }
     Ok(())
@@ -975,6 +1047,7 @@ struct Entry {
     value: Option<f64>,
     cell: bool,
     locale: Option<String>,
+    actions: Option<i32>,
 }
 
 fn variant_str<'v>(v: &'v Variant<'_>) -> Option<&'v str> {
@@ -1054,6 +1127,7 @@ fn tree_entries(msg: &Message, app: &str) -> zbus::Result<Vec<Entry>> {
             value: props.get("Value.CurrentValue").and_then(variant_number),
             cell: props.contains_key("TableCell.Position"),
             locale: props.get("Locale").and_then(variant_str).map(str::to_owned),
+            actions: number("Action.NActions"),
         });
     }
     Ok(out)

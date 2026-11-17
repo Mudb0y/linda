@@ -453,6 +453,15 @@ impl<'a> Renderer<'a> {
         if name_explicit && !name_is_content && role != ROLE_TABLE && !label_visible {
             field.push(("alwaysReportName".into(), "true".into()));
         }
+        if o.action.as_deref() == Some("click") {
+            field.push(("atspi::action_click".into(), "1".into()));
+        }
+        if o.has_details {
+            field.push(("hasDetails".into(), "true".into()));
+        }
+        if let Some(message) = o.error_targets.iter().find_map(|t| self.summary(t)) {
+            field.push(("errorMessage".into(), message));
+        }
 
         let mut child_ctx = ctx;
         child_ctx.in_link = in_link;
@@ -663,6 +672,24 @@ impl<'a> Renderer<'a> {
         self.language = outer_language;
     }
 
+    /// What an object says in a few words, for one that another names as its error message: its own
+    /// text without embedded objects, or its name.
+    fn summary(&self, path: &str) -> Option<String> {
+        let o = self.objs.get(path)?;
+        let text: String = o
+            .text
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .filter(|c| *c != EMBEDDED_OBJECT)
+            .collect();
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !text.is_empty() {
+            return Some(text);
+        }
+        Some(o.name.trim().to_owned()).filter(|n| !n.is_empty())
+    }
+
     fn link_uri(&self, path: &str) -> Option<String> {
         let mut p = self.objs.get(path)?.parent.clone();
         for _ in 0..4 {
@@ -839,6 +866,22 @@ mod tests {
         let s = decoded(&r.out);
         // A replaced object's text has its ancestors' language too.
         assert!(s.contains("T5:there1;8:language2:pl"), "{s}");
+    }
+
+    #[test]
+    fn a_field_says_it_is_clickable_has_details_and_its_error_message() {
+        let mut objs = page();
+        let p = objs.get_mut("/a/2").unwrap();
+        p.action = Some("click".into());
+        p.has_details = true;
+        p.error_targets = vec!["/a/3".into()];
+        let none = HashSet::new();
+        let mut r = Renderer::new(&objs, 7, "/a/1", false, &none);
+        r.render("/a/1", Ctx::default());
+        let s = decoded(&r.out);
+        assert!(s.contains("19:atspi::action_click1:1"), "{s}");
+        assert!(s.contains("10:hasDetails4:true"), "{s}");
+        assert!(s.contains("12:errorMessage5:there"), "{s}");
     }
 
     #[test]
