@@ -332,6 +332,18 @@ def test_browseAndFocusModeKeys(desktop: DesktopSession, tmp_path: Path):
 	assert page.log() == ["a", "b"]
 	assert page.field() == "ab"
 
+	# Control tapped to stop speech, then held again with Home: xdotool releases Control twice, the
+	# second time with only a raw event, which must not reach NVDA between Control and Home.
+	mark = desktop.mark()
+	subprocess.run(
+		["xdotool", "key", "Control_L", "sleep", "0.005", "keydown", "Control_L", "sleep", "0.02"]
+		+ ["key", "Home", "keyup", "Control_L"],
+		check=True,
+	)
+	expect(desktop, "heading level 1 Keys page", since=mark)
+	time.sleep(SETTLE)
+	step(desktop, "h", "Field and link heading level 2")
+
 	mark = desktop.mark()
 	subprocess.run(["xdotool", "keydown", "Down"], check=True)
 	time.sleep(1)

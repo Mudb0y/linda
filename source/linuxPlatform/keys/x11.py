@@ -223,6 +223,8 @@ class X11KeySource:
 		self._translator: keyMap.Translator | None = None
 		#: Virtual-key codes held down, with the generic modifiers among them.
 		self._down: set[int] = set()
+		#: Key codes held down, as their events came.
+		self._keycodesDown: set[int] = set()
 		self._xtestDevices: set[int] = set()
 		#: (key code, isUp) of injected keys whose echo has not come yet, with when each was sent.
 		self._echoes: deque[tuple[float, int, bool]] = deque()
@@ -540,6 +542,12 @@ class X11KeySource:
 				if (slaveKeycode, slaveIsUp) == (keycode, isUp):
 					del self._slaveSeen[index]
 					return
+			pressWaiting = any((raw[1], raw[2]) == (keycode, False) for raw in self._raw)
+			if isUp and keycode not in self._keycodesDown and not pressWaiting:
+				# A release of a key that is up, which only a raw event reports: xdotool releases a modifier
+				# twice. Delivered once its slave event had been waited for, it could come between that
+				# modifier pressed again and the key pressed with it, and NVDA would have the key alone.
+				return
 			self._raw.append((time.monotonic(), keycode, isUp, sourceid))
 		elif evtype == xinput.HierarchyChanged:
 			self._findXtestDevices()
@@ -654,6 +662,10 @@ class X11KeySource:
 				state.update_key(
 					keycode, xkb.KeyDirection.XKB_KEY_UP if isUp else xkb.KeyDirection.XKB_KEY_DOWN
 				)
+				if isUp:
+					self._keycodesDown.discard(keycode)
+				else:
+					self._keycodesDown.add(keycode)
 			generic = GENERIC_FOR.get(vk)
 			for code in (vk, generic):
 				if code is None:
