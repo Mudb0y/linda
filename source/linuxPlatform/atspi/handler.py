@@ -21,6 +21,7 @@ import weakref
 from logHandler import log
 
 from . import client as _clientModule
+from . import liveRegions
 from .client import ROOT_PATH, AppHung, Client, Node, NodeGone
 
 #: The events registered with the registry. Registration filters nothing in at-spi2-core 2.62, so the
@@ -536,6 +537,7 @@ def terminate() -> None:
 	_processIDs.clear()
 	_roles.clear()
 	_names.clear()
+	liveRegions.forget()
 	_applicationNames.clear()
 	_topLevels.clear()
 	_focusWhileHung.clear()
@@ -1080,6 +1082,8 @@ def pumpAll() -> None:
 			continue
 		if not windowsChanged:
 			flushFocus()
+		if liveRegions.handle(event):
+			continue
 		if index in overLimit:
 			continue
 		if eventType == ANNOUNCEMENT_EVENT:
