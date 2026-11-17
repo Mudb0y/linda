@@ -400,7 +400,8 @@ def inputs(log: harness.Launch | str, *names: str) -> int:
 	return sum(text.count(f"Input: kb(desktop):{name}\n") for name in names)
 
 
-def test_bothNVDAKeysOnAPage(desktop: DesktopSession, tmp_path: Path):
+@pytest.mark.parametrize("key", ("Insert", "Caps_Lock"))
+def test_bothNVDAKeysOnAPage(desktop: DesktopSession, tmp_path: Path, key: str):
 	nvda, page = startPage(desktop, tmp_path)
 	enterField(desktop, nvda)
 	desktop.typeText("ab")
@@ -408,36 +409,39 @@ def test_bothNVDAKeysOnAPage(desktop: DesktopSession, tmp_path: Path):
 	step(desktop, "Escape", "Browse mode")
 	waitForCapture(nvda, "browse")
 
-	for key in ("Insert", "Caps_Lock"):
-		# In browse mode, and then in focus mode, which NVDA+space turns on and off.
+	find = ("control+NVDA+f", "NVDA+control+f")
+	for mode in ("browse", "focus"):
+		# NVDA+space turns focus mode on and off.
 		step(desktop, f"{key}+space", "Focus mode")
 		waitForCapture(nvda, "focus")
-		step(desktop, f"{key}+space", "Browse mode")
-		waitForCapture(nvda, "browse")
-		for mode in ("browse", "focus"):
-			if mode == "focus":
-				step(desktop, f"{key}+space", "Focus mode")
-				waitForCapture(nvda, "focus")
-			log = nvda.text("nvda.log")
-			# F5 reaching Firefox would load the page again, and empty its log.
-			desktop.press(f"{key}+F5", gap=1)
-			assert inputs(nvda, "NVDA+f5") == inputs(log, "NVDA+f5") + 1
-			mark = desktop.mark()
+		if mode == "browse":
+			step(desktop, f"{key}+space", "Browse mode")
+			waitForCapture(nvda, "browse")
+		log = nvda.text("nvda.log")
+		# F5 reaching Firefox would load the page again, and empty its log.
+		desktop.press(f"{key}+F5", gap=1)
+		assert inputs(nvda, "NVDA+f5") == inputs(log, "NVDA+f5") + 1
+		if mode == "focus":
 			desktop.press(f"{key}+control+f", gap=1)
-			find = ("control+NVDA+f", "NVDA+control+f")
 			assert inputs(nvda, *find) == inputs(log, *find) + 1
-			if mode == "browse":
-				expect(desktop, "Find" + PREFIX_MARK, since=mark)
-				desktop.press("Escape", gap=1)
-				waitForCapture(nvda, "browse")
-			else:
-				step(desktop, f"{key}+space", "Browse mode")
-				waitForCapture(nvda, "browse")
-			assert page.log() == ["a", "b"]
+			step(desktop, f"{key}+space", "Browse mode")
+			waitForCapture(nvda, "browse")
+		assert page.log() == ["a", "b"]
 	assert not desktopSession.capsLockIsOn()
-	# Closing NVDA's find dialog has GTK complain of a window that is not one; the dialog's own, and
-	# nothing to do with keys.
-	quitNVDA(desktop, nvda, ignoring=("stderr",))
+
+	# Last, as closing NVDA's find dialog destroys it from inside its own modal loop, which wxGTK
+	# survives only some of the time; NVDA is stopped with it open instead.
+	log = nvda.text("nvda.log")
+	mark = desktop.mark()
+	desktop.press(f"{key}+control+f")
+	expect(desktop, "Find dialog" + PREFIX_MARK, since=mark)
+	assert inputs(nvda, *find) == inputs(log, *find) + 1
+	assert page.log() == ["a", "b"]
+	nvda.process.terminate()
+	nvda.waitForExit(20)
+	# Opening the dialog has GTK complain of a window that is not one; the dialog's own, and nothing to
+	# do with keys.
+	nvda.assertClean(ignoring=("stderr",), logNames=("nvda.log",))
 	unexpected = harness.unexpectedStandardError(nvda.text("stderr.txt"))
 	assert all(
 		"gtk_window_set_modal: assertion 'GTK_IS_WINDOW (window)' failed" in line

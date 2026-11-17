@@ -233,6 +233,7 @@ class X11KeySource:
 		#: (key code, isUp) of slave events that came before their raw event.
 		self._slaveSeen: deque[tuple[float, int, bool]] = deque()
 		self._rulesAtom: int | None = None
+		self._pidAtom: int | None = None
 		#: Key code: grab modifiers, for every key grabbed now; None means any modifiers.
 		self._grabbed: dict[int, list[int] | None] = {}
 		#: The grabbed key whose press made a grab active, which lasts until it is released.
@@ -246,6 +247,7 @@ class X11KeySource:
 		self._captured: dict[int, set[int]] = {}
 		#: The window the captured keys are grabbed on: the one with the keyboard focus.
 		self._captureWindow = None
+		self._loggedCapture: CaptureMode = "off"
 		#: Captured presses not yet answered, in the order they came.
 		self._tickets: deque[_Ticket] = deque()
 		#: The captured key whose press was dropped, which keeps its grab active until released.
@@ -287,7 +289,7 @@ class X11KeySource:
 		self._post(lambda: self._applyGrabs(nvdaModifierKeys, numpadReview))
 
 	def setCapture(self, mode: CaptureMode) -> None:
-		self._post(lambda: self._applyCapture(mode))
+		self._post(lambda: self._setCapture(mode))
 
 	def holdKeyboard(self, hold: bool) -> None:
 		self._post(lambda: self._hold(hold))
@@ -366,6 +368,7 @@ class X11KeySource:
 			)
 			root.change_attributes(event_mask=X.PropertyChangeMask)
 			self._rulesAtom = self._display.intern_atom(RULES_NAMES_PROPERTY)
+			self._pidAtom = self._display.intern_atom("_NET_WM_PID")
 			# Any resource of the connection names it to the X server; the guard needs one.
 			self._guardResource = root.create_pixmap(1, 1, self._display.screen().root_depth).id
 			self._findXtestDevices()
@@ -550,7 +553,8 @@ class X11KeySource:
 			# grab moves the focus only for as long as it lasts.
 			moved = event.type == X.DestroyNotify or event.mode in (X.NotifyNormal, X.NotifyWhileGrabbed)
 			if moved and self._captureWindow is not None and event.window.id == self._captureWindow.id:
-				self._applyCapture(self._captureMode)
+				# Grabbed again when next asked, once NVDA's focus has followed and the mode is known.
+				self._dropCapture()
 		elif event.type == X.MappingNotify:
 			self._display.refresh_keyboard_mapping(event)
 			self._loadKeymap()
@@ -885,26 +889,34 @@ class X11KeySource:
 					wanted.setdefault(keycode, set()).add(X.ControlMask)
 		return wanted
 
-	def _applyCapture(self, mode: CaptureMode) -> None:
-		self._captureMode = mode
-		d = self._display
-		root = d.screen().root
-		old, self._captureWindow = self._captureWindow, None
-		if old is not None:
+	def _setCapture(self, mode: CaptureMode) -> None:
+		# Asked again and again while the focus is in a document: the grabs follow the focus, which
+		# may have gone to another window since they were made.
+		if mode != self._captureMode or (mode != "off" and self._captureWindow is None):
+			self._applyCapture(mode)
+
+	def _dropCapture(self) -> None:
+		"""Ungrab the captured keys, leaving the mode as it is."""
+		window, self._captureWindow = self._captureWindow, None
+		if window is not None:
 			# The window may have gone, and its grabs with it.
 			gone = error.CatchError(error.BadWindow)
 			for keycode, masks in self._captured.items():
 				for mask in masks:
-					old.ungrab_key(keycode, mask, onerror=gone)
-			if old.id != root.id:
-				old.change_attributes(event_mask=X.NoEventMask, onerror=gone)
+					window.ungrab_key(keycode, mask, onerror=gone)
+			window.change_attributes(event_mask=X.NoEventMask, onerror=gone)
 		self._captured = {}
+
+	def _applyCapture(self, mode: CaptureMode) -> None:
+		self._captureMode = mode
+		d = self._display
+		self._dropCapture()
 		wanted = self._captureSet(mode)
-		if not wanted:
+		window = self._focusWindow() if wanted else None
+		if window is None:
 			d.sync()
-			log.debug(f"Keys captured for {mode} mode")
+			self._logCapture("off")
 			return
-		window = self._focusWindow()
 		catchers: list[tuple[int, int, error.CatchError]] = []
 		for keycode, bases in wanted.items():
 			for base in bases:
@@ -924,25 +936,48 @@ class X11KeySource:
 				self._captured.setdefault(keycode, set()).add(mask)
 		if refused:
 			log.debugWarning(f"{refused} key combinations for {mode} mode are held by another program")
-		log.debug(f"Keys captured for {mode} mode")
+		self._logCapture(mode)
+
+	def _logCapture(self, mode: CaptureMode) -> None:
+		# Grabs are made again on every change of window, and tried again and again while there is
+		# no window to make them on; only a change of what is captured is worth a record.
+		if mode != self._loggedCapture:
+			self._loggedCapture = mode
+			log.debug(f"Keys captured for {mode} mode")
 
 	def _focusWindow(self):
-		"""The window to grab captured keys on, watched for the focus leaving it.
+		"""The window to grab captured keys on, watched for the focus leaving it; None when there is
+		none to grab them on.
 
 		A grab on the window that has the keyboard focus moves no focus as it activates; one on any
 		other window, the root included, takes the focus from the application for as long as the key
-		is held, and Firefox then reports its window inactive and active again for every key.
+		is held, and Firefox then reports its window inactive and active again for every key. A window
+		of NVDA's own is never grabbed on: it has the focus only until NVDA's focus follows, and a grab
+		there while it opens left wxGTK's modal dialogs crashing as they closed.
 		"""
 		d = self._display
 		root = d.screen().root
 		focus = d.get_input_focus().focus
 		if isinstance(focus, int) or focus.id == root.id:
-			# No window, or the one under the pointer: only the root holds every key.
-			return root
+			return None
 		gone = error.CatchError(error.BadWindow)
+		window = focus
+		try:
+			for _level in range(4):
+				pid = window.get_full_property(self._pidAtom, X.AnyPropertyType)
+				if pid is not None and len(pid.value) and pid.value[0] == os.getpid():
+					return None
+				if pid is not None:
+					break
+				parent = window.query_tree().parent
+				if isinstance(parent, int) or parent.id == root.id:
+					break
+				window = parent
+		except error.BadWindow:
+			return None
 		focus.change_attributes(event_mask=X.FocusChangeMask | X.StructureNotifyMask, onerror=gone)
 		d.sync()
-		return root if gone.get_error() else focus
+		return None if gone.get_error() else focus
 
 	def _hold(self, hold: bool) -> None:
 		self._holdWanted = hold

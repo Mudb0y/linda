@@ -126,7 +126,9 @@ def _watch(source: KeySource) -> None:
 			source.holdKeyboard(hold)
 			held = hold
 		capture = "off" if watchdog.isAttemptingRecovery else captureModeFor(api.getFocusObject())
-		if capture != captured:
+		# Asked again while capturing, as the source lets its grabs go when the focus leaves the window
+		# they are on, and takes them again only once asked.
+		if capture != captured or capture != "off":
 			source.setCapture(capture)
 			captured = capture
 		if _stopWatching.wait(WATCH_INTERVAL):
