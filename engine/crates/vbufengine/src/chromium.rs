@@ -15,6 +15,14 @@ pub fn is_doc_url(key: &str) -> bool {
     key == "DocURL" || key == "URI"
 }
 
+/// The language an object's Locale names, when it is one a page gave as a language tag. Chromium
+/// answers every object's Locale with its own process's locale as POSIX writes it, C.UTF-8 or
+/// pl_PL.UTF-8, whatever language the page marks, which says nothing of the text's language.
+pub fn page_language(locale: &str) -> Option<&str> {
+    let posix = matches!(locale, "C" | "POSIX") || locale.contains(['.', '_', '@']);
+    (!locale.is_empty() && !posix).then_some(locale)
+}
+
 /// The children that an object's embedded object characters stand for, in order, given how many of
 /// those characters its text has.
 pub fn embedded_children<'a>(
@@ -53,6 +61,23 @@ mod tests {
                 .map(|t| vec![("tag".to_owned(), t.to_owned())])
                 .unwrap_or_default(),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_process_locale_is_no_page_language() {
+        assert_eq!(page_language("pl"), Some("pl"));
+        assert_eq!(page_language("en-GB"), Some("en-GB"));
+        for locale in [
+            "",
+            "C",
+            "POSIX",
+            "C.UTF-8",
+            "pl_PL.UTF-8",
+            "en_US",
+            "sr_RS@latin",
+        ] {
+            assert_eq!(page_language(locale), None, "{locale}");
         }
     }
 

@@ -258,7 +258,7 @@ impl<'a> Renderer<'a> {
         let mut p = self.objs.get(path).and_then(|o| o.parent.clone());
         while let Some(here) = p {
             let o = self.objs.get(&here)?;
-            if let Some(l) = o.locale.as_deref().filter(|l| !l.is_empty()) {
+            if let Some(l) = o.locale.as_deref().and_then(crate::chromium::page_language) {
                 return Some(l.to_owned());
             }
             p = o.parent.clone();
@@ -347,7 +347,7 @@ impl<'a> Renderer<'a> {
         };
         self.nodes += 1;
         let outer_language = self.language.clone();
-        if let Some(l) = o.locale.as_deref().filter(|l| !l.is_empty()) {
+        if let Some(l) = o.locale.as_deref().and_then(crate::chromium::page_language) {
             self.language = Some(l.to_owned());
         }
         let raw_name = ROLE_NAMES.get(o.role as usize).copied().unwrap_or("");
