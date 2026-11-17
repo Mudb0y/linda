@@ -336,3 +336,55 @@ class TestLanguageSwitchingOff:
 		stepSaying(languageSwitchingOff, "Control_L+Home", "Languages")
 		readLine(languageSwitchingOff, "Down", "This paragraph is in English.")
 		assert readLine(languageSwitchingOff, "Down", "Ten akapit jest po polsku.") != ["pl"]
+
+
+@pytest.fixture(scope="class")
+def semantics(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Session]:
+	yield from _openPage(tmp_path_factory, "featureSemantics.html", "heading level 1 Semantics")
+
+
+class TestSemantics:
+	"""What NVDA on Windows says of a page's elements by default."""
+
+	def test_readByLine(self, semantics: Session):
+		stepSaying(semantics, "Control_L+Home", "Semantics")
+		for line in (
+			"Clickable: clickable Click me",
+			"block quote A quoted line.",
+			"out of block quote figure graphic A dot",
+			"caption Figure caption",
+			"out of caption out of figure Some highlighted marked words out of highlighted here.",
+			"Edits: deleted old text inserted new text done.",
+			"Pages navigation landmark link current page Page one link Page two",
+			"button Save Saves the draft",
+			# Gecko gives a label the click action, on Windows too.
+			(
+				"clickable Email edit required invalid entry has auto complete you at example dot com "
+				"Enter a full address"
+			),
+			"Enter a full address",
+			"button collapsed Menu toggle button pressed Bold button sub Menu Options",
+			"table with 2 rows and 2 columns row 1 column 1 sorted ascending Name",
+		):
+			step(semantics, "Down", line)
+
+	def test_quickNavigation(self, semantics: Session):
+		stepSaying(semantics, "Control_L+Home", "Semantics")
+		step(semantics, "4", "An ARIA heading heading level 4")
+		stepSaying(semantics, "b", "Details button button has details")
+
+	def test_focusMode(self, semantics: Session):
+		"""On focus an invalid field says its error message, and a fieldset is a grouping."""
+		stepSaying(semantics, "Control_L+Home", "Semantics")
+		step(semantics, "e", "Email…")
+		step(
+			semantics,
+			"Return",
+			"Focus mode",
+			"Email edit required invalid entry has auto complete Enter a full address blank",
+		)
+		step(semantics, "Escape", "Browse mode")
+		for _ in range(3):
+			step(semantics, "Tab", "…")
+		stepSaying(semantics, "Tab", "Size grouping")
+		step(semantics, "Escape", "Browse mode")

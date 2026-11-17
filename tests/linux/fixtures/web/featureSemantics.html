@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Semantics page</title></head>
+<body>
+<h1>Semantics</h1>
+<p>Clickable: <span id="clicky" onclick="this.textContent = 'Clicked'">Click me</span></p>
+<blockquote><p>A quoted line.</p></blockquote>
+<figure><img src="picture.png" alt="A dot"><figcaption>Figure caption</figcaption></figure>
+<p>Some <mark>marked words</mark> here.</p>
+<p>Edits: <del>old text</del> <ins>new text</ins> done.</p>
+<nav aria-label="Pages"><a href="#one" aria-current="page">Page one</a> <a href="#two">Page two</a></nav>
+<p><button aria-describedby="hint">Save</button> <span id="hint">Saves the draft</span></p>
+<p><label for="email">Email</label> <input id="email" type="email" required aria-invalid="true" aria-errormessage="emailError" placeholder="you@example.com"></p>
+<p id="emailError">Enter a full address</p>
+<p><button aria-expanded="false">Menu</button> <button aria-pressed="true">Bold</button> <button aria-haspopup="menu">Options</button></p>
+<table border="1"><tr><th aria-sort="ascending">Name</th><th>Age</th></tr><tr><td>Ann</td><td>7</td></tr></table>
+<ul><li>Alpha</li><li>Beta</li></ul>
+<fieldset><legend>Size</legend><label><input type="radio" name="size"> Small</label><label><input type="radio" name="size"> Large</label></fieldset>
+<div role="heading" aria-level="4">An ARIA heading</div>
+<p><button aria-details="det">Details button</button></p>
+<div id="det"><p>The details text.</p></div>
+<p>The end.</p>
+</body>
+</html>
