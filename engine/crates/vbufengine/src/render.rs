@@ -496,6 +496,7 @@ impl<'a> Renderer<'a> {
         }
         let start_units = self.units;
         let start_useful = self.useful_units;
+        let content_at = self.out.len();
         if let Some(summary) = table_summary {
             self.text(&summary);
         }
@@ -585,6 +586,9 @@ impl<'a> Renderer<'a> {
             && (name_is_content || role == ROLE_SECTION || role == ROLE_TEXTFRAME)
             && !useful
         {
+            // fillVBuf puts this text before the field's other content, so that a link holding only
+            // empty blocks is read on one line with its name.
+            let at = self.out.len();
             if !name.is_empty() {
                 self.text(&name);
             } else if role == ROLE_LINK
@@ -592,6 +596,8 @@ impl<'a> Renderer<'a> {
             {
                 self.text(&name_for_url(uri));
             }
+            let written = self.out.split_off(at);
+            self.out.splice(content_at..content_at, written);
         }
         if matches!(
             role,
@@ -750,6 +756,33 @@ mod tests {
         r.render("/a/1", Ctx::default());
         // The top of a document still being walked stops at the first object not complete.
         assert_eq!(decoded(&r.out), "");
+    }
+
+    #[test]
+    fn a_link_with_nothing_in_it_is_named_before_its_empty_blocks() {
+        let mut objs = HashMap::new();
+        objs.insert("/a/1".into(), obj(95, None, Some("\u{fffc}"), &["/a/2"]));
+        let mut link = obj(
+            88,
+            Some("/a/1"),
+            Some("\u{fffc}\u{fffc}"),
+            &["/a/3", "/a/4"],
+        );
+        link.link_uri = Some("https://example.com/explore".into());
+        objs.insert("/a/2".into(), link);
+        let mut block = obj(85, Some("/a/2"), Some(""), &[]);
+        block.attributes.push(("display".into(), "block".into()));
+        objs.insert("/a/3".into(), block.clone());
+        objs.insert("/a/4".into(), block);
+        let none = HashSet::new();
+        let mut r = Renderer::new(&objs, 7, "/a/1", false, &none);
+        r.render("/a/1", Ctx::default());
+        let s = decoded(&r.out);
+        let name = s
+            .find("T7:explore")
+            .expect("the link's name from its address");
+        let first_block = s.find("C7,3,").expect("the first empty block");
+        assert!(name < first_block, "{s}");
     }
 
     #[test]
