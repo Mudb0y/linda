@@ -1698,6 +1698,12 @@ class ElementsListDialog(
 			self._searchText = ""
 			evt.Skip()
 
+		elif sys.platform == "linux" and (key == wx.WXK_TAB or evt.AltDown() or evt.ControlDown()):
+			# wx on GTK gives the tree the keys Windows keeps for moving between controls and their
+			# Alt shortcuts.
+			self._searchText = ""
+			evt.Skip()
+
 		else:
 			# Search the list.
 			# We have to implement this ourselves, as tree views don't accept space as a search character.

@@ -163,6 +163,9 @@ source/browseMode.py
   Linux runtime: _extractStyles imports the UI Automation Word
   document class only on Windows; Linux has no UI Automation and uses an
   empty tuple, which no isinstance test matches
+  Linux runtime: the elements list's tree passes on Tab and keys with Alt
+  or Control, which wx on GTK hands it as characters to search for, so
+  that they move between the dialog's controls as on Windows
 source/config/__init__.py
   every platform: winreg comes from linuxPlatform.windowsOnly, which on
   Windows is the real module.
