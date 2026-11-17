@@ -960,6 +960,9 @@ def initialize():
 	wx.GetApp().SetTopWindow(mainFrame)
 	if sys.platform != "win32":
 		ownGui.initialize(wx.GetApp())
+		from linuxPlatform import speakService
+
+		speakService.start()
 	import monkeyPatches
 
 	monkeyPatches.applyWxMonkeyPatches(mainFrame, winUser, wx)
@@ -973,6 +976,10 @@ def initialize():
 
 def terminate():
 	global mainFrame
+	if sys.platform != "win32":
+		from linuxPlatform import speakService
+
+		speakService.stop()
 	wx.lib.agw.persist.PersistenceManager.Free()
 	mainFrame = None
 

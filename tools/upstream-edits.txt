@@ -218,7 +218,9 @@ source/gui/__init__.py
   it also labels controls through GTK, makes Enter press a dialog's default
   button and Escape close only a submenu, as on Windows. initialize hands
   ownGui the wx application, which it binds Enter on and sends wx's own log
-  through to NVDA's
+  through to NVDA's, and starts linuxPlatform.speakService, which answers on
+  the session bus the call scripts make to have Orca speak; terminate stops
+  it
   every platform: the help menu's web pages, the donation page and the
   documentation open through startfile from linuxPlatform.windowsOnly,
   which is os.startfile on Windows and on Linux opens them with the
