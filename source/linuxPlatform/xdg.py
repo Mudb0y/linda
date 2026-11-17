@@ -7,6 +7,8 @@ import subprocess
 
 #: The name of the directory Linda keeps under each XDG base directory.
 appDirName = "linda"
+#: What that directory was called while the program was Basedreader.
+formerAppDirName = "basedreader"
 
 
 def _baseDir(variable: str, default: str) -> str:
@@ -39,6 +41,37 @@ def userConfigDir() -> str:
 def userStateDir() -> str:
 	"""The directory that holds what NVDA keeps between runs but is not configuration: the log."""
 	return os.path.join(stateHome(), appDirName)
+
+
+def adoptFormerDirectories() -> list[str]:
+	"""Give the configuration and state directories of the former name the current one, where only
+	the former exists, so that the user's settings carry over.
+
+	Run only while no copy started under the former name is left to write into its directories.
+
+	:return: A sentence for each directory that could not be moved.
+	"""
+	failures = []
+	for base in (configHome(), stateHome()):
+		former = os.path.join(base, formerAppDirName)
+		current = os.path.join(base, appDirName)
+		if os.path.lexists(current) or not os.path.isdir(former):
+			continue
+		try:
+			os.rename(former, current)
+		except OSError as e:
+			failures.append(f"could not move {former} to {current}: {e}")
+	return failures
+
+
+def readableUserConfigDir() -> str:
+	"""The user's configuration directory to read from, which is still the former name's until a
+	full start has moved it."""
+	current = userConfigDir()
+	former = os.path.join(configHome(), formerAppDirName)
+	if not os.path.lexists(current) and os.path.isdir(former):
+		return former
+	return current
 
 
 #: The desktop entry that would start Linda at login.

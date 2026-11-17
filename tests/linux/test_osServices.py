@@ -106,6 +106,36 @@ def test_defaultConfigurationIgnoresARelativeXdgConfigHome(tmp_path):
 	assert not done.value.startswith(str(harness.SOURCE))
 
 
+def test_formerNamesDirectoriesAreAdoptedOnlyWhereTheCurrentOnesAreMissing(tmp_path):
+	configHome = tmp_path / "xdgConfig"
+	stateHome = tmp_path / "xdgState"
+	(configHome / "basedreader").mkdir(parents=True)
+	(configHome / "basedreader" / "nvda.ini").write_text("schemaVersion = 25\n", encoding="utf-8")
+	(stateHome / "basedreader").mkdir(parents=True)
+	(stateHome / "linda").mkdir()
+	done = run(
+		tmp_path,
+		"""
+		from linuxPlatform import xdg
+
+		before = xdg.readableUserConfigDir()
+		failures = xdg.adoptFormerDirectories()
+		result = {"before": before, "after": xdg.readableUserConfigDir(), "failures": failures}
+		""",
+		env={"XDG_CONFIG_HOME": str(configHome), "XDG_STATE_HOME": str(stateHome)},
+	)
+	done.assertClean()
+	assert done.value == {
+		"before": str(configHome / "basedreader"),
+		"after": str(configHome / "linda"),
+		"failures": [],
+	}
+	assert sorted(os.listdir(configHome)) == ["linda"]
+	assert (configHome / "linda" / "nvda.ini").read_text(encoding="utf-8") == "schemaVersion = 25\n"
+	# Something already started under the current name there, so the former directory stays as it is.
+	assert sorted(os.listdir(stateHome)) == ["basedreader", "linda"]
+
+
 def test_changedSettingSurvivesSaveAndReload(tmp_path):
 	env = xdgEnv(tmp_path)
 	saved = run(

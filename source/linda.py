@@ -96,29 +96,40 @@ def main() -> NoReturn:
 			_fail(f"{option} uses NVDA's Windows installer, which Linux does not have")
 
 	try:
-		instanceLock = singleInstance.InstanceLock(singleInstance.lockFilePath())
-		isAlreadyRunning = instanceLock.holder() is not None
+		instanceLocks = [
+			singleInstance.InstanceLock(singleInstance.lockFilePath(name))
+			for name in (singleInstance.APP_NAME, singleInstance.FORMER_APP_NAME)
+		]
+		isAlreadyRunning = any(lock.holder() is not None for lock in instanceLocks)
 	except OSError as e:
 		_fail(f"cannot open the lock that keeps one NVDA per display: {e}")
 	if isAlreadyRunning and not appArgs.easeOfAccess:
 		if appArgs.check_running:
 			sys.exit(0)
-		try:
-			singleInstance.terminateRunning(instanceLock)
-		except OSError as e:
-			# nvda.pyw goes on after this too, and gives up when the lock does not come free.
-			_tell(f"could not stop the NVDA already running: {e}")
+		for lock in instanceLocks:
+			try:
+				singleInstance.terminateRunning(lock)
+			except OSError as e:
+				# nvda.pyw goes on after this too, and gives up when the lock does not come free.
+				_tell(f"could not stop the NVDA already running: {e}")
 	if appArgs.quit or (isAlreadyRunning and appArgs.easeOfAccess):
 		sys.exit(0)
 	elif appArgs.check_running:
 		sys.exit(1)
 	quitSignals.install()
-	try:
-		isLockTaken = instanceLock.acquire()
-	except OSError as e:
-		_fail(f"cannot take {instanceLock.path}: {e}")
-	if not isLockTaken:
-		_fail(f"another NVDA still holds {instanceLock.path}")
+	for lock in instanceLocks:
+		try:
+			isLockTaken = lock.acquire()
+		except OSError as e:
+			_fail(f"cannot take {lock.path}: {e}")
+		if not isLockTaken:
+			_fail(f"another NVDA still holds {lock.path}")
+	# Only now, as a copy started under the former name could still have written its configuration
+	# as it exited.
+	from linuxPlatform import xdg
+
+	for failure in xdg.adoptFormerDirectories():
+		_tell(failure)
 
 	from utils.security import isRunningOnSecureDesktop
 
@@ -158,7 +169,8 @@ def main() -> NoReturn:
 		import core
 
 		# From then on this copy acts on SIGTERM at once, so a copy replacing it need wait no longer.
-		core.postNvdaStartup.register(instanceLock.markReady)
+		for lock in instanceLocks:
+			core.postNvdaStartup.register(lock.markReady)
 		core.main()
 	except BaseException as e:
 		# As nvda.pyw does, SystemExit included: wx raises it when there is no display to open.

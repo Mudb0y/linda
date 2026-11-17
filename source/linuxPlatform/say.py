@@ -466,7 +466,7 @@ def _speak(run: _Run, arguments: list[str]) -> tuple[int, str | None]:
 
 	run.temporaryDir = tempfile.mkdtemp(prefix=TEMPORARY_PREFIX)
 	if not options.factory:
-		_copyConfiguration(options.config_path or xdg.userConfigDir(), run.temporaryDir)
+		_copyConfiguration(options.config_path or xdg.readableUserConfigDir(), run.temporaryDir)
 	# -m and -d keep out the start and exit sounds and add-ons, as they would in a full start.
 	globalVars.appArgs, globalVars.unknownAppArgs = getParser().parse_known_args(
 		["-m", "-d", "--no-sr-flag", "-c", run.temporaryDir, "-f", logPath, "--debug-logging"],

@@ -555,6 +555,18 @@ def test_configurationComesFromWhereItIsAskedFor(tmp_path: Path):
 	fromDefaults.assertClean()
 
 
+def test_configurationUnderTheFormerNameIsReadUntilAStartMovesIt(tmp_path: Path):
+	home = Home(tmp_path / "home")
+	former = home.configDir.parent / "basedreader"
+	home.configDir.rename(former)
+	run = say(home, "From the former name's configuration.")
+	assert run.assertSpoke()["synth"] == "transcript"
+	run.assertClean()
+	# Only read: a copy started under the former name may still be running from it.
+	assert former.is_dir()
+	assert not home.configDir.exists()
+
+
 def test_listsTheVoices(home: Home):
 	run = say(home, "--synth", "espeak", "--list-voices")
 	run.assertClean()

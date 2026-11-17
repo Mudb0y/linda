@@ -52,6 +52,12 @@ _READY = b"ready\n"
 #: localhost included, is another server: what ssh forwards a display to is a proxy for a remote one.
 _LOCAL_HOSTS = ("", "unix")
 
+#: The directory under the runtime directory that holds the locks.
+APP_NAME = "linda"
+#: Where copies started while the program was Basedreader hold theirs. A copy holds that lock as well,
+#: so that either name replaces a copy started under the other and only one reader ever runs.
+FORMER_APP_NAME = "basedreader"
+
 
 def _checkPrivateDirectory(path: str) -> None:
 	info = os.lstat(path)
@@ -95,13 +101,15 @@ def displayName() -> str:
 	return f"{host}:{number}".replace("/", "_")
 
 
-def lockFilePath() -> str:
+def lockFilePath(appName: str = APP_NAME) -> str:
 	"""The lock file for the display this process would run on.
 
 	XDG_RUNTIME_DIR is per user, not per session, so the display is in the name: a user signed in
 	on two displays runs a copy on each.
+
+	:param appName: The directory of the lock: FORMER_APP_NAME for the one copies took under that name.
 	"""
-	directory = os.path.join(_runtimeDir(), "linda")
+	directory = os.path.join(_runtimeDir(), appName)
 	try:
 		os.mkdir(directory, 0o700)
 	except FileExistsError:

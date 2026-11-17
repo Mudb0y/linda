@@ -722,9 +722,7 @@ def test_lockWithoutRuntimeDirectoryIsInTheUsersCache(monkeypatch, tmp_path: Pat
 	assert singleInstance.lockFilePath().startswith(str(tmp_path / "cache" / "linda") + os.sep)
 	monkeypatch.delenv("XDG_CACHE_HOME")
 	monkeypatch.setenv("HOME", str(tmp_path / "home"))
-	assert singleInstance.lockFilePath().startswith(
-		str(tmp_path / "home" / ".cache" / "linda") + os.sep
-	)
+	assert singleInstance.lockFilePath().startswith(str(tmp_path / "home" / ".cache" / "linda") + os.sep)
 
 
 @pytest.mark.parametrize(
@@ -979,3 +977,86 @@ def test_unlockedRecordIsNeverSignalled(start: Start):
 	finally:
 		bystander.kill()
 		bystander.wait()
+
+
+def _formerLockPath() -> str:
+	"""The lock file of the rig's display that a copy started under the program's former name holds."""
+	path = singleInstance.lockFilePath(singleInstance.FORMER_APP_NAME)
+	runtime = os.path.dirname(os.path.dirname(_rigLockPath()))
+	assert path.startswith(os.path.join(runtime, singleInstance.FORMER_APP_NAME) + os.sep), path
+	return path
+
+
+def test_copyStartedUnderTheFormerNameIsReplaced(start: Start):
+	holder = _holdLock(_formerLockPath(), "PID\nready\n")
+	try:
+		nvda = start("takeover", "wait")
+		assert holder.wait(STARTUP_BOUND) == -signal.SIGTERM
+		nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+		# It holds the former name's lock as well, so that a copy started under that name replaces it
+		# as it replaces any copy.
+		former = singleInstance.InstanceLock(_formerLockPath())
+		try:
+			deadline = time.monotonic() + STARTUP_BOUND
+			while former.recordedReady() != nvda.process.pid:
+				assert time.monotonic() < deadline and nvda.process.poll() is None, nvda.describe()
+				time.sleep(0.01)
+			assert former.holder() == nvda.process.pid
+			singleInstance.terminateRunning(former)
+		finally:
+			former.close()
+		assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+		nvda.assertClean(logNames=("nvda.log",))
+		assert "Exiting on SIGTERM" in nvda.text("nvda.log")
+	finally:
+		if holder.poll() is None:
+			holder.kill()
+		holder.wait()
+
+
+def test_checkRunningAndQuitFindACopyUnderTheFormerName(start: Start):
+	holder = _holdLock(_formerLockPath(), "PID\nready\n")
+	try:
+		running = start("checkRunning", None, "--check-running")
+		assert running.waitForExit(SHUTDOWN_BOUND) == 0, running.describe()
+		running.assertClean()
+		assert holder.poll() is None
+		quitter = start("quit", None, "--quit")
+		assert quitter.waitForExit(SHUTDOWN_BOUND) == 0, quitter.describe()
+		quitter.assertClean()
+		assert holder.wait(SHUTDOWN_BOUND) == -signal.SIGTERM
+	finally:
+		if holder.poll() is None:
+			holder.kill()
+		holder.wait()
+
+
+def test_settingsAndLogsUnderTheFormerNameCarryOver(launches, tmp_path: Path):
+	_rigLockPath()
+	configHome = tmp_path / "xdgConfig"
+	stateHome = tmp_path / "xdgState"
+	(configHome / "basedreader").mkdir(parents=True)
+	(configHome / "basedreader" / "nvda.ini").write_text(
+		CONFIG_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8"
+	)
+	(stateHome / "basedreader").mkdir(parents=True)
+	(stateHome / "basedreader" / "nvda.log").write_text("a log of the former name\n", encoding="utf-8")
+	nvda = launches(
+		"adopt",
+		"-f",
+		str(tmp_path / "launches" / "adopt" / "nvda.log"),
+		"--debug-logging",
+		env={
+			"LINDA_BOOT_PROBE": "exit",
+			"XDG_CONFIG_HOME": str(configHome),
+			"XDG_STATE_HOME": str(stateHome),
+		},
+	)
+	# Only the configuration it was moved with sets the transcript synth, which is what hears this.
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	assert not (configHome / "basedreader").exists()
+	assert (configHome / "linda" / "nvda.ini").is_file()
+	assert not (stateHome / "basedreader").exists()
+	assert (stateHome / "linda" / "nvda.log").read_text(encoding="utf-8") == "a log of the former name\n"
