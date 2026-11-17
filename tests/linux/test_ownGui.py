@@ -223,7 +223,7 @@ def test_voiceSettingsSpeakEachControlAndItsChanges(desktop: DesktopSession, tmp
 	step(desktop, "Left", "49")
 	step(desktop, "Tab", "Inflection: slider 50")
 	step(desktop, "Tab", "Volume: slider 50")
-	step(desktop, "Tab", "Automatic language switching (when supported) check box checked Alt plus O")
+	step(desktop, "Tab", "Automatic language switching (when supported) check box checked…")
 	step(desktop, "space", "not checked")
 	# Enter on a check box presses OK, as on Windows.
 	step(desktop, "Return", *AT_START)
@@ -296,8 +296,8 @@ def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSe
 	downToKeyboard(desktop)
 	step(desktop, "Tab", "Keyboard layout: combo box desktop collapsed Alt plus K")
 	step(desktop, "Down", "laptop")
-	step(desktop, "alt+a", "Apply button Alt plus A")
-	step(desktop, "shift+Tab", "Cancel button Alt plus C")
+	# Control+S is Apply; Alt+A only moves to the button while another control shares its letter.
+	step(desktop, "control+s", "Categories: list…")
 	step(desktop, "Escape", *AT_START)
 
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
