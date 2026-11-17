@@ -555,6 +555,57 @@ def test_largePageComesTopFirstWithoutHoldingFirefox(
 			batch.stream.free()
 
 
+#: Text realFrames.html reads as, in this order: a frame from another site, which Firefox runs in a
+#: process of its own, and one from the same site, each in its place; and a link holding only an
+#: image with empty alt text, which Firefox leaves out, read by its address as fillVBuf reads it.
+FRAMES_TEXT = (
+	"Frames page",
+	"Before the frames.",
+	"Inside the other site",
+	"Text of the other site's frame.",
+	"Change the frame",
+	"Between the frames.",
+	"Text of the same site frame.",
+	"screen-readers",
+	"A link that holds only an image",
+	"After the frames.",
+)
+
+
+def test_framesFromOtherSitesAreRenderedInPlaceAndFollowed(
+	desktop: DesktopSession,
+	engine: ModuleType,
+	vbufLib: ModuleType,
+):
+	with webSession.servePages() as pages:
+		webSession.startFirefox(desktop, pages.url("realFrames.html"))
+		_document, bus, path = documentFor("Frames page")
+		inner, _innerBus, _innerPath = documentFor("Inner frame")
+		rendered = engine.render(bus, path, DOC_HANDLE, progressive=False)
+		try:
+			text = bufferText(vbufLib, rendered.stream)
+			model = parseDocument(_units(rendered.stream))
+		finally:
+			rendered.stream.free()
+		at = 0
+		for expected in FRAMES_TEXT:
+			found = text.find(expected, at)
+			assert found >= 0, f"{expected!r} not after offset {at} in {text!r}"
+			at = found + len(expected)
+		Atspi = desktopSession._atspi()
+		pressed = time.monotonic()
+		assert Atspi.Action.do_action(named(inner, Atspi.Role.BUTTON, "Change the frame"), 0)
+		got = batches(engine, pressed + 5, lambda b: any(x.stream and x.docPath == path for x in b))
+		for batch in got:
+			if batch.stream is not None:
+				if batch.docPath == path:
+					model = applyBatch(model, parseBatch(_units(batch.stream)))
+				batch.stream.free()
+		updated = bufferText(vbufLib, Units(encode(model, [])))
+		assert "The frame changed its text." in updated, [b.info for b in got]
+		assert "Text of the other site's frame." not in updated
+
+
 def test_tablesAreGeneratedFromNVDARoles(tmp_path: Path):
 	generated = tmp_path / "tables.rs"
 	subprocess.run(

@@ -749,6 +749,15 @@ impl Walk {
             if rn == "image" && o.name.is_empty() {
                 link = self.link_ancestor(path);
             }
+            // Firefox leaves out an image whose alt is empty, so a link holding only such an image
+            // has nothing in it; fillVBuf reads it by its address.
+            if rn == "link"
+                && o.name.is_empty()
+                && o.known(Field::Children)
+                && o.children.is_empty()
+            {
+                more.push(Field::LinkUri);
+            }
         }
         for f in more {
             self.queue(path, f);
