@@ -192,6 +192,8 @@
           mate-notification-daemon
           libnotify
           featherpad
+          # Another program's side of the clipboard, for the clipboard tests.
+          xclip
           # tests/linux/rig builds its sandbox with this.
           bubblewrap
           git

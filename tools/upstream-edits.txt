@@ -68,6 +68,12 @@ source/_remoteClient/urlHandler.py
   registering or removing the nvdaremote URL handler raises
   NoLinuxImplementation on Linux. The one annotation that names
   winreg.HKEYType is quoted, as the stand-in refuses that name at import
+source/api.py
+  Linux runtime: copyToClip and getClipData use the desktop's clipboard
+  through linuxPlatform.clipboard, which goes through GTK on the main
+  thread, instead of opening Windows' clipboard with NVDA's main window;
+  reading waits at most a second for the program that owns the clipboard
+  to answer, and one that does not answer reads as an OSError
 source/appModuleHandler.py
   Linux runtime: on Linux the application name, executable path,
   architecture, user and liveness of a process come from /proc and a pidfd

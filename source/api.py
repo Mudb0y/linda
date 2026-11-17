@@ -9,6 +9,7 @@ Functions should mostly refer to getting an object (NVDAObject) or a position (T
 """
 
 import typing  # noqa: I001
+import sys
 
 import config
 import textInfos
@@ -402,6 +403,10 @@ def copyToClip(text: str, notify: bool | None = False) -> bool:
 	@param text: the text which will be copied to the clipboard
 	@param notify: whether to emit a confirmation message
 	"""
+	if sys.platform != "win32":
+		from linuxPlatform import clipboard
+
+		return clipboard.copyToClip(text, notify)
 	if not isinstance(text, str) or len(text) == 0:
 		return False
 	import gui
@@ -429,6 +434,10 @@ def getClipData():
 	@returns: Clipboard text
 	@rtype: string
 	"""
+	if sys.platform != "win32":
+		from linuxPlatform import clipboard
+
+		return clipboard.getText()
 	import gui
 
 	with winUser.openClipboard(gui.mainFrame.Handle):
