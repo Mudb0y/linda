@@ -72,6 +72,7 @@ def _openPage(
 	firstLine: str,
 	*,
 	workspaceKeysOff: bool = False,
+	config: Path = webSession.BROWSE_CONFIG,
 ) -> Iterator[Session]:
 	webSession.requireBrowseLibraries()
 	directory = tmp_path_factory.mktemp(Path(page).stem)
@@ -79,7 +80,7 @@ def _openPage(
 	with DesktopSession(directory / "desktop", windowManager=not ownWindowManager) as desktop:
 		if ownWindowManager:
 			_startWindowManagerWithoutWorkspaceKeys(desktop)
-		nvda = desktop.startNVDA(webSession.BROWSE_CONFIG)
+		nvda = desktop.startNVDA(config)
 		nvda.waitForLog("NVDA initialized", STARTUP_BOUND)
 		mark = desktop.mark()
 		firefox = webSession.startFirefox(desktop, page)
@@ -263,3 +264,75 @@ class TestTables:
 		stepSaying(tables, "Down", "Player")
 		stepSaying(tables, "Control_L+Alt_L+Down", "Ann")
 		step(tables, "Control_L+Alt_L+Right", "Points column 2 7")
+
+
+def languagesOf(session: Session, mark: int, text: str) -> list[str | None]:
+	"""The languages speech was switched to before text, in the speak records after mark that hold it."""
+	found = []
+	for record in session.nvda.spoken()[mark:]:
+		language = None
+		for item in record["data"]:
+			if isinstance(item, dict) and "lang" in item:
+				language = item["lang"]
+			elif isinstance(item, str) and text in item:
+				found.append(language)
+	return found
+
+
+def readLine(session: Session, chord: str, text: str) -> list[str | None]:
+	mark = stepSaying(session, chord, text)
+	return languagesOf(session, mark, text)
+
+
+@pytest.fixture(scope="class")
+def english(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Session]:
+	yield from _openPage(tmp_path_factory, "featureLanguage.html", "heading level 1 Languages")
+
+
+class TestLanguage:
+	"""With automatic language switching on, as it is by default, speech switches to the language a
+	page marks for each passage."""
+
+	def test_polishParagraphOnAnEnglishPage(self, english: Session):
+		stepSaying(english, "Control_L+Home", "Languages")
+		assert readLine(english, "Down", "This paragraph is in English.") == ["en"]
+		assert readLine(english, "Down", "Ten akapit jest po polsku.") == ["pl"]
+		assert readLine(english, "Down", "Back in English") == ["en"]
+
+
+@pytest.fixture(scope="class")
+def polish(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Session]:
+	yield from _openPage(tmp_path_factory, "featureLanguagePolish.html", "heading level 1 …")
+
+
+class TestLanguagePolishPage:
+	def test_englishQuotationOnAPolishPage(self, polish: Session):
+		stepSaying(polish, "Control_L+Home", "Języki")
+		assert readLine(polish, "Down", "Ten akapit jest po polsku.") == ["pl"]
+		assert readLine(polish, "Down", "To be or not to be.") == ["en"]
+		assert readLine(polish, "Down", "Koniec strony.") == ["pl"]
+
+
+@pytest.fixture(scope="class")
+def languageSwitchingOff(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Session]:
+	directory = tmp_path_factory.mktemp("languageSwitchingOff")
+	config = directory / "nvda.ini"
+	config.write_text(
+		webSession.BROWSE_CONFIG.read_text().replace(
+			"\tsynth = transcript\n",
+			"\tsynth = transcript\n\tautoLanguageSwitching = False\n",
+		),
+	)
+	yield from _openPage(
+		tmp_path_factory,
+		"featureLanguage.html",
+		"heading level 1 Languages",
+		config=config,
+	)
+
+
+class TestLanguageSwitchingOff:
+	def test_noSwitchWhenTheSettingIsOff(self, languageSwitchingOff: Session):
+		stepSaying(languageSwitchingOff, "Control_L+Home", "Languages")
+		readLine(languageSwitchingOff, "Down", "This paragraph is in English.")
+		assert readLine(languageSwitchingOff, "Down", "Ten akapit jest po polsku.") != ["pl"]
