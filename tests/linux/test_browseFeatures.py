@@ -388,3 +388,28 @@ class TestSemantics:
 			step(semantics, "Tab", "…")
 		stepSaying(semantics, "Tab", "Size grouping")
 		step(semantics, "Escape", "Browse mode")
+
+
+class TestElementsList:
+	"""NVDA+F7 lists the page's links, headings, form fields, buttons and landmarks in NVDA's own
+	dialog, which moves to or activates the one chosen."""
+
+	def test_moveToAHeading(self, semantics: Session):
+		stepSaying(semantics, "Control_L+Home", "Semantics")
+		step(semantics, "Insert+F7", "Elements List dialog", "tree view", "level 1 Page one 1 of 2")
+		step(semantics, "Down", "Page two 2 of 2 level 1")
+		stepSaying(semantics, "alt+h", "Headings radio button")
+		stepSaying(semantics, "Tab", "Semantics expanded 1 of 1 level 1")
+		step(semantics, "Down", "level 2 An ARIA heading 1 of 1")
+		stepSaying(semantics, "alt+m", "An ARIA heading heading level 4")
+
+	def test_filterAndActivate(self, semantics: Session):
+		desktop = semantics.desktop
+		stepSaying(semantics, "Control_L+Home", "Semantics")
+		stepSaying(semantics, "Insert+F7", "Elements List dialog")
+		stepSaying(semantics, "alt+k", "Links radio button")
+		step(semantics, "alt+y", "Filter by: edit Alt plus Y blank")
+		desktop.typeText("two")
+		time.sleep(SETTLE)
+		stepSaying(semantics, "Shift+Tab", "Page two 1 of 1 level 1")
+		stepSaying(semantics, "Return", "Page two link")
