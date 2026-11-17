@@ -613,6 +613,20 @@ class AtSpi(NVDAObject):
 			return str(int(current)) if current == int(current) else f"{current:g}"
 		return None
 
+	def _get_errorMessage(self) -> str | None:
+		"""The text of what the page names as the error message of a field, as IA2's error relation gives
+		it on Windows."""
+		c = _client()
+		for node in self.atspiRelations.get("error-message", []):
+			try:
+				text = c.text(node) if "Text" in c.interfaces(node) else ""
+				text = " ".join(text.replace("\ufffc", " ").split()) or c.name(node)
+			except NodeGone:
+				continue
+			if text:
+				return text
+		return super().errorMessage
+
 	def _get_description(self) -> str | None:
 		try:
 			description = _client().description(self.node)
