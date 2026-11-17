@@ -109,6 +109,9 @@
 CODE_OF_CONDUCT.md
   repository: deleted. It has NV Access's staff enforce it and receive
   the reports, which they do not do for Linda
+readme.md
+  repository: rewritten for Linda: what it is, what it needs and how to
+  set it up on each distribution
 security.md
   repository: deleted. It sends reports of vulnerabilities to NV Access,
   which does not maintain Linda
