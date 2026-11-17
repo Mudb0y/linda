@@ -144,9 +144,12 @@ def unreadablePrograms() -> list[str]:
 
 	from . import handler
 
+	mains = _chromiumMainProcesses()
+	if not mains:
+		return []
 	joined = {handler.processIDOf(app) for app in handler.applications()}
 	names = []
-	for processID in _chromiumMainProcesses():
+	for processID in mains:
 		if processID in joined:
 			continue
 		name = getAppNameFromProcessID(processID)
