@@ -154,6 +154,12 @@ while True:
 	if readable:
 		chunk = os.read(0, 4096)
 		if not chunk:
+			# NVDA has gone, or let the connection go; this guard's copy of the socket is the last.
+			if guarding:
+				try:
+					os.write(socket, FREE)
+				except OSError:
+					pass
 			break
 		*lines, pending = (pending + chunk).split(b"\n")
 		for line in lines:

@@ -41,6 +41,7 @@ import time
 
 import browseMode
 import globalPluginHandler
+import virtualBuffers.atspi
 from logHandler import log
 from scriptHandler import script
 
@@ -49,7 +50,9 @@ def _trap(self, gesture):
 	log.info("Trapped a key in browse mode")
 
 
+# On the buffer class too, which may have a sound of its own for it.
 browseMode.BrowseModeTreeInterceptor.script_trapNonCommandGesture = _trap
+virtualBuffers.atspi.AtSpiBuffer.script_trapNonCommandGesture = _trap
 
 
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
