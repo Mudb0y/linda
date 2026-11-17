@@ -11,11 +11,13 @@
 <button id="stop-log">Stop log</button>
 <button id="busy">Busy update</button>
 <button id="set-output">Set output</button>
-<button id="change-text">Change text</button></p>
+<button id="change-text">Change text</button>
+<button id="set-error">Set error</button></p>
 <div id="polite" aria-live="polite"></div>
 <div id="assertive" aria-live="assertive"></div>
 <div id="status" role="status" aria-atomic="true">Results: <span id="n">3</span> found</div>
 <div id="alerts"></div>
+<div id="formError" role="alert"></div>
 <div id="log" role="log" aria-label="Chat"></div>
 <div id="busyRegion" aria-live="polite"></div>
 <p>Total: <output id="out">0</output></p>
@@ -70,6 +72,9 @@ $("busy").onclick = () => {
 };
 $("set-output").onclick = () => {
 	$("out").textContent = String(Number($("out").textContent) + 5);
+};
+$("set-error").onclick = () => {
+	$("formError").textContent = "Password is too short";
 };
 $("change-text").onclick = () => {
 	$("texty").firstElementChild.textContent = "New words";

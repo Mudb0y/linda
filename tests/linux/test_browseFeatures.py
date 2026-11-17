@@ -154,6 +154,10 @@ class TestLiveRegions:
 	def test_alertIsSpokenWithItsRole(self, live: Session):
 		press(live, "Show alert", "alert Name is required")
 
+	def test_textPutIntoAnAlert(self, live: Session):
+		"""An alert that was on the page empty from the start is spoken when text is put into it."""
+		press(live, "Set error", "alert Password is too short")
+
 	def test_outputElement(self, live: Session):
 		press(live, "Set output", "5")
 
