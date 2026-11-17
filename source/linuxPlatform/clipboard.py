@@ -113,6 +113,9 @@ def copyToClip(text: str, notify: bool | None = False) -> bool:
 
 	if not isinstance(text, str) or len(text) == 0:
 		return False
+	# NVDA joins copied lines with Windows' line ends, which GTK hands out as Linux's, so the copy
+	# would never read back as it went in.
+	text = text.replace("\r\n", "\n")
 	try:
 		setText(text)
 		got = getText()
