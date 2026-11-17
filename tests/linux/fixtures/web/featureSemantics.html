@@ -12,7 +12,7 @@
 <p><button aria-describedby="hint">Save</button> <span id="hint">Saves the draft</span></p>
 <p><label for="email">Email</label> <input id="email" type="email" required aria-invalid="true" aria-errormessage="emailError" placeholder="you@example.com"></p>
 <p id="emailError">Enter a full address</p>
-<p><button aria-expanded="false">Menu</button> <button aria-pressed="true">Bold</button> <button aria-haspopup="menu">Options</button></p>
+<p><button aria-expanded="false" onclick="this.setAttribute('aria-expanded', this.getAttribute('aria-expanded') == 'true' ? 'false' : 'true')">Menu</button> <button aria-pressed="true" onclick="this.setAttribute('aria-pressed', this.getAttribute('aria-pressed') == 'true' ? 'false' : 'true')">Bold</button> <button aria-haspopup="menu">Options</button></p>
 <table border="1"><tr><th aria-sort="ascending">Name</th><th>Age</th></tr><tr><td>Ann</td><td>7</td></tr></table>
 <ul><li>Alpha</li><li>Beta</li></ul>
 <fieldset><legend>Size</legend><label><input type="radio" name="size"> Small</label><label><input type="radio" name="size"> Large</label></fieldset>

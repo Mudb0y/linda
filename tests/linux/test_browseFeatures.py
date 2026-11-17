@@ -424,6 +424,18 @@ class TestSemantics:
 		stepSaying(semantics, "Tab", "Size grouping")
 		step(semantics, "Escape", "Browse mode")
 
+	def test_toggleButtons(self, semantics: Session):
+		"""Enter on a button that opens something or stays pressed says what changed, and only that."""
+		stepSaying(semantics, "Control_L+Home", "Semantics")
+		step(semantics, "b", "Save button Saves the draft")
+		step(semantics, "b", "Menu button collapsed")
+		step(semantics, "Return", "expanded")
+		step(semantics, "Return", "collapsed")
+		step(semantics, "b", "Bold toggle button pressed")
+		step(semantics, "Return", "not pressed")
+		mark = step(semantics, "Return", "pressed")
+		assert semantics.desktop.spokenSince(mark) == ["pressed"], semantics.desktop.spokenSince(mark)
+
 	def test_radioButtons(self, semantics: Session):
 		"""Enter checks a radio button and says so once; in focus mode the arrows say each button's
 		place in its group, and the label holding it is not said before it."""
