@@ -437,8 +437,8 @@ class AtSpi(NVDAObject):
 			return Role.DIALOG
 		if raw == "invalid":
 			return Role.UNKNOWN
-		if raw == "button" and "Hyperlink" in self.atspiInterfaces:
-			# GTK's link button.
+		if raw == "button" and "Hyperlink" in self.atspiInterfaces and self.toolkit in (GTK3, GTK4):
+			# GTK's link button; a browser gives every object in a page's text the interface.
 			return Role.LINK
 		return ROLES.get(raw, Role.UNKNOWN)
 
