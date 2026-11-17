@@ -243,12 +243,16 @@ class Assistant:
 			out += ESC + f"[{self.frameRows - self.previousCursor[0]}B" + "\r"
 		finished, self.finished = self.finished, []
 		if self.render == "full":
-			# Erase, write the finished text, write the live region: three writes, as such a renderer
-			# makes them.
-			self.write(out + eraseLines(self.frameRows + 1 if self.frameRows else 0))
+			erase = out + eraseLines(self.frameRows + 1 if self.frameRows else 0)
+			frame = "\r\n".join(rows) + "\r\n"
 			if finished:
+				# Erase, write the finished text, write the live region: three writes, as such a
+				# renderer makes them when it adds finished text, and one write otherwise.
+				self.write(erase)
 				self.write("".join(row + "\r\n" for row in finished))
-			self.write("\r\n".join(rows) + "\r\n")
+				self.write(frame)
+			else:
+				self.write(erase + frame)
 		else:
 			out += ESC + f"[{self.frameRows}A" if self.frameRows else ""
 			if finished:
