@@ -1,14 +1,16 @@
-"""The web session of test_browseUsable.py in Chromium: NVDA is running when Chromium opens a page,
-and the page is read at once, by line, word and character, by say all and by quick navigation; links
-are followed and the way back remembers the place; a form is filled in focus mode; the page changes
-under the reader; find; a large page; and NVDA's own exit.
+"""Browse mode in Chromium and in an Electron program.
+
+In Chromium, the web session of test_browseUsable.py: NVDA is running when Chromium opens a page, and
+the page is read at once, by line, word and character, by say all and by quick navigation; links are
+followed and the way back remembers the place; a form is filled in focus mode; the page changes under
+the reader; find; a large page; and NVDA's own exit. In an Electron program shaped like a chat
+program, its window read as a web page in browse mode, as NVDA reads such a program's on Windows.
 
 BASEDREADER_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_chromium.py
 
-Chromium is started plainly, without a switch that forces accessibility on, and the accessibility
-status is switched off before NVDA starts, as a desktop has it before any screen reader runs: what
-lets Chromium join the accessibility bus is NVDA's switching it on, and NVDA switches it off again
-when it exits.
+Both are started plainly, without a switch that forces accessibility on, and the accessibility status
+is switched off before NVDA starts, as a desktop has it before any screen reader runs: what lets them
+join the accessibility bus is NVDA's switching it on, and NVDA switches it off again when it exits.
 """
 
 import subprocess
@@ -53,6 +55,8 @@ STATUS_OFF = "Accessibility status: switched IsEnabled off again"
 #: The Electron fixture's window, and a window of another program to switch to and from it.
 CHAT_TITLE = "Chat fixture"
 OTHER_WINDOW = "Fixture window"
+#: The window of the Electron fixture's sign-in page.
+SIGN_IN_TITLE = "Sign in fixture"
 
 
 @dataclass
@@ -84,6 +88,23 @@ def electron(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Session]:
 		nvda = desktop.startNVDA(webSession.BROWSE_CONFIG, env=TIMED_SPEECH)
 		nvda.waitForLog("NVDA initialized", STARTUP_BOUND)
 		program = chromiumSession.startElectron(desktop, "electronChat", window=CHAT_TITLE)
+		yield Session(desktop, nvda, program, directory)
+
+
+@pytest.fixture(scope="class")
+def signIn(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Session]:
+	webSession.requireBrowseLibraries()
+	directory = tmp_path_factory.mktemp("signIn")
+	with DesktopSession(directory / "desktop") as desktop:
+		chromiumSession.clearAccessibilityStatus()
+		nvda = desktop.startNVDA(webSession.BROWSE_CONFIG, env=TIMED_SPEECH)
+		nvda.waitForLog("NVDA initialized", STARTUP_BOUND)
+		program = chromiumSession.startElectron(
+			desktop,
+			"electronChat",
+			"signin.html",
+			window=SIGN_IN_TITLE,
+		)
 		yield Session(desktop, nvda, program, directory)
 
 
@@ -379,3 +400,42 @@ class TestElectron:
 		assert nvda.process.returncode == 0, nvda.describe()
 		nvda.assertClean(logNames=("nvda.log",))
 		assert chromiumSession.accessibilityStatus() is False
+
+
+class TestElectronSignIn:
+	"""A sign-in screen that a single-page program builds and focuses a while after its page has
+	loaded, as Discord's is. The field's focus event comes before the buffer has the field, and the
+	buffer takes the focus as its own once it has."""
+
+	@pytest.fixture
+	def session(self, signIn: Session) -> Session:
+		return signIn
+
+	@pytest.fixture(autouse=True)
+	def recoverAfterAFailure(self, request: pytest.FixtureRequest, session: Session) -> Iterator[None]:
+		failed = request.session.testsfailed
+		yield
+		if request.session.testsfailed > failed and session.nvda.process.poll() is None:
+			session.desktop.press("Escape", "Escape", gap=SETTLE)
+
+	def test_theFocusedFieldIsInFocusMode(self, session: Session):
+		session.desktop.expect("Email edit…", "Focus mode", since=0, timeout=STARTUP_BOUND)
+		time.sleep(SETTLE)
+
+	def test_browseModeReadsTheScreen(self, session: Session):
+		step(session, "Escape", "Browse mode")
+		step(session, "ctrl+Home", "main landmark heading level 1 Welcome back")
+		step(session, "e", "form Email edit…")
+		step(session, "e", "Password edit…")
+		step(session, "b", "Log in button")
+		step(session, "shift+e", "Password edit…")
+		step(session, "Return", "Focus mode")
+		step(session, "Escape", "Browse mode")
+
+	def test_exitIsClean(self, session: Session):
+		step(session, "Insert+q", "Exit NVDA…")
+		session.desktop.press("Return")
+		nvda = session.nvda
+		nvda.waitForExit(EXIT_BOUND)
+		assert nvda.process.returncode == 0, nvda.describe()
+		nvda.assertClean(logNames=("nvda.log",))

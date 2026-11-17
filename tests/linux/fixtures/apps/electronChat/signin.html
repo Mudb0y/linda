@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Sign in fixture</title></head>
+<body>
+<div id="app"></div>
+<script>
+// Built and focused a while after the page has loaded, as a single-page program shows its sign-in
+// screen once its scripts have run.
+setTimeout(() => {
+	document.getElementById("app").innerHTML = `<main>
+<h1>Welcome back</h1>
+<form><label for="email">Email</label> <input id="email" type="email" required>
+<label for="password">Password</label> <input id="password" type="password" required>
+<button type="button">Log in</button></form>
+</main>`;
+	document.getElementById("email").focus();
+}, 2000);
+</script>
+</body></html>

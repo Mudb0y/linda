@@ -148,15 +148,20 @@ def startChromium(desktop: DesktopSession, page: str) -> webSession.FirefoxProce
 	return process
 
 
-def startElectron(desktop: DesktopSession, app: str, *, window: str) -> webSession.FirefoxProcess:
-	"""Start the Electron program in the fixtures directory app, and wait until its window named window
-	is on the accessibility desktop and has the keyboard."""
+def startElectron(
+	desktop: DesktopSession,
+	app: str,
+	*arguments: str,
+	window: str,
+) -> webSession.FirefoxProcess:
+	"""Start the Electron program in the fixtures directory app with arguments, and wait until its
+	window named window is on the accessibility desktop and has the keyboard."""
 	directory = ELECTRON_APPS / app
 	assert (directory / "package.json").is_file(), f"no Electron program {app} in {ELECTRON_APPS}"
 	profile = Path(tempfile.mkdtemp(prefix="electron", dir=desktop.directory))
 	process = _start(
 		desktop,
-		["electron", *ELECTRON_SWITCHES, f"--user-data-dir={profile}", str(directory)],
+		["electron", *ELECTRON_SWITCHES, f"--user-data-dir={profile}", str(directory), *arguments],
 		window=window,
 		logName=f"{profile.name}.log",
 	)
