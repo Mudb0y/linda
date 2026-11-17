@@ -2,12 +2,17 @@
 
 The accessibility bus launcher keeps org.a11y.Status on the session bus. Chromium, and every Electron
 program with it, reads IsEnabled once, as it starts: off, it never joins the accessibility bus, and
-nothing short of a restart changes that. Firefox reads it at start and again whenever it changes. GTK
-3, GTK 4 and Qt on X11 join the bus whatever it says. at-spi2-core 2.61 and later switch IsEnabled on
-by themselves as soon as a client registers for events and off when the last one leaves, and no longer
-have ScreenReaderEnabled; earlier ones keep both where a client sets them, and Qt reads either. So both
-are switched on here, before NVDA registers for events, and each one this switched on is switched off
-again when NVDA stops.
+nothing short of a restart changes that. Firefox reads it at start and again whenever it changes. GTK 3
+and GTK 4 do not read it, and Qt on X11 joins the bus whenever the display names one.
+
+at-spi2-core 2.61 and later switch IsEnabled on by themselves when a client registers for events and
+off when the last such client leaves; there it is not a setting but a report, and they have no
+ScreenReaderEnabled. Earlier launchers keep both as the desktop's settings, and on GNOME and MATE
+ScreenReaderEnabled is the setting that starts Orca, so it is never touched here.
+
+So IsEnabled is switched on, before NVDA registers for events, when it is off. When NVDA stops, a
+launcher that reports it is left to switch it off once no screen reader remains, which writes none of
+the desktop's settings, as switching it off here would; an earlier launcher gets back what was found.
 """
 
 from gi.repository import Gio, GLib
@@ -17,13 +22,14 @@ BUS_NAME = "org.a11y.Bus"
 OBJECT_PATH = "/org/a11y/bus"
 INTERFACE = "org.a11y.Status"
 PROPERTIES_INTERFACE = "org.freedesktop.DBus.Properties"
-#: The properties a program may read to decide whether a screen reader is there.
-PROPERTIES = ("IsEnabled", "ScreenReaderEnabled")
+ENABLED = "IsEnabled"
+#: Only launchers that keep the status as settings have it.
+SCREEN_READER_ENABLED = "ScreenReaderEnabled"
 #: The launcher answers at once; a session without one must not hold NVDA's start up.
 TIMEOUT_MS = 1000
 
-#: The properties claim found off and switched on, for release to switch off.
-_switchedOn: list[str] = []
+#: Whether claim switched IsEnabled on on a launcher that keeps it as a setting, for release to put back.
+_putBack = False
 
 
 def _sessionBus() -> Gio.DBusConnection | None:
@@ -75,27 +81,23 @@ def _set(bus: Gio.DBusConnection, name: str, value: bool) -> bool:
 
 
 def claim() -> None:
-	"""Switch on each property the launcher has that is off, and remember which."""
+	"""Switch IsEnabled on when it is off, and remember whether it must be put back."""
+	global _putBack
 	bus = _sessionBus()
-	if bus is None:
+	if bus is None or _get(bus, ENABLED) is not False:
 		return
-	for name in PROPERTIES:
-		if name in _switchedOn or _get(bus, name) is not False:
-			continue
-		if _set(bus, name, True):
-			_switchedOn.append(name)
-			log.info(f"Accessibility status: switched {name} on")
+	if not _set(bus, ENABLED, True):
+		return
+	_putBack = _get(bus, SCREEN_READER_ENABLED) is not None
+	log.info(f"Accessibility status: switched {ENABLED} on")
 
 
 def release() -> None:
-	"""Switch off what claim switched on."""
-	if not _switchedOn:
+	"""Put back what claim switched on, where the launcher keeps it as a setting."""
+	global _putBack
+	if not _putBack:
 		return
+	_putBack = False
 	bus = _sessionBus()
-	names = list(_switchedOn)
-	_switchedOn.clear()
-	if bus is None:
-		return
-	for name in names:
-		if _set(bus, name, False):
-			log.info(f"Accessibility status: switched {name} off again")
+	if bus is not None and _set(bus, ENABLED, False):
+		log.info(f"Accessibility status: switched {ENABLED} off again")

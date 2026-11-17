@@ -10,7 +10,7 @@ BASEDREADER_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q t
 
 Both are started plainly, without a switch that forces accessibility on, and the accessibility status
 is switched off before NVDA starts, as a desktop has it before any screen reader runs: what lets them
-join the accessibility bus is NVDA's switching it on, and NVDA switches it off again when it exits.
+join the accessibility bus is NVDA's switching it on, and it is off again once NVDA has exited.
 """
 
 import subprocess
@@ -293,8 +293,11 @@ class TestChromium:
 		nvda.assertClean(logNames=("nvda.log",))
 		log = nvda.text("nvda.log")
 		assert not [mark for mark in FREEZE_MARKS if mark in log], "the watchdog found NVDA frozen"
-		assert STATUS_OFF in log
-		assert chromiumSession.accessibilityStatus() is False
+		if chromiumSession.launcherKeepsSettings():
+			assert STATUS_OFF in log
+		else:
+			assert STATUS_OFF not in log, "NVDA wrote the desktop's setting where the launcher reports it"
+		chromiumSession.waitForAccessibilityStatus(False)
 
 
 def toTop(session: Session) -> None:
@@ -403,7 +406,7 @@ class TestElectron:
 		nvda.waitForExit(EXIT_BOUND)
 		assert nvda.process.returncode == 0, nvda.describe()
 		nvda.assertClean(logNames=("nvda.log",))
-		assert chromiumSession.accessibilityStatus() is False
+		chromiumSession.waitForAccessibilityStatus(False)
 
 
 class TestElectronSignIn:

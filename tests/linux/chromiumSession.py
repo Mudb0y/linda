@@ -51,6 +51,8 @@ CHROMIUM_SWITCHES = (
 	"--lang=en-US",
 )
 ELECTRON_SWITCHES = ("--disable-gpu",)
+#: Seconds the launcher has to follow a client that comes or goes.
+STATUS_TIMEOUT = 3.0
 
 
 def plainEnvironment() -> dict[str, str]:
@@ -82,6 +84,22 @@ def accessibilityStatus(name: str = "IsEnabled") -> bool | None:
 	if reply.returncode != 0:
 		return None
 	return reply.stdout.split()[-1] == "true"
+
+
+def launcherKeepsSettings() -> bool:
+	"""Whether the launcher keeps the status as the desktop's settings, as launchers before at-spi2-core
+	2.61 do, rather than reporting whether a client listens for events."""
+	return accessibilityStatus("ScreenReaderEnabled") is not None
+
+
+def waitForAccessibilityStatus(value: bool, timeout: float = STATUS_TIMEOUT) -> None:
+	"""Wait until IsEnabled is value; a launcher that reports it changes it once it has seen a client
+	come or go."""
+	end = time.monotonic() + timeout
+	while (found := accessibilityStatus()) is not value:
+		if time.monotonic() >= end:
+			raise AssertionError(f"IsEnabled was {found} {timeout} s on, not {value}")
+		time.sleep(0.1)
 
 
 def clearAccessibilityStatus() -> None:
