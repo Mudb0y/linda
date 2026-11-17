@@ -585,6 +585,4 @@ def test_anUnknownCommandIsNoError(tmp_path: Path):
 
 def test_isHeardThroughPipewire(pipewire: PipewireFixture, tmp_path: Path):
 	requireDriverDirectory()
-	assertSpeechHeard(
-		pipewire, tmp_path, "openevv", "This is openevv, speaking through Linda and PipeWire."
-	)
+	assertSpeechHeard(pipewire, tmp_path, "openevv", "This is openevv, speaking through Linda and PipeWire.")

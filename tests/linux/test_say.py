@@ -259,9 +259,7 @@ class Say:
 		except subprocess.TimeoutExpired:
 			self.process.kill()
 			self.stdout, self.stderr = self.process.communicate()
-			raise AssertionError(
-				f"linda say did not end within {timeout} s\n{self.describe()}"
-			) from None
+			raise AssertionError(f"linda say did not end within {timeout} s\n{self.describe()}") from None
 		self.ended = time.monotonic()
 		assert snapshot(self.home.configDir) == self.configBefore, "the user's configuration changed"
 		leftOver = [

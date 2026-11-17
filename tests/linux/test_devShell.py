@@ -195,9 +195,7 @@ def _vbufEngine(value: str) -> None:
 def _benchBin(value: str) -> None:
 	# Named without depending on the bench, so that entering the shell never builds the engine: it
 	# exists once nix build .#linda-bench has built it.
-	assert re.fullmatch(r"/nix/store/[0-9a-z]{32}-linda-bench-[^/]+/bin/linda-bench", value), (
-		value
-	)
+	assert re.fullmatch(r"/nix/store/[0-9a-z]{32}-linda-bench-[^/]+/bin/linda-bench", value), value
 
 
 #: Every LINDA_ variable the shell exports, with what makes its value right.

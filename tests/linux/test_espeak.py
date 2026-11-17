@@ -521,9 +521,7 @@ def test_noDoneAfterACancelInTheLastWait(tmp_path: Path):
 
 
 def test_isHeardThroughPipewire(pipewire: PipewireFixture, tmp_path: Path):
-	assertSpeechHeard(
-		pipewire, tmp_path, "espeak", "This is Linda, speaking through eSpeak and PipeWire."
-	)
+	assertSpeechHeard(pipewire, tmp_path, "espeak", "This is Linda, speaking through eSpeak and PipeWire.")
 
 
 def test_theLibraryLinksNoSoundLibrary():
