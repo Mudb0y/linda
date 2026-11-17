@@ -239,6 +239,8 @@ class AtSpiBuffer(VirtualBuffer):
 		self._loadHold = None
 		#: time.monotonic() by which that wait ends whatever the page does.
 		self._loadHoldUntil = 0.0
+		#: Whether the document said last that it was busy, as it does when it is being left.
+		self._busy = False
 		super().__init__(rootNVDAObject, backendName="atspi")
 
 	def prepare(self):
@@ -684,9 +686,14 @@ class AtSpiBuffer(VirtualBuffer):
 	def event_stateChange(self, obj, nextHandler):
 		if not self.isAlive:
 			return treeInterceptorHandler.killTreeInterceptor(self)
-		# The link followed goes away with its page, and an object that is gone has none of the states
-		# that make it available; Firefox on Windows tells nothing of it.
-		if State.DEFUNCT in obj.states:
+		states = obj.states
+		isRoot = obj == self.rootNVDAObject
+		if isRoot:
+			self._busy = State.BUSY in states
+		# The page and the link followed go away: while the page is left, Firefox takes from what it
+		# holds the states that make it available, and an object that is gone has none of them. Firefox
+		# on Windows tells nothing of either.
+		if State.DEFUNCT in states or (self._busy and not isRoot and State.UNAVAILABLE in states):
 			return
 		return nextHandler()
 
