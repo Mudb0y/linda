@@ -51,10 +51,20 @@ pub enum Field {
     Value,
     Relations,
     LinkUri,
+    /// How many objects a subtree holds, up to SUBTREE_LIMIT, by Collection.GetMatches, which stops
+    /// counting there; a smaller one is then fetched whole with Tree.
+    Size,
     /// A whole subtree in one Collection.GetTree: structure, names, descriptions, attributes and
     /// the interfaces its properties show, leaving roles, states and text to ask for each object.
     Tree,
 }
+
+/// Objects below which a subtree comes in one GetTree. A GetTree holds Firefox's main thread for
+/// the whole subtree, about 20 microseconds an object and twice that the first time, so a bigger
+/// one would keep every other client waiting.
+const SUBTREE_LIMIT: u32 = 200;
+/// Collection's canonical order.
+const SORT_CANONICAL: u32 = 1;
 
 /// New children of one parent from which a GetTree on the parent replaces one on each.
 const PARENT_TREE_CHILDREN: usize = 16;
@@ -225,6 +235,10 @@ pub struct Walk {
     pub objs: HashMap<String, Obj>,
     outer: Option<Outer>,
     heap: BinaryHeap<Reverse<(Vec<u32>, Field, String)>>,
+    /// Calls that walk a whole subtree in Firefox, one at a time, so that another client's call
+    /// never waits behind more than one of them.
+    heavy: BinaryHeap<Reverse<(Vec<u32>, Field, String)>>,
+    heavy_inflight: Option<u64>,
     inflight: FuturesUnordered<LocalBoxFuture<'static, Reply>>,
     pending: HashMap<u64, (String, Field)>,
     retried: HashSet<(String, Field)>,
@@ -248,6 +262,8 @@ pub struct Walk {
     /// Time spent waiting with the window full.
     started: Instant,
     starts: HashSet<String>,
+    /// Fetch small subtrees whole rather than object by object.
+    subtrees: bool,
 }
 
 impl Walk {
@@ -262,6 +278,8 @@ impl Walk {
             objs: HashMap::new(),
             outer,
             heap: BinaryHeap::new(),
+            heavy: BinaryHeap::new(),
+            heavy_inflight: None,
             inflight: FuturesUnordered::new(),
             pending: HashMap::new(),
             retried: HashSet::new(),
@@ -280,7 +298,15 @@ impl Walk {
             slowest: (Duration::ZERO, None, String::new()),
             started: Instant::now(),
             starts: HashSet::new(),
+            subtrees: false,
         }
+    }
+
+    /// Fetches each subtree under SUBTREE_LIMIT objects with one GetTree, after one GetMatches to
+    /// count it, and asks only role, states and text of each object in it.
+    pub fn by_subtrees(mut self) -> Self {
+        self.subtrees = true;
+        self
     }
 
     /// Fetches path and everything under it, as one more starting point of this walk.
@@ -306,7 +332,12 @@ impl Walk {
             return;
         }
         o.queued |= bit(f);
-        self.heap.push(Reverse((o.key.clone(), f, path.to_owned())));
+        let entry = Reverse((o.key.clone(), f, path.to_owned()));
+        if matches!(f, Field::Size | Field::Tree) {
+            self.heavy.push(entry);
+        } else {
+            self.heap.push(entry);
+        }
     }
 
     pub fn seconds(&self) -> f64 {
@@ -314,7 +345,7 @@ impl Walk {
     }
 
     pub fn idle(&self) -> bool {
-        self.heap.is_empty() && self.inflight.is_empty()
+        self.heap.is_empty() && self.heavy.is_empty() && self.inflight.is_empty()
     }
 
     /// Sends calls up to the window and takes in one reply. False once nothing is left to do, or
@@ -325,15 +356,30 @@ impl Walk {
                 self.truncated = true;
             }
             self.heap.clear();
+            self.heavy.clear();
+            self.heavy_inflight = None;
             self.inflight = FuturesUnordered::new();
             self.pending.clear();
             return false;
         }
         while self.inflight.len() < WINDOW {
-            let Some(Reverse((_, f, path))) = self.heap.pop() else {
+            let heavy_next = self.heavy_inflight.is_none()
+                && self
+                    .heavy
+                    .peek()
+                    .is_some_and(|h| self.heap.peek().is_none_or(|l| h.0.0 <= l.0.0));
+            let next = if heavy_next {
+                self.heavy.pop()
+            } else {
+                self.heap.pop()
+            };
+            let Some(Reverse((_, f, path))) = next else {
                 break;
             };
             let id = self.next_id;
+            if heavy_next {
+                self.heavy_inflight = Some(id);
+            }
             self.next_id += 1;
             self.calls += 1;
             self.inflight
@@ -343,6 +389,9 @@ impl Walk {
         let Some((id, r, took)) = self.inflight.next().await else {
             return false;
         };
+        if self.heavy_inflight == Some(id) {
+            self.heavy_inflight = None;
+        }
         if let Some((path, f)) = self.pending.remove(&id) {
             if took > self.slowest.0 {
                 self.slowest = (took, Some(f), path.clone());
@@ -353,6 +402,27 @@ impl Walk {
     }
 
     fn reply(&mut self, path: String, f: Field, r: zbus::Result<Message>) {
+        if f == Field::Size {
+            let small = r
+                .ok()
+                .and_then(|m| decode::children(&m).ok())
+                .is_some_and(|found| (found.len() as u32) < SUBTREE_LIMIT);
+            if small {
+                if let Some(o) = self.objs.get_mut(&path) {
+                    o.awaiting_tree = true;
+                }
+                self.queue(&path, Field::Tree);
+            } else {
+                let (parent, key) = self
+                    .objs
+                    .get(&path)
+                    .map(|o| (o.parent.clone(), o.key.clone()))
+                    .unwrap_or_default();
+                self.admit(&path, parent, key);
+            }
+            self.finish(&path, f);
+            return;
+        }
         if f == Field::Tree {
             self.tree(&path, r.as_ref().ok());
             self.finish(&path, f);
@@ -444,6 +514,11 @@ impl Walk {
             k.push(i as u32);
             if new.contains(c) {
                 self.admit_tree(c, Some(path.to_owned()), k, !through_parent);
+            } else if self.subtrees && self.outer.is_none() {
+                let o = self.objs.entry(c.clone()).or_default();
+                o.parent = Some(path.to_owned());
+                o.key = k;
+                self.queue(c, Field::Size);
             } else if self.reusable(c, path) {
                 self.reused.insert(c.clone());
             } else {
@@ -761,6 +836,16 @@ fn issue(client: Rc<Client>, id: u64, path: String, f: Field) -> LocalBoxFuture<
                     .await
             }
             Field::LinkUri => client.call(p, IFACE_HYPERLINK, "GetURI", &(0i32,)).await,
+            Field::Size => {
+                client
+                    .call(
+                        p,
+                        IFACE_COLLECTION,
+                        "GetMatches",
+                        &(match_all(), SORT_CANONICAL, SUBTREE_LIMIT as i32, true),
+                    )
+                    .await
+            }
             Field::Tree => {
                 client
                     .call(
@@ -843,7 +928,7 @@ fn decode_into(o: &mut Obj, f: Field, msg: &Message) -> zbus::Result<()> {
         Field::Value => o.value = Some(number_property(msg)?),
         Field::Relations => o.label_visible = labelled_by(msg)?,
         Field::LinkUri => o.link_uri = Some(decode::string(msg)?),
-        Field::Tree => {}
+        Field::Size | Field::Tree => {}
     }
     Ok(())
 }
