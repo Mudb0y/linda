@@ -1068,13 +1068,12 @@ class VteTerminal(EnhancedTermTypedCharSupport):
 		if not self._cursorIsDrawn():
 			return None
 		inputRow = self._inputRowNow()
-		rows = self._rawRows
-		if inputRow is None or inputRow >= len(rows):
+		drawn = self._drawnRow()
+		if drawn is None:
 			return None
-		start = sum(len(row) + 1 for row in rows[:inputRow])
-		row = rows[inputRow]
-		column = min(max(self._tracker.inputColumn, inputContentStart(row)), inputContentEnd(row))
-		return start + column
+		row, column = drawn
+		start = sum(len(text) + 1 for text in self._rawRows[:inputRow])
+		return start + min(max(column, inputContentStart(row)), inputContentEnd(row))
 
 	def _inputPromptEnd(self, offset: int) -> int | None:
 		"""How far into the row starting at offset its prompt reaches, when it is the line typed in."""
@@ -1094,12 +1093,23 @@ class VteTerminal(EnhancedTermTypedCharSupport):
 		row = self._rawRows[inputRow]
 		self._tracker.inputColumn = min(max(column, inputContentStart(row)), inputContentEnd(row))
 
+	def _drawnRow(self) -> tuple[str, int] | None:
+		"""The line typed in and the drawn cursor's column in it, or None; the monitor thread can have
+		lost either since the caller looked."""
+		inputRow = self._inputRowNow()
+		column = self._tracker.inputColumn
+		rows = self._rawRows
+		if inputRow is None or column is None or inputRow >= len(rows):
+			return None
+		return rows[inputRow], column
+
 	def _drawnMove(self, gesture) -> bool:
 		"""Move the drawn cursor as the program will for gesture; whether gesture is a move it knows."""
-		inputRow = self._inputRowNow()
-		row = self._rawRows[inputRow]
+		drawn = self._drawnRow()
+		if drawn is None:
+			return False
+		row, column = drawn
 		start, end = inputContentStart(row), inputContentEnd(row)
-		column = self._tracker.inputColumn
 		key = gesture.mainKeyName
 		byWord = "control" in gesture.modifierNames
 		if key == "home":
@@ -1144,8 +1154,11 @@ class VteTerminal(EnhancedTermTypedCharSupport):
 		if not self._cursorIsDrawn():
 			self._backspaceFromBeforeKey(unit, gesture)
 			return
-		row = self._rawRows[self._inputRowNow()]
-		column = self._tracker.inputColumn
+		drawn = self._drawnRow()
+		if drawn is None:
+			gesture.send()
+			return
+		row, column = drawn
 		start = inputContentStart(row)
 		if column <= start:
 			gesture.send()
