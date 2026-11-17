@@ -34,7 +34,7 @@ KEY_BOUND = 0.1
 #: Words NVDA's symbol processing adds for the fixture's punctuation: "notes.txt", "settings = load()".
 SYMBOL_WORDS = frozenset({"dot", "equals"})
 #: Characters that frame and mark the fixture's rows, none of which may reach the synth.
-DECORATION = re.compile("[─-▟←-⯿•·]")
+DECORATION = re.compile("[\u2500-\u259f\u2190-\u2bff\u2022\u00b7]")
 
 ASSISTANT = harness._loadFile(
 	"terminalAssistant", harness.HERE / "fixtures" / "apps" / "terminalAssistant.py"
