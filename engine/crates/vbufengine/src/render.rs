@@ -150,6 +150,9 @@ pub struct Renderer<'a> {
     /// utils.cpp nodeHasUsefulContent.
     units: usize,
     useful_units: usize,
+    /// The language of the object being written, from it or its nearest ancestor that has one,
+    /// which each text field carries as gecko_ia2.cpp gives it from IA2 locale.
+    language: Option<String>,
 }
 
 fn push(out: &mut Vec<u16>, s: &str) {
@@ -246,7 +249,21 @@ impl<'a> Renderer<'a> {
             marks: Vec::new(),
             units: 0,
             useful_units: 0,
+            language: None,
         }
+    }
+
+    /// The language path's text is in when its own object does not say: its nearest ancestor's.
+    fn language_for(&self, path: &str) -> Option<String> {
+        let mut p = self.objs.get(path).and_then(|o| o.parent.clone());
+        while let Some(here) = p {
+            let o = self.objs.get(&here)?;
+            if let Some(l) = o.locale.as_deref().filter(|l| !l.is_empty()) {
+                return Some(l.to_owned());
+            }
+            p = o.parent.clone();
+        }
+        None
     }
 
     /// The context path's own children were rendered with: from its nearest rendered ancestor.
@@ -264,6 +281,7 @@ impl<'a> Renderer<'a> {
 
     /// Writes path's field, and everything in it.
     pub fn render(&mut self, path: &str, ctx: Ctx) {
+        self.language = self.language_for(path);
         self.node(path, ctx, true);
     }
 
@@ -273,6 +291,7 @@ impl<'a> Renderer<'a> {
         self.out.push(b'S' as u16);
         push(&mut self.out, &format!("{},{};", self.doc_handle, id));
         let ctx = self.ctx_for(path);
+        self.language = self.language_for(path);
         self.node(path, ctx, true);
     }
 
@@ -282,7 +301,13 @@ impl<'a> Renderer<'a> {
         }
         self.out.push(b'T' as u16);
         push_string(&mut self.out, s);
-        push(&mut self.out, "0;");
+        if let Some(language) = &self.language {
+            push(&mut self.out, "1;");
+            push_string(&mut self.out, "language");
+            push_string(&mut self.out, language);
+        } else {
+            push(&mut self.out, "0;");
+        }
         let n = s.encode_utf16().count();
         self.units += n;
         self.useful_units += s
@@ -321,6 +346,10 @@ impl<'a> Renderer<'a> {
             return;
         };
         self.nodes += 1;
+        let outer_language = self.language.clone();
+        if let Some(l) = o.locale.as_deref().filter(|l| !l.is_empty()) {
+            self.language = Some(l.to_owned());
+        }
         let raw_name = ROLE_NAMES.get(o.role as usize).copied().unwrap_or("");
         let raw = o.states;
         let tag = o.attr("tag");
@@ -631,6 +660,7 @@ impl<'a> Renderer<'a> {
         {
             m.escalate = true;
         }
+        self.language = outer_language;
     }
 
     fn link_uri(&self, path: &str) -> Option<String> {
@@ -785,6 +815,30 @@ mod tests {
             .expect("the link's name from its address");
         let first_block = s.find("C7,3,").expect("the first empty block");
         assert!(name < first_block, "{s}");
+    }
+
+    #[test]
+    fn text_carries_the_language_of_its_object_or_its_ancestor() {
+        let mut objs = page();
+        objs.get_mut("/a/1").unwrap().locale = Some("pl".into());
+        objs.get_mut("/a/3").unwrap().locale = Some("en".into());
+        let none = HashSet::new();
+        let mut r = Renderer::new(&objs, 7, "/a/1", false, &none);
+        r.render("/a/1", Ctx::default());
+        let s = decoded(&r.out);
+        assert!(s.contains("T3:Hi 1;8:language2:pl"), "{s}");
+        assert!(s.contains("T5:there1;8:language2:en"), "{s}");
+        assert!(s.ends_with("T1: 1;8:language2:plEE"), "{s}");
+        let mut objs = page();
+        objs.get_mut("/a/1").unwrap().locale = Some("pl".into());
+        for o in objs.values_mut() {
+            o.rendered = true;
+        }
+        let mut r = Renderer::new(&objs, 7, "/a/1", false, &none);
+        r.replace("/a/3");
+        let s = decoded(&r.out);
+        // A replaced object's text has its ancestors' language too.
+        assert!(s.contains("T5:there1;8:language2:pl"), "{s}");
     }
 
     #[test]

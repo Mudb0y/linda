@@ -51,6 +51,8 @@ pub enum Field {
     Value,
     Relations,
     LinkUri,
+    /// The language the object's text is in, which a page gives with lang.
+    Locale,
     /// How many objects a subtree holds, up to SUBTREE_LIMIT, by Collection.GetMatches, which stops
     /// counting there; a smaller one is then fetched whole with Tree.
     Size,
@@ -71,7 +73,7 @@ const PARENT_TREE_CHILDREN: usize = 16;
 
 /// What a subtree's GetTree carries for each object. An interface's property is there only for an
 /// object that has the interface.
-const TREE_PROPERTIES: [&str; 10] = [
+const TREE_PROPERTIES: [&str; 11] = [
     "Name",
     "Description",
     "Parent",
@@ -82,6 +84,7 @@ const TREE_PROPERTIES: [&str; 10] = [
     "Table.NColumns",
     "Value.CurrentValue",
     "TableCell.Position",
+    "Locale",
 ];
 
 /// The match rule `(aiia{ss}iaiiasib)` matching everything; the bridge parses it for GetTree and
@@ -152,6 +155,8 @@ pub struct Obj {
     /// Whether a label elsewhere in the document names this object; asked only where it matters.
     pub label_visible: bool,
     pub link_uri: Option<String>,
+    /// Its language, asked only of an object with text of its own; empty when it has none.
+    pub locale: Option<String>,
     /// Where it comes in the document: its index in each ancestor up to the walk's start.
     pub key: Vec<u32>,
     /// Fields asked for, and fields answered or given up.
@@ -655,6 +660,11 @@ impl Walk {
             if e.cell {
                 o.interfaces |= iface_bit(IFACE_TABLE_CELL);
             }
+            if let Some(locale) = e.locale {
+                o.locale = Some(locale);
+                o.queued |= bit(Field::Locale);
+                o.done |= bit(Field::Locale);
+            }
             o.queued |= given;
             o.done |= given;
             taken.push(e.path);
@@ -703,6 +713,12 @@ impl Walk {
             let i = o.interfaces;
             if i & iface_bit(IFACE_TEXT) != 0 {
                 more.push(Field::Text);
+            }
+            if o.text
+                .as_deref()
+                .is_some_and(|t| t.chars().any(|c| c != '\u{fffc}' && !c.is_whitespace()))
+            {
+                more.push(Field::Locale);
             }
             if i & iface_bit(IFACE_TABLE) != 0 {
                 more.extend([Field::TableRows, Field::TableColumns]);
@@ -842,6 +858,11 @@ fn issue(client: Rc<Client>, id: u64, path: String, f: Field) -> LocalBoxFuture<
                     .await
             }
             Field::LinkUri => client.call(p, IFACE_HYPERLINK, "GetURI", &(0i32,)).await,
+            Field::Locale => {
+                client
+                    .call(p, IFACE_PROPERTIES, "Get", &(IFACE_ACCESSIBLE, "Locale"))
+                    .await
+            }
             Field::Size => {
                 client
                     .call(
@@ -934,6 +955,7 @@ fn decode_into(o: &mut Obj, f: Field, msg: &Message) -> zbus::Result<()> {
         Field::Value => o.value = Some(number_property(msg)?),
         Field::Relations => o.label_visible = labelled_by(msg)?,
         Field::LinkUri => o.link_uri = Some(decode::string(msg)?),
+        Field::Locale => o.locale = Some(decode::string_property(msg)?),
         Field::Size | Field::Tree => {}
     }
     Ok(())
@@ -952,6 +974,7 @@ struct Entry {
     columns: Option<i32>,
     value: Option<f64>,
     cell: bool,
+    locale: Option<String>,
 }
 
 fn variant_str<'v>(v: &'v Variant<'_>) -> Option<&'v str> {
@@ -1030,6 +1053,7 @@ fn tree_entries(msg: &Message, app: &str) -> zbus::Result<Vec<Entry>> {
             columns: number("Table.NColumns"),
             value: props.get("Value.CurrentValue").and_then(variant_number),
             cell: props.contains_key("TableCell.Position"),
+            locale: props.get("Locale").and_then(variant_str).map(str::to_owned),
         });
     }
     Ok(out)
