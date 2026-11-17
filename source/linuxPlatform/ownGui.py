@@ -586,6 +586,18 @@ def _onCharHook(evt: wx.KeyEvent) -> None:
 	evt.Skip()
 
 
+def _addPageOnce(self, page: wx.Window, text: str, *args, **kwargs) -> bool:
+	"""wx.Notebook.AddPage, with an empty page of its own in place of a window that is already a page.
+
+	The add-on store gives one window as the page of each of its tabs, which wxMSW allows. A GTK widget
+	has one parent, and the notebook's other pages were left holding a widget taken from them, so that
+	closing the store, in whatever way, crashed NVDA.
+	"""
+	if any(self.GetPage(index) is page for index in range(self.GetPageCount())):
+		page = wx.Panel(self)
+	return _upstreamAddPage(self, page, text, *args, **kwargs)
+
+
 class _NvdaLogTarget(wx.Log):
 	def DoLogTextAtLevel(self, level: int, msg: str) -> None:
 		if level <= wx.LOG_Error:
@@ -633,6 +645,7 @@ _upstreamPostInitInputGestures = None
 _upstreamAddCaptured = None
 _upstreamDoRefresh = None
 _upstreamPopupMenu = wx.Window.PopupMenu
+_upstreamAddPage = wx.Notebook.AddPage
 
 
 def install() -> None:
@@ -650,6 +663,7 @@ def install() -> None:
 	inputGestures.InputGesturesDialog.postInit = _postInitInputGestures
 	inputGestures.InputGesturesDialog._addCaptured = _addCapturedOnceKeysReleased
 	wx.Window.PopupMenu = _popupMenuOnFirstItem
+	wx.Notebook.AddPage = _addPageOnce
 	wx.Window.SetAccessible = _setNoAccessible
 	wx.Window.SetFocus = _setFocusOnceActive
 	nvdaControls.ListCtrlAccessible = _NoAccessible
