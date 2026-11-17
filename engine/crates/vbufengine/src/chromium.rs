@@ -10,6 +10,11 @@ use std::collections::HashMap;
 use crate::tables::ROLE_NAMES;
 use crate::walk::Obj;
 
+/// Whether a document attribute holds the document's address: Firefox's DocURL, Chromium's URI.
+pub fn is_doc_url(key: &str) -> bool {
+    key == "DocURL" || key == "URI"
+}
+
 /// The children that an object's embedded object characters stand for, in order, given how many of
 /// those characters its text has.
 pub fn embedded_children<'a>(

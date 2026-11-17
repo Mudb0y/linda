@@ -507,7 +507,7 @@ async fn doc_url(client: &Client, doc: &str) -> String {
     decode::attributes(&msg)
         .unwrap_or_default()
         .into_iter()
-        .find(|(k, _)| k == "DocURL")
+        .find(|(k, _)| crate::chromium::is_doc_url(k))
         .map(|(_, v)| v)
         .unwrap_or_default()
 }
