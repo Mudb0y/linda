@@ -624,6 +624,87 @@ def test_pageKeepsTheFocusThroughNVDAKeys(desktop: DesktopSession, tmp_path: Pat
 	quitNVDA(desktop, nvda)
 
 
+class PopupsPage:
+	"""The keys popups page's logs: what its suggestion list and menu did, and what its window and
+	document noticed of the focus."""
+
+	def __init__(self) -> None:
+		Atspi = self._Atspi = desktopSession._atspi()
+		desktop = Atspi.get_desktop(0)
+		desktop.clear_cache()
+		for index in range(desktop.get_child_count()):
+			app = desktop.get_child_at_index(index)
+			if app is None or app.get_toolkit_name() != "Gecko":
+				continue
+			documents = [
+				d for d in _matches(Atspi, app, Atspi.Role.DOCUMENT_WEB) if d.get_name() == "Keys popups page"
+			]
+			if documents:
+				break
+		else:
+			raise AssertionError("no Firefox shows the keys popups page")
+		self._popupLog = _byId(documents[0], "popupLog")
+		self._focusLog = _byId(documents[0], "focusLog")
+		self.popupLog()
+		self.focusLog()
+		time.sleep(webSession.CACHE_FILL_SECONDS)
+
+	def popupLog(self) -> list[str]:
+		return self._Atspi.Text.get_text(self._popupLog, 0, -1).split()
+
+	def focusLog(self) -> list[str]:
+		return self._Atspi.Text.get_text(self._focusLog, 0, -1).split()
+
+	def waitForPopupLog(self, expected: list[str], timeout: float = 3) -> None:
+		deadline = time.monotonic() + timeout
+		while (logged := self.popupLog()) != expected:
+			assert time.monotonic() < deadline, f"the page's popups logged {logged}, not {expected}"
+			time.sleep(0.05)
+
+
+#: NVDA commands that read without moving anything: the window's title, the focus, the review cursor's
+#: line on the numpad, and the current line, with each NVDA key.
+READING_CHORDS = ("Insert+t", "Caps_Lock+t", "Insert+Tab", "KP_Up", "Insert+Up")
+
+
+def test_popupsStayOpenThroughNVDAKeys(desktop: DesktopSession, tmp_path: Path):
+	webSession.requireBrowseLibraries()
+	webSession.startFirefox(desktop, "keysPopups.html")
+	nvda = desktop.startNVDA(browseConfig(tmp_path), env=probeHooks(tmp_path))
+	nvda.waitForLog("Buffer rendered", BUFFER_BOUND)
+	waitForCapture(nvda, "browse", timeout=BUFFER_BOUND)
+	time.sleep(SETTLE)
+	page = PopupsPage()
+	settled = page.focusLog()
+
+	step(desktop, "control+Home", "heading level 1 Keys popups page")
+	step(desktop, "Tab", "Focus mode")
+	desktop.typeText("ap")
+	page.waitForPopupLog(["suggestions-open"])
+	for chord in READING_CHORDS:
+		desktop.press(chord, gap=SETTLE)
+	assert page.popupLog() == ["suggestions-open"]
+	# Back to browse mode, with the field keeping the focus and its list open, and browse mode's keys.
+	step(desktop, "Escape", "Browse mode")
+	for chord in ("Down", "Up", "h", "shift+h", *READING_CHORDS):
+		desktop.press(chord, gap=SETTLE)
+	assert page.popupLog() == ["suggestions-open"]
+
+	# The menu takes the focus as it opens, which closes the list.
+	step(desktop, "b", "Actions" + PREFIX_MARK)
+	desktop.press("Return", gap=SETTLE)
+	page.waitForPopupLog(["suggestions-open", "suggestions-closed", "menu-open"])
+	time.sleep(SETTLE)
+	for chord in READING_CHORDS:
+		desktop.press(chord, gap=SETTLE)
+	assert page.popupLog() == ["suggestions-open", "suggestions-closed", "menu-open"]
+	assert page.focusLog() == settled, page.focusLog()
+	# NVDA gives a menu its Escape, which closes it.
+	desktop.press("Escape", gap=SETTLE)
+	page.waitForPopupLog(["suggestions-open", "suggestions-closed", "menu-open", "menu-closed"])
+	quitNVDA(desktop, nvda)
+
+
 def test_polishAltGrLettersOnAPage(desktop: DesktopSession, tmp_path: Path):
 	subprocess.run(["setxkbmap", "pl"], check=True)
 	try:

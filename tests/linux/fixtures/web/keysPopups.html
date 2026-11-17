@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Keys popups page</title></head>
+<body>
+<h1>Keys popups page</h1>
+<p><label for="search">Search</label> <input id="search" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="suggestions" autocomplete="off"></p>
+<ul id="suggestions" role="listbox" aria-label="Suggestions" hidden>
+<li role="option">apple</li>
+<li role="option">apricot</li>
+</ul>
+<p><button id="menuButton" aria-haspopup="menu" aria-expanded="false">Actions</button></p>
+<ul id="menu" role="menu" aria-label="Actions" hidden>
+<li role="menuitem" tabindex="-1">Open</li>
+<li role="menuitem" tabindex="-1">Save</li>
+</ul>
+<div id="popupLog" aria-label="Popup log"></div>
+<div id="focusLog" aria-label="Focus log"></div>
+<script>
+const note = (id, name) => {
+	const log = document.getElementById(id);
+	log.textContent = log.textContent ? log.textContent + " " + name : name;
+};
+for (const type of ["blur", "focus"]) {
+	window.addEventListener(type, (event) => {
+		if (event.target === window) {
+			note("focusLog", "window-" + type);
+		}
+	});
+}
+document.addEventListener("visibilitychange", () => note("focusLog", "document-" + document.visibilityState));
+
+// As pages make them: a list of suggestions and a menu, each closing when its control loses the
+// focus, which it does when the window does.
+const search = document.getElementById("search");
+const suggestions = document.getElementById("suggestions");
+const showSuggestions = (open) => {
+	if (suggestions.hidden !== open) {
+		return;
+	}
+	suggestions.hidden = !open;
+	search.setAttribute("aria-expanded", String(open));
+	note("popupLog", open ? "suggestions-open" : "suggestions-closed");
+};
+search.addEventListener("input", () => showSuggestions(search.value.length > 0));
+search.addEventListener("blur", () => showSuggestions(false));
+
+const button = document.getElementById("menuButton");
+const menu = document.getElementById("menu");
+const items = [...menu.querySelectorAll("[role=menuitem]")];
+const showMenu = (open) => {
+	if (menu.hidden !== open) {
+		return;
+	}
+	menu.hidden = !open;
+	button.setAttribute("aria-expanded", String(open));
+	note("popupLog", open ? "menu-open" : "menu-closed");
+	if (open) {
+		items[0].focus();
+	}
+};
+button.addEventListener("click", () => showMenu(menu.hidden));
+menu.addEventListener("focusout", (event) => {
+	if (!menu.contains(event.relatedTarget)) {
+		showMenu(false);
+	}
+});
+menu.addEventListener("keydown", (event) => {
+	const index = items.indexOf(document.activeElement);
+	if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+		items[(index + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus();
+		event.preventDefault();
+	} else if (event.key === "Escape") {
+		button.focus();
+	}
+});
+</script>
+</body></html>
