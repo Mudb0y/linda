@@ -59,8 +59,9 @@ if sys.platform != "win32":
 	import core
 	import wx
 	from linuxPlatform import ownGui
+	from linuxPlatform.atspi import client as atspiClient
 	from NVDAObjects import NVDAObject
-	from NVDAObjects.AtSpi import TableCell
+	from NVDAObjects.AtSpi import TableCell, TableRowItem
 	from NVDAObjects.behaviors import Dialog
 
 	class NvdaGtkDialog(NVDAObject):
@@ -98,7 +99,13 @@ if sys.platform != "win32":
 
 		def _get_name(self):
 			textCell = self.next
-			return textCell.name if textCell is not None else ""
+			if textCell is None:
+				return ""
+			# The cell's own text: as a row item, the text cell would read the whole row.
+			try:
+				return atspiClient.client.name(textCell.node)
+			except LookupError:
+				return ""
 
 		def _get_states(self):
 			return (super().states | {controlTypes.State.CHECKABLE}) - {
@@ -108,11 +115,8 @@ if sys.platform != "win32":
 
 		def _get_positionInfo(self):
 			try:
-				return {
-					"indexInGroup": TableCell._get_rowNumber(self),
-					"similarItemsInGroup": TableCell._get_rowCount(self),
-				}
-			except (LookupError, AttributeError):
+				return self._tableCellPosition()
+			except LookupError:
 				return {}
 
 		def _get_rowNumber(self):
@@ -388,7 +392,8 @@ class AppModule(appModuleHandler.AppModule):
 				if controlTypes.State.FOCUSABLE in obj.states:
 					clsList.insert(0, NvdaGtkReadOnlyField)
 			elif (
-				TableCell in clsList
+				# The cell of a GTK 3 tree view is a row item, and that of any other table a TableCell.
+				(TableRowItem in clsList or TableCell in clsList)
 				and getattr(obj, "atspiRole", None) == "table cell"
 				and not obj.name
 				and ownGui.focusIsCheckList()

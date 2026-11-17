@@ -306,7 +306,7 @@ def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSe
 	downToKeyboard(desktop)
 	# Applied, and kept although the dialog was then cancelled.
 	step(desktop, "Tab", "Keyboard layout: combo box laptop collapsed Alt plus K")
-	step(desktop, "Tab", "Select NVDA Modifier Keys table", "caps lock check box not checked 1 of 3")
+	step(desktop, "Tab", "Select NVDA Modifier Keys list", "caps lock check box not checked 1 of 3")
 	step(desktop, "space", "checked")
 	step(desktop, "Return", *AT_START)
 	step(desktop, "Caps_Lock+t", "Fixture window")
