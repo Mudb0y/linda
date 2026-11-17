@@ -284,23 +284,19 @@ result = {{
 	}
 
 
-def test_productInfoRaises(tmp_path: Path):
+def test_productInfoComesFromTheProgramAndItsStorePath(tmp_path: Path):
 	done = harness.runChild(
 		tmp_path,
 		"""
 import os, appModuleHandler
-from linuxPlatform import NoLinuxImplementation
-mod = appModuleHandler.getAppModuleFromProcessID(os.getppid())
-try:
-	mod.productName
-	result = "answered"
-except NoLinuxImplementation:
-	result = "raised"
+mod = appModuleHandler.getAppModuleFromProcessID(os.getpid())
+result = [mod.productName, mod.productVersion, os.readlink(f"/proc/{os.getpid()}/exe")]
 """,
 	)
-	done.assertClean(ignoring={"noLinuxImplementation"})
-	assert done.value == "raised"
-	assert done.noLinuxImplementation == ["product name and version of a process"]
+	done.assertClean()
+	name, version, executable = done.value
+	assert name == os.path.basename(executable)
+	assert version and version in executable, (version, executable)
 
 
 def test_otherUsersProcess(tmp_path: Path):

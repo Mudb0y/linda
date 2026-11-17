@@ -11,8 +11,6 @@ import threading
 import weakref
 from dataclasses import dataclass
 
-from . import NoLinuxImplementation
-
 # NixOS's wrapProgram moves a program to .name-wrapped and puts a wrapper in its place, and a
 # program wrapped twice becomes ..name-wrapped-wrapped.
 _wrappedName = re.compile(r"\.(.+)-wrapped")
@@ -386,12 +384,28 @@ def isOtherUser(processID: int | None) -> bool:
 	return False
 
 
+#: A store path's package directory, which Nix names after the package and its version.
+_storePackage = re.compile(r"/nix/store/[0-9a-z]{32}-(?P<name>.+?)-(?P<version>[0-9][^/-]*(?:-[^/]*)?)/")
+
+
 def getProductInfo(processID: int) -> tuple[str, str]:
-	"""The product name and version, which Windows reads from the executable's version resource."""
-	raise NoLinuxImplementation(
-		"product name and version of a process",
-		"Linux executables carry no version resource",
-	)
+	"""The product name and version, which Windows reads from the executable's version resource.
+
+	Linux executables carry no version resource. The program's name, without NixOS's wrapper
+	decoration, stands for the product, and the version is the one in the store path of a program run
+	from the Nix store, or "" otherwise.
+
+	:raises RuntimeError: When the process has gone, as Windows does when it has no handle for it.
+	"""
+	try:
+		path = getExecutablePath(processID)
+	except PermissionError:
+		path = (_readCommandLine(processID) or [""])[0]
+	except OSError as e:
+		raise RuntimeError(f"process {processID} has no executable: {e}") from e
+	name = _unwrap(os.path.basename(path))
+	match = _storePackage.match(path)
+	return name, match.group("version") if match else ""
 
 
 def _readStat(processID: int) -> list[bytes] | None:
