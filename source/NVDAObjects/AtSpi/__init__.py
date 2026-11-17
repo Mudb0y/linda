@@ -252,6 +252,8 @@ class AtSpi(NVDAObject):
 		if role == Role.SPINBUTTON and "Text" in ifaces and "Value" in ifaces:
 			clsList.append(SpinButton)
 		elif "Text" in ifaces and ("editable" in states or role == Role.EDITABLETEXT):
+			if self._isRichTextEditor:
+				clsList.append(RichTextEditor)
 			clsList.append(EditableTextWithAutoSelectDetection)
 		elif role == Role.TERMINAL and "Text" in ifaces:
 			clsList.append(VteTerminal)
@@ -276,6 +278,28 @@ class AtSpi(NVDAObject):
 			clsList.append(TopLevelWindow)
 		clsList.append(AtSpi)
 		super().findOverlayClasses(clsList)
+
+	def _get__isRichTextEditor(self) -> bool:
+		"""Whether this is an editable element of a page in Firefox, which keeps its text in the
+		paragraphs inside it, as NVDA's Editor is on Windows; a field of a form keeps its own."""
+		states = self.atspiStates
+		return (
+			self.toolkit == GECKO
+			and self.role == Role.EDITABLETEXT
+			and "focusable" in states
+			and "multi-line" in states
+			and "Hypertext" in self.atspiInterfaces
+			and self.atspiAttributes.get("tag") != "textarea"
+		)
+
+	def event_caret(self):
+		# Firefox moves the caret of the paragraph inside an editor, which alone reports it; the
+		# editor, which has the focus, takes it as its own, as NVDA's IAccessible does on Windows.
+		focus = api.getFocusObject()
+		if self is not focus and isinstance(focus, RichTextEditor) and self.isDescendantOf(focus):
+			focus.event_caret()
+			return
+		super().event_caret()
 
 	# Raw AT-SPI facts, each cached for one core cycle like every NVDAObject property.
 
@@ -1066,6 +1090,15 @@ def _topLevelNodes() -> list[Node]:
 		except NodeGone:
 			continue
 	return result
+
+
+class RichTextEditor(AtSpi):
+	"""An editable element of a page, its paragraphs' text read as one."""
+
+	def _get_TextInfo(self):
+		from NVDAObjects.AtSpi.compoundText import AtspiCompoundTextInfo
+
+		return AtspiCompoundTextInfo
 
 
 class TopLevelWindow(AtSpi):

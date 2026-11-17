@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Editor fixture</title>
+<style>
+#prompt { width: 22em; font: 16px sans-serif; border: 1px solid; padding: 4px; }
+#prompt p { margin: 0 0 4px 0; }
+</style>
+</head>
+<body>
+<main>
+<h1>New chat</h1>
+<!-- A prompt field built as ProseMirror builds one, as claude.ai's is: an editable element with the
+textbox role holding a paragraph per paragraph, an empty paragraph holding ProseMirror's trailing break,
+and Shift+Enter putting a line break into the paragraph. The editor handles Enter and Shift+Enter itself
+and changes the document as ProseMirror does. -->
+<div id="prompt" contenteditable="true" translate="no" class="ProseMirror" role="textbox" aria-multiline="true" aria-label="Write your prompt"><p>Alpha beta gamma</p><p>Second line<br>after a break</p><p><br class="ProseMirror-trailingBreak"></p><p>one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty</p><p>Last words here</p></div>
+<button type="button">Send</button>
+</main>
+<script>
+const prompt = document.getElementById("prompt");
+
+function trailingBreak() {
+	const br = document.createElement("br");
+	br.className = "ProseMirror-trailingBreak";
+	return br;
+}
+
+function paragraphOf(node) {
+	while (node && node.parentNode !== prompt) {
+		node = node.parentNode;
+	}
+	return node;
+}
+
+// An empty paragraph, or one ending in a line break, gets ProseMirror's trailing break so that its
+// last line has a height; one with text after its last break loses it.
+function tidy(paragraph) {
+	for (const br of paragraph.querySelectorAll("br.ProseMirror-trailingBreak")) {
+		br.remove();
+	}
+	const last = paragraph.lastChild;
+	if (!last || last.nodeName === "BR" || (last.nodeType === Node.TEXT_NODE && !last.data)) {
+		paragraph.append(trailingBreak());
+	}
+}
+
+function caretAfter(node) {
+	const range = document.createRange();
+	range.setStartAfter(node);
+	range.collapse(true);
+	const selection = window.getSelection();
+	selection.removeAllRanges();
+	selection.addRange(range);
+}
+
+function splitParagraph() {
+	const selection = window.getSelection();
+	const range = selection.getRangeAt(0);
+	range.deleteContents();
+	const paragraph = paragraphOf(range.startContainer) || prompt.lastElementChild;
+	const tail = document.createRange();
+	tail.setStart(range.startContainer, range.startOffset);
+	tail.setEndAfter(paragraph.lastChild);
+	const moved = tail.extractContents();
+	const next = document.createElement("p");
+	next.append(...moved.childNodes);
+	paragraph.after(next);
+	tidy(paragraph);
+	tidy(next);
+	selection.collapse(next, 0);
+}
+
+function hardBreak() {
+	const selection = window.getSelection();
+	const range = selection.getRangeAt(0);
+	range.deleteContents();
+	const br = document.createElement("br");
+	range.insertNode(br);
+	const paragraph = paragraphOf(br);
+	tidy(paragraph);
+	caretAfter(br);
+}
+
+prompt.addEventListener("keydown", (event) => {
+	if (event.key !== "Enter") {
+		return;
+	}
+	event.preventDefault();
+	if (event.shiftKey) {
+		hardBreak();
+	} else {
+		splitParagraph();
+	}
+});
+
+prompt.addEventListener("input", () => {
+	for (const paragraph of prompt.children) {
+		if (!paragraph.textContent && !paragraph.querySelector("br")) {
+			paragraph.append(trailingBreak());
+		}
+	}
+});
+</script>
+</body></html>

@@ -118,6 +118,9 @@ security.md
 source/NVDAObjects/AtSpi/__init__.py
   Linux runtime: added. NVDAObjects for AT-SPI accessibles, the counterpart
   of NVDAObjects.IAccessible and NVDAObjects.UIA, which only Linux imports
+source/NVDAObjects/AtSpi/compoundText.py
+  Linux runtime: added. MozillaCompoundTextInfo over AT-SPI, which reads a
+  rich text editor in Firefox as one text, which only Linux imports
 source/NVDAObjects/AtSpi/terminal.py
   Linux runtime: added. A terminal's screen over AT-SPI, read as NVDA reads
   a console, which only Linux imports
