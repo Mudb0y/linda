@@ -95,8 +95,9 @@ source/appModules/caja.py
   opens; no Windows program is named caja
 source/appModules/chromium.py
   Linux runtime: added. The app module for Chromium, which makes sure
-  Chromium builds a page's accessible tree and names a page's landmarks for
-  their kind; on Windows, where Chromium is chrome.exe, it is the default
+  Chromium builds a page's accessible tree, names a page's landmarks for
+  their kind and reads a rich text editor's paragraphs as one text; on
+  Windows, where Chromium is chrome.exe, it is the default
 source/appModules/discord.py
   Linux runtime: added. Discord's app module is Chromium's; on Windows,
   where Discord.exe would load it, it is the default

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Composer fixture</title></head>
+<body>
+<main>
+<h1>general</h1>
+<ol id="messages" aria-label="Messages">
+<li>Ala: Hello everyone</li>
+</ol>
+<form id="send">
+<!-- A rich text editor of the kind chat programs write messages in: an editable element with the
+textbox role, not a field, holding a paragraph of spans, focused as the channel opens. -->
+<div id="message" role="textbox" aria-multiline="true" aria-label="Message #general" contenteditable="true"><div><span><br></span></div></div>
+</form>
+</main>
+<script>
+const messages = document.getElementById("messages");
+const field = document.getElementById("message");
+
+field.addEventListener("keydown", (event) => {
+	if (event.key !== "Enter" || event.shiftKey) {
+		return;
+	}
+	event.preventDefault();
+	const text = field.textContent.trim();
+	if (text) {
+		const item = document.createElement("li");
+		item.textContent = "You: " + text;
+		messages.append(item);
+		field.replaceChildren(document.createElement("div"));
+		field.firstChild.append(document.createElement("br"));
+	}
+});
+window.addEventListener("load", () => setTimeout(() => field.focus(), 500));
+</script>
+</body></html>

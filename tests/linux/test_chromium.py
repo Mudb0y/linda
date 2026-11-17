@@ -109,6 +109,18 @@ def signIn(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Session]:
 		yield Session(desktop, nvda, program, directory)
 
 
+@pytest.fixture(scope="class")
+def composer(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Session]:
+	webSession.requireBrowseLibraries()
+	directory = tmp_path_factory.mktemp("composer")
+	with DesktopSession(directory / "desktop") as desktop:
+		chromiumSession.clearAccessibilityStatus()
+		nvda = desktop.startNVDA(webSession.BROWSE_CONFIG, env=TIMED_SPEECH)
+		nvda.waitForLog("NVDA initialized", STARTUP_BOUND)
+		browser = chromiumSession.startChromium(desktop, "chromiumComposer.html")
+		yield Session(desktop, nvda, browser, directory)
+
+
 class TestChromium:
 	"""Chromium on the usable page, from NVDA's start to its exit."""
 
@@ -438,6 +450,49 @@ class TestElectronSignIn:
 		step(session, "shift+e", "Password edit…")
 		step(session, "Return", "Focus mode")
 		step(session, "Escape", "Browse mode")
+
+	def test_exitIsClean(self, session: Session):
+		step(session, "Insert+q", "Exit NVDA…")
+		session.desktop.press("Return")
+		nvda = session.nvda
+		nvda.waitForExit(EXIT_BOUND)
+		assert nvda.process.returncode == 0, nvda.describe()
+		nvda.assertClean(logNames=("nvda.log",))
+
+
+class TestChromiumComposer:
+	"""A message written in a rich text editor, an editable element rather than a field, as chat
+	programs have, which the channel focuses as it opens; Enter sends it."""
+
+	@pytest.fixture
+	def session(self, composer: Session) -> Session:
+		return composer
+
+	@pytest.fixture(autouse=True)
+	def recoverAfterAFailure(self, request: pytest.FixtureRequest, session: Session) -> Iterator[None]:
+		failed = request.session.testsfailed
+		yield
+		if request.session.testsfailed > failed and session.nvda.process.poll() is None:
+			session.desktop.press("Escape", "Escape", gap=SETTLE)
+
+	def test_theEditorIsInFocusModeWhenTheChannelOpens(self, session: Session):
+		session.desktop.expect(
+			"Message  number general edit multi line…", "Focus mode", since=0, timeout=STARTUP_BOUND
+		)
+		time.sleep(SETTLE)
+
+	def test_typingIsEchoedAndReadBack(self, session: Session):
+		typeEchoed(session, "hello")
+		step(session, "Left", "o")
+		step(session, "Insert+Up", "hello")
+
+	def test_enterSendsTheMessage(self, session: Session):
+		session.desktop.press("End", "Return")
+		time.sleep(SETTLE)
+		step(session, "Escape", "Browse mode")
+		step(session, "shift+i", "Messages list with 2 items 2. You: hello")
+		step(session, "e", "form Message  number general edit multi line…")
+		step(session, "Return", "Focus mode")
 
 	def test_exitIsClean(self, session: Session):
 		step(session, "Insert+q", "Exit NVDA…")
