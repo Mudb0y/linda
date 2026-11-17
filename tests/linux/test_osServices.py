@@ -130,7 +130,9 @@ def test_formerNamesDirectoriesAreAdoptedOnlyWhereTheCurrentOnesAreMissing(tmp_p
 		"after": str(configHome / "linda"),
 		"failures": [],
 	}
-	assert sorted(os.listdir(configHome)) == ["linda"]
+	assert sorted(os.listdir(configHome)) == ["basedreader", "linda"]
+	# What a copy from before the rename reads and writes is the same directory.
+	assert os.readlink(configHome / "basedreader") == "linda"
 	assert (configHome / "linda" / "nvda.ini").read_text(encoding="utf-8") == "schemaVersion = 25\n"
 	# Something already started under the current name there, so the former directory stays as it is.
 	assert sorted(os.listdir(stateHome)) == ["basedreader", "linda"]

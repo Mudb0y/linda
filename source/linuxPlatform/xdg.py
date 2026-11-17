@@ -45,7 +45,9 @@ def userStateDir() -> str:
 
 def adoptFormerDirectories() -> list[str]:
 	"""Give the configuration and state directories of the former name the current one, where only
-	the former exists, so that the user's settings carry over.
+	the former exists, so that the user's settings carry over. The former name stays as a link to
+	the directory: a copy from before the rename, which is what gets started when this one fails,
+	then speaks with the settings its user chose.
 
 	Run only while no copy started under the former name is left to write into its directories.
 
@@ -61,6 +63,11 @@ def adoptFormerDirectories() -> list[str]:
 			os.rename(former, current)
 		except OSError as e:
 			failures.append(f"could not move {former} to {current}: {e}")
+			continue
+		try:
+			os.symlink(appDirName, former)
+		except OSError as e:
+			failures.append(f"could not leave {former} as a link to {current}: {e}")
 	return failures
 
 

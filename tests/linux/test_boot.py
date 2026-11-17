@@ -1056,7 +1056,7 @@ def test_settingsAndLogsUnderTheFormerNameCarryOver(launches, tmp_path: Path):
 	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
 	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
 	nvda.assertClean(logNames=("nvda.log",))
-	assert not (configHome / "basedreader").exists()
+	assert os.readlink(configHome / "basedreader") == "linda"
 	assert (configHome / "linda" / "nvda.ini").is_file()
-	assert not (stateHome / "basedreader").exists()
+	assert os.readlink(stateHome / "basedreader") == "linda"
 	assert (stateHome / "linda" / "nvda.log").read_text(encoding="utf-8") == "a log of the former name\n"
