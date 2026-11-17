@@ -42,6 +42,9 @@ EVENT_TYPES = [
 	"window:create",
 ]
 WINDOW_ACTIVATION_EVENTS = frozenset({"window:activate", "window:deactivate"})
+#: What Qt's QAccessibleAnnouncementEvent and GTK 4's gtk_accessible_announce send: a message for the
+#: screen reader to speak, as a UIA notification is on Windows.
+ANNOUNCEMENT_EVENT = "object:announcement"
 
 #: AT-SPI state changes NVDA presents as stateChange, by the state's name.
 STATE_CHANGE_STATES = frozenset(
@@ -300,15 +303,58 @@ def _ownsActiveWindow(node: Node) -> bool:
 	return True
 
 
+#: Focused objects read at most to find the one that has the keyboard, among those Qt leaves focused.
+FOCUS_CANDIDATES = 8
+#: Items Qt marks focused whenever they are current in their container, focused or not: the current tab
+#: of every tab bar and the current item of every combo box's hidden list.
+_QT_ITEM_ROLES = frozenset({"page tab", "list item", "tree item", "table cell"})
+_QT_MENU_ROLES = frozenset({"menu item", "check menu item", "radio menu item", "menu", "popup menu"})
+
+
 def _focusIn(window: Node) -> Node | None:
 	c = client()
 	try:
 		if "focused" in c.states(window):
 			return window
-		focused = c.firstMatchWithState(window, "focused")
+		if c.toolkit(window) == "Qt":
+			focused = _qtFocusAmong(c.matchesWithState(window, "focused", FOCUS_CANDIDATES))
+		else:
+			focused = c.firstMatchWithState(window, "focused")
 	except NodeGone:
 		return None
 	return activeDescendant(focused) or focused if focused else None
+
+
+def _qtFocusAmong(candidates: list[Node]) -> Node | None:
+	"""The object with the keyboard among the focused ones Qt lists in tree order: an item counts only
+	while its container has the focus too, and then wins over it."""
+	c = client()
+	chosen = None
+	inMenus = False
+	for node in candidates:
+		try:
+			role = c.role(node)
+			if role == "menu bar":
+				# Only while its menus have the keyboard, which then goes to the newest item they focus,
+				# whatever else keeps the focus behind them.
+				inMenus = True
+				chosen = node
+			elif inMenus:
+				if role in _QT_MENU_ROLES:
+					chosen = node
+			elif role in _QT_ITEM_ROLES:
+				parent = c.parent(node)
+				if parent is None or "focused" not in c.states(parent):
+					continue
+				if chosen is None or parent == chosen:
+					chosen = node
+			elif chosen is None:
+				chosen = node
+		except AppHung:
+			raise
+		except NodeGone:
+			continue
+	return chosen
 
 
 def activeDescendant(container: Node) -> Node | None:
@@ -461,6 +507,9 @@ def initialize() -> None:
 	import core
 
 	core.postNvdaStartup.register(_onPostNvdaStartup)
+	from linuxPlatform import messageService
+
+	messageService.initialize()
 
 
 def terminate() -> None:
@@ -468,6 +517,9 @@ def terminate() -> None:
 	import core
 
 	core.postNvdaStartup.unregister(_onPostNvdaStartup)
+	from linuxPlatform import messageService
+
+	messageService.terminate()
 	if _listening:
 		client().stopListening(EVENT_TYPES)
 	_listening = False
@@ -562,6 +614,11 @@ def _focusCandidate(event) -> Node | None:
 		if c.toolkit(source).lower() != "gtk":
 			return None
 	role = c.role(source)
+	if role == "menu bar" and c.toolkit(source) == "Qt":
+		# Qt focuses its menu bar after the menu it opens, whose first item has the focus without an
+		# event of its own.
+		inside = [n for n in c.matchesWithState(source, "focused", FOCUS_CANDIDATES) if n != source]
+		return inside[-1] if inside else source
 	if role == "menu" and _hasSelectedChild(source):
 		# GTK 3 focuses a menu item again as its submenu opens on a child that is already highlighted;
 		# the child's own focus event follows.
@@ -785,6 +842,17 @@ def _backgroundEventsOf(node: Node) -> frozenset[str]:
 	return getattr(appModule, "backgroundEvents", frozenset())
 
 
+def _announce(event) -> None:
+	"""Speak what an application announced, from any application: a chat program announces new
+	messages while another window has the focus, as it would to Orca."""
+	import queueHandler
+	import ui
+
+	text = event[4]
+	if isinstance(text, str) and text.strip():
+		queueHandler.queueFunction(queueHandler.eventQueue, ui.message, text.strip())
+
+
 def _reportTextChange(obj, event) -> None:
 	eventType, _source, detail1, detail2, anyData = event
 	try:
@@ -806,6 +874,7 @@ def _coalesced(events: list) -> list:
 			_isFocusEvent(event)
 			or eventType in WINDOW_ACTIVATION_EVENTS
 			or eventType.startswith("object:text-changed:")
+			or eventType == ANNOUNCEMENT_EVENT
 		):
 			kept.append(event)
 			continue
@@ -931,7 +1000,12 @@ def pumpAll() -> None:
 	alwaysAllowed = {focusKey, _foreground.key if _foreground is not None else None}
 	for index in range(len(kept) - 1, -1, -1):
 		event = kept[index]
-		if _isFocusEvent(event) or _isBlur(event) or event[0] in WINDOW_ACTIVATION_EVENTS:
+		if (
+			_isFocusEvent(event)
+			or _isBlur(event)
+			or event[0] in WINDOW_ACTIVATION_EVENTS
+			or event[0] == ANNOUNCEMENT_EVENT
+		):
 			continue
 		node = event[1]
 		if node.key not in alwaysAllowed:
@@ -958,6 +1032,9 @@ def pumpAll() -> None:
 		if not windowsChanged:
 			flushFocus()
 		if index in overLimit:
+			continue
+		if eventType == ANNOUNCEMENT_EVENT:
+			_announce(event)
 			continue
 		if event[1].key in blurred and eventType in (
 			"object:text-caret-moved",

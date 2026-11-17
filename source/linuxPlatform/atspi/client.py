@@ -27,6 +27,8 @@ ROOT_PATH = "/org/a11y/atspi/accessible/root"
 #: libatspi's deadline for one call, in milliseconds, also for applications it met in the last 15 s,
 #: which otherwise get 15 s each.
 TIMEOUT_MS = 300
+#: A call that takes this long is logged, for finding out which applications answer slowly and when.
+SLOW_ANSWER_SECONDS = 0.05
 #: A call that takes this long marks its application hung.
 HUNG_AFTER_SECONDS = 0.25
 #: A call that takes this long has met libatspi's deadline, and its answer, if any, is not one.
@@ -122,6 +124,12 @@ def call[T](node: Node, func: Callable[..., T], *args) -> T:
 		error = None
 	elapsed = time.monotonic() - start
 	callSeconds += elapsed
+	if elapsed >= SLOW_ANSWER_SECONDS:
+		from logHandler import log
+
+		log.debug(
+			f"AT-SPI: slow answer {elapsed * 1000:.0f} ms from {busName} to {getattr(func, '__name__', func)}"
+		)
 	if elapsed >= HUNG_AFTER_SECONDS:
 		if busName not in _hungSince:
 			from logHandler import log
@@ -381,9 +389,16 @@ class Client:
 	def firstMatchWithState(self, node: Node, state: str, limit: int = WALK_LIMIT) -> Node | None:
 		"""The first descendant of node, in tree order, that has state and is showing: through
 		Collection, or for GTK 4, which has none, by a walk of at most limit accessibles."""
+		matches = self.matchesWithState(node, state, 1, limit)
+		return matches[0] if matches else None
+
+	def matchesWithState(self, node: Node, state: str, count: int, limit: int = WALK_LIMIT) -> list[Node]:
+		"""The first count descendants of node, in tree order, that have state and are showing; for GTK 4,
+		which has no Collection, only the first, found by a walk of at most limit accessibles."""
 		# Showing too: Qt leaves a closed combo box's current item focused.
 		if "Collection" not in self.interfaces(node):
-			return self._walkForState(node, state, limit)
+			found = self._walkForState(node, state, limit)
+			return [found] if found is not None else []
 		stateSet = Atspi.StateSet.new(
 			[getattr(Atspi.StateType, state.upper().replace("-", "_")), Atspi.StateType.SHOWING],
 		)
@@ -398,7 +413,15 @@ class Client:
 			Atspi.CollectionMatchType.NONE,
 			False,
 		)
-		return self._firstMatch(node, rule)
+		matches = call(
+			node,
+			Atspi.Collection.get_matches,
+			rule,
+			Atspi.CollectionSortOrder.CANONICAL,
+			count,
+			True,
+		)
+		return [found for found in (self.node(match) for match in matches or []) if found is not None]
 
 	def _walkForState(self, node: Node, state: str, limit: int) -> Node | None:
 		stack = list(reversed(self.children(node)))
