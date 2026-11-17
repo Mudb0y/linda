@@ -617,6 +617,48 @@ def _onCharHook(evt: wx.KeyEvent) -> None:
 	evt.Skip()
 
 
+def _disableRememberingFocus(self) -> bool:
+	if isinstance(self, wx.TopLevelWindow):
+		focus = wx.Window.FindFocus()
+		if focus is not None and wx.GetTopLevelParent(focus) is self:
+			self._basedreaderFocusBeforeDisable = weakref.ref(focus)
+	return _upstreamDisable(self)
+
+
+def _enableRestoringFocus(self, enable: bool = True) -> bool:
+	"""wx.Window.Enable, after which a top-level window gives the focus back to the control that had it
+	when the window was disabled.
+
+	The profiles dialog disables itself while the dialog for a new profile is open. Windows gives the
+	control that had the focus its focus back as the window is enabled and activated again; GTK takes the
+	focus from a window as it is disabled and gives it to nothing again, so that the profiles dialog was
+	left with no focus, in which even Escape did nothing.
+	"""
+	if not enable:
+		return _disableRememberingFocus(self)
+	result = _upstreamEnable(self, enable)
+	remembered = getattr(self, "_basedreaderFocusBeforeDisable", None)
+	if isinstance(self, wx.TopLevelWindow) and remembered is not None:
+		self._basedreaderFocusBeforeDisable = None
+		wx.CallAfter(_restoreFocus, weakref.ref(self), remembered)
+	return result
+
+
+def _restoreFocus(topLevelRef: weakref.ref, focusRef: weakref.ref) -> None:
+	topLevel = topLevelRef()
+	focus = focusRef()
+	if topLevel is None or _isGone(topLevel) or not topLevel.IsShown() or not topLevel.IsEnabled():
+		return
+	try:
+		if _gtkCalls().focus(_widget(topLevel)):
+			return
+	except (OSError, AttributeError):
+		log.debugWarning("Could not find the focus through GTK", exc_info=True)
+		return
+	if focus is not None and not _isGone(focus) and focus.IsShownOnScreen() and focus.IsEnabled():
+		_upstreamSetFocus(focus)
+
+
 def _addPageOnce(self, page: wx.Window, text: str, *args, **kwargs) -> bool:
 	"""wx.Notebook.AddPage, with an empty page of its own in place of a window that is already a page.
 
@@ -677,6 +719,8 @@ _upstreamAddCaptured = None
 _upstreamDoRefresh = None
 _upstreamPopupMenu = wx.Window.PopupMenu
 _upstreamAddPage = wx.Notebook.AddPage
+_upstreamEnable = wx.Window.Enable
+_upstreamDisable = wx.Window.Disable
 
 
 def install() -> None:
@@ -695,6 +739,8 @@ def install() -> None:
 	inputGestures.InputGesturesDialog._addCaptured = _addCapturedOnceKeysReleased
 	wx.Window.PopupMenu = _popupMenuOnFirstItem
 	wx.Notebook.AddPage = _addPageOnce
+	wx.Window.Enable = _enableRestoringFocus
+	wx.Window.Disable = _disableRememberingFocus
 	wx.Window.SetAccessible = _setNoAccessible
 	wx.Window.SetFocus = _setFocusOnceActive
 	nvdaControls.ListCtrlAccessible = _NoAccessible
