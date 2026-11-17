@@ -720,6 +720,14 @@ def _processFocus(event, mayRetry: bool = True) -> bool:
 		# focus would be spoken as an unknown, unavailable object.
 		_deferWhileHung(event)
 		return True
+	if getattr(obj, "atspiRole", None) == "invalid":
+		# libatspi saw it go between the event and now, as Caja's views do while they are rebuilt; the
+		# focus is looked for again once, after the application has had a moment.
+		log.debug(f"AT-SPI focus: {event[0]} on {source} went as it was read")
+		if mayRetry and _foreground is not None:
+			again = ("window:activate", _foreground, 0, 0, None)
+			_retries.append((time.monotonic() + INVALID_RETRY_SECONDS, again))
+		return False
 	_focusWhileHung.clear()
 	eventHandler.queueEvent("gainFocus", obj)
 	return True
@@ -730,6 +738,8 @@ def _processFocus(event, mayRetry: bool = True) -> bool:
 _focusWhileHung: dict[str, tuple[tuple, float]] = {}
 #: Seconds after which such a focus event is given up.
 HUNG_FOCUS_SECONDS = 10.0
+#: Seconds before the focus is looked for again when the object a focus event named went as it was read.
+INVALID_RETRY_SECONDS = 0.2
 #: The properties of a new focus that speech reads, read before it is queued.
 _FOCUS_PROPERTIES = ("role", "name", "states", "value", "description", "keyboardShortcut", "positionInfo")
 
