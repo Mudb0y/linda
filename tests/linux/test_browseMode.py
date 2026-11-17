@@ -12,34 +12,56 @@ The two libraries are built with:
 """
 
 import json
-import os
-import shutil
-import subprocess
 import time
 from collections.abc import Iterator
 from pathlib import Path
 
-import desktopSession
 import harness
 import pytest
+import webSession
 from desktopSession import DesktopSession
+from harness import Launch
 
-WEB_PAGES = harness.HERE / "fixtures" / "web"
-SESSION_CONFIG = harness.HERE / "fixtures" / "sessionConfig" / "nvda.ini"
-FIREFOX_PREFS = harness.HERE / "bench" / "user.js"
-LIBRARY_VARIABLES = ("BASEDREADER_VBUF_LIB", "BASEDREADER_VBUF_ENGINE")
-#: Seconds for Firefox to show its window; a first start with a fresh profile takes several.
-FIREFOX_BOUND = 60.0
-#: Seconds from NVDA's start to the buffer being built.
+#: Seconds from NVDA's start to the buffer being built and its say all spoken.
 BUFFER_BOUND = 60.0
 #: Seconds for anything a key starts to settle before the next key.
 SETTLE = 1.0
+#: Seconds a followed link has to bring its page.
+PAGE_BOUND = 15.0
+#: Whether the buffer gets the page's changes by itself; without the update thread a test re-renders it.
+UPDATES_ARRIVE = (harness.ROOT / "source" / "linuxPlatform" / "vbufUpdates.py").is_file()
+#: The test hook's key that renders the focused buffer's document again and applies it as an update.
+RERENDER_KEY = "Insert+control+shift+F9"
+
+#: A global plugin for the test hooks: it stands in for the update thread, which hands the buffer each
+#: change the engine saw.
+RERENDER_PLUGIN = """
+import threading
+
+import api
+import globalPluginHandler
+import queueHandler
 
 
-def requireBrowseLibraries() -> None:
-	missing = [name for name in LIBRARY_VARIABLES if not os.path.isfile(os.environ.get(name, ""))]
-	if missing:
-		pytest.skip(f"{' and '.join(missing)} must name the built browse-mode libraries")
+def _rerender(buffer):
+	from linuxPlatform import vbufEngine, vbufLib
+
+	rendered = vbufEngine.render(buffer.busName, buffer.docPath, buffer.rootDocHandle)
+	try:
+		vbufLib.replaceSubtree(buffer.VBufHandle.value, buffer.rootDocHandle, buffer.rootID, rendered.stream)
+	finally:
+		rendered.stream.free()
+	queueHandler.queueFunction(queueHandler.eventQueue, buffer.onEngineEvents, (), rendered.info)
+
+
+class GlobalPlugin(globalPluginHandler.GlobalPlugin):
+	def script_rerender(self, gesture):
+		buffer = api.getFocusObject().treeInterceptor
+		if buffer is not None and buffer.VBufHandle:
+			threading.Thread(target=_rerender, args=(buffer,), daemon=True).start()
+
+	__gestures = {"kb:NVDA+control+shift+f9": "rerender"}
+"""
 
 
 @pytest.fixture
@@ -48,56 +70,13 @@ def desktop(tmp_path: Path) -> Iterator[DesktopSession]:
 		yield session
 
 
-def browseConfig(directory: Path) -> Path:
-	"""The session configuration, without say all on load, so that nothing reads while keys are
-	pressed; mode changes are spoken, not played."""
-	config = directory / "nvda.ini"
-	config.write_text(
-		SESSION_CONFIG.read_text()
-		+ "[virtualBuffers]\n\tautoSayAllOnPageLoad = False\n\tpassThroughAudioIndication = False\n",
-	)
-	return config
-
-
-def firefoxWindow(title: str, process: subprocess.Popen, timeout: float = FIREFOX_BOUND) -> str:
-	"""The name of Firefox's top-level window for the page title, once it is on the accessibility
-	desktop."""
-	deadline = time.monotonic() + timeout
-	while True:
-		names = desktopSession.topLevelNames()
-		for name in names:
-			if name.startswith(title):
-				return name
-		if process.poll() is not None or time.monotonic() >= deadline:
-			raise AssertionError(
-				f"no Firefox window for {title!r} within {timeout} s, "
-				f"{harness.describeExit(process.poll())}; windows: {names}",
-			)
-		time.sleep(0.2)
-
-
-def startFirefox(directory: Path, page: Path) -> subprocess.Popen:
-	"""Firefox on page with a fresh profile, its output in directory."""
-	profile = directory / "profile"
-	profile.mkdir(parents=True)
-	shutil.copyfile(FIREFOX_PREFS, profile / "user.js")
-	with open(directory / "firefox.log", "w") as output:
-		return subprocess.Popen(
-			["firefox", "--no-remote", "--new-instance", "--profile", str(profile), page.as_uri()],
-			stdout=output,
-			stderr=subprocess.STDOUT,
-			env={**os.environ, "MOZ_CRASHREPORTER_DISABLE": "1"},
-		)
-
-
-def stopFirefox(process: subprocess.Popen) -> None:
-	if process.poll() is None:
-		process.terminate()
-		try:
-			process.wait(10)
-		except subprocess.TimeoutExpired:
-			process.kill()
-			process.wait()
+def hooksDirectory(directory: Path) -> Path:
+	"""A test hooks directory with the transcript synth and the re-rendering plugin."""
+	hooks = directory / "browseHooks"
+	(hooks / "globalPlugins").mkdir(parents=True)
+	(hooks / "synthDrivers").symlink_to(harness.HERE / "synthDrivers")
+	(hooks / "globalPlugins" / "browseRerender.py").write_text(RERENDER_PLUGIN)
+	return hooks
 
 
 def expect(desktop: DesktopSession, *texts: str, since: int, timeout: float = 5) -> None:
@@ -110,32 +89,169 @@ def expect(desktop: DesktopSession, *texts: str, since: int, timeout: float = 5)
 	return desktop.expect(*texts, since=since, timeout=timeout)
 
 
-def step(desktop: DesktopSession, chord: str, *expected: str) -> None:
+def step(desktop: DesktopSession, chord: str, *expected: str, timeout: float = 5) -> None:
 	mark = desktop.mark()
 	desktop.press(chord)
-	expect(desktop, *expected, since=mark)
+	expect(desktop, *expected, since=mark, timeout=timeout)
 	time.sleep(SETTLE)
 
 
-def test_smoke(desktop: DesktopSession, tmp_path: Path):
-	requireBrowseLibraries()
-	firefox = startFirefox(tmp_path / "firefox", WEB_PAGES / "smoke.html")
-	try:
-		window = firefoxWindow("Basedreader browse demo", firefox)
-		desktopSession.activate(window, timeout=30)
-		nvda = desktop.startNVDA(browseConfig(tmp_path))
-		nvda.waitForLog("Buffer rendered", BUFFER_BOUND)
-		expect(desktop, "Basedreader browse demo document", since=0, timeout=BUFFER_BOUND)
-		time.sleep(SETTLE)
+def browse(desktop: DesktopSession, tmp_path: Path, page: str, title: str, *sayAll: str) -> Launch:
+	"""Firefox on page, then NVDA, which builds the page's buffer and reads it from the top: the page's
+	title, then the records sayAll names, the last of them the page's last line."""
+	webSession.requireBrowseLibraries()
+	webSession.startFirefox(desktop, page)
+	webSession.waitForDocument(title)
+	nvda = desktop.startNVDA(
+		webSession.BROWSE_CONFIG,
+		env={"BASEDREADER_TEST_HOOKS_DIR": str(hooksDirectory(tmp_path))},
+	)
+	nvda.waitForLog("Buffer rendered", BUFFER_BOUND)
+	expect(desktop, title, *sayAll, since=0, timeout=BUFFER_BOUND)
+	time.sleep(SETTLE)
+	return nvda
 
-		step(desktop, "Down", "list bullet link Contact")
-		step(desktop, "Down", "main landmark heading level 1 Welcome to the demo")
-		step(desktop, "h", "Second section heading level 2")
 
-		step(desktop, "Insert+q", "Exit NVDA…")
-		desktop.press("Return")
-		nvda.waitForExit(10)
-	finally:
-		stopFirefox(firefox)
+def quit(desktop: DesktopSession, nvda: Launch) -> None:
+	step(desktop, "Insert+q", "Exit NVDA…")
+	desktop.press("Return")
+	nvda.waitForExit(10)
 	assert nvda.process.returncode == 0, nvda.describe()
 	nvda.assertClean(logNames=("nvda.log",))
+
+
+def test_loadSaysAllThenReadsByLineCharacterAndWord(desktop: DesktopSession, tmp_path: Path):
+	nvda = browse(
+		desktop,
+		tmp_path,
+		"basic.html",
+		"Basic page",
+		"heading level 1 Basic page",
+		"The first paragraph has link a link to the contact section on this page.",
+		"content info landmark heading level 2 Contact",
+		"Write to us.",
+	)
+	step(desktop, "control+Home", "heading level 1 Basic page")
+	step(desktop, "Down", "The first paragraph has link a link to the contact section on this page.")
+	step(desktop, "Up", "heading level 1 Basic page")
+	step(desktop, "h", "main landmark Text heading level 2")
+	step(desktop, "Down", "An emoji  grinning face  sits in this sentence.")
+	step(desktop, "Right", "n")
+	step(desktop, "control+Right", "emoji")
+	# The emoji is two UTF-16 code units in the buffer, and one word.
+	step(desktop, "control+Right", "grinning face")
+	step(desktop, "control+Right", "sits")
+	step(desktop, "control+Left", "grinning face")
+	quit(desktop, nvda)
+
+
+def test_quickNavigationAndRefresh(desktop: DesktopSession, tmp_path: Path):
+	nvda = browse(desktop, tmp_path, "basic.html", "Basic page", "heading level 1 Basic page", "Write to us.")
+	step(desktop, "control+Home", "heading level 1 Basic page")
+	step(desktop, "h", "main landmark Text heading level 2")
+	step(desktop, "shift+h", "Basic page heading level 1")
+	step(desktop, "2", "main landmark Text heading level 2")
+	step(desktop, "control+Home", "heading level 1 Basic page")
+	step(desktop, "k", "a link to the contact section link")
+	step(desktop, "k", "Pages navigation landmark list The second page link")
+	step(desktop, "shift+k", "a link to the contact section link")
+	step(desktop, "u", "Pages navigation landmark list The second page link")
+	step(desktop, "v", "list This page again visited link")
+	step(desktop, "d", "main landmark…")
+	step(desktop, "q", "block quote…")
+	step(desktop, "s", "separator")
+	step(desktop, "l", "list bullet  First item")
+	step(desktop, "i", "list bullet  Second item")
+	# The layout table before it is passed over.
+	step(desktop, "t", "Prices table with 3 rows and 2 columns…")
+	step(desktop, "e", "Your name edit has auto complete")
+	step(desktop, "f", "Subscribe check box not checked")
+	step(desktop, "r", "Size grouping Small radio button checked")
+	step(desktop, "c", "Colour combo box collapsed Red")
+	step(desktop, "shift+x", "Subscribe check box not checked")
+	step(desktop, "b", "Press me button")
+	step(desktop, "g", "A small square graphic")
+	step(desktop, "3", "Frame and application heading level 3")
+	step(desktop, "m", "Inner frame frame Text inside the frame.")
+	step(desktop, "o", "Text inside the application. Embedded application application")
+	step(desktop, "h", "content info landmark Contact heading level 2")
+	step(desktop, "h", "no next heading")
+	step(desktop, "Insert+F5", "Refreshed")
+	quit(desktop, nvda)
+
+
+def test_followingLinks(desktop: DesktopSession, tmp_path: Path):
+	nvda = browse(desktop, tmp_path, "usable.html", "Usable page", "heading level 1 Welcome", "Write to us.")
+	step(desktop, "control+Home", "heading level 1 Welcome")
+	step(desktop, "k", "the news link")
+	# Firefox moves its caret to the target, and the buffer follows.
+	step(desktop, "Return", "heading level 2 News")
+	step(desktop, "control+Home", "heading level 1 Welcome")
+	step(desktop, "k", "the news link")
+	step(desktop, "k", "the second page link")
+	step(
+		desktop,
+		"Return",
+		"Second page",
+		"heading level 1 Second page",
+		"You followed the link.",
+		timeout=PAGE_BOUND,
+	)
+	# Firefox gives the focus back to the link followed, and reading starts there.
+	step(desktop, "alt+Left", "Usable page", "visited link the second page…", timeout=PAGE_BOUND)
+	quit(desktop, nvda)
+
+
+def test_focusMode(desktop: DesktopSession, tmp_path: Path):
+	nvda = browse(desktop, tmp_path, "usable.html", "Usable page", "heading level 1 Welcome", "Write to us.")
+	step(desktop, "control+Home", "heading level 1 Welcome")
+	step(desktop, "e", "Your name edit has auto complete")
+	step(desktop, "Return", "Focus mode")
+	mark = desktop.mark()
+	desktop.typeText("Bob")
+	expect(desktop, "B", "o", "b", since=mark)
+	time.sleep(SETTLE)
+	step(desktop, "Escape", "Browse mode")
+	step(desktop, "Insert+space", "Focus mode")
+	step(desktop, "Insert+space", "Browse mode")
+	quit(desktop, nvda)
+
+
+def test_find(desktop: DesktopSession, tmp_path: Path):
+	nvda = browse(desktop, tmp_path, "usable.html", "Usable page", "heading level 1 Welcome", "Write to us.")
+	step(desktop, "control+Home", "heading level 1 Welcome")
+	step(desktop, "Insert+control+f", "Find dialog Type the text you wish to find")
+	mark = desktop.mark()
+	desktop.typeText("Contact")
+	desktop.press("Return")
+	expect(desktop, "heading level 2 Contact", since=mark)
+	time.sleep(SETTLE)
+	step(desktop, "Down", "Write to us.")
+	step(desktop, "control+Home", "heading level 1 Welcome")
+	step(desktop, "Insert+F3", "heading level 2 Contact")
+	# NVDA's exit dialog does not take the keyboard from Firefox once NVDA's find dialog has been
+	# used, so NVDA is asked to exit as the session's end asks it. The find dialog also makes GTK
+	# complain on standard error that it was made modal without a window.
+	nvda.process.terminate()
+	nvda.waitForExit(10)
+	assert nvda.process.returncode == 0, nvda.describe()
+	nvda.assertClean(ignoring={"stderr"}, logNames=("nvda.log",))
+
+
+def test_pageThatChanges(desktop: DesktopSession, tmp_path: Path):
+	nvda = browse(
+		desktop,
+		tmp_path,
+		"dynamic.html",
+		"Dynamic page",
+		"heading level 1 Dynamic page",
+		"Tail paragraph.",
+	)
+	step(desktop, "control+Home", "heading level 1 Dynamic page")
+	step(desktop, "b", "Add paragraph button")
+	desktop.press("Return")
+	time.sleep(SETTLE)
+	if not UPDATES_ARRIVE:
+		step(desktop, RERENDER_KEY, "button Add paragraph")
+	step(desktop, "Down", "Added paragraph 1 with link a new link dot")
+	quit(desktop, nvda)
