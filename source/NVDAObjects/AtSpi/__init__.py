@@ -38,6 +38,11 @@ ROOT_PATH = "/org/a11y/atspi/accessible/root"
 CHILD_LIMIT = 200
 #: The most siblings an item is counted among when nothing gives its position directly.
 SIBLING_LIMIT = 50
+#: The same for a menu item: a GTK 3 menu built from actions keeps every item it may show, and Caja's
+#: have more than fifty, most of them hidden.
+MENU_SIBLING_LIMIT = 120
+#: Columns read at most to speak a row of a table as a list item with columns.
+ROW_COLUMN_LIMIT = 12
 #: Objects visited at most, and how deep, to name an object from the text inside it.
 DESCENDANT_TEXT_LIMIT = 20
 DESCENDANT_TEXT_DEPTH = 4
@@ -168,7 +173,9 @@ def _descendantText(node: Node) -> str:
 			visited += 1
 			name = c.name(child)
 			if name:
-				texts.append(name)
+				# Caja's side pane repeats a place's name in two cells of its row.
+				if not texts or texts[-1] != name:
+					texts.append(name)
 			elif depth < DESCENDANT_TEXT_DEPTH and c.role(child) not in _OPAQUE_RAW_ROLES:
 				visit(child, depth + 1)
 
@@ -228,8 +235,10 @@ class AtSpi(NVDAObject):
 			clsList.append(SpinButton)
 		elif "Text" in ifaces and ("editable" in states or role == Role.EDITABLETEXT):
 			clsList.append(EditableTextWithAutoSelectDetection)
-		if role == Role.LISTITEM and self.atspiRole == "table cell":
-			clsList.append(ListCell)
+		if role in (Role.LISTITEM, Role.TREEVIEWITEM) and self.atspiRole == "table cell":
+			clsList.append(TableRowItem)
+		elif role == Role.LISTITEM and self.atspiRole == "icon":
+			clsList.append(IconItem)
 		elif role == Role.TABLECELL and "TableCell" in ifaces:
 			clsList.append(TableCell)
 		if role == Role.DIALOG:
@@ -349,23 +358,28 @@ class AtSpi(NVDAObject):
 			if parentRole in ("menu bar", "menu") or "selectable" in self.atspiStates:
 				return Role.MENUITEM
 			return Role.POPUPMENU
-		if raw == "table":
-			# A one-column GTK 3 tree view is what GTK programs use for an ordinary list.
-			if self.toolkit == GTK3 and self._isSingleColumnTable:
-				return Role.LIST
-			return Role.TABLE
+		if (
+			raw in ("table", "tree table")
+			and self.toolkit == GTK3
+			and "manages-descendants" in self.atspiStates
+		):
+			# A GTK 3 tree view is what GTK programs use for an ordinary list, and with columns for what
+			# Windows shows as a list view's details, Caja's list view among them; only a one-column
+			# tree is a tree view.
+			if raw == "tree table" and self._isSingleColumnTable:
+				return Role.TREEVIEW
+			return Role.LIST
 		if raw == "table cell":
-			parent = self.atspiParentNode
-			try:
-				inList = (
-					parent is not None
-					and self.toolkit == GTK3
-					and _client().role(parent) == "table"
-					and _isSingleColumnTable(parent)
-				)
-			except NodeGone:
-				inList = False
-			return Role.LISTITEM if inList else Role.TABLECELL
+			rowTable = self._rowTable
+			if rowTable is None:
+				return Role.TABLECELL
+			_node, tableRole, columns = rowTable
+			return Role.TREEVIEWITEM if tableRole == "tree table" and columns == 1 else Role.LISTITEM
+		if raw == "layered pane" and "Selection" in self.atspiInterfaces:
+			# Caja's icon view, of a folder and of the desktop: Windows' list view in icon mode.
+			return Role.LIST
+		if raw == "icon" and self.atspiParentRole == "layered pane":
+			return Role.LISTITEM
 		if (
 			raw == "check box"
 			and self.toolkit == QT
@@ -413,6 +427,26 @@ class AtSpi(NVDAObject):
 		except NodeGone:
 			return False
 
+	def _get__rowTable(self) -> tuple[Node, str, int] | None:
+		"""For a cell of a GTK 3 tree view, which takes the focus for its whole row: the tree view, its raw
+		role, and how many columns it has."""
+		if self.toolkit != GTK3:
+			return None
+		parent = self.atspiParentNode
+		if parent is None:
+			return None
+		c = _client()
+		try:
+			tableRole = c.role(parent)
+			if tableRole not in ("table", "tree table") or "manages-descendants" not in c.states(parent):
+				return None
+			if "Table" not in c.interfaces(parent):
+				return None
+			_rows, columns = c.tableSize(parent)
+		except NodeGone:
+			return None
+		return (parent, tableRole, columns)
+
 	def _get_roleText(self) -> str | None:
 		if self.role == Role.UNKNOWN and self.atspiRole not in ("unknown", "invalid"):
 			return self.atspiRole
@@ -443,13 +477,61 @@ class AtSpi(NVDAObject):
 			if role == Role.TABCONTROL and self.toolkit == QT and name == self._selectedTabName:
 				# Qt names a tab bar after its current tab, which follows it as the focus.
 				return ""
+			if role == Role.STATICTEXT and "focusable" in self.atspiStates and self.toolkit == GTK3:
+				# A value the keyboard reaches is read with its title, as Windows reads a read-only field.
+				title = self._labelText or self._gridTitle
+				if title and title != name:
+					return f"{title} {name}"
 			return name
 		labelled = self._labelText
 		if labelled:
 			return labelled
+		if role == Role.TAB and self.toolkit == GTK3:
+			# A GTK 3 tab is named by its label; one without a name is a page of a notebook whose tabs
+			# are hidden, and what is inside it is the page, not its name.
+			return name
 		if role in DESCENDANT_NAMED_ROLES or (role == Role.STATUSBAR and self.toolkit == GTK4):
 			return _descendantText(self.node)
 		return name
+
+	def _get_isPresentableFocusAncestor(self) -> bool:
+		if self.toolkit == GTK3 and self.atspiRole in ("page tab", "page tab list") and self._isHiddenTab:
+			# Caja and Pluma keep a notebook with its tabs hidden around every view, which Windows
+			# programs do not have, and which would be announced on every move into the view.
+			return False
+		return super().isPresentableFocusAncestor
+
+	def _get__isHiddenTab(self) -> bool:
+		"""Whether this GTK 3 tab, or the selected tab of this tab list, has no label: the notebook shows
+		no tabs."""
+		c = _client()
+		try:
+			if self.atspiRole == "page tab":
+				return not self.atspiName
+			selected = c.selectedChild(self.node) if "Selection" in self.atspiInterfaces else None
+			return selected is not None and not c.name(selected)
+		except NodeGone:
+			return False
+
+	def _get__gridTitle(self) -> str:
+		"""For a value a GTK 3 dialog shows as a label the keyboard can reach and relates to no title, the
+		title on its left that ends with a colon."""
+		c = _client()
+		parent = self.atspiParentNode
+		index = self.indexInParent
+		if parent is None or index is None:
+			return ""
+		try:
+			# GtkGrid lists its children last added first, so a title added before its value comes after
+			# it.
+			sibling = c.childAt(parent, index + 1)
+			if sibling is not None and c.role(sibling) == "label":
+				text = c.name(sibling)
+				if text.endswith(":"):
+					return text
+		except NodeGone:
+			pass
+		return ""
 
 	def _get__selectedTabName(self) -> str | None:
 		c = _client()
@@ -697,13 +779,14 @@ class AtSpi(NVDAObject):
 		parent = self.atspiParentNode
 		if kind is None or parent is None:
 			return {}
+		limit = MENU_SIBLING_LIMIT if kind is _SIBLING_KINDS[0] else SIBLING_LIMIT
 		c = _client()
 		parentStates = c.states(parent)
-		if "manages-descendants" in parentStates or c.childCount(parent) > SIBLING_LIMIT:
+		if "manages-descendants" in parentStates or c.childCount(parent) > limit:
 			return {}
 		index = 0
 		position = 0
-		for sibling in childNodes(parent, parentStates, SIBLING_LIMIT):
+		for sibling in childNodes(parent, parentStates, limit):
 			if c.role(sibling) not in kind or "visible" not in c.states(sibling):
 				continue
 			index += 1
@@ -923,14 +1006,92 @@ class SpinButton(EditableTextWithoutAutoSelectDetection, AtSpi):
 		return states
 
 
-class ListCell(AtSpi):
-	"""A cell of a one-column GTK tree view, which Windows users know as a list item."""
+class TableRowItem(AtSpi):
+	"""A cell of a GTK 3 tree view, which takes the focus for its row: spoken as the item of a Windows
+	list view is, with the text of each column after the first behind its header, or as a tree view's
+	item where the tree view has a single column."""
+
+	def _get_name(self) -> str:
+		rowTable = self._rowTable
+		try:
+			if rowTable is None or rowTable[2] <= 1:
+				return self._cellText(self.node)
+			table, _tableRole, columns = rowTable
+			row, _column = _client().cellPosition(self.node)
+			return self._rowText(table, row, min(columns, ROW_COLUMN_LIMIT))
+		except NodeGone:
+			return ""
+
+	def _cellText(self, cell: Node) -> str:
+		c = _client()
+		name = c.name(cell)
+		if name:
+			return name
+		# Caja puts its file name and icon in two cells inside the first column's.
+		return _descendantText(cell) if c.childCount(cell) else ""
+
+	def _rowText(self, table: Node, row: int, columns: int) -> str:
+		import config
+		from config.configFlags import ReportTableHeaders
+
+		c = _client()
+		withHeaders = config.conf["documentFormatting"]["reportTableHeaders"] in (
+			ReportTableHeaders.ROWS_AND_COLUMNS,
+			ReportTableHeaders.COLUMNS,
+		)
+		texts = []
+		for column in range(columns):
+			cell = self.node if column == 0 else c.cellAt(table, row, column)
+			if cell is None:
+				continue
+			text = self._cellText(cell)
+			if not text:
+				continue
+			header = c.columnHeader(table, column) if withHeaders and column > 0 else ""
+			texts.append(f"{header}: {text}" if header else text)
+		return "; ".join(texts)
 
 	def _get_positionInfo(self) -> dict[str, int]:
 		try:
 			return self._tableCellPosition()
 		except NodeGone:
 			return {}
+
+	def _get_states(self) -> set[State]:
+		states = super().states
+		# GTK 3 says nothing of a row being selectable; it is, and NVDA leaves the selection of a
+		# selectable item unsaid.
+		states.add(State.SELECTABLE)
+		return states
+
+
+class IconItem(AtSpi):
+	"""A file in Caja's icon view."""
+
+	def _get_positionInfo(self) -> dict[str, int]:
+		parent = self.atspiParentNode
+		index = self.indexInParent
+		if parent is None or index is None:
+			return {}
+		c = _client()
+		try:
+			count = c.childCount(parent)
+			# The field a file was renamed in stays behind as the view's last child.
+			last = c.childAt(parent, count - 1) if count else None
+			if last is not None and c.role(last) != "icon":
+				count -= 1
+		except NodeGone:
+			return {}
+		return {"indexInGroup": index + 1, "similarItemsInGroup": count}
+
+	def _get_states(self) -> set[State]:
+		states = super().states
+		# Caja's icons carry neither sensitive nor enabled, and are usable; nor do they say when they are
+		# selected, so whether they are is left unsaid.
+		states.discard(State.UNAVAILABLE)
+		states.discard(State.SELECTABLE)
+		states.discard(State.SELECTED)
+		return states
 
 
 class TableCell(AtSpi):
