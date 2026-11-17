@@ -24,6 +24,7 @@ from linuxPlatform.atspi.roles import ROLES, mapStates
 from locationHelper import RectLTWH
 
 from NVDAObjects import NVDAObject
+from NVDAObjects.AtSpi.deletion import DeletionEcho
 from NVDAObjects.AtSpi.terminal import VteTerminal
 from NVDAObjects.AtSpi.textInfo import AtspiTextInfo
 from NVDAObjects.behaviors import (
@@ -254,6 +255,7 @@ class AtSpi(NVDAObject):
 		elif "Text" in ifaces and ("editable" in states or role == Role.EDITABLETEXT):
 			if self._isRichTextEditor:
 				clsList.append(RichTextEditor)
+			clsList.append(DeletionEcho)
 			clsList.append(EditableTextWithAutoSelectDetection)
 		elif role == Role.TERMINAL and "Text" in ifaces:
 			clsList.append(VteTerminal)

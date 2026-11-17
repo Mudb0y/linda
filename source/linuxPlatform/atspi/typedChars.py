@@ -3,6 +3,7 @@
 On Windows NVDA's in-process hook tells it each character a key typed. Here the application's own
 text-changed signal carries it: one character inserted into the focus just after a key that types
 text is the typed character, and NVDA's typedCharacter event speaks it, as it speaks one on Windows.
+Likewise what Backspace or Delete removed from the focus is what the focus's echoDeletion speaks.
 
 The text of a password field never passes through here: the caller gives None for it, and Qt sends
 the real characters even so. A character inserted into a protected field is NVDA's protected
@@ -22,6 +23,7 @@ from .textSource import toolkitOf, unitFor
 TYPING_WINDOW = 0.5
 #: Windows' virtual-key code of Backspace.
 VK_BACK = 0x08
+VK_DELETE = 0x2E
 #: Line and paragraph breaks, which NVDA on Windows does not speak as typed: Qt inserts U+2029 for
 #: Enter.
 NOT_ECHOED = frozenset({"\n", "\r", "\r\n", " ", " "})
@@ -35,8 +37,16 @@ REPLACED_SECONDS = 0.05
 #: rich text editor keeps its text in the paragraphs inside it, which report the change themselves.
 INSIDE_FOCUS_DEPTH = 4
 
+#: What Qt inserts for Enter in a multi-line field, whose text reads it as a line feed.
+PARAGRAPH_SEPARATOR = " "
+#: UTF-16 units at most of a field whose text keepText keeps.
+KEPT_LIMIT = 200_000
+
 #: The last text removed from an object, as (its node, offset, text, time.monotonic()).
 _lastRemoved: tuple[object, int, str, float] | None = None
+#: The focus's text as keepText read it and its changes since have changed it, as (its node, the text
+#: in UTF-16 little-endian), which is how Qt counts offsets.
+_kept: tuple[object, bytearray] | None = None
 #: When the key went down whose character a terminal last echoed, so that it is echoed once whether
 #: VTE's report or the terminal's own reading of its screen finds it first.
 echoedKeyTime: float | None = None
@@ -117,6 +127,56 @@ def _typedInTerminal(removed: str | None, inserted: str, key) -> str | None:
 	return found[0] if len(found) == 1 else None
 
 
+def _keepsText(obj) -> bool:
+	"""Whether obj's text is kept: a Qt multi-line field reports spaces for the text a deletion removed,
+	where a line edit and every other toolkit report the text itself."""
+	if unitFor(getattr(obj, "toolkit", None)) != "utf16":
+		return False
+	return "multi-line" in getattr(obj, "atspiStates", ()) and not obj.isProtected
+
+
+def keepText(obj) -> None:
+	"""Read and keep the text of obj, which has just become the focus, when its deletions do not say
+	what they removed; forget whatever was kept before."""
+	global _kept
+	_kept = None
+	if not _keepsText(obj):
+		return
+	from .client import NodeGone
+	from .handler import client
+
+	try:
+		if client().characterCount(obj.node) > KEPT_LIMIT:
+			return
+		text = client().text(obj.node)
+	except NodeGone:
+		return
+	_kept = (obj.node, bytearray(text.replace(PARAGRAPH_SEPARATOR, "\n").encode("utf-16-le")))
+
+
+def _applyToKept(node, kind: str, offset: int, length: int, text: str | None) -> str | None:
+	"""Apply a change to node's text to what is kept of it, and return what a deletion removed; None
+	when nothing is kept of node, or a change does not fit what is, which is then forgotten."""
+	global _kept
+	if _kept is None or _kept[0] != node:
+		return None
+	data = _kept[1]
+	start, end = offset * 2, (offset + length) * 2
+	if kind == "delete":
+		if offset < 0 or end > len(data):
+			_kept = None
+			return None
+		removed = bytes(data[start:end]).decode("utf-16-le", errors="replace")
+		del data[start:end]
+		return removed
+	inserted = (text or "").replace(PARAGRAPH_SEPARATOR, "\n").encode("utf-16-le")
+	if text is None or offset < 0 or start > len(data) or len(inserted) != length * 2:
+		_kept = None
+		return None
+	data[start:start] = inserted
+	return None
+
+
 def _isInsideFocus(node, focus) -> bool:
 	"""Whether node is inside focus, an editable object, within INSIDE_FOCUS_DEPTH parents."""
 	if "editable" not in getattr(focus, "atspiStates", ()):
@@ -163,6 +223,16 @@ def handleTextChange(
 	key = _lastKeyDown()
 	isRecent = key is not None and time.monotonic() - key.time <= TYPING_WINDOW
 	inside = objNode != node
+	# Whether what a deletion removed is known: a Qt multi-line field reports spaces for it.
+	known = True
+	if not inside and _keepsText(focus):
+		kept = _applyToKept(node, kind, offset, length, text)
+		if _kept is None or _kept[0] != node:
+			# Read once the change is made, for those that follow.
+			keepText(focus)
+			known = False
+		elif kind == "delete" and text is not None:
+			text = kept
 	if inside and not (isRecent and _isInsideFocus(objNode, focus)):
 		return
 	removed = None
@@ -178,9 +248,22 @@ def handleTextChange(
 	if kind == "delete":
 		if text is not None:
 			_lastRemoved = (node, offset, text, time.monotonic())
-		# Clears the character from the word NVDA builds for typed word echo; nothing is spoken.
-		if isRecent and key.vkCode == VK_BACK and (not inside or claimEcho(key.time)):
+		if not isRecent or key.vkCode not in (VK_BACK, VK_DELETE) or (inside and not claimEcho(key.time)):
+			return
+		if key.vkCode == VK_BACK:
+			# Clears the character from the word NVDA builds for typed word echo; nothing is spoken.
 			eventHandler.queueEvent("typedCharacter", focus, ch="\b")
+		if known and getattr(focus, "echoesDeletion", False):
+			import queueHandler
+
+			if focus.isProtected:
+				text = None
+			queueHandler.queueFunction(
+				queueHandler.eventQueue,
+				focus.echoDeletion,
+				key.vkCode == VK_BACK,
+				text,
+			)
 		return
 	if kind != "insert":
 		return

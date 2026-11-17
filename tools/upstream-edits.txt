@@ -121,6 +121,9 @@ source/NVDAObjects/AtSpi/__init__.py
 source/NVDAObjects/AtSpi/compoundText.py
   Linux runtime: added. MozillaCompoundTextInfo over AT-SPI, which reads a
   rich text editor in Firefox as one text, which only Linux imports
+source/NVDAObjects/AtSpi/deletion.py
+  Linux runtime: added. Backspace and Delete in an AT-SPI field, spoken
+  from what the application says it removed, which only Linux imports
 source/NVDAObjects/AtSpi/terminal.py
   Linux runtime: added. A terminal's screen over AT-SPI, read as NVDA reads
   a console, which only Linux imports
