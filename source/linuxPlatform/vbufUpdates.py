@@ -23,11 +23,15 @@ if TYPE_CHECKING:
 
 #: Milliseconds each wait for a batch may take, which bounds how long the thread takes to stop.
 WAIT_MS = 500
-#: Seconds the rest of a large page is kept for a buffer not yet registered. It can come before the
-#: thread that rendered the top has built the buffer and registered it, and it replaces the whole
-#: document, so nothing older than it is lost by applying it late. Other batches for a document no
-#: buffer has are dropped: the buffer's own render is newer than they are.
+#: Seconds the rest of a large page, and the end of a document's load, are kept for a buffer not yet
+#: registered. Either can come before the thread that rendered the document has built the buffer
+#: and registered it; the rest replaces the whole document, so nothing older than it is lost by
+#: applying it late, and the end of the load is what the buffer waits for before reading a page
+#: that was still loading. Other batches for a document no buffer has are dropped: the buffer's own
+#: render is newer than they are.
 HOLD_SECONDS = 10.0
+#: The events that make a batch worth keeping for a buffer not yet registered.
+_HELD_EVENTS = ("complete", "loadComplete")
 
 _buffers: dict[tuple[str, str], "AtSpiBuffer"] = {}
 #: The rest of each large page that came before its buffer registered, with when it came.
@@ -158,7 +162,7 @@ def _apply(batch, *, hold: bool = True) -> None:
 			if buffer is None:
 				now = time.monotonic()
 				_dropExpiredHeld(now)
-				if hold and "complete" in batch.events:
+				if hold and any(event in batch.events for event in _HELD_EVENTS):
 					_held.setdefault(key, []).append((now, batch))
 					held = True
 				return

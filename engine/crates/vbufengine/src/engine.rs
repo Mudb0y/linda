@@ -682,7 +682,11 @@ async fn render_task(
         ]),
     );
     info.insert("documentObjects".into(), walk.objs.len().into());
-    info.insert("busy".into(), busy(&walk.objs, &root).into());
+    let still_busy = match busy_now(&client, &root).await {
+        Some(b) => b,
+        None => busy(&walk.objs, &root),
+    };
+    info.insert("busy".into(), still_busy.into());
     let t_render = Instant::now();
     let (out, nodes, marks) = render_whole(&walk.objs, &root, handle, false);
     info.insert(
@@ -728,6 +732,17 @@ async fn render_task(
 fn busy(objs: &HashMap<String, Obj>, root: &str) -> bool {
     objs.get(root)
         .is_some_and(|o| has(o.states, mirror::consts::STATE_BUSY))
+}
+
+/// Whether the document is still loading now, which may have changed while it was walked.
+async fn busy_now(client: &Client, root: &str) -> Option<bool> {
+    let msg = client
+        .call(root, IFACE_ACCESSIBLE, "GetState", &())
+        .await
+        .ok()?;
+    decode::states(&msg)
+        .ok()
+        .map(|s| has(s, mirror::consts::STATE_BUSY))
 }
 
 /// The objects that have to be walked again: each changed one whose ancestors have not changed.

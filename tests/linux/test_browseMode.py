@@ -277,6 +277,32 @@ def test_find(desktop: DesktopSession, tmp_path: Path):
 	nvda.assertClean(ignoring={"stderr"}, logNames=("nvda.log",))
 
 
+def startFirst(desktop: DesktopSession) -> Launch:
+	"""NVDA, started before any Firefox, as on a desktop where it is the screen reader."""
+	webSession.requireBrowseLibraries()
+	nvda = desktop.startNVDA(webSession.BROWSE_CONFIG)
+	nvda.waitForLog("NVDA initialized", BUFFER_BOUND)
+	return nvda
+
+
+def test_pageStillLoadingIsReadWhole(desktop: DesktopSession):
+	# Firefox focuses the page while it holds only its first line; reading waits for the rest.
+	nvda = startFirst(desktop)
+	with webSession.servePages() as pages:
+		webSession.startFirefox(desktop, pages.url("realSlow.html"))
+		expect(
+			desktop,
+			"Slow page…",
+			"link Skip to the content",
+			"main landmark heading level 1 Arrived late",
+			"The last paragraph of the slow page.",
+			since=0,
+			timeout=BUFFER_BOUND,
+		)
+		time.sleep(SETTLE)
+		quit(desktop, nvda)
+
+
 def test_pageThatChanges(desktop: DesktopSession, tmp_path: Path):
 	nvda = browse(
 		desktop,

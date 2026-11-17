@@ -40,6 +40,13 @@ except ImportError:
 #: The object path every accessible of the ATK bridge and of Qt has, with a number at its end.
 _PATH_PREFIX = "/org/a11y/atspi/accessible/"
 
+#: Firefox focuses a new document as soon as it exists, often holding no more than the page's first
+#: lines, and say all would stop after them. So the first reading of a document still loading waits
+#: until the load ends, or until the page has stopped changing for LOAD_QUIET_SECONDS, but never longer
+#: than LOAD_HOLD_SECONDS; the rest reaches the buffer as updates meanwhile.
+LOAD_QUIET_SECONDS = 0.4
+LOAD_HOLD_SECONDS = 2.0
+
 
 class Identifiers:
 	"""docHandle and ID for AT-SPI identities: a small number per bus name, and the number at the end
@@ -225,6 +232,10 @@ class AtSpiBuffer(VirtualBuffer):
 		self._terminated = False
 		#: (rows, columns, layout) of each table, by (docHandle, ID), or None when it could not be asked.
 		self._tables: dict[tuple[int, int], tuple[int, int, bool] | None] = {}
+		#: Ends the wait for a document still loading when it was rendered; None when not waiting.
+		self._loadHold = None
+		#: time.monotonic() by which that wait ends whatever the page does.
+		self._loadHoldUntil = 0.0
 		super().__init__(rootNVDAObject, backendName="atspi")
 
 	def prepare(self):
@@ -290,6 +301,32 @@ class AtSpiBuffer(VirtualBuffer):
 			# The focus came before the buffer, when membership could not yet be answered from the
 			# buffer alone, as it is when Firefox restores the focus to a link on going back.
 			focus.treeInterceptor = self
+		if info.get("busy") and vbufUpdates is not None:
+			import wx
+
+			self._loadHoldUntil = time.monotonic() + LOAD_HOLD_SECONDS
+			self._loadHold = wx.CallLater(int(LOAD_QUIET_SECONDS * 1000), self._endLoadHold)
+			return
+		self._loadBufferDone()
+		self._primeActions()
+
+	def _extendLoadHold(self) -> None:
+		"""The page changed while its first reading waits: wait until it is quiet again."""
+		left = self._loadHoldUntil - time.monotonic()
+		if left <= 0:
+			self._endLoadHold()
+		else:
+			self._loadHold.Start(int(min(left, LOAD_QUIET_SECONDS) * 1000))
+
+	def _endLoadHold(self) -> None:
+		"""On the main thread: report the document, now that it has loaded or waiting for it is over."""
+		hold = self._loadHold
+		if hold is None:
+			return
+		self._loadHold = None
+		hold.Stop()
+		if self._terminated:
+			return
 		self._loadBufferDone()
 		self._primeActions()
 
@@ -306,7 +343,16 @@ class AtSpiBuffer(VirtualBuffer):
 			# Firefox makes a new document object for a reload and for every page followed, and
 			# that one gets a buffer of its own when it takes the focus.
 			self._gone = True
+			if self._loadHold is not None:
+				self._loadHold.Stop()
+				self._loadHold = None
 			treeInterceptorHandler.killTreeInterceptor(self)
+			return
+		if self._loadHold is not None:
+			if "loadComplete" in events:
+				self._endLoadHold()
+			else:
+				self._extendLoadHold()
 			return
 		if self.VBufHandle:
 			self._handleUpdate()
@@ -333,6 +379,9 @@ class AtSpiBuffer(VirtualBuffer):
 
 	def terminate(self):
 		self._terminated = True
+		if self._loadHold is not None:
+			self._loadHold.Stop()
+			self._loadHold = None
 		super().terminate()
 
 	def _primeActions(self) -> None:
