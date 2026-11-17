@@ -333,9 +333,30 @@ def startFirefox(
 				f"{logPath.read_text(errors='replace')[-3000:]}",
 			)
 		time.sleep(0.1)
-	desktopSession.activate(window, timeout=ACTIVATE_TIMEOUT)
+	if title is None:
+		window = _activateRenamed(process)
+	else:
+		desktopSession.activate(window, timeout=ACTIVATE_TIMEOUT)
 	process.window = window
 	return process
+
+
+def _activateRenamed(process: FirefoxProcess) -> str:
+	"""Give the keyboard to process's window, which takes its page's title as the page loads, so that
+	the name it was first seen by may be gone before it is active; the name it has once it is."""
+	deadline = time.monotonic() + ACTIVATE_TIMEOUT
+	while True:
+		app = _application(process)
+		names = [name for name in (_windowNames(app) if app is not None else []) if name]
+		active = desktopSession.activeTopLevelNames()
+		if len(active) == 1 and active[0] in names:
+			return active[0]
+		for name in names:
+			subprocess.run(["wmctrl", "-F", "-a", name], check=False, capture_output=True)
+		assert time.monotonic() < deadline, (
+			f"Firefox's window did not become active within {ACTIVATE_TIMEOUT} s: {names}, active {active}"
+		)
+		time.sleep(0.2)
 
 
 def _documents(app) -> list:
