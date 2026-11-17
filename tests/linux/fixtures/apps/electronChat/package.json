@@ -1,0 +1,7 @@
+{
+	"name": "electron-chat-fixture",
+	"version": "1.0.0",
+	"description": "A window shaped like a chat program, for browse-mode tests",
+	"main": "main.js",
+	"private": true
+}
