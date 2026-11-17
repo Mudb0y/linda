@@ -200,7 +200,7 @@ def test_sayAllReadsThePageInOrder(session: Session):
 		"Read link the news…",
 		"heading level 2 News",
 		"Nothing new today.",
-		"Your name…",
+		"clickable Your name…",
 		"list…",
 		"heading level 2 Contact",
 		"Write to us.",

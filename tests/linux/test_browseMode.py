@@ -194,10 +194,10 @@ def test_quickNavigationAndRefresh(desktop: DesktopSession, tmp_path: Path):
 	# The layout table before it is passed over.
 	step(desktop, "t", "Prices table with 3 rows and 2 columns…")
 	step(desktop, "e", "Your name edit has auto complete")
-	step(desktop, "f", "Subscribe check box not checked")
-	step(desktop, "r", "Size grouping Small radio button checked")
+	step(desktop, "f", "clickable Subscribe check box not checked")
+	step(desktop, "r", "Size grouping clickable Small radio button checked")
 	step(desktop, "c", "Colour combo box collapsed Red")
-	step(desktop, "shift+x", "Subscribe check box not checked")
+	step(desktop, "shift+x", "clickable Subscribe check box not checked")
 	step(desktop, "b", "Press me button")
 	step(desktop, "g", "A small square graphic")
 	step(desktop, "3", "Frame and application heading level 3")
