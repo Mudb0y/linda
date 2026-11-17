@@ -2,8 +2,10 @@
 
 It walks a document over its own peer-to-peer connection to the application and returns the render
 stream libnvdaVbuf builds, as UTF-16 code units in the engine's memory, which linuxPlatform.vbufLib
-reads without a copy. ctypes releases the GIL for the whole call, so it runs on a thread while NVDA's
-main thread goes on. Found through BASEDREADER_VBUF_ENGINE, never on the library path.
+reads without a copy. It then watches the document, and next hands out each change as an update
+batch for the buffer. Its work runs on a thread of its own; ctypes releases the GIL for the whole of
+each call, so render and next block only the thread that calls them. Found through
+BASEDREADER_VBUF_ENGINE, never on the library path.
 """
 
 import ctypes
@@ -13,6 +15,11 @@ import threading
 from dataclasses import dataclass
 
 LIB_VARIABLE = "BASEDREADER_VBUF_ENGINE"
+
+#: Render flags: the top of a large document first, the rest as an update; updates may keep
+#: unchanged children as they are.
+FLAG_PROGRESSIVE = 1
+FLAG_REUSE = 2
 
 _lib: ctypes.CDLL | None = None
 _loadLock = threading.Lock()
@@ -29,16 +36,25 @@ def _load() -> ctypes.CDLL:
 	with _loadLock:
 		if _lib is None:
 			lib = ctypes.CDLL(os.environ[LIB_VARIABLE])
+			out = (
+				ctypes.POINTER(ctypes.c_void_p),
+				ctypes.POINTER(ctypes.c_size_t),
+				ctypes.POINTER(ctypes.c_void_p),
+			)
 			lib.bre_vbuf_render.restype = ctypes.c_int32
 			lib.bre_vbuf_render.argtypes = (
 				ctypes.c_char_p,
 				ctypes.c_char_p,
 				ctypes.c_int32,
 				ctypes.c_uint32,
-				ctypes.POINTER(ctypes.c_void_p),
-				ctypes.POINTER(ctypes.c_size_t),
-				ctypes.POINTER(ctypes.c_void_p),
+				*out,
 			)
+			lib.bre_vbuf_next.restype = ctypes.c_int32
+			lib.bre_vbuf_next.argtypes = (ctypes.c_uint32, *out)
+			lib.bre_vbuf_unwatch.restype = None
+			lib.bre_vbuf_unwatch.argtypes = (ctypes.c_char_p, ctypes.c_char_p)
+			lib.bre_vbuf_shutdown.restype = None
+			lib.bre_vbuf_shutdown.argtypes = ()
 			lib.bre_vbuf_free_stream.restype = None
 			lib.bre_vbuf_free_stream.argtypes = (ctypes.c_void_p, ctypes.c_size_t)
 			lib.bre_vbuf_free_str.restype = None
@@ -74,6 +90,20 @@ class Rendered:
 	info: dict
 
 
+@dataclass(frozen=True)
+class Batch:
+	"""Changes to one watched document: an update stream of S and R operations, or None when the
+	batch carries events only."""
+
+	stream: Stream | None
+	busName: str
+	docPath: str
+	#: Drawn from "loadComplete", "reload", "gone", "complete" and "urlChanged".
+	events: tuple[str, ...]
+	#: bus, doc, events and docURL, and the engine's timings.
+	info: dict
+
+
 def _takeInfo(pointer: ctypes.c_void_p) -> dict:
 	if not pointer.value:
 		return {}
@@ -83,22 +113,32 @@ def _takeInfo(pointer: ctypes.c_void_p) -> dict:
 		_load().bre_vbuf_free_str(pointer)
 
 
-def render(busName: str, docPath: str, docHandle: int, *, progressive: bool = True) -> Rendered:
-	"""The render stream of the document at docPath. Never call it on the main thread: it waits for the
-	application.
+def render(
+	busName: str,
+	docPath: str,
+	docHandle: int,
+	*,
+	progressive: bool = True,
+	reuse: bool = True,
+) -> Rendered:
+	"""The render stream of the document at docPath, which the engine then watches. Never call it on
+	the main thread: it waits for the application.
 
-	:param progressive: Ask for the top of a large document first and the rest later; not yet done.
+	:param progressive: For a large document, return the top first, with info["complete"] False; the
+		rest comes from next as a batch on the whole document with the event "complete".
+	:param reuse: Let updates keep children that did not change as R operations.
 	:raise RuntimeError: The engine could not render the document.
 	"""
 	lib = _load()
 	pointer = ctypes.c_void_p()
 	length = ctypes.c_size_t()
 	info = ctypes.c_void_p()
+	flags = (FLAG_PROGRESSIVE if progressive else 0) | (FLAG_REUSE if reuse else 0)
 	ok = lib.bre_vbuf_render(
 		busName.encode(),
 		docPath.encode(),
 		docHandle,
-		0,
+		flags,
 		ctypes.byref(pointer),
 		ctypes.byref(length),
 		ctypes.byref(info),
@@ -107,3 +147,38 @@ def render(busName: str, docPath: str, docHandle: int, *, progressive: bool = Tr
 	if not ok or not pointer.value:
 		raise RuntimeError(f"the engine could not render {busName} {docPath}: {details.get('error')}")
 	return Rendered(Stream(pointer.value, length.value), details)
+
+
+def next(timeoutMs: int) -> Batch | None:
+	"""The next batch of changes to any watched document, or None when none came within timeoutMs or
+	the engine has shut down. Never call it on the main thread."""
+	lib = _load()
+	pointer = ctypes.c_void_p()
+	length = ctypes.c_size_t()
+	info = ctypes.c_void_p()
+	got = lib.bre_vbuf_next(timeoutMs, ctypes.byref(pointer), ctypes.byref(length), ctypes.byref(info))
+	if got != 1:
+		return None
+	details = _takeInfo(info)
+	stream = Stream(pointer.value, length.value) if pointer.value else None
+	return Batch(
+		stream,
+		details.get("bus", ""),
+		details.get("doc", ""),
+		tuple(details.get("events", ())),
+		details,
+	)
+
+
+def unwatch(busName: str, docPath: str) -> None:
+	"""Stop watching the document; nothing more comes from next for it."""
+	if _lib is None:
+		return
+	_lib.bre_vbuf_unwatch(busName.encode(), docPath.encode())
+
+
+def shutdown() -> None:
+	"""Stop the engine's thread and close its connections; a later render starts it again."""
+	if _lib is None:
+		return
+	_lib.bre_vbuf_shutdown()

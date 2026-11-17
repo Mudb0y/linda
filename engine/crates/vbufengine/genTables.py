@@ -86,6 +86,9 @@ for name in (
 	"ICON",
 	"LIST",
 	"LISTITEM",
+	"PROGRESSBAR",
+	"TABLEROW",
+	"RADIOBUTTON",
 ):
 	lines.append(f"pub const ROLE_{name}: u32 = {Role[name].value};")
 for nick in (
@@ -98,6 +101,7 @@ for nick in (
 	"indeterminate",
 	"editable",
 	"multi-line",
+	"selected",
 ):
 	bit = int(getattr(Atspi.StateType, nick.upper().replace("-", "_")))
 	lines.append(f"pub const ATSPI_{nick.upper().replace('-', '_')}: u32 = {bit};")

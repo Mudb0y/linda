@@ -1,0 +1,543 @@
+//! Fetching a document, or parts of one, from its application: every object's data, a fixed number
+//! of calls in flight, the object nearest the top of the document first, so that the top of a large
+//! page is complete long before its end.
+
+use std::cell::RefCell;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+use futures_util::future::LocalBoxFuture;
+use futures_util::stream::{FuturesUnordered, StreamExt};
+use mirror::client::{Client, is_gone, is_timeout};
+use mirror::consts::{IFACE_ACCESSIBLE, IFACE_PROPERTIES, IFACE_TEXT, interface_bits};
+use mirror::decode;
+use zbus::{Message, ObjectPath, Variant};
+
+use crate::tables::*;
+
+/// Calls in flight: four already keep Firefox's main thread busy, and more only make every other
+/// client wait longer behind them.
+pub const WINDOW: usize = 4;
+
+const IFACE_TABLE: &str = "org.a11y.atspi.Table";
+const IFACE_TABLE_CELL: &str = "org.a11y.atspi.TableCell";
+const IFACE_VALUE: &str = "org.a11y.atspi.Value";
+const IFACE_HYPERLINK: &str = "org.a11y.atspi.Hyperlink";
+const RELATION_LABELLED_BY: u32 = 2;
+
+pub fn iface_bit(name: &str) -> u32 {
+    interface_bits([name])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Field {
+    Children,
+    Role,
+    States,
+    Name,
+    Description,
+    Interfaces,
+    Attributes,
+    Text,
+    TableRows,
+    TableColumns,
+    CellSpan,
+    ColumnHeaders,
+    RowHeaders,
+    Value,
+    Relations,
+    LinkUri,
+}
+
+const BASE: [Field; 7] = [
+    Field::Children,
+    Field::Role,
+    Field::States,
+    Field::Name,
+    Field::Description,
+    Field::Interfaces,
+    Field::Attributes,
+];
+
+fn bit(f: Field) -> u32 {
+    1 << f as u32
+}
+
+fn base_bits() -> u32 {
+    BASE.iter().fold(0, |a, f| a | bit(*f))
+}
+
+/// What the renderer and the watcher know of one object.
+#[derive(Debug, Clone, Default)]
+pub struct Obj {
+    pub parent: Option<String>,
+    pub children: Vec<String>,
+    pub role: u32,
+    pub states: [u32; 2],
+    pub name: String,
+    pub description: String,
+    pub interfaces: u32,
+    pub attributes: Vec<(String, String)>,
+    pub text: Option<String>,
+    /// Rows and columns, for a table.
+    pub table: Option<(i32, i32)>,
+    /// Row, column, row span and column span, for a cell.
+    pub cell: Option<[i32; 4]>,
+    pub column_headers: Vec<String>,
+    pub row_headers: Vec<String>,
+    pub value: Option<f64>,
+    /// Whether a label elsewhere in the document names this object; asked only where it matters.
+    pub label_visible: bool,
+    pub link_uri: Option<String>,
+    /// Where it comes in the document: its index in each ancestor up to the walk's start.
+    pub key: Vec<u32>,
+    /// Fields asked for, and fields answered or given up.
+    pub queued: u32,
+    pub done: u32,
+    pub gone: bool,
+    /// Set by the renderer: the object is a field in the buffer.
+    pub rendered: bool,
+    /// Set by the renderer: its children may be kept as they are when it is rendered again.
+    pub child_reuse: bool,
+    /// Set by the renderer: a change to it is a change to its parent.
+    pub escalate: bool,
+    /// Set by the renderer: what its children were rendered with.
+    pub child_ctx: crate::render::Ctx,
+}
+
+impl Obj {
+    pub fn attr(&self, k: &str) -> Option<&str> {
+        self.attributes
+            .iter()
+            .find(|(a, _)| a == k)
+            .map(|(_, v)| v.as_str())
+    }
+
+    pub fn complete(&self) -> bool {
+        self.queued & !self.done == 0 && self.done & base_bits() == base_bits()
+    }
+
+    fn known(&self, f: Field) -> bool {
+        self.done & bit(f) != 0
+    }
+}
+
+pub fn has(states: [u32; 2], b: u32) -> bool {
+    b < 64 && states[(b / 32) as usize] & (1 << (b % 32)) != 0
+}
+
+/// Roles whose name is always what they read as, so a label elsewhere does not change how they
+/// are rendered.
+fn name_is_content_by_role(role: u32) -> bool {
+    let nvda = NVDA_ROLES.get(role as usize).copied().unwrap_or(ROLE_UNKNOWN);
+    matches!(
+        nvda,
+        ROLE_LINK
+            | ROLE_BUTTON
+            | ROLE_TOGGLEBUTTON
+            | ROLE_MENUITEM
+            | ROLE_GRAPHIC
+            | ROLE_HEADING
+            | ROLE_TAB
+            | ROLE_MENUBUTTON
+            | ROLE_STATICTEXT
+    )
+}
+
+fn role_name(role: u32) -> &'static str {
+    ROLE_NAMES.get(role as usize).copied().unwrap_or("")
+}
+
+/// The document as rendered, which a walk of part of it consults: where an object sits, and whether
+/// a child can be kept as it is.
+pub struct Outer {
+    pub objs: Rc<RefCell<HashMap<String, Obj>>>,
+    /// Changed objects and every ancestor of one.
+    pub dirty: HashSet<String>,
+    /// Whether children the buffer holds may be kept rather than walked again.
+    pub reuse: bool,
+}
+
+type Reply = (u64, zbus::Result<Message>);
+
+pub struct Walk {
+    client: Rc<Client>,
+    pub objs: HashMap<String, Obj>,
+    outer: Option<Outer>,
+    heap: BinaryHeap<Reverse<(Vec<u32>, Field, String)>>,
+    inflight: FuturesUnordered<LocalBoxFuture<'static, Reply>>,
+    pending: HashMap<u64, (String, Field)>,
+    retried: HashSet<(String, Field)>,
+    next_id: u64,
+    max_objects: usize,
+    deadline: Instant,
+    /// Objects every field of which has come back.
+    pub complete: usize,
+    pub calls: u64,
+    pub errors: u64,
+    pub timeouts: u64,
+    pub truncated: bool,
+    pub foreign: usize,
+    /// Children kept as they are, which the buffer already holds.
+    pub reused: HashSet<String>,
+    /// Starting points that no longer exist in the application.
+    pub gone: Vec<String>,
+    pub first_link: Option<String>,
+    starts: HashSet<String>,
+}
+
+impl Walk {
+    pub fn new(client: Rc<Client>, outer: Option<Outer>, max_objects: usize, max_time: Duration) -> Self {
+        Walk {
+            client,
+            objs: HashMap::new(),
+            outer,
+            heap: BinaryHeap::new(),
+            inflight: FuturesUnordered::new(),
+            pending: HashMap::new(),
+            retried: HashSet::new(),
+            next_id: 0,
+            max_objects,
+            deadline: Instant::now() + max_time,
+            complete: 0,
+            calls: 0,
+            errors: 0,
+            timeouts: 0,
+            truncated: false,
+            foreign: 0,
+            reused: HashSet::new(),
+            gone: Vec::new(),
+            first_link: None,
+            starts: HashSet::new(),
+        }
+    }
+
+    /// Fetches path and everything under it, as one more starting point of this walk.
+    pub fn start(&mut self, path: &str, key: Vec<u32>) {
+        self.starts.insert(path.to_owned());
+        self.admit(path, None, key);
+    }
+
+    fn admit(&mut self, path: &str, parent: Option<String>, key: Vec<u32>) {
+        let o = self.objs.entry(path.to_owned()).or_default();
+        o.parent = parent;
+        o.key = key;
+        for f in BASE {
+            self.queue(path, f);
+        }
+    }
+
+    fn queue(&mut self, path: &str, f: Field) {
+        let Some(o) = self.objs.get_mut(path) else { return };
+        if o.queued & bit(f) != 0 {
+            return;
+        }
+        o.queued |= bit(f);
+        self.heap.push(Reverse((o.key.clone(), f, path.to_owned())));
+    }
+
+    pub fn idle(&self) -> bool {
+        self.heap.is_empty() && self.inflight.is_empty()
+    }
+
+    /// Sends calls up to the window and takes in one reply. False once nothing is left to do, or
+    /// the walk ran out of time.
+    pub async fn step(&mut self) -> bool {
+        if Instant::now() >= self.deadline {
+            if !self.idle() {
+                self.truncated = true;
+            }
+            self.heap.clear();
+            self.inflight = FuturesUnordered::new();
+            self.pending.clear();
+            return false;
+        }
+        while self.inflight.len() < WINDOW {
+            let Some(Reverse((_, f, path))) = self.heap.pop() else { break };
+            let id = self.next_id;
+            self.next_id += 1;
+            self.calls += 1;
+            self.inflight.push(issue(self.client.clone(), id, path.clone(), f));
+            self.pending.insert(id, (path, f));
+        }
+        let Some((id, r)) = self.inflight.next().await else {
+            return false;
+        };
+        if let Some((path, f)) = self.pending.remove(&id) {
+            self.reply(path, f, r);
+        }
+        !self.idle()
+    }
+
+    fn reply(&mut self, path: String, f: Field, r: zbus::Result<Message>) {
+        let msg = match r {
+            Ok(m) => m,
+            Err(e) => {
+                self.errors += 1;
+                if is_timeout(&e) {
+                    self.timeouts += 1;
+                    if self.retried.insert((path.clone(), f)) {
+                        // Asked again at the back of the queue, once.
+                        if let Some(o) = self.objs.get_mut(&path) {
+                            o.queued &= !bit(f);
+                        }
+                        self.queue(&path, f);
+                        return;
+                    }
+                }
+                if is_gone(&e) {
+                    if let Some(o) = self.objs.get_mut(&path) {
+                        o.gone = true;
+                    }
+                    if self.starts.contains(&path) && !self.gone.contains(&path) {
+                        self.gone.push(path.clone());
+                    }
+                }
+                self.finish(&path, f);
+                return;
+            }
+        };
+        if f == Field::Children {
+            self.children(&path, &msg);
+        } else if let Some(o) = self.objs.get_mut(&path) {
+            let _ = decode_into(o, f, &msg);
+        }
+        self.finish(&path, f);
+        self.followups(&path);
+    }
+
+    fn finish(&mut self, path: &str, f: Field) {
+        let Some(o) = self.objs.get_mut(path) else { return };
+        let was = o.complete();
+        o.done |= bit(f);
+        if !was && o.complete() {
+            self.complete += 1;
+        }
+    }
+
+    fn children(&mut self, path: &str, msg: &Message) {
+        let Ok(kids) = decode::children(msg) else { return };
+        let app = self.client.app_bus.clone();
+        let mut own = Vec::with_capacity(kids.len());
+        let mut here = HashSet::with_capacity(kids.len());
+        for k in kids {
+            if k.is_null() {
+                continue;
+            }
+            if k.bus != app {
+                self.foreign += 1;
+                continue;
+            }
+            // An object seen twice is a cycle or a duplicate; it is taken in once.
+            if self.objs.contains_key(&k.path) || !here.insert(k.path.clone()) {
+                continue;
+            }
+            own.push(k.path);
+        }
+        if self.objs.len() + own.len() > self.max_objects {
+            self.truncated = true;
+            return;
+        }
+        let key = self.objs.get(path).map(|o| o.key.clone()).unwrap_or_default();
+        for (i, c) in own.iter().enumerate() {
+            let mut k = key.clone();
+            k.push(i as u32);
+            if self.reusable(c, path) {
+                self.reused.insert(c.clone());
+                continue;
+            }
+            self.admit(c, Some(path.to_owned()), k);
+        }
+        if let Some(o) = self.objs.get_mut(path) {
+            o.children = own;
+        }
+    }
+
+    fn reusable(&self, child: &str, parent: &str) -> bool {
+        let Some(outer) = &self.outer else { return false };
+        if !outer.reuse || outer.dirty.contains(child) {
+            return false;
+        }
+        let objs = outer.objs.borrow();
+        let (Some(c), Some(p)) = (objs.get(child), objs.get(parent)) else {
+            return false;
+        };
+        p.rendered && p.child_reuse && c.rendered && c.parent.as_deref() == Some(parent)
+    }
+
+    fn parent_of(&self, path: &str) -> Option<String> {
+        if let Some(o) = self.objs.get(path) {
+            if o.parent.is_some() {
+                return o.parent.clone();
+            }
+        }
+        self.outer.as_ref()?.objs.borrow().get(path)?.parent.clone()
+    }
+
+    fn role_of(&self, path: &str) -> Option<u32> {
+        if let Some(o) = self.objs.get(path) {
+            return o.known(Field::Role).then_some(o.role);
+        }
+        self.outer.as_ref()?.objs.borrow().get(path).map(|o| o.role)
+    }
+
+    /// Queues the calls an answer has shown to be needed.
+    fn followups(&mut self, path: &str) {
+        let Some(o) = self.objs.get(path) else { return };
+        let mut more = Vec::new();
+        if o.known(Field::Interfaces) {
+            let i = o.interfaces;
+            if i & iface_bit(IFACE_TEXT) != 0 {
+                more.push(Field::Text);
+            }
+            if i & iface_bit(IFACE_TABLE) != 0 {
+                more.extend([Field::TableRows, Field::TableColumns]);
+            }
+            if i & iface_bit(IFACE_TABLE_CELL) != 0 {
+                more.extend([Field::CellSpan, Field::ColumnHeaders, Field::RowHeaders]);
+            }
+            if i & iface_bit(IFACE_VALUE) != 0 && o.known(Field::Attributes) && o.attr("valuetext").is_none() {
+                more.push(Field::Value);
+            }
+        }
+        if o.known(Field::Attributes) && o.known(Field::Role) && o.attr("explicit-name") == Some("true") {
+            let nvda = NVDA_ROLES.get(o.role as usize).copied().unwrap_or(ROLE_UNKNOWN);
+            if !name_is_content_by_role(o.role) || nvda == ROLE_CHECKBOX || role_name(o.role) == "radio button" {
+                more.push(Field::Relations);
+            }
+        }
+        let mut link = None;
+        if o.known(Field::Role) && o.known(Field::Name) {
+            let rn = role_name(o.role);
+            if rn == "link" && self.first_link.is_none() {
+                self.first_link = Some(path.to_owned());
+            }
+            if rn == "image" && o.name.is_empty() {
+                link = self.link_ancestor(path);
+            }
+        }
+        for f in more {
+            self.queue(path, f);
+        }
+        if let Some(l) = link {
+            if self.objs.contains_key(&l) {
+                self.queue(&l, Field::LinkUri);
+            }
+        }
+    }
+
+    /// The nearest link above an unlabelled image, whose address names it.
+    fn link_ancestor(&self, path: &str) -> Option<String> {
+        let mut p = self.parent_of(path);
+        for _ in 0..4 {
+            let here = p?;
+            if self.role_of(&here).is_some_and(|r| role_name(r) == "link") {
+                return Some(here);
+            }
+            p = self.parent_of(&here);
+        }
+        None
+    }
+}
+
+fn issue(client: Rc<Client>, id: u64, path: String, f: Field) -> LocalBoxFuture<'static, Reply> {
+    Box::pin(async move {
+        let p = path.as_str();
+        let r = match f {
+            Field::Children => client.call(p, IFACE_ACCESSIBLE, "GetChildren", &()).await,
+            Field::Role => client.call(p, IFACE_ACCESSIBLE, "GetRole", &()).await,
+            Field::States => client.call(p, IFACE_ACCESSIBLE, "GetState", &()).await,
+            Field::Name => client.call(p, IFACE_PROPERTIES, "Get", &(IFACE_ACCESSIBLE, "Name")).await,
+            Field::Description => {
+                client
+                    .call(p, IFACE_PROPERTIES, "Get", &(IFACE_ACCESSIBLE, "Description"))
+                    .await
+            }
+            Field::Interfaces => client.call(p, IFACE_ACCESSIBLE, "GetInterfaces", &()).await,
+            Field::Attributes => client.call(p, IFACE_ACCESSIBLE, "GetAttributes", &()).await,
+            Field::Text => client.call(p, IFACE_TEXT, "GetText", &(0i32, -1i32)).await,
+            Field::TableRows => client.call(p, IFACE_PROPERTIES, "Get", &(IFACE_TABLE, "NRows")).await,
+            Field::TableColumns => client.call(p, IFACE_PROPERTIES, "Get", &(IFACE_TABLE, "NColumns")).await,
+            Field::CellSpan => client.call(p, IFACE_TABLE_CELL, "GetRowColumnSpan", &()).await,
+            Field::ColumnHeaders => client.call(p, IFACE_TABLE_CELL, "GetColumnHeaderCells", &()).await,
+            Field::RowHeaders => client.call(p, IFACE_TABLE_CELL, "GetRowHeaderCells", &()).await,
+            Field::Value => {
+                client
+                    .call(p, IFACE_PROPERTIES, "Get", &(IFACE_VALUE, "CurrentValue"))
+                    .await
+            }
+            Field::Relations => client.call(p, IFACE_ACCESSIBLE, "GetRelationSet", &()).await,
+            Field::LinkUri => client.call(p, IFACE_HYPERLINK, "GetURI", &(0i32,)).await,
+        };
+        (id, r)
+    })
+}
+
+fn variant_number(v: &Variant<'_>) -> Option<f64> {
+    match v {
+        Variant::I32(i) => Some(*i as f64),
+        Variant::U32(u) => Some(*u as f64),
+        Variant::I64(i) => Some(*i as f64),
+        Variant::U64(u) => Some(*u as f64),
+        Variant::I16(i) => Some(*i as f64),
+        Variant::U16(u) => Some(*u as f64),
+        Variant::U8(u) => Some(*u as f64),
+        Variant::F64(d) => Some(*d),
+        Variant::Variant(inner) => variant_number(inner),
+        _ => None,
+    }
+}
+
+fn number_property(msg: &Message) -> zbus::Result<f64> {
+    let body = msg.body();
+    let v: Variant<'_> = body.deserialize()?;
+    variant_number(&v).ok_or(zbus::Error::IncorrectType)
+}
+
+fn row_column_span(msg: &Message) -> zbus::Result<[i32; 4]> {
+    let body = msg.body();
+    if body.signature().to_string().starts_with('b') {
+        let (_, r, c, rs, cs): (bool, i32, i32, i32, i32) = body.deserialize()?;
+        return Ok([r, c, rs, cs]);
+    }
+    let (r, c, rs, cs): (i32, i32, i32, i32) = body.deserialize()?;
+    Ok([r, c, rs, cs])
+}
+
+fn labelled_by(msg: &Message) -> zbus::Result<bool> {
+    let body = msg.body();
+    let set: Vec<(u32, Vec<(&str, ObjectPath<'_>)>)> = body.deserialize()?;
+    Ok(set
+        .iter()
+        .any(|(kind, targets)| *kind == RELATION_LABELLED_BY && !targets.is_empty()))
+}
+
+fn decode_into(o: &mut Obj, f: Field, msg: &Message) -> zbus::Result<()> {
+    match f {
+        Field::Children => {}
+        Field::Role => o.role = decode::role(msg)?,
+        Field::States => o.states = decode::states(msg)?,
+        Field::Name => o.name = decode::string_property(msg)?,
+        Field::Description => o.description = decode::string_property(msg)?,
+        Field::Interfaces => o.interfaces = decode::interfaces(msg)?,
+        Field::Attributes => o.attributes = decode::attributes(msg)?,
+        Field::Text => o.text = Some(decode::string(msg)?),
+        Field::TableRows => {
+            let n = number_property(msg)? as i32;
+            o.table = Some((n, o.table.map_or(0, |t| t.1)));
+        }
+        Field::TableColumns => {
+            let n = number_property(msg)? as i32;
+            o.table = Some((o.table.map_or(0, |t| t.0), n));
+        }
+        Field::CellSpan => o.cell = Some(row_column_span(msg)?),
+        Field::ColumnHeaders => o.column_headers = decode::children(msg)?.into_iter().map(|r| r.path).collect(),
+        Field::RowHeaders => o.row_headers = decode::children(msg)?.into_iter().map(|r| r.path).collect(),
+        Field::Value => o.value = Some(number_property(msg)?),
+        Field::Relations => o.label_visible = labelled_by(msg)?,
+        Field::LinkUri => o.link_uri = Some(decode::string(msg)?),
+    }
+    Ok(())
+}
