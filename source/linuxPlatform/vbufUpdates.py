@@ -10,6 +10,7 @@ told NVDA through vbufChangeNotify.
 
 import atexit
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import queueHandler
@@ -22,8 +23,17 @@ if TYPE_CHECKING:
 
 #: Milliseconds each wait for a batch may take, which bounds how long the thread takes to stop.
 WAIT_MS = 500
+#: Seconds the rest of a large page is kept for a buffer not yet registered. It can come before the
+#: thread that rendered the top has built the buffer and registered it, and it replaces the whole
+#: document, so nothing older than it is lost by applying it late. Other batches for a document no
+#: buffer has are dropped: the buffer's own render is newer than they are.
+HOLD_SECONDS = 10.0
 
 _buffers: dict[tuple[str, str], "AtSpiBuffer"] = {}
+#: The rest of each large page that came before its buffer registered, with when it came.
+_held: dict[tuple[str, str], list[tuple[float, object]]] = {}
+#: Batches whose buffer registered after they came, for the thread to apply before it waits again.
+_ready: list[object] = []
 #: Held while a batch is applied, so that once unregister returns no update touches that buffer.
 _lock = threading.Lock()
 _thread: threading.Thread | None = None
@@ -43,8 +53,10 @@ def register(buffer: "AtSpiBuffer") -> None:
 	The buffer needs busName, docPath and VBufHandle, and is told of each batch through
 	onEngineEvents(events, info) on the main thread, after the batch is in its storage.
 	"""
+	key = (buffer.busName, buffer.docPath)
 	with _lock:
-		_buffers[(buffer.busName, buffer.docPath)] = buffer
+		_buffers[key] = buffer
+		_ready.extend(batch for _came, batch in _held.pop(key, ()))
 	_start()
 
 
@@ -55,6 +67,9 @@ def unregister(buffer: "AtSpiBuffer") -> None:
 		key = (buffer.busName, buffer.docPath)
 		if _buffers.get(key) is buffer:
 			del _buffers[key]
+		for _came, batch in _held.pop(key, ()):
+			if batch.stream is not None:
+				batch.stream.free()
 
 
 def _start() -> None:
@@ -98,6 +113,14 @@ def terminate() -> None:
 
 def _run(nextBatch) -> None:
 	while not _stop.is_set():
+		with _lock:
+			ready = _ready[:]
+			_ready.clear()
+		for batch in ready:
+			try:
+				_apply(batch, hold=False)
+			except Exception:
+				log.exception("An update from the engine could not be applied")
 		try:
 			batch = nextBatch(WAIT_MS)
 		except Exception:
@@ -111,11 +134,33 @@ def _run(nextBatch) -> None:
 			log.exception("An update from the engine could not be applied")
 
 
-def _apply(batch) -> None:
+def _dropExpiredHeld(now: float) -> None:
+	"""Free the batches held longer than HOLD_SECONDS. Call it holding _lock."""
+	for key in list(_held):
+		kept = []
+		for came, batch in _held[key]:
+			if now - came <= HOLD_SECONDS:
+				kept.append((came, batch))
+			elif batch.stream is not None:
+				batch.stream.free()
+		if kept:
+			_held[key] = kept
+		else:
+			del _held[key]
+
+
+def _apply(batch, *, hold: bool = True) -> None:
+	held = False
 	try:
 		with _lock:
-			buffer = _buffers.get((batch.busName, batch.docPath))
+			key = (batch.busName, batch.docPath)
+			buffer = _buffers.get(key)
 			if buffer is None:
+				now = time.monotonic()
+				_dropExpiredHeld(now)
+				if hold and "complete" in batch.events:
+					_held.setdefault(key, []).append((now, batch))
+					held = True
 				return
 			applies = batch.stream is not None and buffer.VBufHandle
 			if applies and not vbufLib.update(buffer.VBufHandle, batch.stream):
@@ -128,5 +173,5 @@ def _apply(batch) -> None:
 		if onEngineEvents is not None:
 			queueHandler.queueFunction(queueHandler.eventQueue, onEngineEvents, batch.events, batch.info)
 	finally:
-		if batch.stream is not None:
+		if batch.stream is not None and not held:
 			batch.stream.free()
