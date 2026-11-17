@@ -119,6 +119,13 @@ _EXTRA_ROLES = {
 	"menu": Role.POPUPMENU,
 }
 
+#: The states of a column or row header that the page says is sorted, by its sort object attribute.
+_SORT_STATES = {
+	"ascending": State.SORTED_ASCENDING,
+	"descending": State.SORTED_DESCENDING,
+	"other": State.SORTED,
+}
+
 #: The roles NVDA treats as an application inside a document, whose content browse mode leaves alone.
 _APPLICATION_ROLES = (Role.APPLICATION, Role.DIALOG)
 
@@ -173,6 +180,8 @@ class AtSpiBufferTextInfo(VirtualBufferTextInfo):
 		if popupState:
 			states.discard(State.HASPOPUP)
 			states.add(popupState)
+		if sortState := _SORT_STATES.get(attrs.get("sort")):
+			states.add(sortState)
 		landmark = next((r for r in xmlRoles if r in aria.landmarkRoles), None)
 		if landmark and role != Role.LANDMARK and landmark != xmlRoles[0]:
 			landmark = None
