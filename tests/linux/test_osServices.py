@@ -1464,12 +1464,13 @@ def test_registryPathsRaiseNoLinuxImplementation(tmp_path):
 		"installDirX86": "winreg.OpenKey has no Linux implementation",
 		"startMenuFolder": "winreg.OpenKey has no Linux implementation",
 		"deleteKey": "winreg.OpenKey has no Linux implementation",
-		"registerURLHandler": "winreg.CreateKey has no Linux implementation",
+		# Nothing on Linux opens an nvdaremote link, and Remote Access starts without one.
+		"registerURLHandler": "returned",
 		# Control+alt+delete is Windows' secure attention sequence; a remote request for it is refused.
 		"canSendSAS": False,
 		"sasKey": "<winreg.HKEY_LOCAL_MACHINE, which Linux does not have>",
 	}
-	assert done.noLinuxImplementation == ["winreg.OpenKey"] * 3 + ["winreg.CreateKey"]
+	assert done.noLinuxImplementation == ["winreg.OpenKey"] * 3
 
 
 def test_addonStoreOpensLinksWithTheDefaultApplication(tmp_path):
