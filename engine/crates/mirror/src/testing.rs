@@ -9,7 +9,7 @@ use std::time::Duration;
 /// could be copied into another shell; the rig's sandbox is also the first
 /// process and has no /run/user.
 pub fn rig() {
-    let inside = std::env::var("BASEDREADER_RIG").as_deref() == Ok("1")
+    let inside = std::env::var("LINDA_RIG").as_deref() == Ok("1")
         && std::fs::read_to_string("/proc/1/comm").is_ok_and(|c| c.trim_end() == "bwrap")
         && !std::path::Path::new("/run/user").exists();
     assert!(

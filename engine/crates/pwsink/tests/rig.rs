@@ -11,7 +11,7 @@ use pwsink::{
 fn require_rig() {
     let first = std::fs::read_to_string("/proc/1/comm").unwrap_or_default();
     assert!(
-        std::env::var_os("BASEDREADER_RIG").is_some_and(|v| v == "1")
+        std::env::var_os("LINDA_RIG").is_some_and(|v| v == "1")
             && first.trim() == "bwrap"
             && !std::path::Path::new("/run/user").exists(),
         "refusing to initialise PipeWire outside tests/linux/rig"

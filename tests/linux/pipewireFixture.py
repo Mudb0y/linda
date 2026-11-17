@@ -36,10 +36,10 @@ RATE = 48000
 
 #: What has to be named for the fixture and the sink under test. The dev shell names each.
 VARIABLES = {
-	"BASEDREADER_PIPEWIRE_BIN": "PipeWire's bin directory",
-	"BASEDREADER_WIREPLUMBER_BIN": "WirePlumber's bin directory",
-	"BASEDREADER_PWSINK_LIB": "libpwsink.so",
-	"BASEDREADER_PWMON": "pwmon",
+	"LINDA_PIPEWIRE_BIN": "PipeWire's bin directory",
+	"LINDA_WIREPLUMBER_BIN": "WirePlumber's bin directory",
+	"LINDA_PWSINK_LIB": "libpwsink.so",
+	"LINDA_PWMON": "pwmon",
 }
 
 
@@ -73,7 +73,7 @@ def assertCleanThroughPipewire(done: harness.ChildResult, *, ignoring: Collectio
 	sound server. Anything else of that package, such as its JACK or PulseAudio libraries, still counts.
 	"""
 	done.assertClean(ignoring={"audio", *ignoring})
-	pipewireLib = Path(os.path.realpath(os.environ["BASEDREADER_PIPEWIRE_BIN"])).parent / "lib"
+	pipewireLib = Path(os.path.realpath(os.environ["LINDA_PIPEWIRE_BIN"])).parent / "lib"
 	unexpected = []
 	for what in done.audio:
 		how, _, mapped = what.partition(" ")
@@ -184,8 +184,8 @@ class PipewireFixture:
 		workDir.mkdir(parents=True, exist_ok=True)
 		self.config = "pipewire.conf" if sinks else "pipewire-nosinks.conf"
 		self.sinks = sinks
-		self.pipewireBin = Path(os.environ["BASEDREADER_PIPEWIRE_BIN"])
-		self.wireplumberBin = Path(os.environ["BASEDREADER_WIREPLUMBER_BIN"])
+		self.pipewireBin = Path(os.environ["LINDA_PIPEWIRE_BIN"])
+		self.wireplumberBin = Path(os.environ["LINDA_WIREPLUMBER_BIN"])
 		self.socket = Path(os.environ["XDG_RUNTIME_DIR"]) / "pipewire-0"
 		#: WirePlumber's own state, which is where it remembers streams.
 		self.stateDir = workDir / "wireplumber-state"
@@ -348,7 +348,7 @@ class PipewireFixture:
 
 	def childEnv(self, **extra: str) -> dict[str, str]:
 		"""The environment a harness child needs to play to this daemon."""
-		return {"BASEDREADER_AUDIO_SINK": "pipewire", **extra}
+		return {"LINDA_AUDIO_SINK": "pipewire", **extra}
 
 	def _end(self, process: subprocess.Popen | None, how: int = signal.SIGTERM) -> None:
 		if process is None or process.poll() is not None:
@@ -378,7 +378,7 @@ class Monitor:
 		_refuseOutsideTheRig()
 		self.sink = sink
 		self.raw = fixture.workDir / f"monitor-{sink}-{time.monotonic_ns()}.raw"
-		args = [os.environ["BASEDREADER_PWMON"], sink, "--raw", str(self.raw)]
+		args = [os.environ["LINDA_PWMON"], sink, "--raw", str(self.raw)]
 		if passive:
 			args.append("--passive")
 		self.process = subprocess.Popen(

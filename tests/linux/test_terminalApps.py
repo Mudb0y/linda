@@ -21,7 +21,7 @@ from desktopSession import DesktopSession
 
 SESSION_CONFIG = harness.HERE / "fixtures" / "sessionConfig" / "nvda.ini"
 TITLE = "Terminal fixture"
-TIMED_SPEECH = {"BASEDREADER_TRANSCRIPT_MODE": "timed", "BASEDREADER_TRANSCRIPT_MS_PER_CHAR": "10"}
+TIMED_SPEECH = {"LINDA_TRANSCRIPT_MODE": "timed", "LINDA_TRANSCRIPT_MS_PER_CHAR": "10"}
 STARTUP_BOUND = 60.0
 #: Seconds to wait for anything more after what a step expects.
 SETTLE = 0.6
@@ -45,7 +45,7 @@ QUESTION_END = ASSISTANT.MENU_HINT.split("\u00b7")[0].strip() + "\N{HORIZONTAL E
 
 @pytest.fixture
 def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[DesktopSession]:
-	monkeypatch.setenv("BASEDREADER_ASSISTANT_LOG", str(tmp_path / "assistant.jsonl"))
+	monkeypatch.setenv("LINDA_ASSISTANT_LOG", str(tmp_path / "assistant.jsonl"))
 	with DesktopSession(tmp_path / "desktop") as session:
 		yield session
 

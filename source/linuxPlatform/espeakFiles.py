@@ -12,9 +12,9 @@ import errno
 import os
 
 #: Names libespeak-ng.so.1.
-libraryVariable = "BASEDREADER_ESPEAK_LIB"
+libraryVariable = "LINDA_ESPEAK_LIB"
 #: Names the espeak-ng-data directory.
-dataDirVariable = "BASEDREADER_ESPEAK_DATA_DIR"
+dataDirVariable = "LINDA_ESPEAK_DATA_DIR"
 
 
 def _named(variable: str) -> str:

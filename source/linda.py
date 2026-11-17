@@ -23,7 +23,7 @@ SAY_COMMAND = "say"
 def _tell(message: str) -> None:
 	# On Linux the caller reads standard error. logHandler.initialize sends sys.stderr to the log.
 	if sys.__stderr__ is not None:
-		print(f"basedreader: {message}", file=sys.__stderr__, flush=True)
+		print(f"linda: {message}", file=sys.__stderr__, flush=True)
 
 
 def _fail(message: str) -> NoReturn:

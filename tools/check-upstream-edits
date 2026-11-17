@@ -10,7 +10,7 @@ exactly when the file, with each test of sys.platform decided as on Windows, dif
 upstream's, because a change Windows runs is one a merge has to weigh for Windows as well.
 
 Some upstream files are forked rather than edited: linuxPlatform.finder loads a replacement in
-place of each module in its replacedModules, and source/basedreader.py does what source/nvda.pyw
+place of each module in its replacedModules, and source/linda.py does what source/nvda.pyw
 does. The upstream files stay as they are, so upstream's changes to them merge without a conflict
 into files that never run on Linux. tools/upstream-forks.txt records the upstream object each fork
 was last brought up to date with, and a fork whose upstream file has moved on fails here. So does a
@@ -47,13 +47,13 @@ LOUIS_LINK = "include/liblouis"
 
 #: Where an added file is ours by construction rather than something beside upstream's.
 OUR_DIR = "source/linuxPlatform/"
-OUR_FILES = ("source/basedreader.py",)
+OUR_FILES = ("source/linda.py",)
 #: Where an added file sits among upstream's modules or tests.
 UPSTREAM_DIRS = ("source", "tests/unit")
 #: Where the finder loads each replacement from, at the module's own path.
 REPLACEMENTS = "source/linuxPlatform/replacements/"
 #: Forks the finder does not know about, and the file of ours that carries each.
-MIRRORED = {"source/nvda.pyw": "source/basedreader.py"}
+MIRRORED = {"source/nvda.pyw": "source/linda.py"}
 #: The kinds of edit, as the edits list's header explains. Each reason starts with one, and an entry
 #: whose edits are of several kinds starts a line with each.
 EDIT_KINDS = ("import safety:", "Linux runtime:", "every platform:", "repository:")
@@ -339,7 +339,7 @@ def reportLiblouis(base: str) -> None:
 	if pin != recordedPin:
 		print(f"liblouis: upstream now pins {pin}, not {recordedPin}; record its release in {FORKS}")
 		return
-	supplied = os.environ.get("BASEDREADER_LIBLOUIS_VERSION")
+	supplied = os.environ.get("LINDA_LIBLOUIS_VERSION")
 	if supplied is None:
 		print("liblouis: not compared, as only the dev shell says which release nixpkgs supplies")
 	elif supplied != release:

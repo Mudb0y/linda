@@ -5,7 +5,7 @@ stream libnvdaVbuf builds, as UTF-16 code units in the engine's memory, which li
 reads without a copy. It then watches the document, and next hands out each change as an update
 batch for the buffer. Its work runs on a thread of its own; ctypes releases the GIL for the whole of
 each call, so render and next block only the thread that calls them. Found through
-BASEDREADER_VBUF_ENGINE, never on the library path.
+LINDA_VBUF_ENGINE, never on the library path.
 """
 
 import ctypes
@@ -14,7 +14,7 @@ import os
 import threading
 from dataclasses import dataclass
 
-LIB_VARIABLE = "BASEDREADER_VBUF_ENGINE"
+LIB_VARIABLE = "LINDA_VBUF_ENGINE"
 
 #: Render flags: the top of a large document first, the rest as an update; updates may keep
 #: unchanged children as they are.
@@ -26,7 +26,7 @@ _loadLock = threading.Lock()
 
 
 def isAvailable() -> bool:
-	"""Whether BASEDREADER_VBUF_ENGINE names the library."""
+	"""Whether LINDA_VBUF_ENGINE names the library."""
 	path = os.environ.get(LIB_VARIABLE)
 	return bool(path) and os.path.isfile(path)
 

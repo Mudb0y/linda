@@ -30,7 +30,7 @@ _crashDumpFile: TextIO | None = None
 
 
 def stateDirectory() -> str:
-	"""Basedreader's directory under the XDG state home, created when missing.
+	"""Linda's directory under the XDG state home, created when missing.
 
 	The log records every key typed at the input log levels, so the directory is the user's alone.
 	"""

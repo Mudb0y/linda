@@ -7,7 +7,7 @@
 }:
 
 stdenv.mkDerivation {
-  pname = "basedreader-vbuf";
+  pname = "linda-vbuf";
   inherit ((lib.importTOML ../engine/Cargo.toml).workspace.package) version;
 
   # Only what the library compiles from, so that a change elsewhere in nvdaHelper or the engine

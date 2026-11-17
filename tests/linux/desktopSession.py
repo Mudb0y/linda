@@ -159,7 +159,7 @@ class DesktopSession:
 		"""
 		:param directory: Where NVDA's runs and the applications' standard error go.
 		:param windowManager: Whether to have marco running, which the rig starts when
-			BASEDREADER_RIG_WM=marco is in its caller's environment, and this does otherwise.
+			LINDA_RIG_WM=marco is in its caller's environment, and this does otherwise.
 		"""
 		harness.requireRig()
 		self.directory = directory
@@ -218,7 +218,7 @@ class DesktopSession:
 		Its standard error goes to a file in the session's directory.
 		"""
 		env = dict(os.environ)
-		qtPlugins = os.environ.get("BASEDREADER_QT6_PLUGIN_PATH")
+		qtPlugins = os.environ.get("LINDA_QT6_PLUGIN_PATH")
 		if qtPlugins and "QT_PLUGIN_PATH" not in env:
 			# Without its platform plugin a PyQt6 program aborts before it opens a window.
 			env["QT_PLUGIN_PATH"] = qtPlugins

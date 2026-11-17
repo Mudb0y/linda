@@ -1,8 +1,8 @@
 """Linux replacement for winBindings.icu: ICU's break iterators from the dev shell's ICU.
 
-Upstream binds the ICU that Windows ships. On Linux the library is the one BASEDREADER_ICU_LIB_DIR
+Upstream binds the ICU that Windows ships. On Linux the library is the one LINDA_ICU_LIB_DIR
 names, never one found through the loader's search path, and a Linux ICU build suffixes every C
-symbol with its major version, BASEDREADER_ICU_VERSION_MAJOR. The names here are upstream's, plus the
+symbol with its major version, LINDA_ICU_VERSION_MAJOR. The names here are upstream's, plus the
 character break type and the two iteration functions NVDAHelper.localLib needs. Text goes in as
 UTF-16 code units through linuxPlatform.utf16, because c_wchar_p is UTF-32 on Linux.
 
@@ -21,8 +21,8 @@ from typing import Any, NoReturn
 from linuxPlatform import missingAttribute
 from linuxPlatform.utf16 import Utf16Pointer
 
-LIB_DIR_VARIABLE = "BASEDREADER_ICU_LIB_DIR"
-VERSION_MAJOR_VARIABLE = "BASEDREADER_ICU_VERSION_MAJOR"
+LIB_DIR_VARIABLE = "LINDA_ICU_LIB_DIR"
+VERSION_MAJOR_VARIABLE = "LINDA_ICU_VERSION_MAJOR"
 
 
 def _load() -> tuple[CDLL | None, str]:

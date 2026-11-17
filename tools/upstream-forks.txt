@@ -21,7 +21,7 @@ source/UIAHandler/__init__.py 9e1e2f4b26b4cc7eb6eb9393a16b60351b107540
 source/easeOfAccess.py 039ff8b533873d42ca7528c19ee69660ccc62a1d
   replaced by linuxPlatform/replacements/easeOfAccess.py
 source/nvda.pyw caeb8eeb8bddbbcaac1d4f6d0458d5f1b9d8849c
-  source/basedreader.py does on Linux what this does on Windows before and
+  source/linda.py does on Linux what this does on Windows before and
   after core.main
 source/wasapi.py 1836072d3ecfbddcfdbe12e78947217401827baa
   replaced by linuxPlatform/replacements/wasapi.py

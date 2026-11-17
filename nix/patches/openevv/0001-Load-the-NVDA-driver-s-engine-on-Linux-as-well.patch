@@ -5,7 +5,7 @@ Subject: [PATCH 1/8] Load the NVDA driver's engine on Linux as well
 
 The driver reached the library only the Windows way: eci.dll or
 eci32.dll in openevv_engine, loaded with WinDLL and called back through
-WINFUNCTYPE. NVDA running on Linux, which is what Basedreader is, has
+WINFUNCTYPE. NVDA running on Linux, which is what Linda is, has
 none of those. check() found no eci.dll and the voice was never offered.
 
 Anywhere but Windows libraryName() is now libeci.so.1, the library make

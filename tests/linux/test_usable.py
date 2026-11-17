@@ -1,11 +1,11 @@
-"""A session as a person using Basedreader as their only screen reader has one: Alt+Tab between a GTK
+"""A session as a person using Linda as their only screen reader has one: Alt+Tab between a GTK
 and a Qt application under marco, moving and typing in a form, reviewing, reading the window and
 cutting it short, input help, the NVDA menu, and exiting through NVDA's own dialog, with every key
 pressed on the rig's display.
 
-nix develop . -c tests/linux/rig env BASEDREADER_RIG_WM=marco python3 -m pytest -q tests/linux/test_usable.py
+nix develop . -c tests/linux/rig env LINDA_RIG_WM=marco python3 -m pytest -q tests/linux/test_usable.py
 
-Without BASEDREADER_RIG_WM=marco, DesktopSession starts marco itself. The transcript holds what the
+Without LINDA_RIG_WM=marco, DesktopSession starts marco itself. The transcript holds what the
 synthesizer is given, after symbols are spoken as words, so "Alt+P" is "Alt plus P".
 """
 
@@ -22,7 +22,7 @@ from desktopSession import DesktopSession
 
 SESSION_CONFIG = harness.HERE / "fixtures" / "sessionConfig" / "nvda.ini"
 #: The transcript synth takes 10 ms a character, so that reading takes long enough to be cut short.
-TIMED_SPEECH = {"BASEDREADER_TRANSCRIPT_MODE": "timed", "BASEDREADER_TRANSCRIPT_MS_PER_CHAR": "10"}
+TIMED_SPEECH = {"LINDA_TRANSCRIPT_MODE": "timed", "LINDA_TRANSCRIPT_MS_PER_CHAR": "10"}
 #: Seconds from starting NVDA to its first words; a start under the rig takes about three.
 STARTUP_BOUND = 60.0
 #: Seconds from a key that cuts speech short to the synth being told to stop.

@@ -9,7 +9,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent.parent
-ENGINE_BUILD = ROOT / "engine" / "target" / "release" / "basedreader-bench"
+ENGINE_BUILD = ROOT / "engine" / "target" / "release" / "linda-bench"
 
 
 def runBench(tmp_path: Path, **env: str | None) -> subprocess.CompletedProcess:
@@ -37,21 +37,21 @@ def fakeBench(tmp_path: Path, name: str) -> Path:
 def test_benchBinOverridesEverything(tmp_path: Path):
 	given = fakeBench(tmp_path, "given")
 	built = fakeBench(tmp_path, "built")
-	done = runBench(tmp_path, BENCH_BIN=str(given), BASEDREADER_BENCH_BIN=str(built))
+	done = runBench(tmp_path, BENCH_BIN=str(given), LINDA_BENCH_BIN=str(built))
 	assert done.returncode == 0, chosen(done)
 	assert f", {given}, " in done.stdout
 
 
 def test_theFlakesBenchIsUsedOnceBuilt(tmp_path: Path):
 	built = fakeBench(tmp_path, "built")
-	done = runBench(tmp_path, BENCH_BIN=None, BASEDREADER_BENCH_BIN=str(built))
+	done = runBench(tmp_path, BENCH_BIN=None, LINDA_BENCH_BIN=str(built))
 	assert done.returncode == 0, chosen(done)
 	assert f", {built}, " in done.stdout
 
 
 def test_cargosBuildIsTheFallback(tmp_path: Path):
-	done = runBench(tmp_path, BENCH_BIN=None, BASEDREADER_BENCH_BIN=str(tmp_path / "unbuilt"))
+	done = runBench(tmp_path, BENCH_BIN=None, LINDA_BENCH_BIN=str(tmp_path / "unbuilt"))
 	assert str(ENGINE_BUILD) in chosen(done)
 	if not ENGINE_BUILD.exists():
 		assert done.returncode == 2
-		assert f"nix build {ROOT}#basedreader-bench" in done.stderr
+		assert f"nix build {ROOT}#linda-bench" in done.stderr

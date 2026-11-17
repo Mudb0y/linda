@@ -1,6 +1,6 @@
 """A global plugin for test_boot.py: once NVDA has started, it says one sentence.
 
-BASEDREADER_BOOT_PROBE turns it on and says what follows the sentence:
+LINDA_BOOT_PROBE turns it on and says what follows the sentence:
 - "exit" asks NVDA to exit through core.triggerNVDAExit.
 - "wait" leaves NVDA running until something signals it.
 - "restart" restarts NVDA through core.restart, with the variable changed to "exit" for the copy
@@ -53,7 +53,7 @@ import ui
 import wx
 from logHandler import log
 
-ENVIRONMENT_VARIABLE = "BASEDREADER_BOOT_PROBE"
+ENVIRONMENT_VARIABLE = "LINDA_BOOT_PROBE"
 dialogModes = (
 	"messageBox",
 	"question",

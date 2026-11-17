@@ -1,10 +1,10 @@
-"""A session on the web as a person using Basedreader as their only screen reader has one: NVDA is
+"""A session on the web as a person using Linda as their only screen reader has one: NVDA is
 running when Firefox opens a page, and the page is read at once, by line, word and character, by
 say all and by quick navigation; links are followed and the way back remembers the place; a form is
 filled in focus mode; the page changes under the reader; find; a page too large to read in one go;
 and NVDA's own exit, with every key pressed on the rig's display.
 
-BASEDREADER_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_browseUsable.py
+LINDA_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_browseUsable.py
 
 The tests are the session's steps, in order, on one NVDA and one Firefox; each starts from where the
 one before left the page. Firefox starts after NVDA, as on a desktop where the screen reader is
@@ -25,7 +25,7 @@ import webSession
 from desktopSession import DesktopSession
 
 #: The transcript synth takes 10 ms a character, so that reading takes long enough to be cut short.
-TIMED_SPEECH = {"BASEDREADER_TRANSCRIPT_MODE": "timed", "BASEDREADER_TRANSCRIPT_MS_PER_CHAR": "10"}
+TIMED_SPEECH = {"LINDA_TRANSCRIPT_MODE": "timed", "LINDA_TRANSCRIPT_MS_PER_CHAR": "10"}
 #: Seconds from starting NVDA to its being ready; a start under the rig takes about three.
 STARTUP_BOUND = 60.0
 #: Seconds from the page's window appearing to say all reading it.
@@ -42,7 +42,7 @@ EXIT_BOUND = 10.0
 #: engine before it, "Search with Google or enter address", only once it has loaded its search engines.
 ADDRESS_BAR = "or enter address"
 #: What the large page's title is, as tests/linux/bench/makePage.py writes it.
-LARGE_TITLE = "Basedreader bench large page"
+LARGE_TITLE = "Linda bench large page"
 #: How every title of Firefox's window ends.
 FIREFOX_TITLE_SUFFIX = "Mozilla Firefox"
 #: The large page's last line.

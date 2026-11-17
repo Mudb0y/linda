@@ -93,7 +93,7 @@ pub(crate) struct Engine {
     pool_size: AtomicUsize,
     pool_max: AtomicUsize,
     pool_idle_ns: AtomicU64,
-    /// Whether BASEDREADER_PWSINK_TEST_HOOKS=1 was set when the engine started.
+    /// Whether LINDA_PWSINK_TEST_HOOKS=1 was set when the engine started.
     test_hooks: bool,
     block_ms: AtomicU64,
     state: UnsafeCell<LoopState>,
@@ -149,7 +149,7 @@ impl Engine {
                 pool_size: AtomicUsize::new(0),
                 pool_max: AtomicUsize::new(POOL_MAX),
                 pool_idle_ns: AtomicU64::new(POOL_IDLE_NS),
-                test_hooks: std::env::var_os("BASEDREADER_PWSINK_TEST_HOOKS")
+                test_hooks: std::env::var_os("LINDA_PWSINK_TEST_HOOKS")
                     .is_some_and(|v| v == "1"),
                 block_ms: AtomicU64::new(0),
                 state: UnsafeCell::new(LoopState {
@@ -375,8 +375,8 @@ impl Engine {
         // SAFETY: on the loop thread; the properties are handed to the context.
         unsafe {
             let props = pws::pw_properties_new(ptr::null());
-            set(props, c"application.name", c"Basedreader");
-            set(props, c"application.id", c"basedreader");
+            set(props, c"application.name", c"Linda");
+            set(props, c"application.id", c"linda");
             lp.context =
                 pws::pw_context_new(pws::pw_thread_loop_get_loop(self.thread_loop), props, 0);
         }
@@ -449,7 +449,7 @@ impl Engine {
         // detach has removed them.
         unsafe {
             let props = stream_properties(&s.target);
-            let stream = pws::pw_stream_new(lp.core, c"Basedreader".as_ptr(), props);
+            let stream = pws::pw_stream_new(lp.core, c"Linda".as_ptr(), props);
             if stream.is_null() {
                 s.set_retry_ns(now + RECONNECT_NS);
                 return;
@@ -663,11 +663,11 @@ unsafe fn set(props: *mut pws::pw_properties, key: &std::ffi::CStr, value: &std:
     unsafe { pws::pw_properties_set(props, key.as_ptr(), value.as_ptr()) };
 }
 
-/// The properties of every stream. The names are Basedreader's own and no other program's, since
-/// WirePlumber keys what it remembers about a stream by them. Nothing of Basedreader's is
+/// The properties of every stream. The names are Linda's own and no other program's, since
+/// WirePlumber keys what it remembers about a stream by them. Nothing of Linda's is
 /// remembered or restored, so that a volume or a target set for it in a mixer never outlives the
 /// process and nothing stored from elsewhere is applied to it. node.latency asks for a quantum of
-/// 512 where the graph's is free, and cannot force one: Basedreader never sets the quantum, the
+/// 512 where the graph's is free, and cannot force one: Linda never sets the quantum, the
 /// rate, a volume or a mute, on its own node or any other.
 unsafe fn stream_properties(target: &Option<CString>) -> *mut pws::pw_properties {
     // SAFETY: a new property list, handed to pw_stream_new.
@@ -677,11 +677,11 @@ unsafe fn stream_properties(target: &Option<CString>) -> *mut pws::pw_properties
             (c"media.type", c"Audio"),
             (c"media.category", c"Playback"),
             (c"media.role", c"Accessibility"),
-            (c"media.name", c"Basedreader"),
-            (c"application.name", c"Basedreader"),
-            (c"application.id", c"basedreader"),
-            (c"node.name", c"basedreader"),
-            (c"node.description", c"Basedreader"),
+            (c"media.name", c"Linda"),
+            (c"application.name", c"Linda"),
+            (c"application.id", c"linda"),
+            (c"node.name", c"linda"),
+            (c"node.description", c"Linda"),
             (c"node.latency", c"512/48000"),
             (c"state.restore-props", c"false"),
             (c"state.restore-target", c"false"),

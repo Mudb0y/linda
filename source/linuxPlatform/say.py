@@ -1,17 +1,17 @@
-"""basedreader say: speaks one text through NVDA's whole speech path, waits until it has been heard,
+"""linda say: speaks one text through NVDA's whole speech path, waits until it has been heard,
 and exits.
 
 The text goes through speech.speakMessage, so through the speech manager, dictionaries, symbols,
 the configured synthesizer's driver, nvwave, the wasapi replacement and the audio sink, exactly as
 anything NVDA says does. Nothing else of NVDA starts: no wx application and no window, no X
 connection, no session or accessibility bus, no input capture, no add-ons, no braille and no
-single-instance lock, so it runs beside any screen reader already speaking, Basedreader included,
+single-instance lock, so it runs beside any screen reader already speaking, Linda included,
 and takes nothing from it.
 
 The user's configuration is never written: nvda.ini and speechDicts are copied into a temporary
 directory, which NVDA is given as its configuration directory, and which is removed on every way out
 but a fatal signal. The log, the crash dump and whatever a library writes to the standard output or
-error at the C level go to a directory of their own under Basedreader's state directory, never
+error at the C level go to a directory of their own under Linda's state directory, never
 beside the launcher's log, whose last two runs NVDA would otherwise rotate away.
 
 What it prints is read aloud by a screen reader, so nothing is printed until the end, and then one
@@ -50,15 +50,15 @@ EXIT_TIMEOUT = 5
 #: Stopped by SIGINT, SIGTERM or SIGHUP.
 EXIT_INTERRUPTED = 6
 
-PROGRAM = "basedreader say"
+PROGRAM = "linda say"
 INTERRUPTED_SENTENCE = "interrupted before speech finished."
-#: The directory under Basedreader's state directory that holds this mode's log and output.
+#: The directory under Linda's state directory that holds this mode's log and output.
 STATE_SUBDIRECTORY = "say"
 LOG_FILE_NAME = "say.log"
 #: Receives whatever is written to the standard output or error by file descriptor, by C code
 #: included, once the mode has started.
 OUTPUT_FILE_NAME = "output.log"
-TEMPORARY_PREFIX = "basedreader-say-"
+TEMPORARY_PREFIX = "linda-say-"
 
 DEFAULT_TIMEOUT = 30.0
 #: How often NVDA's queue is pumped while speech goes on, as core's pump does it.
@@ -70,9 +70,9 @@ _BEEP_MS = 100
 _STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 _HELP = """\
-basedreader say speaks the text after its options through Basedreader's speech and audio, waits
+linda say speaks the text after its options through Linda's speech and audio, waits
 until it has been heard, and exits.
-It reads the synthesizer and its settings from your Basedreader configuration and never changes it.
+It reads the synthesizer and its settings from your Linda configuration and never changes it.
 --synth followed by a name chooses the synthesizer, such as espeak or openevv.
 --voice followed by an identifier chooses the voice, as --list-voices names it.
 --rate, --pitch and --volume, each followed by a whole number from 0 to 100, set the synthesizer's own settings.

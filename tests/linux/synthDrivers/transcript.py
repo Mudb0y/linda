@@ -1,15 +1,15 @@
 """A synth driver for tests: it records what the speech manager sends and reports indexes.
 
-The records go to synth.events and, when BASEDREADER_TRANSCRIPT_FILE names a file, to that file as
-JSON Lines; _transcriptRecords describes the format and reads it back. BASEDREADER_TRANSCRIPT_MODE
+The records go to synth.events and, when LINDA_TRANSCRIPT_FILE names a file, to that file as
+JSON Lines; _transcriptRecords describes the format and reads it back. LINDA_TRANSCRIPT_MODE
 chooses when indexes are reported:
 - immediate, the default: every index and then done, inside speak().
 - manual: only when the test calls advance(); done counts as one step. Nothing is released while
 paused, as a real driver's player holds its callbacks.
-- timed: from a worker thread, each index after BASEDREADER_TRANSCRIPT_MS_PER_CHAR milliseconds for
+- timed: from a worker thread, each index after LINDA_TRANSCRIPT_MS_PER_CHAR milliseconds for
 every character spoken before it, not counting time spent paused.
 - player: as eSpeak's driver does it, through an nvwave.WavePlayer. A worker thread feeds
-BASEDREADER_TRANSCRIPT_MS_PER_CHAR milliseconds of audio for every character, with each index as
+LINDA_TRANSCRIPT_MS_PER_CHAR milliseconds of audio for every character, with each index as
 the completion callback of the audio before it, idles the player at the end of each utterance and
 then reports done. cancel() stops the player and pause() pauses it, so whatever the player does
 with its callbacks is what the speech manager sees.
@@ -96,10 +96,10 @@ class SynthDriver(BaseSynthDriver):
 
 	def __init__(self) -> None:
 		super().__init__()
-		self.mode = os.environ.get("BASEDREADER_TRANSCRIPT_MODE") or "immediate"
+		self.mode = os.environ.get("LINDA_TRANSCRIPT_MODE") or "immediate"
 		if self.mode not in modes:
-			raise ValueError(f"BASEDREADER_TRANSCRIPT_MODE is {self.mode!r}, not one of {modes}")
-		self.msPerChar = float(os.environ.get("BASEDREADER_TRANSCRIPT_MS_PER_CHAR") or 10)
+			raise ValueError(f"LINDA_TRANSCRIPT_MODE is {self.mode!r}, not one of {modes}")
+		self.msPerChar = float(os.environ.get("LINDA_TRANSCRIPT_MS_PER_CHAR") or 10)
 		self.events: list[dict] = []
 		self._settings = {setting.id: setting.defaultVal for setting in self.supportedSettings}
 		self._settings["voice"] = "transcript"
@@ -110,7 +110,7 @@ class SynthDriver(BaseSynthDriver):
 		self._terminated = False
 		# Reentrant, so that a handler of a notification may call cancel() on the same thread.
 		self._condition = threading.Condition(threading.RLock())
-		self._path = os.environ.get("BASEDREADER_TRANSCRIPT_FILE") or None
+		self._path = os.environ.get("LINDA_TRANSCRIPT_FILE") or None
 		self._worker = None
 		self._player = None
 		if self.mode == "player":

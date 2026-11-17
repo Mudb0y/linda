@@ -72,7 +72,7 @@ tests.unit.test_winVersion.TestWinVersion.test_winVerProcessorArchitecture
 tests.unit.test_winBindings_icu.Test_icuLoading.test_noIcuLibrary
   For good: tests how upstream's winBindings.icu reports ICU missing when neither icu.dll nor
   icuuc.dll loads through windll. linuxPlatform replaces winBindings.icu with a binding that loads
-  ICU by path from BASEDREADER_ICU_LIB_DIR, which test_nativeHelper.py tests, so ICU is available.
+  ICU by path from LINDA_ICU_LIB_DIR, which test_nativeHelper.py tests, so ICU is available.
   Raises: AssertionError: True is not false
 tests.unit.test_winBindings_icu.Test_icuLoading.test_fallsBackToIcuuc
   For good: expects upstream's winBindings.icu to bind icuuc.dll by the name "icuuc"; the Linux

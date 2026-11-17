@@ -1,5 +1,5 @@
 {
-  description = "Basedreader, NVDA brought to Linux";
+  description = "Linda, NVDA brought to Linux";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   # A nixpkgs revision whose ruff is the release upstream's pyproject.toml
@@ -88,18 +88,18 @@
         libeci = openevvLibeci;
       };
 
-      # The BASEDREADER_ variables naming the native libraries and data Linux
+      # The LINDA_ variables naming the native libraries and data Linux
       # code loads, the same in the dev shell and in the package's wrappers.
       # The code finds them through these rather than through the loader's
       # search path, so that what it loads is exactly what the flake pins.
       runtimeEnv = {
-        BASEDREADER_ICU_LIB_DIR = "${lib.getLib pkgs.icu}/lib";
+        LINDA_ICU_LIB_DIR = "${lib.getLib pkgs.icu}/lib";
         # ICU exports every C symbol with this suffix, as in ubrk_open_78.
-        BASEDREADER_ICU_VERSION_MAJOR = lib.versions.major pkgs.icu.version;
-        BASEDREADER_ESPEAK_LIB = "${espeak}/lib/libespeak-ng.so.1";
-        BASEDREADER_ESPEAK_DATA_DIR = "${espeak}/share/espeak-ng-data";
+        LINDA_ICU_VERSION_MAJOR = lib.versions.major pkgs.icu.version;
+        LINDA_ESPEAK_LIB = "${espeak}/lib/libespeak-ng.so.1";
+        LINDA_ESPEAK_DATA_DIR = "${espeak}/share/espeak-ng-data";
         # linuxPlatform.synthDriverPaths puts it on NVDA's driver search path.
-        BASEDREADER_OPENEVV_DRIVER_DIR = "${openevvDriver}";
+        LINDA_OPENEVV_DRIVER_DIR = "${openevvDriver}";
       };
 
       pwsink = pkgs.callPackage ./nix/pwsink.nix { };
@@ -107,17 +107,17 @@
       vbuf = pkgs.callPackage ./nix/vbuf.nix { };
       vbufengine = pkgs.callPackage ./nix/vbufengine.nix { };
 
-      basedreader = pkgs.callPackage ./nix/basedreader.nix {
+      linda = pkgs.callPackage ./nix/linda.nix {
         inherit python runtimeEnv louisTables nvdaCldr pwsink vbuf vbufengine;
       };
       app = name: description: {
         type = "app";
-        program = "${basedreader}/bin/${name}";
+        program = "${linda}/bin/${name}";
         meta = { inherit description; };
       };
 
       bench = pkgs.rustPlatform.buildRustPackage {
-        pname = "basedreader-bench";
+        pname = "linda-bench";
         inherit ((lib.importTOML ./engine/Cargo.toml).workspace.package) version;
         src = lib.fileset.toSource {
           root = ./engine;
@@ -128,7 +128,7 @@
           ];
         };
         cargoLock.lockFile = ./engine/Cargo.lock;
-        cargoBuildFlags = [ "--package" "basedreader-bench" ];
+        cargoBuildFlags = [ "--package" "linda-bench" ];
         # The engine's tests speak D-Bus and refuse to run outside tests/linux/rig,
         # which a Nix build cannot enter; cargo test in engine/ runs them there.
         doCheck = false;
@@ -137,15 +137,15 @@
     {
       apps.${system} =
         {
-          default = app "basedreader" "Start Basedreader";
+          default = app "linda" "Start Linda";
         }
-        // lib.optionalAttrs (basedreader.programs ? basedreader-say) {
-          say = app "basedreader-say" "Speak a sentence through Basedreader's speech and audio, then exit";
+        // lib.optionalAttrs (linda.programs ? linda-say) {
+          say = app "linda-say" "Speak a sentence through Linda's speech and audio, then exit";
         };
 
       packages.${system} = {
-        default = basedreader;
-        inherit basedreader;
+        default = linda;
+        inherit linda;
         inherit (pythonInterpreter.pkgs)
           configobj
           fast-diff-match-patch
@@ -154,7 +154,7 @@
           ;
         louis-tables = louisTables;
         nvda-cldr = nvdaCldr;
-        basedreader-bench = bench;
+        linda-bench = bench;
         espeak-ng = espeak;
         openevv-libeci = openevvLibeci;
         openevv-driver = openevvDriver;
@@ -218,13 +218,13 @@
         PKG_CONFIG_PATH = "${lib.getDev pkgs.pipewire}/lib/pkgconfig";
         # For tests that start a private daemon and session manager inside the
         # rig.
-        BASEDREADER_PIPEWIRE_BIN = "${lib.getBin pkgs.pipewire}/bin";
-        BASEDREADER_WIREPLUMBER_BIN = "${lib.getBin pkgs.wireplumber}/bin";
+        LINDA_PIPEWIRE_BIN = "${lib.getBin pkgs.pipewire}/bin";
+        LINDA_WIREPLUMBER_BIN = "${lib.getBin pkgs.wireplumber}/bin";
         # The library the PipeWire sink loads, the same file the package's wrappers name, and the
         # recorder its tests listen with. The shell does not choose the sink: a run that wants
-        # PipeWire sets BASEDREADER_AUDIO_SINK itself.
-        BASEDREADER_PWSINK_LIB = "${pwsink}/lib/libpwsink.so";
-        BASEDREADER_PWMON = "${pwsink.pwmon}/bin/pwmon";
+        # PipeWire sets LINDA_AUDIO_SINK itself.
+        LINDA_PWSINK_LIB = "${pwsink}/lib/libpwsink.so";
+        LINDA_PWMON = "${pwsink.pwmon}/bin/pwmon";
 
         # setup.sh would put $out/lib first in every RUNPATH the linker
         # writes, and in a shell $out is outputs/out under the working
@@ -250,25 +250,25 @@
         AT_SPI_BUS_LAUNCHER = "${pkgs.at-spi2-core}/libexec/at-spi-bus-launcher";
 
         # tools/build-artifacts takes the tables and the CLDR data from these.
-        BASEDREADER_LOUIS_TABLES_DIR = "${louisTables}";
-        BASEDREADER_NVDA_CLDR_DIR = "${nvdaCldr}";
+        LINDA_LOUIS_TABLES_DIR = "${louisTables}";
+        LINDA_NVDA_CLDR_DIR = "${nvdaCldr}";
         # tools/check-upstream-edits compares it with the release upstream's
         # include/liblouis submodule pins.
-        BASEDREADER_LIBLOUIS_VERSION = pkgs.liblouis.version;
+        LINDA_LIBLOUIS_VERSION = pkgs.liblouis.version;
 
         # Where tests/linux/bench/run finds the bench once nix build
-        # .#basedreader-bench has built it. Stripped of its dependency on the
+        # .#linda-bench has built it. Stripped of its dependency on the
         # package, so that entering the shell never builds the engine.
-        BASEDREADER_BENCH_BIN = builtins.unsafeDiscardStringContext "${bench}/bin/basedreader-bench";
+        LINDA_BENCH_BIN = builtins.unsafeDiscardStringContext "${bench}/bin/linda-bench";
 
         # The Qt fixture sets QT_PLUGIN_PATH from it, so that a test needs no
         # rig env to give Qt its X platform plugin. PyQt6's own Qt.
-        BASEDREADER_QT6_PLUGIN_PATH = "${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}";
+        LINDA_QT6_PLUGIN_PATH = "${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}";
 
         # The terminal fixture's shell. The bash on PATH is stdenv's, built
         # without readline, so arrows and Control with them would type escape
         # sequences instead of editing the line.
-        BASEDREADER_BASH = "${pkgs.bashInteractive}/bin/bash";
+        LINDA_BASH = "${pkgs.bashInteractive}/bin/bash";
 
         # Every locale, so that which ones the tests can set does not depend
         # on the ones the host happens to have built.
@@ -284,18 +284,18 @@
           # appended from the calling session. tests/linux/rig gives its
           # sandbox only these, so that nothing under test depends on the
           # host's desktop.
-          export BASEDREADER_RIG_PATH=''${PATH%"''${nix_saved_PATH:+:$nix_saved_PATH}"}
-          export BASEDREADER_RIG_XDG_DATA_DIRS=''${XDG_DATA_DIRS%"''${nix_saved_XDG_DATA_DIRS:+:$nix_saved_XDG_DATA_DIRS}"}
+          export LINDA_RIG_PATH=''${PATH%"''${nix_saved_PATH:+:$nix_saved_PATH}"}
+          export LINDA_RIG_XDG_DATA_DIRS=''${XDG_DATA_DIRS%"''${nix_saved_XDG_DATA_DIRS:+:$nix_saved_XDG_DATA_DIRS}"}
           # GTK's file and directory choosers abort without GSettings schemas
           # for themselves, which the outputs on XDG_DATA_DIRS lack, and warn
           # on standard error without hicolor, the icon theme every desktop
           # falls back on.
-          BASEDREADER_RIG_XDG_DATA_DIRS=$GSETTINGS_SCHEMAS_PATH:${pkgs.hicolor-icon-theme}/share:$BASEDREADER_RIG_XDG_DATA_DIRS
+          LINDA_RIG_XDG_DATA_DIRS=$GSETTINGS_SCHEMAS_PATH:${pkgs.hicolor-icon-theme}/share:$LINDA_RIG_XDG_DATA_DIRS
           # Browse mode's libraries, as the package's wrappers name them. Set here rather than as
           # attributes, which nix develop would put over the caller's own: a run that names a
           # library built in the checkout keeps it.
-          export BASEDREADER_VBUF_LIB=''${BASEDREADER_VBUF_LIB:-${vbuf}/lib/libnvdaVbuf.so}
-          export BASEDREADER_VBUF_ENGINE=''${BASEDREADER_VBUF_ENGINE:-${vbufengine}/lib/libbre_vbuf.so}
+          export LINDA_VBUF_LIB=''${LINDA_VBUF_LIB:-${vbuf}/lib/libnvdaVbuf.so}
+          export LINDA_VBUF_ENGINE=''${LINDA_VBUF_ENGINE:-${vbufengine}/lib/libbre_vbuf.so}
         '';
       });
     };

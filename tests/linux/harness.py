@@ -42,7 +42,7 @@ from types import ModuleType
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 SOURCE = ROOT / "source"
-LAUNCHER = SOURCE / "basedreader.py"
+LAUNCHER = SOURCE / "linda.py"
 #: Nothing that runs NVDA code may write here.
 PROTECTED = (SOURCE, ROOT / "tests" / "unit")
 #: Directories of the checkout that git and the development tools write to while other work goes on
@@ -52,7 +52,7 @@ UNWATCHED = frozenset(str(ROOT / name) for name in (".git", ".claude", ".ruff_ca
 #: How much of NVDA the child sets up before the code runs, each level adding to the one before.
 #: "none": source/ on sys.path and nothing else.
 #: "bootstrap": linuxPlatform.bootstrap.install().
-#: "appDir": what nvda.pyw and basedreader.py establish before importing config: the gettext
+#: "appDir": what nvda.pyw and linda.py establish before importing config: the gettext
 #: builtins, globalVars.appDir and appPid, and appDir as the working directory.
 #: "config": a configuration directory of the child's own and config.initialize().
 PREPARE_LEVELS = ("none", "bootstrap", "appDir", "config")
@@ -150,7 +150,7 @@ LINKED_WITHOUT_SOUND = {
 #: and links no sound library, which tests/linux/test_devShell.py checks, so that file alone of the
 #: libraries AUDIO_LIBRARIES matches is never counted; any other eSpeak, such as a stock one that links
 #: pcaudiolib, still is.
-ESPEAK_LIBRARY_VARIABLE = "BASEDREADER_ESPEAK_LIB"
+ESPEAK_LIBRARY_VARIABLE = "LINDA_ESPEAK_LIB"
 SOUND_DEVICES = "/dev/snd"
 #: Words in the path of a Unix socket that belongs to a sound server.
 SOUND_SERVER_SOCKETS = ("pulse", "pipewire")
@@ -197,7 +197,7 @@ _ON_EXISTING = frozenset(
 
 #: The three signs whyNotInRig reads: a variable the rig sets, the name of process 1, and a
 #: directory that exists outside the sandbox only.
-RIG_VARIABLE = "BASEDREADER_RIG"
+RIG_VARIABLE = "LINDA_RIG"
 FIRST_PROCESS_NAME = Path("/proc/1/comm")
 LIVE_RUNTIME_DIRECTORY = Path("/run/user")
 
@@ -1029,7 +1029,7 @@ def startLauncher(
 	env: dict[str, str | None] | None = None,
 	recordLevel: int = LOG_ERROR,
 ) -> Launch:
-	"""Start source/basedreader.py with arguments, in directory, under the checks runChild makes.
+	"""Start source/linda.py with arguments, in directory, under the checks runChild makes.
 
 	directory receives stdout.txt, stderr.txt, the checks' records and the transcript synth's
 	transcript.jsonl. The test hooks give NVDA tests/linux/synthDrivers and
@@ -1047,9 +1047,9 @@ def startLauncher(
 			(hooks / name).symlink_to(target)
 	environment = _environment(
 		{
-			"BASEDREADER_TEST_HOOKS_DIR": str(hooks),
-			"BASEDREADER_TRANSCRIPT_FILE": str(directory / "transcript.jsonl"),
-			"BASEDREADER_TRANSCRIPT_MODE": "immediate",
+			"LINDA_TEST_HOOKS_DIR": str(hooks),
+			"LINDA_TRANSCRIPT_FILE": str(directory / "transcript.jsonl"),
+			"LINDA_TRANSCRIPT_MODE": "immediate",
 			**(env or {}),
 		},
 	)

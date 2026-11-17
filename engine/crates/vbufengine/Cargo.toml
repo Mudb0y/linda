@@ -1,5 +1,5 @@
 [package]
-name = "basedreader-vbufengine"
+name = "linda-vbufengine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

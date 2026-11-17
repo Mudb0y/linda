@@ -3,7 +3,7 @@
 	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_pipewireSink.py
 
 The dev shell names the library the flake builds. To test a build of engine/crates/pwsink instead,
-name it and its pwmon with BASEDREADER_PWSINK_LIB and BASEDREADER_PWMON, which the rig passes in.
+name it and its pwmon with LINDA_PWSINK_LIB and LINDA_PWMON, which the rig passes in.
 BENCH_PWSINK_ROUNDS sets how many stops and starts are timed at each quantum and rate, 30 by
 default.
 
@@ -232,7 +232,7 @@ def wakeBoundMs(quantum: int) -> float:
 
 
 def ourNodes(fixture: PipewireFixture) -> list[dict]:
-	return [n for n in fixture.nodes() if n["info"]["props"].get("application.id") == "basedreader"]
+	return [n for n in fixture.nodes() if n["info"]["props"].get("application.id") == "linda"]
 
 
 def report(name: str, value: object) -> None:
@@ -365,7 +365,7 @@ def test_nothingOfOneSoundIsHeldBackForTheNext(pipewire: PipewireFixture, tmp_pa
 
 def test_channelVolumesAndTheProcessGainApplyInTheSinkOnly(pipewire: PipewireFixture, tmp_path: Path):
 	"""Channel volumes and the process gain scale what is heard, while PipeWire's own volumes on
-	Basedreader's node stay at 1, so that nothing is left for WirePlumber to remember."""
+	Linda's node stay at 1, so that nothing is left for WirePlumber to remember."""
 	monitor = pipewire.monitor()
 	nodesBefore = {
 		n["info"]["props"]["node.name"]: n["info"]["params"].get("Props") for n in pipewire.nodes()
@@ -402,7 +402,7 @@ def test_channelVolumesAndTheProcessGainApplyInTheSinkOnly(pipewire: PipewireFix
 	expected = 0.25 / math.sqrt(2)
 	assert abs(decibels(rms(left) / (expected * 0.5 * 0.5))) < 0.5
 	assert abs(decibels(rms(right) / (expected * 0.25 * 0.5))) < 0.5
-	assert value["props"], "Basedreader's node was not found"
+	assert value["props"], "Linda's node was not found"
 	for props in value["props"]:
 		(params,) = props
 		assert params["volume"] == 1.0
@@ -414,11 +414,11 @@ def test_channelVolumesAndTheProcessGainApplyInTheSinkOnly(pipewire: PipewireFix
 
 
 EXPECTED_PROPERTIES = {
-	"application.name": "Basedreader",
-	"application.id": "basedreader",
-	"media.name": "Basedreader",
-	"node.name": "basedreader",
-	"node.description": "Basedreader",
+	"application.name": "Linda",
+	"application.id": "linda",
+	"media.name": "Linda",
+	"node.name": "linda",
+	"node.description": "Linda",
 	"media.type": "Audio",
 	"media.category": "Playback",
 	"media.role": "Accessibility",
@@ -429,12 +429,12 @@ EXPECTED_PROPERTIES = {
 }
 
 
-def test_streamsCarryBasedreadersPropertiesAndNeverForceTheQuantum(pipewire: PipewireFixture, tmp_path: Path):
-	"""The node is named as Basedreader's own, asks for a quantum of 512 without forcing it, and
+def test_streamsCarryLindasPropertiesAndNeverForceTheQuantum(pipewire: PipewireFixture, tmp_path: Path):
+	"""The node is named as Linda's own, asks for a quantum of 512 without forcing it, and
 	plays to a configured device by target.object.
 
-	A forced quantum stays as forced while Basedreader plays. A free one, 1024 here as in PipeWire's
-	own configuration, comes down to the 512 Basedreader asks for while its stream is active, which
+	A forced quantum stays as forced while Linda plays. A free one, 1024 here as in PipeWire's
+	own configuration, comes down to the 512 Linda asks for while its stream is active, which
 	halves the time to silence, and goes back once the stream is deactivated."""
 	pipewire.setQuantum(256)
 	monitor = pipewire.monitor()
@@ -532,8 +532,8 @@ def test_streamsCarryBasedreadersPropertiesAndNeverForceTheQuantum(pipewire: Pip
 	], "the targeted stream played to the default sink"
 
 
-def test_wirePlumberRemembersNothingOfBasedreader(pipewire: PipewireFixture, tmp_path: Path):
-	"""WirePlumber stores no entry for Basedreader's stream even after a mixer changes its volume,
+def test_wirePlumberRemembersNothingOfLinda(pipewire: PipewireFixture, tmp_path: Path):
+	"""WirePlumber stores no entry for Linda's stream even after a mixer changes its volume,
 	though it does for another stream treated the same way."""
 	stateFiles = pipewire.stateDir / "wireplumber"
 	control = tmp_path / "control.wav"
@@ -579,7 +579,7 @@ def test_wirePlumberRemembersNothingOfBasedreader(pipewire: PipewireFixture, tmp
 		player.send_signal(signal.SIGTERM)
 		player.wait(5)
 
-	with Steps(tmp_path / "steps", {"volume": lambda: setVolume("basedreader")}) as steps:
+	with Steps(tmp_path / "steps", {"volume": lambda: setVolume("linda")}) as steps:
 		runPipewireChild(
 			tmp_path,
 			"""
@@ -595,7 +595,7 @@ def test_wirePlumberRemembersNothingOfBasedreader(pipewire: PipewireFixture, tmp
 		)
 	contents = stored()
 	assert "rig-control" in contents
-	assert "basedreader" not in contents.lower()
+	assert "linda" not in contents.lower()
 
 
 #: Bounds in milliseconds, by quantum, on the time from a call to the first or last sounding frame:
@@ -1752,7 +1752,7 @@ def test_noCallFromPythonWaitsForTheLibrarysThreadOrTheDaemon(pipewire: Pipewire
 				attached=[attachedBefore, attachedWhileBusy, attachedAfter],
 			)
 			""",
-			{**pipewire.childEnv(), **steps.env(), "BASEDREADER_PWSINK_TEST_HOOKS": "1"},
+			{**pipewire.childEnv(), **steps.env(), "LINDA_PWSINK_TEST_HOOKS": "1"},
 		)
 	report("call times, ms", {k: round(v, 3) for k, v in value["took"].items()})
 	before, whileBusy, after = value["attached"]
@@ -1813,11 +1813,11 @@ def test_aLibraryThatCannotBeLoadedFailsAtOnce(tmp_path: Path, library: str):
 		except OSError as e:
 			result = str(e)
 		""",
-		env={"BASEDREADER_AUDIO_SINK": "pipewire", "BASEDREADER_PWSINK_LIB": library},
+		env={"LINDA_AUDIO_SINK": "pipewire", "LINDA_PWSINK_LIB": library},
 	)
 	done.assertClean()
 	assert done.value != "started"
-	assert re.search("BASEDREADER_PWSINK_LIB|libpwsink", done.value), done.value
+	assert re.search("LINDA_PWSINK_LIB|libpwsink", done.value), done.value
 
 
 def test_aStreamFailsCleanlyWhenMisused(pipewire: PipewireFixture, tmp_path: Path):

@@ -3,7 +3,7 @@
 The library is upstream's nvdaHelper/vbufBase/storage.cpp with a C entry point per VBuf_* function and
 two for filling it from render streams, which the engine's renderer writes (linuxPlatform.vbufEngine):
 one builds a buffer, the other applies an update batch to it.
-It is found through BASEDREADER_VBUF_LIB, never on the library path. Text crosses its interface as
+It is found through LINDA_VBUF_LIB, never on the library path. Text crosses its interface as
 UTF-16 code units, so buffer offsets are the code units NVDA counts on Windows.
 
 Each function takes Python arguments as upstream's ctypes bindings do, so virtualBuffers/__init__.py
@@ -20,14 +20,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
 	from linuxPlatform.vbufEngine import Stream
 
-LIB_VARIABLE = "BASEDREADER_VBUF_LIB"
+LIB_VARIABLE = "LINDA_VBUF_LIB"
 
 _lib: ctypes.CDLL | None = None
 _pUnits = POINTER(ctypes.c_uint16)
 
 
 def isAvailable() -> bool:
-	"""Whether BASEDREADER_VBUF_LIB names the library."""
+	"""Whether LINDA_VBUF_LIB names the library."""
 	path = os.environ.get(LIB_VARIABLE)
 	return bool(path) and os.path.isfile(path)
 

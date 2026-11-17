@@ -24,7 +24,7 @@ from typing import Literal, Protocol
 MASK_TYPED_KEYS_IN_LOG: bool = True
 
 #: Set to "off" in the environment, no key source is started.
-SWITCH_VARIABLE = "BASEDREADER_KEYS"
+SWITCH_VARIABLE = "LINDA_KEYS"
 
 #: Which keys are captured: none beyond the NVDA keys, Escape alone for focus mode, or browse mode's.
 CaptureMode = Literal["off", "focus", "browse"]

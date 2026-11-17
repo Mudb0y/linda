@@ -43,7 +43,7 @@ schemaVersion = 25
 """
 
 DRIVER_PLUGIN = '''\
-"""Runs NVDA commands that a test writes to the FIFO BASEDREADER_OBJECTS_FIFO names, one per line, on
+"""Runs NVDA commands that a test writes to the FIFO LINDA_OBJECTS_FIFO names, one per line, on
 NVDA's main thread: "gesture NAME" runs a key gesture through inputCore as if NVDA had captured the
 keys, "script NAME" runs globalCommands' script_NAME, and "exit" asks NVDA to exit."""
 
@@ -63,7 +63,7 @@ from logHandler import log
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	def __init__(self):
 		super().__init__()
-		self._fifo = os.environ.get("BASEDREADER_OBJECTS_FIFO")
+		self._fifo = os.environ.get("LINDA_OBJECTS_FIFO")
 		if self._fifo:
 			threading.Thread(target=self._read, name="objectsDriver", daemon=True).start()
 
@@ -105,8 +105,8 @@ class Reader:
 		self.launch = desktop.startNVDA(
 			config,
 			env={
-				"BASEDREADER_TEST_HOOKS_DIR": str(hooks),
-				"BASEDREADER_OBJECTS_FIFO": str(self.fifo),
+				"LINDA_TEST_HOOKS_DIR": str(hooks),
+				"LINDA_OBJECTS_FIFO": str(self.fifo),
 			},
 		)
 		self._commands: int | None = None
@@ -338,7 +338,7 @@ def test_longListsDoNotFreeze(
 	title: str,
 	tabs: int,
 ):
-	monkeypatch.setenv("BASEDREADER_LISTSIZE", "2000")
+	monkeypatch.setenv("LINDA_LISTSIZE", "2000")
 	if fixture == "qtFixture":
 		nvda = _startQt(desktop, tmp_path)
 	else:

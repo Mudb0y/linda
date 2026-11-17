@@ -1,14 +1,14 @@
 """Browse mode in Firefox: NVDA reads a web page through its own virtual buffer, built by the engine's
 renderer into NVDA's buffer storage, with every key pressed on the rig's display.
 
-BASEDREADER_VBUF_LIB=ROOT/engine/target/vbuf/libnvdaVbuf.so \
-BASEDREADER_VBUF_ENGINE=ROOT/engine/target/release/libbre_vbuf.so \
-BASEDREADER_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_browseMode.py
+LINDA_VBUF_LIB=ROOT/engine/target/vbuf/libnvdaVbuf.so \
+LINDA_VBUF_ENGINE=ROOT/engine/target/release/libbre_vbuf.so \
+LINDA_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_browseMode.py
 
 The two libraries are built with:
 
 	nix develop . -c bash engine/vbuf/build.sh nvdaHelper engine/target/vbuf/libnvdaVbuf.so
-	cd engine && nix develop .. -c cargo build --release --offline -p basedreader-vbufengine
+	cd engine && nix develop .. -c cargo build --release --offline -p linda-vbufengine
 """
 
 import json
@@ -38,7 +38,7 @@ UPDATES_ARRIVE = (harness.ROOT / "source" / "linuxPlatform" / "vbufUpdates.py").
 BUSY_SECONDS = 5.0
 BUSY_SHARE = 0.3
 #: The transcript synthesizer's speech taking 10 ms a character, as a voice takes time.
-TIMED_SPEECH = {"BASEDREADER_TRANSCRIPT_MODE": "timed", "BASEDREADER_TRANSCRIPT_MS_PER_CHAR": "10"}
+TIMED_SPEECH = {"LINDA_TRANSCRIPT_MODE": "timed", "LINDA_TRANSCRIPT_MS_PER_CHAR": "10"}
 #: The test hook's key, which does what the hook's command file says to the focused buffer.
 HOOK_KEY = "Insert+control+shift+F9"
 #: The hook's command file, beside the plugin.
@@ -135,7 +135,7 @@ def browse(desktop: DesktopSession, tmp_path: Path, page: str, title: str, *sayA
 	webSession.waitForDocument(title)
 	nvda = desktop.startNVDA(
 		webSession.BROWSE_CONFIG,
-		env={"BASEDREADER_TEST_HOOKS_DIR": str(hooksDirectory(desktop.directory))},
+		env={"LINDA_TEST_HOOKS_DIR": str(hooksDirectory(desktop.directory))},
 	)
 	nvda.waitForLog("Buffer rendered", BUFFER_BOUND)
 	expect(desktop, title, *sayAll, since=0, timeout=BUFFER_BOUND)

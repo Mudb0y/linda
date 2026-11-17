@@ -2,9 +2,9 @@
 focus mode, through synchronous grabs on the rig's display, which a slow or stopped NVDA must never
 hold for long.
 
-BASEDREADER_VBUF_LIB=ROOT/engine/target/vbuf/libnvdaVbuf.so \
-BASEDREADER_VBUF_ENGINE=ROOT/engine/target/release/libbre_vbuf.so \
-BASEDREADER_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_browseKeys.py
+LINDA_VBUF_LIB=ROOT/engine/target/vbuf/libnvdaVbuf.so \
+LINDA_VBUF_ENGINE=ROOT/engine/target/release/libbre_vbuf.so \
+LINDA_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_browseKeys.py
 """
 
 import json
@@ -141,7 +141,7 @@ def probeHooks(directory: Path) -> dict[str, str]:
 	(hooks / "globalPlugins").mkdir(parents=True)
 	(hooks / "synthDrivers").symlink_to(harness.HERE / "synthDrivers")
 	(hooks / "globalPlugins" / "browseKeysProbe.py").write_text(PROBE_PLUGIN)
-	return {"BASEDREADER_TEST_HOOKS_DIR": str(hooks)}
+	return {"LINDA_TEST_HOOKS_DIR": str(hooks)}
 
 
 def expect(desktop: DesktopSession, *texts: str, since: int, timeout: float = 5) -> None:

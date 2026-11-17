@@ -2,7 +2,7 @@
 appears on the accessibility desktop, keys typed into the keys page are logged where a test can read
 them, and nothing of it is left once the session closes.
 
-BASEDREADER_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_webSession.py
+LINDA_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_webSession.py
 """
 
 import os
@@ -45,7 +45,7 @@ def _firefoxProcesses() -> list[str]:
 
 @pytest.mark.parametrize(
 	("name", "fileName"),
-	[("BASEDREADER_VBUF_LIB", "libnvdaVbuf.so"), ("BASEDREADER_VBUF_ENGINE", "libbre_vbuf.so")],
+	[("LINDA_VBUF_LIB", "libnvdaVbuf.so"), ("LINDA_VBUF_ENGINE", "libbre_vbuf.so")],
 )
 def test_browseLibraryIsNamed(name: str, fileName: str):
 	"""The dev shell names both libraries, built by Nix unless the caller named its own builds: one

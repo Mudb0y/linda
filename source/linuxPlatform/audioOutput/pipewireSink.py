@@ -23,7 +23,7 @@ from collections.abc import Callable
 from . import BUFFER_MS, Sink, SinkStream, StreamFormat, checkGain
 
 #: Names the libpwsink the sink loads.
-LIBRARY_VARIABLE = "BASEDREADER_PWSINK_LIB"
+LIBRARY_VARIABLE = "LINDA_PWSINK_LIB"
 
 
 class _Silencers:

@@ -84,7 +84,7 @@ def test_firstRunCreatesConfigurationUnderXdgConfigHome(tmp_path):
 		env=xdgEnv(tmp_path),
 	)
 	done.assertClean()
-	assert done.value["configDir"] == str(tmp_path / "xdgConfig" / "basedreader")
+	assert done.value["configDir"] == str(tmp_path / "xdgConfig" / "linda")
 	assert done.value["entries"] == ["addons", "nvda.ini", "profiles", "speechDicts"]
 	assert done.value["nvdaIni"].startswith("schemaVersion = 25")
 	assert done.value["baseConfigError"] is False
@@ -102,7 +102,7 @@ def test_defaultConfigurationIgnoresARelativeXdgConfigHome(tmp_path):
 		env={"XDG_CONFIG_HOME": "relative/config"},
 	)
 	done.assertClean()
-	assert done.value == os.path.join(os.path.expanduser("~"), ".config", "basedreader")
+	assert done.value == os.path.join(os.path.expanduser("~"), ".config", "linda")
 	assert not done.value.startswith(str(harness.SOURCE))
 
 
@@ -254,7 +254,7 @@ def test_saveSurvivesAFileSystemThatCannotSyncDirectories(tmp_path):
 
 # Upgrading a schema 13 configuration looks the old speech output device up among the audio devices.
 def test_olderWindowsConfigurationUpgrades(tmp_path):
-	configDir = tmp_path / "xdgConfig" / "basedreader"
+	configDir = tmp_path / "xdgConfig" / "linda"
 	configDir.mkdir(parents=True)
 	(configDir / "nvda.ini").write_text(
 		"schemaVersion = 13\n[speech]\n\toutputDevice = Speakers (Realtek High Definition Audio)\n"
@@ -485,8 +485,8 @@ def test_languagesWithoutIcuAreListedByCode(tmp_path):
 		env={
 			**NO_LOCALE,
 			"LANG": "en_GB.UTF-8",
-			"BASEDREADER_ICU_LIB_DIR": "",
-			"BASEDREADER_ICU_VERSION_MAJOR": "",
+			"LINDA_ICU_LIB_DIR": "",
+			"LINDA_ICU_VERSION_MAJOR": "",
 		},
 	)
 	done.assertClean()
@@ -897,7 +897,7 @@ def test_autostartFollowsXdgAutostartEntries(tmp_path):
 	system = tmp_path / "xdgSystem" / "autostart"
 	user.mkdir(parents=True)
 	system.mkdir(parents=True)
-	entry = "[Desktop Entry]\nType=Application\nName=Basedreader\nExec=basedreader\n"
+	entry = "[Desktop Entry]\nType=Application\nName=Linda\nExec=linda\n"
 	done = run(
 		tmp_path,
 		f"""
@@ -909,7 +909,7 @@ def test_autostartFollowsXdgAutostartEntries(tmp_path):
 
 
 		def write(directory, text):
-			with open(os.path.join(directory, "basedreader.desktop"), "w", encoding="utf-8") as f:
+			with open(os.path.join(directory, "linda.desktop"), "w", encoding="utf-8") as f:
 				f.write(text)
 
 
@@ -928,7 +928,7 @@ def test_autostartFollowsXdgAutostartEntries(tmp_path):
 		result["onlyForMate"] = easeOfAccess.willAutoStart(context.AFTER_LOGON)
 		write(user, {entry!r} + "NotShowIn=MATE;\\n")
 		result["notForMate"] = easeOfAccess.willAutoStart(context.AFTER_LOGON)
-		write(user, {entry!r} + "TryExec=/nonexistent/basedreader\\n")
+		write(user, {entry!r} + "TryExec=/nonexistent/linda\\n")
 		result["notInstalled"] = easeOfAccess.willAutoStart(context.AFTER_LOGON)
 		write(user, {entry!r} + "TryExec=sh\\n")
 		result["installed"] = easeOfAccess.willAutoStart(context.AFTER_LOGON)
@@ -994,9 +994,9 @@ def test_configurationDirectoryOpensInTheDesktopsFileManager(tmp_path):
 	)
 	done.assertClean()
 	# Neither call waits for xdg-open, so the two may record in either order.
-	assert sorted(done.value) == sorted([str(configDir), str(tmp_path / "xdgConfig" / "basedreader")])
+	assert sorted(done.value) == sorted([str(configDir), str(tmp_path / "xdgConfig" / "linda")])
 	# Opening the default directory creates it first, as upstream does.
-	assert (tmp_path / "xdgConfig" / "basedreader" / "profiles").is_dir()
+	assert (tmp_path / "xdgConfig" / "linda" / "profiles").is_dir()
 
 
 def test_messageWindowNeedsNoWindow(tmp_path):
@@ -1134,7 +1134,7 @@ def test_timeAndDateWithoutIcuAreTheCLibrarys(tmp_path):
 	done = run(
 		tmp_path,
 		"cases = [{'LANG': 'en_GB.UTF-8'}, {'LANG': 'en_GB.UTF-8'}]" + TIME_AND_DATE,
-		env={**NO_LOCALE, "BASEDREADER_ICU_LIB_DIR": "", "BASEDREADER_ICU_VERSION_MAJOR": ""},
+		env={**NO_LOCALE, "LINDA_ICU_LIB_DIR": "", "LINDA_ICU_VERSION_MAJOR": ""},
 	)
 	done.assertClean()
 	# In the language NVDA set the process's locale to, which is all the C library can write in.
@@ -1226,7 +1226,7 @@ def test_helpNamesTheLinuxLogFile(tmp_path):
 		env={"XDG_STATE_HOME": str(stateHome)},
 	)
 	done.assertClean()
-	assert done.value == str(stateHome / "basedreader" / "nvda.log")
+	assert done.value == str(stateHome / "linda" / "nvda.log")
 	assert f'Default destination is "{done.value}".' in done.stdout
 	assert "TEMP" not in done.stdout
 
@@ -1521,5 +1521,5 @@ def test_xdgDirectoriesFollowTheSpecification(tmp_path):
 		"configDirs": ["/etc/one", "/etc/two"],
 		"onlyRelative": ["/etc/xdg"],
 		"stateHome": os.path.join(home, ".local", "state"),
-		"userStateDir": os.path.join(home, ".local", "state", "basedreader"),
+		"userStateDir": os.path.join(home, ".local", "state", "linda"),
 	}

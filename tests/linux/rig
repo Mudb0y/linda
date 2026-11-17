@@ -11,11 +11,11 @@
 # Inside, the checkout and the system are read-only and /tmp is empty.
 # --bind DIR makes DIR visible and writable, for results that should outlive
 # the run or scripts kept outside the checkout. The locale is C.UTF-8 and the
-# time zone UTC, and of the caller's variables only BASEDREADER_ and BENCH_
+# time zone UTC, and of the caller's variables only LINDA_ and BENCH_
 # ones get in; anything else goes through env, as in
 # rig env LANG=pl_PL.UTF-8 command.
 #
-# BASEDREADER_RIG_NET=1 in the caller's environment gives the sandbox the
+# LINDA_RIG_NET=1 in the caller's environment gives the sandbox the
 # internet, through pasta, a network stack in user space: still a network
 # namespace of its own, so the live display's abstract socket and anything on
 # the host's loopback stay out of reach, with no port forwarded either way,
@@ -37,7 +37,7 @@ self=$(realpath -e -- "$0")
 # namespace and shuts off the host's addresses in it, then becomes the
 # sandbox, which keeps that network namespace.
 if [ "${1:-}" = --network ]; then
-	[ "${BASEDREADER_RIG:-}" = 1 ] ||
+	[ "${LINDA_RIG:-}" = 1 ] ||
 		fail "--network is the rig's own and runs only in the namespace it makes"
 	: >"$2"
 	read -r _ <"$3" || fail "the network was never connected"
@@ -49,7 +49,7 @@ if [ "${1:-}" = --inside ]; then
 	# This half sets itself up against whatever session it finds, so it must
 	# only ever run as the sandbox's own command. The variable alone could be
 	# copied into another shell; the other two hold nowhere but in there.
-	if [ "${BASEDREADER_RIG:-}" != 1 ] || [ -e /run/user ] ||
+	if [ "${LINDA_RIG:-}" != 1 ] || [ -e /run/user ] ||
 		[ "$(cat /proc/1/comm 2>/dev/null)" != bwrap ]; then
 		fail "--inside is the rig's own second half and runs only in its sandbox"
 	fi
@@ -100,8 +100,8 @@ if [ "${1:-}" = --inside ]; then
 	# A window manager on request, so that a test can have an active window,
 	# focus that moves between windows when they open and close, and the
 	# root window properties a real desktop has.
-	if [ -n "${BASEDREADER_RIG_WM:-}" ]; then
-		[ "$BASEDREADER_RIG_WM" = marco ] || fail "unknown window manager: $BASEDREADER_RIG_WM"
+	if [ -n "${LINDA_RIG_WM:-}" ]; then
+		[ "$LINDA_RIG_WM" = marco ] || fail "unknown window manager: $LINDA_RIG_WM"
 		marco --no-force-fullscreen >"$XDG_RUNTIME_DIR/wm.log" 2>&1 &
 		up=
 		for _ in $(seq 100); do
@@ -135,13 +135,13 @@ within() {
 	return 1
 }
 
-if [ -z "${AT_SPI_BUS_LAUNCHER:-}" ] || [ -z "${BASEDREADER_RIG_PATH:-}" ]; then
+if [ -z "${AT_SPI_BUS_LAUNCHER:-}" ] || [ -z "${LINDA_RIG_PATH:-}" ]; then
 	fail "run inside the dev shell, nix develop"
 fi
-case "${BASEDREADER_RIG_NET:-}" in
+case "${LINDA_RIG_NET:-}" in
 '' | 0) network= ;;
 1) network=1 ;;
-*) fail "BASEDREADER_RIG_NET is 1 for the internet or unset for none, not $BASEDREADER_RIG_NET" ;;
+*) fail "LINDA_RIG_NET is 1 for the internet or unset for none, not $LINDA_RIG_NET" ;;
 esac
 
 checkout=$(dirname "$(dirname "$(dirname "$self")")")
@@ -194,7 +194,7 @@ for visible in "$checkout" "${bound[@]}"; do
 	fi
 done
 
-root=$(mktemp -d "${TMPDIR:-/tmp}/basedreader-rig.XXXXXX") || fail "cannot make a working directory"
+root=$(mktemp -d "${TMPDIR:-/tmp}/linda-rig.XXXXXX") || fail "cannot make a working directory"
 mkdir -m 700 "$root/home" "$root/run"
 
 sandbox=
@@ -236,15 +236,15 @@ storeOnly() {
 # the caller's: a desktop session exports dozens of variables that make
 # programs load its modules, start its services and read its settings.
 variables=()
-for name in "${!BASEDREADER_@}" "${!BENCH_@}" AT_SPI_BUS_LAUNCHER GI_TYPELIB_PATH \
+for name in "${!LINDA_@}" "${!BENCH_@}" AT_SPI_BUS_LAUNCHER GI_TYPELIB_PATH \
 	GDK_PIXBUF_MODULE_FILE LOCALE_ARCHIVE; do
 	if [ -n "${!name:-}" ]; then
 		variables+=("$name=${!name}")
 	fi
 done
 variables+=(
-	"PATH=$(storeOnly "$BASEDREADER_RIG_PATH")"
-	"XDG_DATA_DIRS=$(storeOnly "${BASEDREADER_RIG_XDG_DATA_DIRS:-}")"
+	"PATH=$(storeOnly "$LINDA_RIG_PATH")"
+	"XDG_DATA_DIRS=$(storeOnly "${LINDA_RIG_XDG_DATA_DIRS:-}")"
 	"HOME=$root/home"
 	"USER=$(id -un)"
 	"LOGNAME=$(id -un)"
@@ -269,7 +269,7 @@ variables+=(
 	# one would be read by the others.
 	PYTHONDONTWRITEBYTECODE=1
 	"PYTEST_ADDOPTS=-p no:cacheprovider"
-	BASEDREADER_RIG=1
+	LINDA_RIG=1
 )
 
 # A cgroup of its own with a limit on memory, where the session's systemd
@@ -277,10 +277,10 @@ variables+=(
 # otherwise the kernel, or systemd-oomd with the whole login session's
 # cgroup, picks what dies. A rig started inside a rig is already in one.
 scope=()
-if [ -z "${BASEDREADER_RIG:-}" ] && command -v systemd-run >/dev/null 2>&1 &&
+if [ -z "${LINDA_RIG:-}" ] && command -v systemd-run >/dev/null 2>&1 &&
 	systemd-run --user --scope --quiet --collect true 2>/dev/null; then
 	scope=(systemd-run --user --scope --quiet --collect
-		-p "MemoryMax=${BASEDREADER_RIG_MEMORY:-16G}" -p MemorySwapMax=0 --)
+		-p "MemoryMax=${LINDA_RIG_MEMORY:-16G}" -p MemorySwapMax=0 --)
 fi
 
 namespaces=(--unshare-all)

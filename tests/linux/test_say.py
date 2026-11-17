@@ -1,7 +1,7 @@
-"""The say mode, basedreader say, as a process of its own: one text spoken through NVDA's whole speech
+"""The say mode, linda say, as a process of its own: one text spoken through NVDA's whole speech
 path into the capture sink, one line saying how it went, an exit status, and nothing left behind.
 
-Each run starts source/basedreader.py through a small runner that holds it to harness's checks, as
+Each run starts source/linda.py through a small runner that holds it to harness's checks, as
 harness.startLauncher does, and that also records, as the process exits, the sockets it still holds.
 Every run has a user configuration, a state directory, a runtime directory and a temporary
 directory of its own, and whatever way it ends, it must leave the configuration exactly as it was,
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 	from gi.repository import Gio
 
 HERE = Path(__file__).resolve().parent
-TEMPORARY_PREFIX = "basedreader-say-"
+TEMPORARY_PREFIX = "linda-say-"
 #: Seconds a run may take; one takes about two, and eSpeak with the sounds about six.
 RUN_BOUND = 120.0
 #: Seconds a run that refuses its arguments may take. It stops before importing NVDA.
@@ -46,14 +46,14 @@ TRANSCRIPT_LEVEL = 1000
 #: What the launcher's own log directory holds before each run, which no run may touch.
 LAUNCHER_LOGS = {"nvda.log": "the launcher's last log\n", "nvda-old.log": "the launcher's log before that\n"}
 SPOKE = re.compile(
-	r"basedreader say: spoke with (?P<synth>\S+), voice (?P<voice>[^,]+), "
+	r"linda say: spoke with (?P<synth>\S+), voice (?P<voice>[^,]+), "
 	r"(?:(?P<null>into the null sink, which plays nothing)\. Speech"
 	r"|(?P<output>into the capture sink|through PipeWire)\. "
 	r"The first audio came (?P<firstAudio>\d+) milliseconds? after asking, and speech)"
 	r" finished after (?P<finished>\d+(?:\.\d)?) seconds?\.\n",
 )
-INTERRUPTED = "basedreader say: interrupted before speech finished.\n"
-OPENEVV_DRIVER_DIR_VARIABLE = "BASEDREADER_OPENEVV_DRIVER_DIR"
+INTERRUPTED = "linda say: interrupted before speech finished.\n"
+OPENEVV_DRIVER_DIR_VARIABLE = "LINDA_OPENEVV_DRIVER_DIR"
 
 #: Runs the launcher with the checks harness.startLauncher puts on it. The say mode leaves through
 #: os._exit, past atexit, so this records what the process holds and finishes the checks there too.
@@ -158,8 +158,8 @@ class Home:
 
 	def __init__(self, directory: Path, config: str | None = TRANSCRIPT_CONFIG) -> None:
 		self.directory = directory
-		self.configDir = directory / "config" / "basedreader"
-		self.stateDir = directory / "state" / "basedreader"
+		self.configDir = directory / "config" / "linda"
+		self.stateDir = directory / "state" / "linda"
 		self.sayDir = self.stateDir / "say"
 		self.runtimeDir = directory / "run"
 		self.temporaryDir = directory / "tmp"
@@ -172,7 +172,7 @@ class Home:
 			(self.configDir / "nvda.ini").write_text(config, encoding="utf-8")
 		dictionaries = self.configDir / "speechDicts"
 		dictionaries.mkdir()
-		(dictionaries / "default.dic").write_text("Basedreader\tbased reader\t1\t0\n", encoding="utf-8")
+		(dictionaries / "default.dic").write_text("Linda\tbased reader\t1\t0\n", encoding="utf-8")
 		for name, text in LAUNCHER_LOGS.items():
 			(self.stateDir / name).write_text(text, encoding="utf-8")
 		(self.hooksDir / "synthDrivers").symlink_to(HERE / "synthDrivers")
@@ -187,11 +187,11 @@ class Home:
 			"XDG_STATE_HOME": str(self.stateDir.parent),
 			"XDG_RUNTIME_DIR": str(self.runtimeDir),
 			"TMPDIR": str(self.temporaryDir),
-			"BASEDREADER_TEST_HOOKS_DIR": str(self.hooksDir),
-			"BASEDREADER_AUDIO_SINK": "capture",
-			"BASEDREADER_AUDIO_CAPTURE_DIR": str(self.captureDir),
-			"BASEDREADER_TRANSCRIPT_MODE": "player",
-			"BASEDREADER_TRANSCRIPT_FILE": str(self.transcriptPath),
+			"LINDA_TEST_HOOKS_DIR": str(self.hooksDir),
+			"LINDA_AUDIO_SINK": "capture",
+			"LINDA_AUDIO_CAPTURE_DIR": str(self.captureDir),
+			"LINDA_TRANSCRIPT_MODE": "player",
+			"LINDA_TRANSCRIPT_FILE": str(self.transcriptPath),
 		}
 
 	def transcript(self) -> list[dict]:
@@ -204,7 +204,7 @@ class Home:
 
 
 class Say:
-	"""One run of basedreader say."""
+	"""One run of linda say."""
 
 	def __init__(
 		self,
@@ -260,7 +260,7 @@ class Say:
 			self.process.kill()
 			self.stdout, self.stderr = self.process.communicate()
 			raise AssertionError(
-				f"basedreader say did not end within {timeout} s\n{self.describe()}"
+				f"linda say did not end within {timeout} s\n{self.describe()}"
 			) from None
 		self.ended = time.monotonic()
 		assert snapshot(self.home.configDir) == self.configBefore, "the user's configuration changed"
@@ -332,7 +332,7 @@ class Say:
 		assert self.process.returncode == status, self.describe()
 		assert self.stdout == "", self.describe()
 		assert self.stderr.endswith("\n") and self.stderr.count("\n") == 1, self.describe()
-		assert self.stderr.startswith("basedreader say: "), self.describe()
+		assert self.stderr.startswith("linda say: "), self.describe()
 		assert sentence in self.stderr, self.describe()
 		if self.log():
 			assert self.stderr.endswith(f", and the log is {self.home.sayDir / 'say.log'}\n"), self.describe()
@@ -383,11 +383,11 @@ def test_speaksThroughTheWholeSpeechPath(home: Home):
 	assert peak(audio[0].samples) == TRANSCRIPT_LEVEL
 	log = run.log()
 	assert "Loaded synthDriver transcript" in log
-	assert spoke.group(0).removeprefix("basedreader say: ").strip() in log
+	assert spoke.group(0).removeprefix("linda say: ").strip() in log
 
 
 def test_speaksWithEspeak(home: Home):
-	run = say(home, "--synth", "espeak", "This is Basedreader, speaking through eSpeak.")
+	run = say(home, "--synth", "espeak", "This is Linda, speaking through eSpeak.")
 	spoke = run.assertSpoke()
 	run.assertClean()
 	assert spoke["synth"] == "espeak" and spoke["voice"] == "en"
@@ -399,7 +399,7 @@ def test_speaksWithEspeak(home: Home):
 
 def test_speaksWithOpenevv(home: Home):
 	requireOpenevvDriverDirectory()
-	run = say(home, "--synth", "openevv", "This is openevv inside Basedreader.")
+	run = say(home, "--synth", "openevv", "This is openevv inside Linda.")
 	spoke = run.assertSpoke()
 	run.assertClean()
 	assert spoke["synth"] == "openevv"
@@ -447,7 +447,7 @@ def test_soundsFollowTheText(home: Home):
 
 @pytest.mark.parametrize("sinkName", ["capture", "pipewire", "bogus"])
 def test_checkPlaysToTheNullSinkWhateverTheOutput(home: Home, sinkName: str):
-	run = say(home, "--check", "Checking.", env={"BASEDREADER_AUDIO_SINK": sinkName})
+	run = say(home, "--check", "Checking.", env={"LINDA_AUDIO_SINK": sinkName})
 	spoke = run.assertSpoke()
 	run.assertClean()
 	assert spoke["null"] and spoke["synth"] == "transcript"
@@ -464,7 +464,7 @@ def test_checkPlaysToTheNullSinkWhateverTheOutput(home: Home, sinkName: str):
 
 
 def test_nullSinkWithoutCheckIsRefused(home: Home):
-	run = say(home, "Nobody would hear this.", env={"BASEDREADER_AUDIO_SINK": "null"})
+	run = say(home, "Nobody would hear this.", env={"LINDA_AUDIO_SINK": "null"})
 	run.assertFailed(4, "the audio output is the null sink, which nobody hears, and only --check plays to it")
 	run.assertClean()
 	assert home.transcript() == []
@@ -474,13 +474,13 @@ def test_nullSinkWithoutCheckIsRefused(home: Home):
 	("env", "sentence"),
 	[
 		(
-			{"BASEDREADER_AUDIO_SINK": "capture", "BASEDREADER_AUDIO_CAPTURE_DIR": "/nonexistent"},
+			{"LINDA_AUDIO_SINK": "capture", "LINDA_AUDIO_CAPTURE_DIR": "/nonexistent"},
 			"the audio output could not be set up, [Errno 20] the audio capture directory does not exist",
 		),
 		(
-			{"BASEDREADER_AUDIO_SINK": "bogus"},
+			{"LINDA_AUDIO_SINK": "bogus"},
 			(
-				"the audio output could not be set up, [Errno 22] BASEDREADER_AUDIO_SINK must be null, capture "
+				"the audio output could not be set up, [Errno 22] LINDA_AUDIO_SINK must be null, capture "
 				"or pipewire, not 'bogus'"
 			),
 		),
@@ -496,7 +496,7 @@ def test_audioOutputThatCannotBeSetUpExits4(home: Home, env: dict[str, str], sen
 
 def test_nothingReachingTheOutputExits4(home: Home):
 	# In immediate mode the transcript synth reports the end of speech at once and plays nothing.
-	run = say(home, "Silent.", env={"BASEDREADER_TRANSCRIPT_MODE": "immediate"})
+	run = say(home, "Silent.", env={"LINDA_TRANSCRIPT_MODE": "immediate"})
 	run.assertFailed(4, "nothing reached the capture sink, which may not be running")
 	run.assertClean()
 
@@ -513,7 +513,7 @@ def test_unknownVoiceExits2(home: Home):
 	run = say(home, "--voice", "klingon", "Hello.")
 	run.assertFailed(
 		2,
-		"transcript has no voice klingon, and basedreader say --synth transcript --list-voices lists those it has",
+		"transcript has no voice klingon, and linda say --synth transcript --list-voices lists those it has",
 	)
 	run.assertClean()
 	assert home.transcript() == []
@@ -521,7 +521,7 @@ def test_unknownVoiceExits2(home: Home):
 
 def test_stalledSynthesizerExits5(home: Home):
 	# In manual mode the transcript synth never reports the end of speech by itself.
-	run = say(home, "--timeout", "1", "Stalled.", env={"BASEDREADER_TRANSCRIPT_MODE": "manual"})
+	run = say(home, "--timeout", "1", "Stalled.", env={"LINDA_TRANSCRIPT_MODE": "manual"})
 	run.assertFailed(5, "the synthesizer transcript did not finish within 1 second")
 	run.assertClean()
 	assert run.ended - run.started < 1 + 30
@@ -571,7 +571,7 @@ def test_helpIsPlainSentences(home: Home):
 	run = say(home, "--help")
 	assert run.process.returncode == 0 and run.stderr == "", run.describe()
 	lines = run.stdout.splitlines()
-	assert lines[0].startswith("basedreader say speaks the text")
+	assert lines[0].startswith("linda say speaks the text")
 	# Read aloud by a screen reader: no brackets, bars or other symbols standing for words.
 	assert not re.search(r"[\[\]{}<>|=]", run.stdout), run.stdout
 	assert not run.log()
@@ -580,56 +580,56 @@ def test_helpIsPlainSentences(home: Home):
 @pytest.mark.parametrize(
 	("arguments", "line"),
 	[
-		((), "basedreader say: it needs the text to speak after its options, as in basedreader say Hello.\n"),
-		(("",), "basedreader say: the text to speak is empty.\n"),
+		((), "linda say: it needs the text to speak after its options, as in linda say Hello.\n"),
+		(("",), "linda say: the text to speak is empty.\n"),
 		(
 			("--bogus", "Hello."),
-			"basedreader say: --bogus is not one of its options, which basedreader say --help lists.\n",
+			"linda say: --bogus is not one of its options, which linda say --help lists.\n",
 		),
 		# NVDA's own parser knows these, and would start the screen reader on them.
 		(
 			("-r", "Hello."),
-			"basedreader say: -r is not one of its options, which basedreader say --help lists.\n",
+			"linda say: -r is not one of its options, which linda say --help lists.\n",
 		),
 		(
 			("--replace", "Hello."),
-			"basedreader say: --replace is not one of its options, which basedreader say --help lists.\n",
+			"linda say: --replace is not one of its options, which linda say --help lists.\n",
 		),
 		(
 			("--install", "Hello."),
-			"basedreader say: --install is not one of its options, which basedreader say --help lists.\n",
+			"linda say: --install is not one of its options, which linda say --help lists.\n",
 		),
-		(("-q",), "basedreader say: -q is not one of its options, which basedreader say --help lists.\n"),
+		(("-q",), "linda say: -q is not one of its options, which linda say --help lists.\n"),
 		(
 			("--syn", "espeak", "Hello."),
-			"basedreader say: --syn is not one of its options, which basedreader say --help lists.\n",
+			"linda say: --syn is not one of its options, which linda say --help lists.\n",
 		),
 		(
 			("--rate", "300", "Hello."),
-			"basedreader say: the rate must be a whole number from 0 to 100, not 300.\n",
+			"linda say: the rate must be a whole number from 0 to 100, not 300.\n",
 		),
 		(
 			("--pitch", "high", "Hello."),
-			"basedreader say: the pitch must be a whole number from 0 to 100, not high.\n",
+			"linda say: the pitch must be a whole number from 0 to 100, not high.\n",
 		),
-		(("--gain", "2", "Hello."), "basedreader say: the gain must be a number from 0 to 1, not 2.\n"),
-		(("--gain", "nan", "Hello."), "basedreader say: the gain must be a number from 0 to 1, not nan.\n"),
+		(("--gain", "2", "Hello."), "linda say: the gain must be a number from 0 to 1, not 2.\n"),
+		(("--gain", "nan", "Hello."), "linda say: the gain must be a number from 0 to 1, not nan.\n"),
 		(
 			("--timeout", "0", "Hello."),
-			"basedreader say: the timeout must be a number of seconds above 0, not 0.\n",
+			"linda say: the timeout must be a number of seconds above 0, not 0.\n",
 		),
-		(("--synth",), "basedreader say: --synth needs a value after it.\n"),
+		(("--synth",), "linda say: --synth needs a value after it.\n"),
 		(
 			("--factory", "--config-path", "/", "Hello."),
-			"basedreader say: --config-path and --factory cannot be given together.\n",
+			"linda say: --config-path and --factory cannot be given together.\n",
 		),
 		(
 			("--config-path", "/nonexistent", "Hello."),
-			"basedreader say: the configuration directory /nonexistent does not exist.\n",
+			"linda say: the configuration directory /nonexistent does not exist.\n",
 		),
 		(
 			("--config-path", "/", "Hello."),
-			"basedreader say: the configuration directory / holds no nvda.ini.\n",
+			"linda say: the configuration directory / holds no nvda.ini.\n",
 		),
 	],
 )
@@ -648,7 +648,7 @@ def test_sayAnywhereButFirstStartsNothing(home: Home, arguments: tuple[str, ...]
 	run.wait(REFUSAL_BOUND)
 	assert (run.process.returncode, run.stdout) == (2, ""), run.describe()
 	assert run.stderr == (
-		"basedreader: the word say starts the say mode only as the first argument, so nothing was started\n"
+		"linda: the word say starts the say mode only as the first argument, so nothing was started\n"
 	), run.describe()
 	assertNothingStarted(run)
 
@@ -657,7 +657,7 @@ def assertNothingStarted(run: Say) -> None:
 	"""The run imported none of NVDA's core, took no lock, opened no log and connected to nothing."""
 	modules = run.exitRecord()["modules"]
 	assert not {"core", "config", "wx", "logHandler"} & set(modules), run.describe()
-	assert not (run.home.runtimeDir / "basedreader").exists()
+	assert not (run.home.runtimeDir / "linda").exists()
 	assert not run.home.sayDir.exists()
 	assert run.exitRecord()["sockets"] == []
 	run.result().assertClean(ignoring={"stderr", "returnCode"})
@@ -699,7 +699,7 @@ def test_stopSignalSilencesSpeechAtOnce(home: Home, signalNumber: signal.Signals
 	if ignoredAtStart:
 		# As a background job of a shell without job control starts.
 		prefix = (shutil.which("env"), f"--ignore-signal={signalNumber.name.removeprefix('SIG')}")
-	run = Say(home, ("say", LONG_TEXT), {"BASEDREADER_TRANSCRIPT_MS_PER_CHAR": "20"}, prefix)
+	run = Say(home, ("say", LONG_TEXT), {"LINDA_TRANSCRIPT_MS_PER_CHAR": "20"}, prefix)
 	deadline = time.monotonic() + RUN_BOUND
 	while not (spoken := [r for r in home.transcript() if r["kind"] == "speak"]):
 		assert time.monotonic() < deadline and run.process.poll() is None, run.describe()
@@ -724,7 +724,7 @@ def test_stopSignalSilencesSpeechAtOnce(home: Home, signalNumber: signal.Signals
 def throughPipewire(runtimeDir: str) -> dict[str, str]:
 	"""The say mode's environment for PipeWire, whose client looks for the daemon's socket in
 	runtimeDir rather than in the home's own runtime directory."""
-	return {"BASEDREADER_AUDIO_SINK": "pipewire", "PIPEWIRE_RUNTIME_DIR": runtimeDir}
+	return {"LINDA_AUDIO_SINK": "pipewire", "PIPEWIRE_RUNTIME_DIR": runtimeDir}
 
 
 def assertCleanThroughPipewireSay(run: Say) -> None:
@@ -743,7 +743,7 @@ def test_isHeardThroughPipewire(home: Home, pipewire: PipewireFixture):
 		home,
 		"--synth",
 		"espeak",
-		"This is Basedreader, speaking through PipeWire.",
+		"This is Linda, speaking through PipeWire.",
 		env=throughPipewire(os.environ["XDG_RUNTIME_DIR"]),
 	)
 	spoke = run.assertSpoke()

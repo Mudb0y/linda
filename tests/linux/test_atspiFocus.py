@@ -34,7 +34,7 @@ PRESS_ME_ANY = "Press me button Does nothing\N{HORIZONTAL ELLIPSIS}"
 #: so that what a command says is timed apart from how its keys are captured.
 PROBE = textwrap.dedent(
 	'''\
-	"""Runs a gesture for each line "gesture NAME" written to the FIFO BASEDREADER_FOCUS_PROBE names."""
+	"""Runs a gesture for each line "gesture NAME" written to the FIFO LINDA_FOCUS_PROBE names."""
 
 	import os
 	import threading
@@ -52,7 +52,7 @@ PROBE = textwrap.dedent(
 	class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		def __init__(self):
 			super().__init__()
-			path = os.environ.get("BASEDREADER_FOCUS_PROBE")
+			path = os.environ.get("LINDA_FOCUS_PROBE")
 			if path:
 				threading.Thread(target=self._read, args=(path,), name="focusProbe", daemon=True).start()
 
@@ -155,7 +155,7 @@ def _startNVDA(desktop: DesktopSession, tmp_path: Path) -> tuple[harness.Launch,
 	os.mkfifo(fifo)
 	launch = desktop.startNVDA(
 		config,
-		env={"BASEDREADER_TEST_HOOKS_DIR": str(hooks), "BASEDREADER_FOCUS_PROBE": str(fifo)},
+		env={"LINDA_TEST_HOOKS_DIR": str(hooks), "LINDA_FOCUS_PROBE": str(fifo)},
 	)
 	return launch, Probe(fifo)
 

@@ -1,7 +1,7 @@
 # openevv's NVDA synthesizer driver, laid out as its add-on is on Windows: the
 # driver's three modules beside openevv_engine/, which holds the engine
 # library, so that the driver finds the library where it looks on every
-# platform and reads no variable of Basedreader's. The series in
+# platform and reads no variable of Linda's. The series in
 # patches/openevv, applied in file-name order, makes the driver load on Linux
 # and fixes its cancelling, marks and settings.
 {

@@ -1,6 +1,6 @@
 # Files that came from NVDA and that this tree changes or deletes, and files
 # it adds among upstream's in source/ or tests/unit, outside
-# source/linuxPlatform and source/basedreader.py.
+# source/linuxPlatform and source/linda.py.
 # A path at the start of a line, the reason indented beneath it.
 # tools/check-upstream-edits compares this list with the tree.
 # Each reason starts with the kind of edit, which says what a merge risks,
@@ -173,7 +173,7 @@ source/config/__init__.py
   getInstalledUserConfigPath() is None; that also turns off touch support,
   the installed-only settings, parts of the update check and part of the
   remote client. getUserDefaultConfigPath() is the XDG configuration directory,
-  XDG_CONFIG_HOME/basedreader, never a directory under appDir
+  XDG_CONFIG_HOME/linda, never a directory under appDir
 source/config/registry.py
   every platform: winreg comes from linuxPlatform.windowsOnly, so
   _deleteKeyAndSubkeys raises NoLinuxImplementation on Linux
@@ -331,7 +331,7 @@ source/logHandler.py
   time conversion; a record that cannot be written is reported on the real
   standard error, since sys.stderr is
   redirected into the log and the report would fail again without end; the
-  default log is under XDG_STATE_HOME/basedreader; log files are created
+  default log is under XDG_STATE_HOME/linda; log files are created
   readable by the user alone, since the log can record every key typed; the
   error sound is requested from a thread of its own, which stops it when
   errors keep following it, and CRITICAL has no sound, not the winsound
@@ -381,8 +381,8 @@ source/synthDriverHandler.py
 source/synthDrivers/_espeak.py
   Linux runtime: the library, the data directory passed to
   espeak_Initialize and the variants directory come from
-  linuxPlatform.espeakFiles, which reads BASEDREADER_ESPEAK_LIB and
-  BASEDREADER_ESPEAK_DATA_DIR, instead of espeak.dll and espeak-ng-data
+  linuxPlatform.espeakFiles, which reads LINDA_ESPEAK_LIB and
+  LINDA_ESPEAK_DATA_DIR, instead of espeak.dll and espeak-ng-data
   beside the driver. espeak_Initialize sets the process's LC_CTYPE to
   C.UTF-8, which on Windows touches only the C runtime linked into
   espeak.dll, so initialize() puts back the one NVDA set.

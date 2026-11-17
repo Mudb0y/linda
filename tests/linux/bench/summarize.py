@@ -353,8 +353,8 @@ def main(argv: list[str]) -> int:
 		return 2
 	results = loadResults(argv[1:])
 	problems = Problems()
-	fetch = [r for r in results if r.get("schema", "") == "basedreader-bench/fetch/2"]
-	mirror = [r for r in results if r.get("schema", "") == "basedreader-bench/mirror/2"]
+	fetch = [r for r in results if r.get("schema", "") == "linda-bench/fetch/2"]
+	mirror = [r for r in results if r.get("schema", "") == "linda-bench/mirror/2"]
 	old = len(results) - len(fetch) - len(mirror)
 	if old:
 		problems.add("input", f"{old} files from another version of the bench")

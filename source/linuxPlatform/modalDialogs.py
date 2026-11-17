@@ -121,7 +121,7 @@ def _giveUp(reason: str) -> NoReturn:
 	log.error(message)
 	config.saveOnExit()
 	if sys.__stderr__ is not None:
-		print(f"basedreader: {message}", file=sys.__stderr__, flush=True)
+		print(f"linda: {message}", file=sys.__stderr__, flush=True)
 	os._exit(GIVEN_UP_STATUS)
 
 

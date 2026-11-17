@@ -128,7 +128,7 @@ def repo(tmp_path: Path) -> Repo:
 	r.commit("Import NVDA", "source", "tests")
 	r.git("checkout", "-q", "-b", "main")
 	r.write("source/edited.py", LINUX_EDIT)
-	r.write("source/basedreader.py", "launcher = True\n")
+	r.write("source/linda.py", "launcher = True\n")
 	r.write("source/linuxPlatform/__init__.py", "")
 	r.write("source/linuxPlatform/replacements/watchdog.py", "")
 	writeFinder(r, "watchdog", "NVDAHelper")
@@ -144,7 +144,7 @@ def repo(tmp_path: Path) -> Repo:
 
 
 def check(r: Repo, louis: str = "3.39.0") -> subprocess.CompletedProcess:
-	return r.tool("check-upstream-edits", BASEDREADER_LIBLOUIS_VERSION=louis)
+	return r.tool("check-upstream-edits", LINDA_LIBLOUIS_VERSION=louis)
 
 
 def assertFails(r: Repo, *expected: str) -> None:
@@ -344,8 +344,8 @@ def test_fileAddedAmongUpstreamsFailsUntilListed(repo: Repo, path: str):
 
 
 def test_fileNamedLikeTheLauncherIsNotOurs(repo: Repo):
-	repo.write("source/basedreader.pyi", "")
-	assertFails(repo, "added among upstream's files but not listed:\nsource/basedreader.pyi")
+	repo.write("source/linda.pyi", "")
+	assertFails(repo, "added among upstream's files but not listed:\nsource/linda.pyi")
 
 
 def test_fileAddedInOurOwnPlacesPasses(repo: Repo):
@@ -370,7 +370,7 @@ def test_forkWhoseUpstreamFileMovedFails(repo: Repo):
 
 def test_launcherWhoseUpstreamMovedFails(repo: Repo):
 	repo.onUpstream(lambda r: r.write("source/nvda.pyw", "launcher = False\n"))
-	assertFails(repo, "upstream changed source/nvda.pyw", "carry what applies into source/basedreader.py")
+	assertFails(repo, "upstream changed source/nvda.pyw", "carry what applies into source/linda.py")
 
 
 def test_moduleNewlyReplacedWithoutAnEntryFails(repo: Repo):

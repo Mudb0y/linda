@@ -17,7 +17,7 @@ let
   otherMembers = lib.filter (member: !lib.hasPrefix "crates/pwsink" member) workspace.members;
 in
 rustPlatform.buildRustPackage {
-  pname = "basedreader-pwsink";
+  pname = "linda-pwsink";
   inherit (workspace.package) version;
   # Without engine/.cargo, whose runner starts every test binary inside tests/linux/rig, which a
   # Nix build cannot enter.
@@ -45,13 +45,13 @@ rustPlatform.buildRustPackage {
 
   cargoBuildFlags = [
     "--package"
-    "basedreader-pwsink"
+    "linda-pwsink"
   ];
   # The library's own test connects to PipeWire and refuses to run outside the rig; the core's
   # tests, of the ring, the position and the clock, need no daemon.
   cargoTestFlags = [
     "--package"
-    "basedreader-pwsink-core"
+    "linda-pwsink-core"
   ];
 
   nativeBuildInputs = [
@@ -66,7 +66,7 @@ rustPlatform.buildRustPackage {
   '';
 
   meta = {
-    description = "Basedreader's PipeWire output library";
+    description = "Linda's PipeWire output library";
     license = lib.licenses.gpl2Plus;
     platforms = lib.platforms.linux;
   };

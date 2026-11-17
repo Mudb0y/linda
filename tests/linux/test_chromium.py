@@ -6,7 +6,7 @@ followed and the way back remembers the place; a form is filled in focus mode; t
 the reader; find; a large page; and NVDA's own exit. In an Electron program shaped like a chat
 program, its window read as a web page in browse mode, as NVDA reads such a program's on Windows.
 
-BASEDREADER_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_chromium.py
+LINDA_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_chromium.py
 
 Both are started plainly, without a switch that forces accessibility on, and the accessibility status
 is switched off before NVDA starts, as a desktop has it before any screen reader runs: what lets them

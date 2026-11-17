@@ -17,7 +17,7 @@ Programs that stop speech through it, such as FastSM and the Prism library behin
 the InterruptSpeech command of Orca's speech module first, so that module answers too, with that
 command alone.
 
-BASEDREADER_SPEAK_SERVICE=off in the environment leaves the service out.
+LINDA_SPEAK_SERVICE=off in the environment leaves the service out.
 """
 
 import os
@@ -33,7 +33,7 @@ MODULE_INTERFACE = "org.gnome.Orca.Module"
 SPEECH_MODULE = "SpeechAndVerbosityManager"
 INTERRUPT_COMMAND = "InterruptSpeech"
 #: The environment variable that turns the service off when it is "off".
-SWITCH_VARIABLE = "BASEDREADER_SPEAK_SERVICE"
+SWITCH_VARIABLE = "LINDA_SPEAK_SERVICE"
 #: Characters of a message that are spoken; NVDA's speech can take seconds over a book's worth.
 MAX_MESSAGE_LENGTH = 10_000
 #: Messages waiting for the main thread beyond which more are dropped, so that a script calling in a
@@ -168,7 +168,7 @@ class _Service:
 		#: The connections of an Orca process that NVDA gave the name up for, while that one has not
 		#: taken it.
 		self._yieldingTo: set[str] = set()
-		self.thread = threading.Thread(target=self._run, name="basedreaderSpeakService", daemon=True)
+		self.thread = threading.Thread(target=self._run, name="lindaSpeakService", daemon=True)
 
 	def _run(self) -> None:
 		self._context.push_thread_default()

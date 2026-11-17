@@ -654,7 +654,7 @@ pub async fn run(args: &Args) -> Result<(), String> {
     write_json(
         out,
         &json!({
-            "schema": "basedreader-bench/mirror/2",
+            "schema": "linda-bench/mirror/2",
             "title": title,
             "run_index": run_index,
             "seed": args.num("seed", 0)?,

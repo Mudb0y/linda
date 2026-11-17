@@ -1,7 +1,7 @@
 """openevv's NVDA driver, loaded from its own directory, speaking through NVDA into the capture sink.
 
 The driver is not part of this tree. It lives in openevv's source, and a build lays it out in a
-directory of its own with the engine library beside it, which BASEDREADER_OPENEVV_DRIVER_DIR names:
+directory of its own with the engine library beside it, which LINDA_OPENEVV_DRIVER_DIR names:
 openevv.py, _openevv.py and _openevv_dictionaries.py from openevv's nvda/addon/synthDrivers with the
 series in nix/patches/openevv applied, and openevv_engine/libeci.so.1. The dev shell names the
 directory nix/openevv-driver.nix builds. Every test but the first needs it, and fails without it. Run
@@ -12,7 +12,7 @@ under the rig:
 A directory built some other way is named with env, and passed with --bind when it is outside the Nix
 store, which the rig sees, and outside the checkout:
 
-	nix develop . -c tests/linux/rig --bind DIR env BASEDREADER_OPENEVV_DRIVER_DIR=DIR python3 -m pytest ...
+	nix develop . -c tests/linux/rig --bind DIR env LINDA_OPENEVV_DRIVER_DIR=DIR python3 -m pytest ...
 
 The tests of cancelling, marks and settings each drive the case a driver of this shape gets wrong:
 a cancel landing in the last wait for the player, a cancel landing between the engine callback's
@@ -28,7 +28,7 @@ import harness
 import pytest
 from pipewireFixture import PipewireFixture, assertSpeechHeard
 
-DRIVER_DIR_VARIABLE = "BASEDREADER_OPENEVV_DRIVER_DIR"
+DRIVER_DIR_VARIABLE = "LINDA_OPENEVV_DRIVER_DIR"
 
 
 def requireDriverDirectory() -> None:
@@ -185,7 +185,7 @@ def runOpenevv(tmpPath: Path, code: str) -> harness.ChildResult:
 	return harness.runChild(
 		tmpPath,
 		SPEECH + textwrap.dedent(code) + END,
-		env={"BASEDREADER_AUDIO_CAPTURE_DIR": str(capture)},
+		env={"LINDA_AUDIO_CAPTURE_DIR": str(capture)},
 		timeout=600,
 	)
 
@@ -586,5 +586,5 @@ def test_anUnknownCommandIsNoError(tmp_path: Path):
 def test_isHeardThroughPipewire(pipewire: PipewireFixture, tmp_path: Path):
 	requireDriverDirectory()
 	assertSpeechHeard(
-		pipewire, tmp_path, "openevv", "This is openevv, speaking through Basedreader and PipeWire."
+		pipewire, tmp_path, "openevv", "This is openevv, speaking through Linda and PipeWire."
 	)

@@ -13,9 +13,9 @@ import json
 import sys
 
 TITLES = {
-	"normal": "Basedreader bench normal page",
-	"large": "Basedreader bench large page",
-	"mutation": "Basedreader bench mutation page",
+	"normal": "Linda bench normal page",
+	"large": "Linda bench large page",
+	"mutation": "Linda bench mutation page",
 }
 
 # Sections, table rows and form fields.

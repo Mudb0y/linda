@@ -3,9 +3,9 @@ them: the synthesizer, the voice and its settings ring, the welcome dialog of a 
 settings dialog and its keyboard panel, the NVDA menu and saving the configuration. Every key is
 pressed on the rig's display under marco.
 
-nix develop . -c tests/linux/rig env BASEDREADER_RIG_WM=marco python3 -m pytest -q tests/linux/test_ownGui.py
+nix develop . -c tests/linux/rig env LINDA_RIG_WM=marco python3 -m pytest -q tests/linux/test_ownGui.py
 
-Without BASEDREADER_RIG_WM=marco, DesktopSession starts marco itself. The transcript holds what the
+Without LINDA_RIG_WM=marco, DesktopSession starts marco itself. The transcript holds what the
 synthesizer is given, after symbols are spoken as words, so "Alt+P" is "Alt plus P".
 """
 
@@ -198,7 +198,7 @@ def test_voiceSettingsSpeakEachControlAndItsChanges(desktop: DesktopSession, tmp
 	(hooks / "synthDrivers" / "voicedTranscript.py").write_text(VOICED_TRANSCRIPT, encoding="utf-8")
 	(hooks / "globalPlugins").symlink_to(harness.HERE / "fixtures" / "globalPlugins")
 	config = sessionConfig(tmp_path / "config", replace={"synth =": "synth = voicedTranscript"})
-	nvda = start(desktop, config, env={"BASEDREADER_TEST_HOOKS_DIR": str(hooks)})
+	nvda = start(desktop, config, env={"LINDA_TEST_HOOKS_DIR": str(hooks)})
 	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
 
 	mark = step(

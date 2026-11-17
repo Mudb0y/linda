@@ -148,7 +148,7 @@ form.addRow("C&ount:", spin)
 fruit = QListWidget()
 fruit.addItems(
 	["Apples", "Pears", "Plums"]
-	+ [f"Item {n}" for n in range(int(os.environ.get("BASEDREADER_LISTSIZE", "0")))]
+	+ [f"Item {n}" for n in range(int(os.environ.get("LINDA_LISTSIZE", "0")))]
 )
 fruit.setCurrentRow(0)
 form.addRow("Fr&uit:", fruit)

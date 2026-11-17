@@ -26,7 +26,7 @@ LEDGER = ROOT / "tools" / "upstream-edits.txt"
 #: Files without a .py extension are checked only when named.
 OURS = (
 	"source/linuxPlatform",
-	"source/basedreader.py",
+	"source/linda.py",
 	"tests/linux",
 	"tools/build-artifacts",
 	"tools/check-upstream-edits",

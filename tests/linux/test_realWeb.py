@@ -1,7 +1,7 @@
 """Browse mode on a few real websites, for the gross things only: the page is read from the top soon
 after it opens, quick navigation finds a heading, the log has no error and NVDA exits cleanly.
 
-BASEDREADER_RIG_NET=1 nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_realWeb.py
+LINDA_RIG_NET=1 nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_realWeb.py
 
 Each needs the internet, which the rig gives only when its caller asks; without it they skip as
 expected. A site is loaded once a run, with a fresh profile, and nothing is typed into it.

@@ -64,8 +64,8 @@ def runAudio(tmpPath: Path, code: str, *, captureDir: Path | None = None, extra:
 		+ "result = {'value': result, 'isolation': isolation}\n"
 	)
 	env = {
-		"BASEDREADER_AUDIO_SINK": None,
-		"BASEDREADER_AUDIO_CAPTURE_DIR": str(captureDir) if captureDir else "",
+		"LINDA_AUDIO_SINK": None,
+		"LINDA_AUDIO_CAPTURE_DIR": str(captureDir) if captureDir else "",
 	}
 	done = harness.runChild(tmpPath, "result = None\n" + body, env=env)
 	done.assertClean()
@@ -121,8 +121,8 @@ def test_backEndAloneMapsNothingThatCouldSound(tmp_path: Path):
 		}
 		"""
 	for env in (
-		{"BASEDREADER_AUDIO_SINK": None, "BASEDREADER_AUDIO_CAPTURE_DIR": ""},
-		{"BASEDREADER_AUDIO_SINK": None, "BASEDREADER_AUDIO_CAPTURE_DIR": str(captureDir)},
+		{"LINDA_AUDIO_SINK": None, "LINDA_AUDIO_CAPTURE_DIR": ""},
+		{"LINDA_AUDIO_SINK": None, "LINDA_AUDIO_CAPTURE_DIR": str(captureDir)},
 	):
 		done = harness.runChild(
 			tmp_path, "import sys\n" + textwrap.dedent(code), prepare="bootstrap", env=env
@@ -2012,14 +2012,14 @@ def test_missingCaptureDirectoryFailsAtStart(tmp_path: Path):
 
 		nvwave.initialize()
 		""",
-		env={"BASEDREADER_AUDIO_SINK": None, "BASEDREADER_AUDIO_CAPTURE_DIR": str(tmp_path / "absent")},
+		env={"LINDA_AUDIO_SINK": None, "LINDA_AUDIO_CAPTURE_DIR": str(tmp_path / "absent")},
 	)
 	assert done.error is not None and "NotADirectoryError" in done.error
 	done.assertClean(ignoring={"error"})
 
 
 def test_theEnvironmentChoosesTheSink(tmp_path: Path):
-	"""BASEDREADER_AUDIO_SINK names the sink, unset it falls back to the capture directory, and any
+	"""LINDA_AUDIO_SINK names the sink, unset it falls back to the capture directory, and any
 	other value, or the capture sink with nowhere to capture to, fails at the first getSink with the
 	variable named. The PipeWire sink is reached by importing its module, which a stand-in replaces
 	here so that nothing is loaded that could sound."""
@@ -2044,7 +2044,7 @@ def test_theEnvironmentChoosesTheSink(tmp_path: Path):
 		chosen = {{}}
 		for sinkName in (None, "", "null", "capture", "pipewire", "alsa", "Null"):
 			for directory in (None, captureDir):
-				for name, value in (("BASEDREADER_AUDIO_SINK", sinkName), ("BASEDREADER_AUDIO_CAPTURE_DIR", directory)):
+				for name, value in (("LINDA_AUDIO_SINK", sinkName), ("LINDA_AUDIO_CAPTURE_DIR", directory)):
 					if value is None:
 						os.environ.pop(name, None)
 					else:
@@ -2058,7 +2058,7 @@ def test_theEnvironmentChoosesTheSink(tmp_path: Path):
 				chosen[f"{{sinkName}} {{'with' if directory else 'without'}} directory"] = outcome
 		import wasapi
 
-		os.environ["BASEDREADER_AUDIO_SINK"] = "alsa"
+		os.environ["LINDA_AUDIO_SINK"] = "alsa"
 		audioOutput._sink = None
 		try:
 			wasapi.wasPlay_startup()
@@ -2068,7 +2068,7 @@ def test_theEnvironmentChoosesTheSink(tmp_path: Path):
 		result = {{"chosen": chosen, "startup": startup}}
 		""",
 		prepare="bootstrap",
-		env={"BASEDREADER_AUDIO_SINK": None, "BASEDREADER_AUDIO_CAPTURE_DIR": None},
+		env={"LINDA_AUDIO_SINK": None, "LINDA_AUDIO_CAPTURE_DIR": None},
 	)
 	done.assertClean()
 	null = ["NullSink", "null", None]
@@ -2076,7 +2076,7 @@ def test_theEnvironmentChoosesTheSink(tmp_path: Path):
 	noDirectory = [
 		"FileNotFoundError",
 		(
-			"[Errno 2] BASEDREADER_AUDIO_SINK is capture, but BASEDREADER_AUDIO_CAPTURE_DIR names no "
+			"[Errno 2] LINDA_AUDIO_SINK is capture, but LINDA_AUDIO_CAPTURE_DIR names no "
 			"directory to capture to"
 		),
 	]
@@ -2084,7 +2084,7 @@ def test_theEnvironmentChoosesTheSink(tmp_path: Path):
 	def unknown(name: str) -> list:
 		return [
 			"OSError",
-			f"[Errno 22] BASEDREADER_AUDIO_SINK must be null, capture or pipewire, not {name!r}",
+			f"[Errno 22] LINDA_AUDIO_SINK must be null, capture or pipewire, not {name!r}",
 		]
 
 	assert done.value["chosen"] == {
@@ -2106,7 +2106,7 @@ def test_theEnvironmentChoosesTheSink(tmp_path: Path):
 	assert done.value["startup"] == [
 		"WindowsError",
 		-2147467259,
-		"[Errno 22] BASEDREADER_AUDIO_SINK must be null, capture or pipewire, not 'alsa'",
+		"[Errno 22] LINDA_AUDIO_SINK must be null, capture or pipewire, not 'alsa'",
 	]
 
 

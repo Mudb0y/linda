@@ -1,7 +1,7 @@
 """NVDA's eSpeak NG driver on Linux, speaking through NVDA into the capture sink.
 
-The library and its data are the ones the dev shell names in BASEDREADER_ESPEAK_LIB and
-BASEDREADER_ESPEAK_DATA_DIR: eSpeak NG at the commit NVDA pins, built without audio output. Run
+The library and its data are the ones the dev shell names in LINDA_ESPEAK_LIB and
+LINDA_ESPEAK_DATA_DIR: eSpeak NG at the commit NVDA pins, built without audio output. Run
 under the rig:
 
 	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_espeak.py
@@ -22,8 +22,8 @@ import harness
 import rununittests
 from pipewireFixture import PipewireFixture, assertSpeechHeard
 
-LIBRARY_VARIABLE = "BASEDREADER_ESPEAK_LIB"
-DATA_DIR_VARIABLE = "BASEDREADER_ESPEAK_DATA_DIR"
+LIBRARY_VARIABLE = "LINDA_ESPEAK_LIB"
+DATA_DIR_VARIABLE = "LINDA_ESPEAK_DATA_DIR"
 
 
 #: Brings speech up as core.main does with eSpeak configured, into the capture sink, and records when
@@ -202,7 +202,7 @@ def runEspeak(tmpPath: Path, code: str, language: str = "en") -> harness.ChildRe
 	done = harness.runChild(
 		tmpPath,
 		f"LANGUAGE = {language!r}\n" + SPEECH + textwrap.dedent(code) + END,
-		env={"BASEDREADER_AUDIO_CAPTURE_DIR": str(capture)},
+		env={"LINDA_AUDIO_CAPTURE_DIR": str(capture)},
 		timeout=600,
 	)
 	done.assertClean()
@@ -522,7 +522,7 @@ def test_noDoneAfterACancelInTheLastWait(tmp_path: Path):
 
 def test_isHeardThroughPipewire(pipewire: PipewireFixture, tmp_path: Path):
 	assertSpeechHeard(
-		pipewire, tmp_path, "espeak", "This is Basedreader, speaking through eSpeak and PipeWire."
+		pipewire, tmp_path, "espeak", "This is Linda, speaking through eSpeak and PipeWire."
 	)
 
 
@@ -583,7 +583,7 @@ def test_unitTestRunnerAllowsThisEspeakAndNoOther(tmp_path: Path):
 
 		class TestLoads(unittest.TestCase):
 			def test_theNamedEspeak(self):
-				ctypes.CDLL(os.environ["BASEDREADER_ESPEAK_LIB"])
+				ctypes.CDLL(os.environ["LINDA_ESPEAK_LIB"])
 
 			def test_otherLibraries(self):
 				for path in {refused!r}:

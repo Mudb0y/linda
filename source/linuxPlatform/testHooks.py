@@ -19,7 +19,7 @@ from importlib.machinery import ModuleSpec
 from types import ModuleType
 
 #: Names a directory that may hold synthDrivers/ and globalPlugins/ subdirectories.
-ENVIRONMENT_VARIABLE = "BASEDREADER_TEST_HOOKS_DIR"
+ENVIRONMENT_VARIABLE = "LINDA_TEST_HOOKS_DIR"
 
 #: The packages whose search paths get the subdirectory of the same name.
 packageNames = ("synthDrivers", "globalPlugins")

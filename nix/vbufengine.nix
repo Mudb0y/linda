@@ -21,7 +21,7 @@ let
     map (bin: bin.path) (lib.filter (bin: bin ? path) ((lib.importTOML (../engine + "/${member}/Cargo.toml")).bin or [ ]));
 in
 rustPlatform.buildRustPackage {
-  pname = "basedreader-vbufengine";
+  pname = "linda-vbufengine";
   inherit (workspace.package) version;
   # Without engine/.cargo, whose runner starts every test binary inside tests/linux/rig, which a
   # Nix build cannot enter.
@@ -51,14 +51,14 @@ rustPlatform.buildRustPackage {
 
   cargoBuildFlags = [
     "--package"
-    "basedreader-vbufengine"
+    "linda-vbufengine"
   ];
   # The library and the mirror it walks with speak D-Bus to real or fake applications, and their
   # tests refuse to run outside the rig.
   doCheck = false;
 
   meta = {
-    description = "Basedreader's renderer of web documents for NVDA's virtual buffers";
+    description = "Linda's renderer of web documents for NVDA's virtual buffers";
     license = lib.licenses.gpl2Plus;
     platforms = lib.platforms.linux;
   };

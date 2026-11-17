@@ -114,8 +114,8 @@ def arrangeTables(tablesDir: Path) -> int:
 
 def main() -> None:
 	print("build-artifacts: start")
-	cldrDir = envDir("BASEDREADER_NVDA_CLDR_DIR")
-	tablesDir = envDir("BASEDREADER_LOUIS_TABLES_DIR")
+	cldrDir = envDir("LINDA_NVDA_CLDR_DIR")
+	tablesDir = envDir("LINDA_LOUIS_TABLES_DIR")
 	if shutil.which("msgfmt") is None:
 		fail("msgfmt is not on PATH; run this inside the dev shell")
 	built, total = buildCatalogues()

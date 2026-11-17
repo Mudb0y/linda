@@ -12,7 +12,7 @@ drawn with box-drawing characters, with a prompt character and the text being ty
 the real one under the live region; --cursor=real leaves the terminal's cursor in the input box, or
 on the marked option of a menu. --render=full erases the whole live region and writes it again, in
 the three writes such a renderer makes when it also adds finished text; --render=lines rewrites only
-the rows that changed. --log, or BASEDREADER_ASSISTANT_LOG, names a file to which a JSON line with
+the rows that changed. --log, or LINDA_ASSISTANT_LOG, names a file to which a JSON line with
 time.monotonic() is added as each paragraph of the reply starts to appear.
 
 Submitting any text plays the conversation in REPLY: a reply, a tool call with its output, a
@@ -509,7 +509,7 @@ def main() -> None:
 		cursor=options.get("cursor", "drawn"),
 		render=options.get("render", "full"),
 		seed=int(options.get("seed", "1")),
-		logPath=options.get("log", os.environ.get("BASEDREADER_ASSISTANT_LOG")),
+		logPath=options.get("log", os.environ.get("LINDA_ASSISTANT_LOG")),
 	)
 	saved = termios.tcgetattr(sys.stdin.fileno())
 	tty.setraw(sys.stdin.fileno())

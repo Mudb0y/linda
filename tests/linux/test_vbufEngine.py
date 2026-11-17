@@ -3,9 +3,9 @@ the first action after it is not dropped, each change to a page comes as an upda
 buffer as a fresh render would, following a link ends the old document, and a large page comes top
 first without holding Firefox up.
 
-BASEDREADER_VBUF_LIB=ROOT/engine/target/vbuf/libnvdaVbuf.so \
-BASEDREADER_VBUF_ENGINE=ROOT/engine/target/release/libbre_vbuf.so \
-BASEDREADER_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_vbufEngine.py
+LINDA_VBUF_LIB=ROOT/engine/target/vbuf/libnvdaVbuf.so \
+LINDA_VBUF_ENGINE=ROOT/engine/target/release/libbre_vbuf.so \
+LINDA_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_vbufEngine.py
 """
 
 import array
@@ -41,7 +41,7 @@ FOLLOW_BOUND = 10.0
 FIRST_PART_BOUND = 1.0
 LARGE_BOUND = 15.0
 CALL_BOUND = 0.3
-LARGE_TITLE = "Basedreader bench large page"
+LARGE_TITLE = "Linda bench large page"
 #: Seconds a page has to finish loading, and how long it must stay loaded to count as finished.
 LOAD_BOUND = 120.0
 STEADY = 0.5

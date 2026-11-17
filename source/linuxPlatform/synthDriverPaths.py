@@ -10,7 +10,7 @@ Unlike testHooks, this is how a built copy finds the driver too, so it acts in e
 import os
 
 #: Names the directory holding openevv.py, the modules it imports and openevv_engine/libeci.so.1.
-openevvDriverDirVariable = "BASEDREADER_OPENEVV_DRIVER_DIR"
+openevvDriverDirVariable = "LINDA_OPENEVV_DRIVER_DIR"
 
 
 def install() -> list[str]:

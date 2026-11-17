@@ -4,7 +4,7 @@ write. No document and no engine take part.
 
 	nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_vbufStorage.py
 
-The library is the one BASEDREADER_VBUF_LIB names when it names a file, and is otherwise built here
+The library is the one LINDA_VBUF_LIB names when it names a file, and is otherwise built here
 with engine/vbuf/build.sh; the sanitizer build is always built here.
 """
 
@@ -308,7 +308,7 @@ def buildLibrary(out: Path, mode: str = "release") -> Path:
 
 @pytest.fixture(scope="module")
 def library(tmp_path_factory: pytest.TempPathFactory) -> Path:
-	named = os.environ.get("BASEDREADER_VBUF_LIB", "")
+	named = os.environ.get("LINDA_VBUF_LIB", "")
 	if os.path.isfile(named):
 		return Path(named)
 	return buildLibrary(tmp_path_factory.mktemp("vbuf") / "libnvdaVbuf.so")
@@ -366,7 +366,7 @@ def test_astralCharacterIsTwoUnits(tmp_path: Path, library: Path):
 		localLib.VBuf_destroyBuffer(ctypes.byref(handle))
 		result["cleared"] = handle.value is None
 		""",
-		env={"BASEDREADER_VBUF_LIB": str(library)},
+		env={"LINDA_VBUF_LIB": str(library)},
 	)
 	done.assertClean()
 	value = done.value
@@ -732,7 +732,7 @@ def test_updateThreadAppliesThenTellsTheBuffer(tmp_path: Path, library: Path):
 		vbufUpdates.unregister(buffer)
 		vbufLib.destroy(buffer.VBufHandle.value)
 		""",
-		env={"BASEDREADER_VBUF_LIB": str(library)},
+		env={"LINDA_VBUF_LIB": str(library)},
 	)
 	done.assertClean()
 	value = done.value

@@ -1,5 +1,5 @@
 [package]
-name = "basedreader-pwsink"
+name = "linda-pwsink"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -21,4 +21,4 @@ test = false
 [dependencies]
 pipewire = "=0.10.1"
 libc.workspace = true
-pwsink-core = { path = "core", package = "basedreader-pwsink-core" }
+pwsink-core = { path = "core", package = "linda-pwsink-core" }

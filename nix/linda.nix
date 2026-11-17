@@ -1,4 +1,4 @@
-# Basedreader as an installed program: NVDA's tree with what
+# Linda as an installed program: NVDA's tree with what
 # tools/build-artifacts generates from it, read-only in the store, and a
 # wrapper for each program that runs the launcher with the flake's Python and
 # names the native pieces the code loads by absolute path.
@@ -16,7 +16,7 @@
   python,
   louisTables,
   nvdaCldr,
-  # BASEDREADER_ variables the program reads, as the dev shell sets them.
+  # LINDA_ variables the program reads, as the dev shell sets them.
   runtimeEnv,
   # The PipeWire sink's library. Without it linuxPlatform.audioOutput keeps
   # its own choice of sink.
@@ -30,8 +30,8 @@
 let
   # Each program installed, with the arguments it puts before the caller's.
   programs = {
-    basedreader = [ ];
-    basedreader-say = [ "say" ];
+    linda = [ ];
+    linda-say = [ "say" ];
   };
 
   # A caller's values for these would load code from outside the package into
@@ -55,12 +55,12 @@ let
   wrapperEnv =
     runtimeEnv
     // lib.optionalAttrs (pwsink != null) {
-      BASEDREADER_AUDIO_SINK = "pipewire";
-      BASEDREADER_PWSINK_LIB = "${pwsink}/lib/libpwsink.so";
+      LINDA_AUDIO_SINK = "pipewire";
+      LINDA_PWSINK_LIB = "${pwsink}/lib/libpwsink.so";
     }
     // lib.optionalAttrs (vbuf != null && vbufengine != null) {
-      BASEDREADER_VBUF_LIB = "${vbuf}/lib/libnvdaVbuf.so";
-      BASEDREADER_VBUF_ENGINE = "${vbufengine}/lib/libbre_vbuf.so";
+      LINDA_VBUF_LIB = "${vbuf}/lib/libnvdaVbuf.so";
+      LINDA_VBUF_ENGINE = "${vbufengine}/lib/libbre_vbuf.so";
     };
 
   # The libraries the wrappers name. One that is not there is not loaded, and NVDA carries on
@@ -80,10 +80,10 @@ let
       lib.findFirst (lib.hasPrefix prefix) (throw "source/buildVersion.py sets no version_${name}") versionLines
     );
 
-  appDir = "$out/share/basedreader/source";
+  appDir = "$out/share/linda/source";
 in
 stdenvNoCC.mkDerivation {
-  pname = "basedreader";
+  pname = "linda";
   version = lib.concatMapStringsSep "." versionField [
     "year"
     "major"
@@ -117,8 +117,8 @@ stdenvNoCC.mkDerivation {
   dontWrapGApps = true;
 
   env = {
-    BASEDREADER_LOUIS_TABLES_DIR = "${louisTables}";
-    BASEDREADER_NVDA_CLDR_DIR = "${nvdaCldr}";
+    LINDA_LOUIS_TABLES_DIR = "${louisTables}";
+    LINDA_NVDA_CLDR_DIR = "${nvdaCldr}";
   };
 
   buildPhase = ''
@@ -129,7 +129,7 @@ stdenvNoCC.mkDerivation {
 
   installPhase = ''
     runHook preInstall
-    mkdir -p $out/share/basedreader
+    mkdir -p $out/share/linda
     cp -r source ${appDir}
     # The program runs with -B and the store is read-only, so modules are
     # compiled here or on every start.
@@ -144,7 +144,7 @@ stdenvNoCC.mkDerivation {
         "''${gappsWrapperArgs[@]}" \
         ${lib.concatStringsSep " " (lib.mapAttrsToList (n: v: "--set-default ${n} ${lib.escapeShellArg v}") wrapperEnv)} \
         ${lib.concatMapStringsSep " " (n: "--unset ${n}") callerVariablesCleared} \
-        --add-flags "-I -B ${appDir}/basedreader.py" \
+        --add-flags "-I -B ${appDir}/linda.py" \
         ${lib.concatMapStrings (a: "--add-flags ${lib.escapeShellArg a} ") arguments}
     '') programs
   );
@@ -192,6 +192,6 @@ stdenvNoCC.mkDerivation {
     description = "NVDA, the screen reader, on Linux";
     license = lib.licenses.gpl2Plus;
     platforms = lib.platforms.linux;
-    mainProgram = "basedreader";
+    mainProgram = "linda";
   };
 }

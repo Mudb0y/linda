@@ -223,9 +223,9 @@ def test_hungChildEndsWithEveryStack(tmp_path: Path):
 		"open(os.path.join(SOURCE, 'linuxPlatform', 'harnessTest.tmp'), 'w')",
 		"os.open(os.path.join(SOURCE, 'harnessTest.tmp'), os.O_WRONLY | os.O_CREAT)",
 		"os.mkdir(os.path.join(SOURCE, 'harnessTest'))",
-		"os.rename(os.path.join(SOURCE, 'basedreader.py'), os.path.join(SOURCE, 'moved.py'))",
-		"os.utime(os.path.join(SOURCE, 'basedreader.py'))",
-		"shutil.copyfile(os.path.join(SOURCE, 'basedreader.py'), os.path.join(UNIT, 'copy.py'))",
+		"os.rename(os.path.join(SOURCE, 'linda.py'), os.path.join(SOURCE, 'moved.py'))",
+		"os.utime(os.path.join(SOURCE, 'linda.py'))",
+		"shutil.copyfile(os.path.join(SOURCE, 'linda.py'), os.path.join(UNIT, 'copy.py'))",
 		"os.symlink('/nowhere', os.path.join(UNIT, 'link'))",
 		# Through a symbolic link that lives outside the protected trees.
 		"os.symlink(SOURCE, 'outside') or open(os.path.join('outside', 'harnessTest.tmp'), 'w')",
@@ -337,7 +337,7 @@ def test_whatIsNotAWriteUnderSourceIsNotReported(tmp_path: Path):
 		import os
 
 		SOURCE = {str(harness.SOURCE)!r}
-		with open(os.path.join(SOURCE, "basedreader.py"), encoding="utf-8") as f:
+		with open(os.path.join(SOURCE, "linda.py"), encoding="utf-8") as f:
 			f.read()
 		with open("here.txt", "w") as f:
 			f.write("outside")
@@ -421,7 +421,7 @@ def test_writtenPathsResolvesDescriptorRelativePathsAndLinks(tmp_path: Path):
 
 def test_treeStateCoversTheProtectedTreesAndSkipsUnwatched():
 	state = harness.treeState()
-	assert str(harness.SOURCE / "basedreader.py") in state
+	assert str(harness.SOURCE / "linda.py") in state
 	assert str(harness.ROOT / "tests" / "unit" / "__init__.py") in state
 	assert not any(path.startswith(str(harness.ROOT / "tests" / "linux")) for path in state)
 	whole = harness.treeState(harness.ROOT)
@@ -492,7 +492,7 @@ def test_audioLibraryMappedAtExitIsReported(tmp_path: Path, names: list[str], re
 
 
 def test_onlyTheEspeakLibraryTheEnvironmentNamesIsAllowed(tmp_path: Path):
-	# Reached through a link, as BASEDREADER_ESPEAK_LIB names the soname's link in the dev shell; a file
+	# Reached through a link, as LINDA_ESPEAK_LIB names the soname's link in the dev shell; a file
 	# of the same name anywhere else is still counted, loaded and mapped.
 	work = tmp_path.resolve()
 	named = work / "named" / "libespeak-ng.so.1.1.51"
@@ -676,7 +676,7 @@ def test_standardErrorIsChecked(tmp_path: Path):
 		'  File "/x/source/autoSettingsUtils/autoSettings.py", line 43, in __del__\n'
 		'  File "/x/source/autoSettingsUtils/autoSettings.py", line 52, in _unregisterConfigSaveAction\n'
 		"AttributeError: 'NoneType' object has no attribute 'unregister'\n"
-		"(basedreader.py:12): Gtk-WARNING **: 12:00:00.000: Could not load a pixbuf from "
+		"(linda.py:12): Gtk-WARNING **: 12:00:00.000: Could not load a pixbuf from "
 		"/org/gtk/libgtk/theme/Adwaita/assets/check-symbolic.svg.\n"
 		"This may indicate that pixbuf loaders or the mime database could not be found.\n"
 	)
@@ -821,7 +821,7 @@ def startBootProbe(launches, tmp_path: Path, name: str, probe: str) -> harness.L
 		"-f",
 		str(tmp_path / "launches" / name / "nvda.log"),
 		"--debug-logging",
-		env={"BASEDREADER_BOOT_PROBE": probe},
+		env={"LINDA_BOOT_PROBE": probe},
 	)
 	return launch
 
@@ -895,7 +895,7 @@ def test_launchIsHeldToTheSameChecks(launches, tmp_path: Path):
 		str(configDir),
 		"-f",
 		str(tmp_path / "launches" / "unclean" / "nvda.log"),
-		env={"BASEDREADER_TEST_HOOKS_DIR": str(hooks)},
+		env={"LINDA_TEST_HOOKS_DIR": str(hooks)},
 	)
 	assert nvda.waitForExit(timeout=60) == 0, nvda.describe()
 	done = nvda.result()

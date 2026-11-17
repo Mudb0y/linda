@@ -3,7 +3,7 @@
 Upstream binds nvdaHelperLocal.dll. This has the entry points that code staying on Linux names.
 The beep generator and the three text boundary functions are implemented here, with upstream's
 calling convention, so their callers work unchanged; so are the virtual buffer functions, from
-linuxPlatform.vbufLib, when BASEDREADER_VBUF_LIB names the library. The others raise
+linuxPlatform.vbufLib, when LINDA_VBUF_LIB names the library. The others raise
 NoLinuxImplementation.
 Entry points that only Windows-only modules call (in-process helpers for Office, SysListView32,
 IAccessible2 and UI Automation) are left out, and reaching for one, or for any other name upstream's

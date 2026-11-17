@@ -233,7 +233,7 @@ def test_nameIsSharedWithOtherOwnersAndOrca(desktop: DesktopSession, tmp_path: P
 
 
 def test_serviceCanBeTurnedOff(desktop: DesktopSession):
-	nvda = start(desktop, env={"BASEDREADER_SPEAK_SERVICE": "off"})
+	nvda = start(desktop, env={"LINDA_SPEAK_SERVICE": "off"})
 	reply = busSend("PresentMessage", "string:nobody")
 	assert reply.returncode != 0 and "ServiceUnknown" in reply.stderr, reply
 	desktop.close()

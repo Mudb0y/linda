@@ -1,4 +1,4 @@
-"""MATE's own programs walked with the keyboard, as someone using Basedreader as their only screen reader
+"""MATE's own programs walked with the keyboard, as someone using Linda as their only screen reader
 walks them: what NVDA says for each step, compared with what it says for the same kind of control on
 Windows. One walk per program, with keys pressed on the rig's display under marco.
 

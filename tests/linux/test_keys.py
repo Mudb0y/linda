@@ -374,7 +374,7 @@ def blockHooks(directory: Path) -> dict[str, str]:
 	(hooks / "globalPlugins").mkdir(parents=True)
 	(hooks / "synthDrivers").symlink_to(harness.HERE / "synthDrivers")
 	(hooks / "globalPlugins" / "blockProbe.py").write_text(BLOCK_PLUGIN)
-	return {"BASEDREADER_TEST_HOOKS_DIR": str(hooks)}
+	return {"LINDA_TEST_HOOKS_DIR": str(hooks)}
 
 
 def test_blockedMainThreadLeavesTheNVDAKeysWorking(
@@ -475,7 +475,7 @@ def test_controlCancelsReading(desktop: DesktopSession, tmp_path: Path, layoutNa
 		desktop,
 		tmp_path,
 		layoutName,
-		env={"BASEDREADER_TRANSCRIPT_MODE": "timed", "BASEDREADER_TRANSCRIPT_MS_PER_CHAR": "10"},
+		env={"LINDA_TRANSCRIPT_MODE": "timed", "LINDA_TRANSCRIPT_MS_PER_CHAR": "10"},
 	)
 	launch = desktop.nvda
 	mark = desktop.mark()

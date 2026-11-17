@@ -11,7 +11,7 @@ names. A class or test whose entry says "Not run:" is dropped instead; an entry 
 package cannot say it, as nothing would then show it stale. A skip that the list does not expect also
 fails the run, as does any write into the checkout, any load of an audio library, and a thread that a
 test leaves running. The one library of that kind it allows is the eSpeak NG library that
-BASEDREADER_ESPEAK_LIB names, without which it does not start.
+LINDA_ESPEAK_LIB names, without which it does not start.
 
 The tests run in a child process that records its result only once the run has reached its end, so
 that a test, fixture or module that ends the interpreter, by whatever means, fails the run.
@@ -75,7 +75,7 @@ harness = _loadHarness()
 #: Names the one eSpeak NG library the run may load, which NVDA's eSpeak driver and its unit tests
 #: load. It is built without audio output; tests/linux/test_espeak.py checks that it links no sound
 #: library.
-ESPEAK_LIBRARY_VARIABLE = "BASEDREADER_ESPEAK_LIB"
+ESPEAK_LIBRARY_VARIABLE = "LINDA_ESPEAK_LIB"
 #: Words that, anywhere in a library's file name, mark one that can reach a sound server or a sound
 #: card, besides those harness.isAudioLibrary knows. eSpeak is among them because any other build of
 #: it, a stock one for instance, links pcaudiolib. libspeechd links no sound library, as it speaks

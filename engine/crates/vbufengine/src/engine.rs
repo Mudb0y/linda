@@ -635,8 +635,8 @@ async fn render_task(
     let calls_before = client.counters().calls;
     let t_walk = Instant::now();
     let mut walk = Walk::new(client.clone(), None, MAX_OBJECTS, MAX_WALK_TIME);
-    // BASEDREADER_VBUF_WALK=objects asks every object for every field, for bisecting.
-    if std::env::var("BASEDREADER_VBUF_WALK").as_deref() != Ok("objects") {
+    // LINDA_VBUF_WALK=objects asks every object for every field, for bisecting.
+    if std::env::var("LINDA_VBUF_WALK").as_deref() != Ok("objects") {
         walk = walk.by_subtrees();
     }
     walk.start(&root, Vec::new());

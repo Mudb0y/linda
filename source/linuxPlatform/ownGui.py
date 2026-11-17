@@ -244,7 +244,7 @@ def _widget(window: wx.Window) -> int:
 def _labelControl(label: wx.StaticText, control: wx.Window) -> None:
 	# Kept, because wx pairs labels again whenever a control is moved in the tab order, as the driver
 	# settings are, and the mnemonic has to be set again after it.
-	label._basedreaderControl = weakref.ref(control)
+	label._lindaControl = weakref.ref(control)
 	try:
 		gtk = _gtkCalls()
 		if gtk.isLabel(_widget(label)):
@@ -269,7 +269,7 @@ def _repairLabels(window: wx.Window) -> None:
 				label = _widget(child)
 				if not gtk.isLabel(label):
 					continue
-				control = getattr(child, "_basedreaderControl", lambda: None)()
+				control = getattr(child, "_lindaControl", lambda: None)()
 				if control is not None and not _isGone(control):
 					gtk.setMnemonicWidget(label, gtk.control(_widget(control)))
 					continue
@@ -462,15 +462,15 @@ def _setFocusOnceActive(self) -> None:
 	if topLevel is None or topLevel is self or topLevel.IsShown():
 		return
 	target = weakref.ref(self)
-	if getattr(topLevel, "_basedreaderFocusTarget", None) is None:
+	if getattr(topLevel, "_lindaFocusTarget", None) is None:
 
 		def focusOnceActive(evt: wx.ActivateEvent) -> None:
 			evt.Skip()
 			if not evt.GetActive():
 				return
 			topLevel.Unbind(wx.EVT_ACTIVATE, handler=focusOnceActive)
-			target = topLevel._basedreaderFocusTarget
-			topLevel._basedreaderFocusTarget = None
+			target = topLevel._lindaFocusTarget
+			topLevel._lindaFocusTarget = None
 			window = target() if target else None
 			if window is None:
 				return
@@ -479,7 +479,7 @@ def _setFocusOnceActive(self) -> None:
 			wx.CallAfter(lambda: None if _isGone(window) or _isGone(topLevel) else _upstreamSetFocus(window))
 
 		topLevel.Bind(wx.EVT_ACTIVATE, focusOnceActive)
-	topLevel._basedreaderFocusTarget = target
+	topLevel._lindaFocusTarget = target
 
 
 def _initSettingsDialog(self, *args, **kwargs) -> None:
@@ -504,7 +504,7 @@ def _initSettingsDialog(self, *args, **kwargs) -> None:
 	self.postInit = postInitOnceShown
 	_upstreamSettingsDialogInit(self, *args, **kwargs)
 	# postInit chooses the focus, over any control focused while the dialog was being built.
-	self._basedreaderFocusTarget = None
+	self._lindaFocusTarget = None
 	_repairLabels(self)
 
 
@@ -621,7 +621,7 @@ def _disableRememberingFocus(self) -> bool:
 	if isinstance(self, wx.TopLevelWindow):
 		focus = wx.Window.FindFocus()
 		if focus is not None and wx.GetTopLevelParent(focus) is self:
-			self._basedreaderFocusBeforeDisable = weakref.ref(focus)
+			self._lindaFocusBeforeDisable = weakref.ref(focus)
 	return _upstreamDisable(self)
 
 
@@ -637,9 +637,9 @@ def _enableRestoringFocus(self, enable: bool = True) -> bool:
 	if not enable:
 		return _disableRememberingFocus(self)
 	result = _upstreamEnable(self, enable)
-	remembered = getattr(self, "_basedreaderFocusBeforeDisable", None)
+	remembered = getattr(self, "_lindaFocusBeforeDisable", None)
 	if isinstance(self, wx.TopLevelWindow) and remembered is not None:
-		self._basedreaderFocusBeforeDisable = None
+		self._lindaFocusBeforeDisable = None
 		wx.CallAfter(_restoreFocus, weakref.ref(self), remembered)
 	return result
 

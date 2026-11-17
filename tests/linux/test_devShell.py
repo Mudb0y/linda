@@ -1,11 +1,11 @@
 """The dev shell: the variables it exports, the programs it leaves off PATH, and the native pieces it
 names.
 
-Linux code loads its native libraries and data by the absolute paths in BASEDREADER_ variables, so a
+Linux code loads its native libraries and data by the absolute paths in LINDA_ variables, so a
 variable that names nothing, or the wrong build, is a fault the code itself would report only as a
 feature missing. PipeWire's daemon and session manager are named in variables rather than put on PATH,
 so that tests start them only where they mean to. Run under the rig, which passes the shell's
-BASEDREADER_ variables in and gives its command the PATH the shell itself made:
+LINDA_ variables in and gives its command the PATH the shell itself made:
 
 	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_devShell.py
 """
@@ -108,13 +108,13 @@ def _searchPath(value: str) -> None:
 
 
 def _icuLibDir(value: str) -> None:
-	_elfFile(str(_directory(value) / f"libicuuc.so.{os.environ['BASEDREADER_ICU_VERSION_MAJOR']}"))
+	_elfFile(str(_directory(value) / f"libicuuc.so.{os.environ['LINDA_ICU_VERSION_MAJOR']}"))
 
 
 def _icuVersionMajor(value: str) -> None:
 	# The library's own name carries it, and ICU suffixes every C symbol with it.
 	assert re.fullmatch(r"[1-9]\d*", value), value
-	_holds(Path(os.environ["BASEDREADER_ICU_LIB_DIR"]), f"libicuuc.so.{value}")
+	_holds(Path(os.environ["LINDA_ICU_LIB_DIR"]), f"libicuuc.so.{value}")
 
 
 def _louisTablesDir(value: str) -> None:
@@ -181,7 +181,7 @@ def _pwmon(value: str) -> None:
 	assert path.name == "pwmon" and os.access(path, os.X_OK), value
 	# The program's package takes the library's store path, which must not hold a program that
 	# records sound.
-	assert _storePath(path) != _storePath(Path(os.environ["BASEDREADER_PWSINK_LIB"])), value
+	assert _storePath(path) != _storePath(Path(os.environ["LINDA_PWSINK_LIB"])), value
 
 
 def _vbufLib(value: str) -> None:
@@ -194,33 +194,33 @@ def _vbufEngine(value: str) -> None:
 
 def _benchBin(value: str) -> None:
 	# Named without depending on the bench, so that entering the shell never builds the engine: it
-	# exists once nix build .#basedreader-bench has built it.
-	assert re.fullmatch(r"/nix/store/[0-9a-z]{32}-basedreader-bench-[^/]+/bin/basedreader-bench", value), (
+	# exists once nix build .#linda-bench has built it.
+	assert re.fullmatch(r"/nix/store/[0-9a-z]{32}-linda-bench-[^/]+/bin/linda-bench", value), (
 		value
 	)
 
 
-#: Every BASEDREADER_ variable the shell exports, with what makes its value right.
+#: Every LINDA_ variable the shell exports, with what makes its value right.
 SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
-	"BASEDREADER_ICU_LIB_DIR": _icuLibDir,
-	"BASEDREADER_ICU_VERSION_MAJOR": _icuVersionMajor,
-	"BASEDREADER_LOUIS_TABLES_DIR": _louisTablesDir,
-	"BASEDREADER_LIBLOUIS_VERSION": _liblouisVersion,
-	"BASEDREADER_NVDA_CLDR_DIR": _cldrDir,
-	"BASEDREADER_ESPEAK_LIB": _espeakLib,
-	"BASEDREADER_ESPEAK_DATA_DIR": _espeakDataDir,
-	"BASEDREADER_OPENEVV_DRIVER_DIR": _openevvDriverDir,
-	"BASEDREADER_PIPEWIRE_BIN": _pipewireBin,
-	"BASEDREADER_WIREPLUMBER_BIN": _wireplumberBin,
-	"BASEDREADER_PWSINK_LIB": _pwsinkLib,
-	"BASEDREADER_PWMON": _pwmon,
-	"BASEDREADER_VBUF_LIB": _vbufLib,
-	"BASEDREADER_VBUF_ENGINE": _vbufEngine,
-	"BASEDREADER_BENCH_BIN": _benchBin,
-	"BASEDREADER_QT6_PLUGIN_PATH": _qt6PluginPath,
-	"BASEDREADER_BASH": _bash,
-	"BASEDREADER_RIG_PATH": _searchPath,
-	"BASEDREADER_RIG_XDG_DATA_DIRS": _searchPath,
+	"LINDA_ICU_LIB_DIR": _icuLibDir,
+	"LINDA_ICU_VERSION_MAJOR": _icuVersionMajor,
+	"LINDA_LOUIS_TABLES_DIR": _louisTablesDir,
+	"LINDA_LIBLOUIS_VERSION": _liblouisVersion,
+	"LINDA_NVDA_CLDR_DIR": _cldrDir,
+	"LINDA_ESPEAK_LIB": _espeakLib,
+	"LINDA_ESPEAK_DATA_DIR": _espeakDataDir,
+	"LINDA_OPENEVV_DRIVER_DIR": _openevvDriverDir,
+	"LINDA_PIPEWIRE_BIN": _pipewireBin,
+	"LINDA_WIREPLUMBER_BIN": _wireplumberBin,
+	"LINDA_PWSINK_LIB": _pwsinkLib,
+	"LINDA_PWMON": _pwmon,
+	"LINDA_VBUF_LIB": _vbufLib,
+	"LINDA_VBUF_ENGINE": _vbufEngine,
+	"LINDA_BENCH_BIN": _benchBin,
+	"LINDA_QT6_PLUGIN_PATH": _qt6PluginPath,
+	"LINDA_BASH": _bash,
+	"LINDA_RIG_PATH": _searchPath,
+	"LINDA_RIG_XDG_DATA_DIRS": _searchPath,
 }
 
 
@@ -237,7 +237,7 @@ def test_everyVariableNamingTheStoreIsChecked():
 	unchecked = sorted(
 		name
 		for name, value in os.environ.items()
-		if name.startswith("BASEDREADER_") and STORE in value and name not in SHELL_VARIABLES
+		if name.startswith("LINDA_") and STORE in value and name not in SHELL_VARIABLES
 	)
 	assert not unchecked, f"add these to SHELL_VARIABLES: {unchecked}"
 
@@ -245,17 +245,17 @@ def test_everyVariableNamingTheStoreIsChecked():
 def test_liblouisVersionIsTheLibraryNvdaLoads(tmp_path: Path):
 	done = harness.runChild(tmp_path, "import louis\nresult = louis.version()", prepare="none")
 	done.assertClean()
-	assert done.value == os.environ["BASEDREADER_LIBLOUIS_VERSION"]
+	assert done.value == os.environ["LINDA_LIBLOUIS_VERSION"]
 
 
-@pytest.mark.parametrize("searchPath", ["PATH", "BASEDREADER_RIG_PATH"])
+@pytest.mark.parametrize("searchPath", ["PATH", "LINDA_RIG_PATH"])
 def test_noPipewireOrWireplumberProgramIsOnPath(searchPath: str):
 	"""Not one of the programs PipeWire's and WirePlumber's packages install, nothing from a directory of
 	a package that plays, records or routes sound or speaks, and none of OTHER_SOUND_PROGRAMS.
 
-	So the tests reach PipeWire only through BASEDREADER_PIPEWIRE_BIN, and a host without PipeWire's
+	So the tests reach PipeWire only through LINDA_PIPEWIRE_BIN, and a host without PipeWire's
 	tools gets none from the shell. Firefox is on PATH for the browser tests and can play sound; the rig
-	gives it no sound server. Inside the rig PATH is the store part of BASEDREADER_RIG_PATH, which is the
+	gives it no sound server. Inside the rig PATH is the store part of LINDA_RIG_PATH, which is the
 	shell's PATH without what nix develop appended from the caller's, so this is what the shell itself
 	put there."""
 	directories = [entry for entry in os.environ[searchPath].split(":") if entry]
@@ -266,7 +266,7 @@ def test_noPipewireOrWireplumberProgramIsOnPath(searchPath: str):
 	]
 	assert not fromSoundPackages, f"on {searchPath}: {fromSoundPackages}"
 	programs = set(OTHER_SOUND_PROGRAMS)
-	for variable in ("BASEDREADER_PIPEWIRE_BIN", "BASEDREADER_WIREPLUMBER_BIN"):
+	for variable in ("LINDA_PIPEWIRE_BIN", "LINDA_WIREPLUMBER_BIN"):
 		programs.update(os.listdir(os.environ[variable]))
 	found = {
 		name: where for name in sorted(programs) if (where := shutil.which(name, path=os.environ[searchPath]))
@@ -293,7 +293,7 @@ result = {
 
 @pytest.mark.parametrize(
 	("variable", "relative"),
-	[("BASEDREADER_ESPEAK_LIB", ""), ("BASEDREADER_OPENEVV_DRIVER_DIR", OPENEVV_ENGINE)],
+	[("LINDA_ESPEAK_LIB", ""), ("LINDA_OPENEVV_DRIVER_DIR", OPENEVV_ENGINE)],
 )
 def test_synthesizerLibraryNeedsNoSoundLibrary(tmp_path: Path, variable: str, relative: str):
 	"""Loaded alone, the library maps nothing that can reach a sound server or a sound card, through any
@@ -344,7 +344,7 @@ def test_pwsinkNeedsOnlyPipewiresClientFromTheStore(tmp_path: Path):
 	loader path holds; the one sound library it needs, and the only one loading it maps, is
 	PipeWire's client library; and nothing in its store path names pwmon's, so a package that holds
 	the library does not hold the recorder."""
-	library = _elfFile(os.environ["BASEDREADER_PWSINK_LIB"])
+	library = _elfFile(os.environ["LINDA_PWSINK_LIB"])
 	strings = _dynamicStrings(library)
 	searched = [
 		d for tag in (DT_RPATH, DT_RUNPATH) for value in strings.get(tag, []) for d in value.split(":")
@@ -359,13 +359,13 @@ def test_pwsinkNeedsOnlyPipewiresClientFromTheStore(tmp_path: Path):
 		import ctypes
 		import os
 
-		ctypes.CDLL(os.environ["BASEDREADER_PWSINK_LIB"])
+		ctypes.CDLL(os.environ["LINDA_PWSINK_LIB"])
 		result = harness.soundReached(allowLinked=False)
 		""",
 		prepare="none",
 	)
 	done.assertClean(ignoring={"audio"})
-	pipewireLib = Path(os.path.realpath(os.environ["BASEDREADER_PIPEWIRE_BIN"])).parent / "lib"
+	pipewireLib = Path(os.path.realpath(os.environ["LINDA_PIPEWIRE_BIN"])).parent / "lib"
 	mapped = [what.removeprefix("mapped ") for what in done.value]
 	assert len(mapped) == len(done.value) == 1, done.value
 	assert Path(mapped[0]).parent == pipewireLib and Path(mapped[0]).name.startswith("libpipewire-0.3.so"), (
@@ -373,7 +373,7 @@ def test_pwsinkNeedsOnlyPipewiresClientFromTheStore(tmp_path: Path):
 	)
 	assert done.audio == done.value, done.audio
 	# How Nix itself finds a store path's references.
-	pwmonHash = _storePath(Path(os.environ["BASEDREADER_PWMON"])).name[:32].encode()
+	pwmonHash = _storePath(Path(os.environ["LINDA_PWMON"])).name[:32].encode()
 	naming = [
 		str(path)
 		for path in _storePath(library).rglob("*")
@@ -419,7 +419,7 @@ def test_espeakAndSonicAreTheCommitsUpstreamPins(monkeypatch: pytest.MonkeyPatch
 			rf'\s*rev = "{pin}";\s*narHash = "sha256-[\w+/=]+";\s*\}};'
 		)
 		assert re.search(fetch, nix), f"nix/espeak-ng.nix does not fetch {repo} with builtins.fetchTree"
-	library = Path(os.environ["BASEDREADER_ESPEAK_LIB"])
+	library = Path(os.environ["LINDA_ESPEAK_LIB"])
 	storeName = library.relative_to(STORE).parts[0]
 	assert storeName.endswith(f"-unstable-{pins['espeak-ng'][:8]}"), storeName
 
@@ -427,7 +427,7 @@ def test_espeakAndSonicAreTheCommitsUpstreamPins(monkeypatch: pytest.MonkeyPatch
 def test_openevvDriverDirectoryHoldsTheDriverAndTheEngine():
 	"""The layout of the driver's add-on on Windows: the three modules beside openevv_engine/, where
 	the driver looks for the engine library on every platform, a link to the built library."""
-	directory = _directory(os.environ["BASEDREADER_OPENEVV_DRIVER_DIR"])
+	directory = _directory(os.environ["LINDA_OPENEVV_DRIVER_DIR"])
 	assert sorted(entry.name for entry in directory.iterdir()) == sorted(
 		[*OPENEVV_DRIVER_FILES, "openevv_engine"]
 	)

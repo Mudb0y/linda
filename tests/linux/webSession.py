@@ -33,7 +33,7 @@ BROWSE_CONFIG = harness.HERE / "fixtures" / "browseConfig" / "nvda.ini"
 #: The preferences every fresh profile starts with: no first-run pages, no updates, no network.
 USER_JS = harness.HERE / "bench" / "user.js"
 #: The variables naming the buffer's storage library and its renderer, which browse mode needs.
-BROWSE_LIBRARY_VARIABLES = ("BASEDREADER_VBUF_LIB", "BASEDREADER_VBUF_ENGINE")
+BROWSE_LIBRARY_VARIABLES = ("LINDA_VBUF_LIB", "LINDA_VBUF_ENGINE")
 #: Seconds from starting Firefox to its window on the accessibility desktop; a first start under
 #: the rig takes a few.
 FIREFOX_WINDOW_TIMEOUT = 60.0

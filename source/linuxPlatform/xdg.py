@@ -5,8 +5,8 @@ import os
 import shutil
 import subprocess
 
-#: The name of the directory Basedreader keeps under each XDG base directory.
-appDirName = "basedreader"
+#: The name of the directory Linda keeps under each XDG base directory.
+appDirName = "linda"
 
 
 def _baseDir(variable: str, default: str) -> str:
@@ -41,7 +41,7 @@ def userStateDir() -> str:
 	return os.path.join(stateHome(), appDirName)
 
 
-#: The desktop entry that would start Basedreader at login.
+#: The desktop entry that would start Linda at login.
 autostartEntryName = f"{appDirName}.desktop"
 
 

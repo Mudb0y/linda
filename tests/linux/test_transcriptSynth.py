@@ -107,7 +107,7 @@ def runSpeech(tmpPath: Path, code: str, mode: str = "immediate", **env: str) -> 
 	return harness.runChild(
 		tmpPath,
 		SPEECH + textwrap.dedent(code) + END,
-		env={"BASEDREADER_TEST_HOOKS_DIR": str(HERE), "BASEDREADER_TRANSCRIPT_MODE": mode, **env},
+		env={"LINDA_TEST_HOOKS_DIR": str(HERE), "LINDA_TRANSCRIPT_MODE": mode, **env},
 	)
 
 
@@ -116,7 +116,7 @@ def test_testHooksDoNothingWhenUnset(tmp_path: Path):
 		tmp_path,
 		"""
 		import os
-		os.environ.pop("BASEDREADER_TEST_HOOKS_DIR", None)
+		os.environ.pop("LINDA_TEST_HOOKS_DIR", None)
 		import globalPlugins
 		import synthDrivers
 		before = (list(synthDrivers.__path__), list(globalPlugins.__path__))
@@ -150,7 +150,7 @@ def test_testHooksAddBothDirectoriesOnce(tmp_path: Path):
 		}
 		""",
 		prepare="bootstrap",
-		env={"BASEDREADER_TEST_HOOKS_DIR": str(hooks)},
+		env={"LINDA_TEST_HOOKS_DIR": str(hooks)},
 	)
 	done.assertClean()
 	synthDir, pluginDir = str(hooks / "synthDrivers"), str(hooks / "globalPlugins")
@@ -171,7 +171,7 @@ def test_testHooksSkipAMissingSubdirectory(tmp_path: Path):
 		result = testHooks.install()
 		""",
 		prepare="bootstrap",
-		env={"BASEDREADER_TEST_HOOKS_DIR": str(HERE)},
+		env={"LINDA_TEST_HOOKS_DIR": str(HERE)},
 	)
 	done.assertClean()
 	assert done.value == [str(HERE / "synthDrivers")]
@@ -185,7 +185,7 @@ def test_testHooksRefuseAMissingDirectory(tmp_path: Path):
 		testHooks.install()
 		""",
 		prepare="bootstrap",
-		env={"BASEDREADER_TEST_HOOKS_DIR": str(tmp_path / "absent")},
+		env={"LINDA_TEST_HOOKS_DIR": str(tmp_path / "absent")},
 	)
 	assert done.error is not None and "FileNotFoundError" in done.error
 
@@ -204,7 +204,7 @@ def test_testHooksDoNothingInSecureMode(tmp_path: Path):
 		result = {"added": added, "unchanged": before == (synthDrivers.__path__, globalPlugins.__path__)}
 		""",
 		prepare="bootstrap",
-		env={"BASEDREADER_TEST_HOOKS_DIR": str(HERE)},
+		env={"LINDA_TEST_HOOKS_DIR": str(HERE)},
 	)
 	done.assertClean()
 	assert done.value == {"added": [], "unchanged": True}
@@ -231,7 +231,7 @@ def test_testHooksDoNothingOutsideACheckout(tmp_path: Path):
 		}}
 		""",
 		prepare="bootstrap",
-		env={"BASEDREADER_TEST_HOOKS_DIR": str(HERE)},
+		env={"LINDA_TEST_HOOKS_DIR": str(HERE)},
 	)
 	done.assertClean()
 	assert done.value == {"fromCheckout": True, "added": [], "unchanged": True}
@@ -268,7 +268,7 @@ def test_testHooksSurviveReloadingPlugins(tmp_path: Path):
 		result = {"before": before, "after": running()}
 		globalPluginHandler.terminate()
 		""",
-		env={"BASEDREADER_TEST_HOOKS_DIR": str(tmp_path / "hooks")},
+		env={"LINDA_TEST_HOOKS_DIR": str(tmp_path / "hooks")},
 	)
 	done.assertClean()
 	assert done.value == {"before": ["globalPlugins.hookedPlugin"], "after": ["globalPlugins.hookedPlugin"]}
@@ -348,7 +348,7 @@ def test_eachCommandIsRecorded(tmp_path: Path):
 		])
 		result = {"events": synth.events, "heard": heard.plain()}
 		""",
-		BASEDREADER_TRANSCRIPT_FILE=str(transcript),
+		LINDA_TRANSCRIPT_FILE=str(transcript),
 	)
 	done.assertClean()
 	expected = [
@@ -512,7 +512,7 @@ def test_timedModeReportsFromItsOwnThreadAndHonoursPause(tmp_path: Path):
 		result = steps
 		""",
 		mode="timed",
-		BASEDREADER_TRANSCRIPT_MS_PER_CHAR="10",
+		LINDA_TRANSCRIPT_MS_PER_CHAR="10",
 	)
 	done.assertClean()
 	steps = done.value
@@ -584,7 +584,7 @@ def test_speechReachesTheDriver(tmp_path: Path):
 			"lastIndex": synth.events[-1]["data"][-1],
 		}
 		""",
-		BASEDREADER_TRANSCRIPT_FILE=str(transcript),
+		LINDA_TRANSCRIPT_FILE=str(transcript),
 	)
 	done.assertClean()
 	speaks = [e["data"] for e in done.value["events"]]
@@ -936,7 +936,7 @@ def test_autoChoosesEspeakAndSavesIt(tmp_path: Path):
 
 
 def test_autoFallsBackToSilenceWithoutEspeakAndStaysAuto(tmp_path: Path):
-	done = harness.runChild(tmp_path, AUTO, env={"BASEDREADER_ESPEAK_LIB": ""})
+	done = harness.runChild(tmp_path, AUTO, env={"LINDA_ESPEAK_LIB": ""})
 	# Silence as a fallback is not saved, so eSpeak takes over by itself once its library is there.
 	assert done.value["configuredBefore"] == "auto"
 	assert done.value["synth"] == "silence"

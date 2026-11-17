@@ -7,7 +7,7 @@ nix develop . -c tests/linux/rig python -m pytest tests/linux/test_rig.py
 
 The tests of the rig's internet run only in a rig that has it, and are skipped otherwise:
 
-BASEDREADER_RIG_NET=1 nix develop . -c tests/linux/rig python -m pytest tests/linux/test_rig.py
+LINDA_RIG_NET=1 nix develop . -c tests/linux/rig python -m pytest tests/linux/test_rig.py
 """
 
 import errno
@@ -26,7 +26,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 RIG = HERE / "rig"
 
-#: Everything the sandbox's environment may hold besides BASEDREADER_ and BENCH_ variables: what
+#: Everything the sandbox's environment may hold besides LINDA_ and BENCH_ variables: what
 #: the rig sets, what it passes on from the dev shell, and what bash, Python and pytest add.
 ALLOWED_VARIABLES = {
 	"AT_SPI_BUS_LAUNCHER",
@@ -102,7 +102,7 @@ def test_environmentHoldsOnlyWhatTheRigGives():
 	strangers = {
 		name
 		for name in os.environ
-		if name not in ALLOWED_VARIABLES and not name.startswith(("BASEDREADER_", "BENCH_"))
+		if name not in ALLOWED_VARIABLES and not name.startswith(("LINDA_", "BENCH_"))
 	}
 	assert not strangers, f"variables from outside the dev shell: {sorted(strangers)}"
 
@@ -247,7 +247,7 @@ def test_rigsOwnFailuresHaveTheirOwnStatus():
 
 
 def test_unknownWindowManagerIsRefused(monkeypatch: pytest.MonkeyPatch):
-	monkeypatch.setenv("BASEDREADER_RIG_WM", "twm")
+	monkeypatch.setenv("LINDA_RIG_WM", "twm")
 	done = rig("true")
 	assert done.returncode == 125
 	assert "unknown window manager" in done.stderr
@@ -283,8 +283,8 @@ def test_unboundDirectoryIsInvisible(tmp_path: Path):
 
 def test_callersVariablesStayOutside(monkeypatch: pytest.MonkeyPatch):
 	monkeypatch.setenv("SESSION_MANAGER", "local/host:@/tmp/.ICE-unix/1")
-	monkeypatch.setenv("BASEDREADER_PASSED_ON", "yes")
-	done = rig("sh", "-c", 'echo "${SESSION_MANAGER:-unset} ${BASEDREADER_PASSED_ON:-unset}"')
+	monkeypatch.setenv("LINDA_PASSED_ON", "yes")
+	done = rig("sh", "-c", 'echo "${SESSION_MANAGER:-unset} ${LINDA_PASSED_ON:-unset}"')
 	assert done.stdout == "unset yes\n"
 
 
@@ -384,7 +384,7 @@ def test_hostAddressesAreShutOffWithTheVariable():
 
 def test_abstractSocketIsUnreachableWithTheVariable():
 	network.requireNetwork()
-	name = f"\0basedreader-test_rig-{os.getpid()}"
+	name = f"\0linda-test_rig-{os.getpid()}"
 	with socket.socket(socket.AF_UNIX) as listener:
 		listener.bind(name)
 		listener.listen()

@@ -5,11 +5,11 @@
 use std::process::Command;
 
 fn run(rig_variable: Option<&str>) -> std::process::Output {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_basedreader-bench"));
+    let mut c = Command::new(env!("CARGO_BIN_EXE_linda-bench"));
     c.arg("no-such-command");
     match rig_variable {
-        Some(v) => c.env("BASEDREADER_RIG", v),
-        None => c.env_remove("BASEDREADER_RIG"),
+        Some(v) => c.env("LINDA_RIG", v),
+        None => c.env_remove("LINDA_RIG"),
     };
     c.output().expect("the bench runs")
 }

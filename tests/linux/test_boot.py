@@ -1,6 +1,6 @@
 """The launcher as a real process: NVDA starts, speaks through the transcript synth, and exits.
 
-Each test starts source/basedreader.py through harness.startLauncher, with a configuration from
+Each test starts source/linda.py through harness.startLauncher, with a configuration from
 fixtures/bootConfig, the transcript synth, and the boot probe plugin from fixtures/globalPlugins,
 which says one sentence once NVDA has started. Run under the rig, which gives every launch its display
 and its runtime directory, where the single-instance lock is:
@@ -171,7 +171,7 @@ def start(launches, tmp_path: Path) -> Start:
 			(configDir / "nvda.ini").write_text(text, encoding="utf-8")
 		if probe:
 			args = (*args, "-c", str(configDir), "-f", str(directory / "nvda.log"), "--debug-logging")
-		return launches(name, *args, env={"BASEDREADER_BOOT_PROBE": probe, **(env or {})})
+		return launches(name, *args, env={"LINDA_BOOT_PROBE": probe, **(env or {})})
 
 	return start
 
@@ -445,7 +445,7 @@ def test_coreFailureIsReportedOnStandardError(start: Start):
 	)
 	# One line, and nothing from a hook of logHandler's that the interpreter took apart as it exited.
 	assert harness.unexpectedStandardError(nvda.text("stderr.txt")) == (
-		"basedreader: core failure, SystemExit: Unable to access the X Display, is $DISPLAY set "
+		"linda: core failure, SystemExit: Unable to access the X Display, is $DISPLAY set "
 		f"properly?; the log is {nvda.directory / 'nvda.log'}\n"
 	)
 	nvda.assertClean(ignoring={"returnCode", "logErrors", "stderr"})
@@ -454,7 +454,7 @@ def test_coreFailureIsReportedOnStandardError(start: Start):
 def test_launcherOptionIsRefused(start: Start):
 	nvda = start("launcherOption", "exit", "--launcher")
 	assert nvda.waitForExit(SHUTDOWN_BOUND) == 1, nvda.describe()
-	assert nvda.text("stderr.txt").startswith("basedreader: --launcher ")
+	assert nvda.text("stderr.txt").startswith("linda: --launcher ")
 	assert not nvda.text("nvda.log")
 	nvda.assertClean(ignoring={"returnCode", "stderr"})
 
@@ -466,7 +466,7 @@ def test_launcherOptionIsRefused(start: Start):
 def test_installerOptionsAreRefused(start: Start, option: str):
 	nvda = start(option.lstrip("-"), "exit", option)
 	assert nvda.waitForExit(SHUTDOWN_BOUND) == 1, nvda.describe()
-	assert nvda.text("stderr.txt").startswith(f"basedreader: {option} uses NVDA's Windows installer")
+	assert nvda.text("stderr.txt").startswith(f"linda: {option} uses NVDA's Windows installer")
 	assert not nvda.text("nvda.log")
 	nvda.assertClean(ignoring={"returnCode", "stderr"})
 
@@ -484,14 +484,14 @@ def test_lockFailureIsReportedOnStandardError(tmp_path: Path):
 
 		fcntl.lockf = refuse
 		sys.argv = [{str(LAUNCHER)!r}]
-		import basedreader
+		import linda
 
-		basedreader.main()
+		linda.main()
 		""",
 		prepare="none",
 	)
 	assert done.error is not None and done.error.rstrip().endswith("SystemExit: 1"), done.error
-	assert done.stderr.startswith("basedreader: cannot take "), done.stderr
+	assert done.stderr.startswith("linda: cannot take "), done.stderr
 	assert done.stderr.rstrip().endswith("No locks available"), done.stderr
 	done.assertClean(ignoring={"error", "stderr"})
 
@@ -518,7 +518,7 @@ def test_greeterCopyTakesNoTestHooks(start: Start):
 
 
 def test_configuredDriverFromOutsideTheTreeLoads(start: Start, tmp_path: Path):
-	# openevv's driver is built into a directory of its own, which BASEDREADER_OPENEVV_DRIVER_DIR names.
+	# openevv's driver is built into a directory of its own, which LINDA_OPENEVV_DRIVER_DIR names.
 	configDir = tmp_path / "openevvConfig"
 	configDir.mkdir()
 	text = CONFIG_FIXTURE.read_text(encoding="utf-8").replace("synth = transcript", "synth = openevv")
@@ -652,7 +652,7 @@ def test_desktopIsOneObjectWithNothingUnderIt(tmp_path: Path):
 
 
 def test_restartKeepsInterpreterOptions():
-	script = "/nvda/source/basedreader.py"
+	script = "/nvda/source/linda.py"
 	origArgv = ["/bin/python3", "-I", "-B", "-X", "dev", script, "-c", script, "--debug-logging"]
 	assert singleInstance.interpreterOptions(origArgv, script) == ["-I", "-B", "-X", "dev"]
 	assert singleInstance.interpreterOptions(["/bin/python3", script], script) == []
@@ -707,23 +707,23 @@ def test_oneLockNamePerWaylandDisplay(monkeypatch, tmp_path: Path):
 
 def test_lockDirectoryMustBePrivate(monkeypatch, tmp_path: Path):
 	monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-	(tmp_path / "basedreader").mkdir(mode=0o755)
-	(tmp_path / "basedreader").chmod(0o755)
+	(tmp_path / "linda").mkdir(mode=0o755)
+	(tmp_path / "linda").chmod(0o755)
 	with pytest.raises(PermissionError):
 		singleInstance.lockFilePath()
-	(tmp_path / "basedreader").chmod(0o700)
-	assert singleInstance.lockFilePath().startswith(str(tmp_path / "basedreader") + os.sep)
+	(tmp_path / "linda").chmod(0o700)
+	assert singleInstance.lockFilePath().startswith(str(tmp_path / "linda") + os.sep)
 
 
 def test_lockWithoutRuntimeDirectoryIsInTheUsersCache(monkeypatch, tmp_path: Path):
 	# As under su or sudo. No other user can make this directory first, as one could in /tmp.
 	monkeypatch.delenv("XDG_RUNTIME_DIR")
 	monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-	assert singleInstance.lockFilePath().startswith(str(tmp_path / "cache" / "basedreader") + os.sep)
+	assert singleInstance.lockFilePath().startswith(str(tmp_path / "cache" / "linda") + os.sep)
 	monkeypatch.delenv("XDG_CACHE_HOME")
 	monkeypatch.setenv("HOME", str(tmp_path / "home"))
 	assert singleInstance.lockFilePath().startswith(
-		str(tmp_path / "home" / ".cache" / "basedreader") + os.sep
+		str(tmp_path / "home" / ".cache" / "linda") + os.sep
 	)
 
 
@@ -907,7 +907,7 @@ def test_dialogReopenedForEverEndsNVDA(start: Start, route: str):
 	assert len(harness.nvdaLogErrorRecords(log)) == 1, log[-4000:]
 	assert log.count("ending modal <Gtk.MessageDialog") == int(given[1])
 	assert savedSetting(nvda) == CHANGED_SETTING[2]
-	assert f"basedreader: {given[0]}\n" in nvda.text("stderr.txt")
+	assert f"linda: {given[0]}\n" in nvda.text("stderr.txt")
 	assert nvda.result().logErrors == [f"ERROR: {given[0]}"]
 	nvda.assertClean(ignoring={"returnCode", "logErrors", "stderr"}, logNames=("nvda.log",))
 
@@ -956,7 +956,7 @@ def test_lockHolderThatRecordedNothingIsNeverSignalled(start: Start):
 		starter = start("start", None)
 		assert starter.waitForExit(SHUTDOWN_BOUND) == 1, starter.describe()
 		assert "has not recorded itself" in starter.text("stderr.txt")
-		assert f"basedreader: another NVDA still holds {lockPath}\n" in starter.text("stderr.txt")
+		assert f"linda: another NVDA still holds {lockPath}\n" in starter.text("stderr.txt")
 		starter.assertClean(ignoring={"returnCode", "stderr"})
 		assert bystander.poll() is None
 		assert holder.poll() is None

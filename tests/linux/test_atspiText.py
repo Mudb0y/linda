@@ -1,7 +1,7 @@
 """Text in GTK and Qt fields as NVDA reads it: review, caret and selection, say all and typing echo,
 with what a password field holds kept out of speech and the log.
 
-NVDA's caret, review and say all scripts run from keys pressed on the rig's display when Basedreader
+NVDA's caret, review and say all scripts run from keys pressed on the rig's display when Linda
 has a key source. Without one, a test plugin runs each script as that key would. A caret script's key
 is pressed first and its gesture's send does nothing, as with the key source, which leaves every key
 to the application too; so the caret has often moved before the script reads it.
@@ -39,7 +39,7 @@ SCRIPT_KEYS = {
 }
 
 DRIVER_PLUGIN = '''
-"""Runs NVDA scripts a test asks for, one per line of the file BASEDREADER_TEXT_DRIVER names, and
+"""Runs NVDA scripts a test asks for, one per line of the file LINDA_TEXT_DRIVER names, and
 counts the lines it has run in that file with ".done" appended.
 
 A line is "focus SCRIPT", a script of the focus object, or "global SCRIPT", one of globalCommands.
@@ -55,7 +55,7 @@ import core
 import globalCommands
 import globalPluginHandler
 
-COMMANDS = os.environ.get("BASEDREADER_TEXT_DRIVER")
+COMMANDS = os.environ.get("LINDA_TEXT_DRIVER")
 
 
 class Gesture:
@@ -151,8 +151,8 @@ class TextSession:
 		self.nvda = desktop.startNVDA(
 			config,
 			env={
-				"BASEDREADER_TEST_HOOKS_DIR": str(hooks),
-				"BASEDREADER_TEXT_DRIVER": str(self.commands),
+				"LINDA_TEST_HOOKS_DIR": str(hooks),
+				"LINDA_TEXT_DRIVER": str(self.commands),
 			},
 		)
 		self._waitForDriver(0, "start", STARTUP_BOUND)

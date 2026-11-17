@@ -102,7 +102,7 @@ def test_exceptionWithOSError(tmp_path: Path):
 		import exceptions
 
 		try:
-			open("/nonexistent/basedreader-test")
+			open("/nonexistent/linda-test")
 		except OSError:
 			log.exception("plain OSError")
 		try:
@@ -631,9 +631,9 @@ def test_lateErrorLeavesTheExitSoundWhole(launches, tmp_path: Path):
 		str(tmp_path / "launches" / "lateError" / "nvda.log"),
 		"--debug-logging",
 		env={
-			"BASEDREADER_TEST_HOOKS_DIR": str(hooks),
-			"BASEDREADER_AUDIO_CAPTURE_DIR": str(capture),
-			"BASEDREADER_BOOT_PROBE": None,
+			"LINDA_TEST_HOOKS_DIR": str(hooks),
+			"LINDA_AUDIO_CAPTURE_DIR": str(capture),
+			"LINDA_BOOT_PROBE": None,
 			"LATE_ERROR_PROBE_RESULT": str(resultPath),
 		},
 	)
@@ -723,7 +723,7 @@ def test_defaultLogPathHonoursXdgStateHome(tmp_path: Path):
 		env={"XDG_STATE_HOME": str(state)},
 	)
 	done.assertClean()
-	logDir = state / "basedreader"
+	logDir = state / "linda"
 	assert done.value == str(logDir / "nvda.log")
 	assert "in the default place" in (logDir / "nvda.log").read_text(encoding="utf-8")
 	assert (logDir / "nvda_crash.log").exists()
@@ -733,8 +733,8 @@ def test_defaultLogPathHonoursXdgStateHome(tmp_path: Path):
 def test_logFilesAreTheUsersAlone(tmp_path: Path):
 	state = tmp_path / "state"
 	# Left open by something else, or by an earlier build.
-	(state / "basedreader").mkdir(parents=True, mode=0o755)
-	(state / "basedreader").chmod(0o755)
+	(state / "linda").mkdir(parents=True, mode=0o755)
+	(state / "linda").chmod(0o755)
 	chosen = tmp_path / "chosen"
 	chosen.mkdir()
 	(chosen / "shared.log").write_text("")
@@ -762,9 +762,9 @@ def test_logFilesAreTheUsersAlone(tmp_path: Path):
 	def mode(path: Path) -> int:
 		return stat.S_IMODE(path.stat().st_mode)
 
-	assert mode(state / "basedreader") == 0o700
-	assert mode(state / "basedreader" / "nvda.log") == 0o600
-	assert mode(state / "basedreader" / "nvda_crash.log") == 0o600
+	assert mode(state / "linda") == 0o700
+	assert mode(state / "linda" / "nvda.log") == 0o600
+	assert mode(state / "linda" / "nvda_crash.log") == 0o600
 	assert mode(chosen / "my.log") == 0o600
 	assert mode(chosen / "nvda_crash.log") == 0o600
 	# A file that exists keeps the mode it was given.
@@ -785,7 +785,7 @@ def test_defaultLogPathFallsBackToLocalState(tmp_path: Path):
 		env={"XDG_STATE_HOME": "relative/state", "HOME": str(home)},
 	)
 	done.assertClean()
-	logFile = home / ".local" / "state" / "basedreader" / "nvda.log"
+	logFile = home / ".local" / "state" / "linda" / "nvda.log"
 	assert done.value == str(logFile)
 	assert "in the fallback place" in logFile.read_text(encoding="utf-8")
 
@@ -981,7 +981,7 @@ def test_crashDumpWithoutLogFile(tmp_path: Path):
 	done.assertClean(ignoring={"logErrors"})
 	assert done.logErrors == ["ERROR: Faile to open log file, redirecting to standard output"]
 	assert done.value == {"enabled": True, "logFileName": None}
-	assert (state / "basedreader" / "nvda_crash.log").exists()
+	assert (state / "linda" / "nvda_crash.log").exists()
 
 
 def test_crashDumpThatCannotBeOpenedIsReported(tmp_path: Path):

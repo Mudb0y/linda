@@ -1,7 +1,7 @@
 """What NVDA does on web pages beyond reading them: live regions and alerts spoken as they change,
 tables read cell by cell, the elements list, and the language a page marks.
 
-BASEDREADER_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_browseFeatures.py
+LINDA_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_browseFeatures.py
 
 Each page gets its own NVDA and Firefox, NVDA first, as on a desktop where the screen reader is
 already running. Within a page the tests are steps in order, each starting where the one before

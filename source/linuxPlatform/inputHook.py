@@ -6,7 +6,7 @@ deliverKey and deliverMouse take the hooks' place: the key source of linuxPlatfo
 key event to them on its own thread, and they call those same callbacks with the same arguments.
 What keyboardHandler asks of the live keyboard while it turns those events into gestures, the layout
 and the key states, is asked of that source too. With no source, as when there is no X display or
-BASEDREADER_KEYS is off, nothing reads the keyboard, and whatever needs the live layout or key
+LINDA_KEYS is off, nothing reads the keyboard, and whatever needs the live layout or key
 states raises NoLinuxImplementation.
 """
 
@@ -36,7 +36,7 @@ KEYEVENTF_KEYUP = 0x2
 WATCH_INTERVAL = 0.05
 #: Set to "off" in the environment, browse mode's keys are never captured, and reach the application
 #: and NVDA both, as every other key does.
-BROWSE_KEYS_VARIABLE = "BASEDREADER_BROWSE_KEYS"
+BROWSE_KEYS_VARIABLE = "LINDA_BROWSE_KEYS"
 
 _source: KeySource | None = None
 _delivering = threading.local()

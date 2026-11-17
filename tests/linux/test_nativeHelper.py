@@ -311,8 +311,8 @@ def test_icuLoadsFromTheDevShellAndTakesUtf16(tmp_path: Path):
 			"available": icu.ICU_AVAILABLE,
 			"path": icu.dll._name,
 			"expected": os.path.join(
-				os.environ["BASEDREADER_ICU_LIB_DIR"],
-				"libicuuc.so." + os.environ["BASEDREADER_ICU_VERSION_MAJOR"],
+				os.environ["LINDA_ICU_LIB_DIR"],
+				"libicuuc.so." + os.environ["LINDA_ICU_VERSION_MAJOR"],
 			),
 			"wideRefused": refused,
 		}
@@ -353,14 +353,14 @@ def test_icuAbsentIsReportedTruthfully(tmp_path: Path):
 			"raised": raised,
 		}
 		""",
-		env={"BASEDREADER_ICU_LIB_DIR": "/nonexistent"},
+		env={"LINDA_ICU_LIB_DIR": "/nonexistent"},
 	)
 	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert done.value == {
 		"available": False,
 		"segmenterSees": False,
 		"dll": None,
-		"unbound": "winBindings.icu.ubrk_open: ICU did not load from BASEDREADER_ICU_LIB_DIR",
+		"unbound": "winBindings.icu.ubrk_open: ICU did not load from LINDA_ICU_LIB_DIR",
 		"raised": "NVDAHelper.localLib.calculateWordOffsets",
 	}
 	assert done.noLinuxImplementation == [
@@ -698,7 +698,7 @@ def test_virtualBufferAndDisplayModelStillRaise(tmp_path: Path):
 			except NoLinuxImplementation:
 				result.append(name)
 		""",
-		env={"BASEDREADER_VBUF_LIB": None},
+		env={"LINDA_VBUF_LIB": None},
 	)
 	done.assertClean(ignoring={"noLinuxImplementation"})
 	expected = ["VBuf_getTextLength", "VBuf_createBuffer", "displayModel_getWindowTextInRect"]

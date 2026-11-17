@@ -101,7 +101,7 @@ def lockFilePath() -> str:
 	XDG_RUNTIME_DIR is per user, not per session, so the display is in the name: a user signed in
 	on two displays runs a copy on each.
 	"""
-	directory = os.path.join(_runtimeDir(), "basedreader")
+	directory = os.path.join(_runtimeDir(), "linda")
 	try:
 		os.mkdir(directory, 0o700)
 	except FileExistsError:

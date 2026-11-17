@@ -1,14 +1,14 @@
 //! Times fetching an application's whole accessibility tree, and keeping a
 //! mirror of it current. Runs only inside tests/linux/rig.
 //!
-//! basedreader-bench wait   --title T [--mode cold|warm] [--settle-ms N]
+//! linda-bench wait   --title T [--mode cold|warm] [--settle-ms N]
 //!                          [--app NAME] [--timeout-s N]
-//! basedreader-bench fetch  --title T --page NAME --out FILE [--run-index N]
+//! linda-bench fetch  --title T --page NAME --out FILE [--run-index N]
 //!                          [--seed N] [--wait-info FILE]
 //!                          [--methods LABEL,...|none]
 //!                          [--app NAME] [--method-timeout-ms N]
 //!                          [--connect-timeout-ms N]
-//! basedreader-bench mirror --title T --out FILE --watch-ms N [--run-index N]
+//! linda-bench mirror --title T --out FILE --watch-ms N [--run-index N]
 //!                          [--seed N] [--interval-ms N] [--wait-info FILE]
 //!                          [--coalesce-ms N] [--dump FILE]
 //!                          [--app NAME] [--method-timeout-ms N]
@@ -159,7 +159,7 @@ impl Target {
                 Some(Client::p2p(conn, &self.app_bus))
             }
             Err(e) => {
-                eprintln!("basedreader-bench: using the bus, peer to peer failed: {e}");
+                eprintln!("linda-bench: using the bus, peer to peer failed: {e}");
                 p2p.fell_back = Some(e.to_string());
                 None
             }
@@ -323,14 +323,14 @@ async fn wait(args: &Args) -> Result<(), String> {
 /// variable alone could be copied into another shell; the rig's sandbox is
 /// also the first process and has no /run/user, as the rig itself checks.
 fn inside_rig() -> bool {
-    std::env::var("BASEDREADER_RIG").as_deref() == Ok("1")
+    std::env::var("LINDA_RIG").as_deref() == Ok("1")
         && std::fs::read_to_string("/proc/1/comm").is_ok_and(|c| c.trim_end() == "bwrap")
         && !std::path::Path::new("/run/user").exists()
 }
 
 fn main() -> ExitCode {
     if !inside_rig() {
-        eprintln!("basedreader-bench: runs only inside tests/linux/rig");
+        eprintln!("linda-bench: runs only inside tests/linux/rig");
         return ExitCode::from(2);
     }
     let mut argv = std::env::args().skip(1);
@@ -338,7 +338,7 @@ fn main() -> ExitCode {
     let args = match Args::parse(argv) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("basedreader-bench: {e}");
+            eprintln!("linda-bench: {e}");
             return ExitCode::from(2);
         }
     };
@@ -347,13 +347,13 @@ fn main() -> ExitCode {
             "wait" => wait(&args).await,
             "fetch" => fetchcmd::run(&args).await,
             "mirror" => mirrorcmd::run(&args).await,
-            _ => Err("usage: basedreader-bench wait|fetch|mirror --title T ...".to_owned()),
+            _ => Err("usage: linda-bench wait|fetch|mirror --title T ...".to_owned()),
         }
     });
     match r {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("basedreader-bench {cmd}: {e}");
+            eprintln!("linda-bench {cmd}: {e}");
             ExitCode::FAILURE
         }
     }

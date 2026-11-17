@@ -27,7 +27,7 @@ languageHandler.setLanguage("en")
 """
 
 #: The dev shell's ICU, which textUtils loads at import for segmentation, as upstream loads Windows'.
-ICU_DIRECTORY = os.environ.get("BASEDREADER_ICU_LIB_DIR")
+ICU_DIRECTORY = os.environ.get("LINDA_ICU_LIB_DIR")
 #: The file name of liblouis, which linuxPlatform.bootstrap has louis load before anything else.
 LIBLOUIS = "liblouis.so"
 
@@ -91,7 +91,7 @@ def run(
 	"""
 	code = PRELUDE + (OBJECTS if objects else "") + "".join(textwrap.dedent(p) for p in pieces)
 	# The rig's display is there, but these tests hand keys to inputHook themselves.
-	done = harness.runChild(tmpPath, code, recordLevel=recordLevel, env={"BASEDREADER_KEYS": "off"})
+	done = harness.runChild(tmpPath, code, recordLevel=recordLevel, env={"LINDA_KEYS": "off"})
 	assert done.error is None, done.error
 	reached = reachedPastTheProcess(done)
 	assert not reached, f"reached past the process: {reached}"
