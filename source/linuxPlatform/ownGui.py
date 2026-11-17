@@ -29,6 +29,12 @@ and the first arrow key is spent selecting an item. A menu opened from the keybo
 its first item, as Windows opens NVDA's menu and as GTK opens a context menu from the Menu key.
 Escape in a submenu closes that submenu only, as on Windows; GTK closes every menu.
 
+Each of NVDA's dialogs is made the active window as it is shown, as NVDA brings its dialogs to the
+foreground on Windows. marco gives a new window the keyboard only when its user time is later than
+that of the window that has it, and GTK stamps a window with the time of the last key NVDA's own
+windows received. Once one of NVDA's dialogs had taken keys, every later one was stamped with that
+time, older than the keys typed in the browser since, and was left behind it.
+
 wx's own log goes to NVDA's log, where wxMSW's goes to the debugger rather than to the user;
 wxGTK would print it on standard error.
 """
@@ -555,10 +561,39 @@ def install() -> None:
 	atexit.register(_quietAutoSettingsAtExit)
 
 
+def _presentDialogOnMap(window, *args) -> bool:
+	Gtk = _gtkModule()
+	from gi.repository import Gdk, GLib
+
+	# The hook sees every widget mapped, as map is a signal of every widget.
+	if (
+		isinstance(window, Gtk.Window)
+		and window.get_window_type() == Gtk.WindowType.TOPLEVEL
+		and window.get_type_hint() == Gdk.WindowTypeHint.DIALOG
+	):
+		GLib.idle_add(_presentNow, window)
+	return True
+
+
+def _presentNow(window) -> bool:
+	import gi
+
+	gi.require_version("GdkX11", "3.0")
+	from gi.repository import GdkX11
+
+	gdkWindow = window.get_window()
+	if gdkWindow is not None and window.get_visible() and isinstance(gdkWindow, GdkX11.X11Window):
+		window.present_with_time(GdkX11.x11_get_server_time(gdkWindow))
+	return False
+
+
 def initialize(app: wx.App) -> None:
 	"""Make the changes that need the application, once it exists."""
 	global _logTarget
+	from gi.repository import GObject
+
 	app.Bind(wx.EVT_CHAR_HOOK, _onCharHook)
+	GObject.add_emission_hook(_gtkModule().Window, "map", _presentDialogOnMap)
 	# wx.App sets its own target as it starts.
 	_logTarget = _NvdaLogTarget()
 	wx.Log.SetActiveTarget(_logTarget)
