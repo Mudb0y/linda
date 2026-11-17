@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Live page</title></head>
+<body>
+<h1>Live regions</h1>
+<p><button id="add-polite">Add polite</button>
+<button id="add-assertive">Add assertive</button>
+<button id="count">Count</button>
+<button id="show-alert">Show alert</button>
+<button id="start-log">Start log</button>
+<button id="stop-log">Stop log</button>
+<button id="busy">Busy update</button>
+<button id="set-output">Set output</button>
+<button id="change-text">Change text</button></p>
+<div id="polite" aria-live="polite"></div>
+<div id="assertive" aria-live="assertive"></div>
+<div id="status" role="status" aria-atomic="true">Results: <span id="n">3</span> found</div>
+<div id="alerts"></div>
+<div id="log" role="log" aria-label="Chat"></div>
+<div id="busyRegion" aria-live="polite"></div>
+<p>Total: <output id="out">0</output></p>
+<div id="texty" aria-live="polite" aria-relevant="text"><p>Old words</p></div>
+<p id="tail">End of live page.</p>
+<script>
+const $ = (id) => document.getElementById(id);
+let polite = 0, assertive = 0, count = 3, logLine = 0, logTimer = null, busy = 0;
+$("add-polite").onclick = () => {
+	const p = document.createElement("p");
+	p.textContent = "Polite message " + ++polite;
+	$("polite").appendChild(p);
+};
+$("add-assertive").onclick = () => {
+	const p = document.createElement("p");
+	p.textContent = "Assertive message " + ++assertive;
+	$("assertive").appendChild(p);
+};
+$("count").onclick = () => {
+	$("n").textContent = String(++count);
+};
+$("show-alert").onclick = () => {
+	const div = document.createElement("div");
+	div.setAttribute("role", "alert");
+	div.textContent = "Name is required";
+	$("alerts").replaceChildren(div);
+};
+$("start-log").onclick = () => {
+	if (logTimer) return;
+	logTimer = setInterval(() => {
+		const p = document.createElement("p");
+		p.textContent = "Log line " + ++logLine;
+		$("log").appendChild(p);
+	}, 500);
+};
+$("stop-log").onclick = () => {
+	clearInterval(logTimer);
+	logTimer = null;
+};
+$("busy").onclick = () => {
+	const region = $("busyRegion");
+	region.setAttribute("aria-busy", "true");
+	const p = document.createElement("p");
+	p.textContent = "Busy part " + ++busy;
+	region.appendChild(p);
+	setTimeout(() => {
+		const q = document.createElement("p");
+		q.textContent = "Done part " + busy;
+		region.appendChild(q);
+		region.setAttribute("aria-busy", "false");
+	}, 300);
+};
+$("set-output").onclick = () => {
+	$("out").textContent = String(Number($("out").textContent) + 5);
+};
+$("change-text").onclick = () => {
+	$("texty").firstElementChild.textContent = "New words";
+};
+</script>
+</body>
+</html>
