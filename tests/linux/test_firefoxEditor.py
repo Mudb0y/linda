@@ -161,16 +161,6 @@ def test_deleteSaysTheCharacterThatComesUnderTheCaret(session: Session):
 	step(session, "Insert+Up", FIRST[1:])
 
 
-#: Why Backspace says the wrong character, here as in a plain field: the key reaches the application
-#: before NVDA's script reads the character before the caret, so the script reads the text as it is
-#: after the deletion.
-BACKSPACE_COMES_FIRST = (
-	"Backspace reaches the application before NVDA's script reads the character before the caret, "
-	"in every field and not only in this editor"
-)
-
-
-@pytest.mark.xfail(reason=BACKSPACE_COMES_FIRST, strict=False)
 def test_backspaceInAnEmptyParagraphSaysTheCharacterThatWent(session: Session):
 	# As in the user's log of claude.ai's prompt field: one character typed into an empty paragraph,
 	# which then said "blank".
@@ -179,7 +169,6 @@ def test_backspaceInAnEmptyParagraphSaysTheCharacterThatWent(session: Session):
 	step(session, "BackSpace", "z")
 
 
-@pytest.mark.xfail(reason=BACKSPACE_COMES_FIRST, strict=False)
 def test_backspaceInTheMiddleOfALineSaysTheCharacterThatWent(session: Session):
 	step(session, "ctrl+End", "blank")
 	step(session, "Up", "it")
