@@ -137,6 +137,11 @@ def test_conferencingClient(desktop: DesktopSession):
 	# A Qt tree's rows are tree items read with their columns, not cells numbered by row.
 	step(desktop, "Down", "Music; Users: 0")
 	step(desktop, "Up", "Lobby; Users: 2 collapsed")
+	# Qt opens and closes a branch without an event, and replaces the item as it opens one.
+	step(desktop, "Right", "Lobby; Users: 2 expanded")
+	step(desktop, "Down", "Alice")
+	step(desktop, "Left", "Lobby; Users: 2 expanded")
+	step(desktop, "Left", "collapsed")
 	# A control in a group box is named by its own label; the box is said as its group.
 	step(desktop, "shift+Tab", "User Settings grouping", "Gender: combo box Neutral collapsed")
 	step(desktop, "shift+Tab", "Send button Alt plus S")

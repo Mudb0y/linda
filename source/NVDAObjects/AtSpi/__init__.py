@@ -13,6 +13,7 @@ counted by their roles only, and only in small containers.
 
 import os
 import re
+from typing import ClassVar
 
 import api
 from controlTypes import Role, State
@@ -1194,6 +1195,55 @@ class TableRowItem(AtSpi):
 		# selectable item unsaid.
 		states.add(State.SELECTABLE)
 		return states
+
+	#: Milliseconds after an arrow key that a Qt tree's item is read again for a branch it opened or
+	#: closed.
+	EXPANSION_CHECK_MS = 150
+
+	def script_expandOrCollapse(self, gesture) -> None:
+		gesture.send()
+		if self.toolkit != QT:
+			return
+		# Qt opens and closes a tree's branches without saying so, where GTK and Windows send a state
+		# change, and replaces the item's accessible as it does; the item is read again and the change
+		# spoken.
+		import core
+
+		core.callLater(self.EXPANSION_CHECK_MS, self._reportExpansion)
+
+	__gestures: ClassVar[dict[str, str]] = {
+		"kb:rightArrow": "expandOrCollapse",
+		"kb:leftArrow": "expandOrCollapse",
+	}
+
+	#: Whether the item was open or closed when it was last spoken; the key reaches Qt as soon as NVDA,
+	#: so the state as the script runs may already be the new one.
+	spokenExpansion: set[State] | None = None
+
+	def _get__expansion(self) -> set[State]:
+		return self.states & {State.EXPANDED, State.COLLAPSED}
+
+	def event_gainFocus(self) -> None:
+		self.spokenExpansion = self._expansion
+		super().event_gainFocus()
+
+	def _reportExpansion(self) -> None:
+		if api.getFocusObject() is not self:
+			return
+		import eventHandler
+
+		node = handler.nodeForRelation("focus")
+		if node is not None and node != self.node:
+			# The item Qt made in place of this one has the focus without an event.
+			eventHandler.queueEvent("gainFocus", handler.eventObject(node))
+			return
+		expansion = self._expansion
+		if self.spokenExpansion is not None and expansion != self.spokenExpansion:
+			import speech
+			from controlTypes import OutputReason
+
+			speech.speakObjectProperties(self, states=True, reason=OutputReason.CHANGE)
+		self.spokenExpansion = expansion
 
 
 class IconItem(AtSpi):
