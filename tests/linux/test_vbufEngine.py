@@ -256,6 +256,14 @@ def encode(node: Field, out: list[int]) -> list[int]:
 	return out
 
 
+def _keptIn(node: Field) -> int:
+	"""How many R operations are in node's field."""
+	return sum(
+		_keptIn(item) if isinstance(item, Field) else int(item[0] == "R" and isinstance(item[1], tuple))
+		for item in node.content
+	)
+
+
 def applyBatch(document: Field, batch: list[tuple[tuple[int, int], Field]]) -> Field:
 	"""document with each field the batch names replaced, its R operations by the fields kept: what
 	the buffer holds once it has applied the batch."""
@@ -451,6 +459,7 @@ def test_eachChangeComesAsABatchThatMatchesAFreshRender(
 		return model, text
 
 	model, _ = fresh()
+	kept = 0
 	for name in DYNAMIC_CHANGES:
 		pressed = time.monotonic()
 		assert Atspi.Action.do_action(buttons[name], 0), name
@@ -462,12 +471,15 @@ def test_eachChangeComesAsABatchThatMatchesAFreshRender(
 			for batch in got:
 				assert batch.docPath == path, batch.info
 				if batch.stream is not None:
-					model = applyBatch(model, parseBatch(_units(batch.stream)))
+					replaced = parseBatch(_units(batch.stream))
+					kept += sum(_keptIn(field) for _, field in replaced)
+					model = applyBatch(model, replaced)
 					batch.stream.free()
 			got = batches(engine, time.monotonic() + QUIET, lambda b: bool(b))
 		updated = bufferText(vbufLib, Units(encode(model, [])))
 		model, expected = fresh()
 		assert updated == expected, f"{name}: the updated buffer differs from a fresh render"
+	assert kept, "no update kept an unchanged field as it was"
 
 
 def test_followingALinkEndsTheOldDocument(desktop: DesktopSession, engine: ModuleType):

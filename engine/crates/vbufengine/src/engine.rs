@@ -857,7 +857,10 @@ async fn update_task(st: Rc<State>, d: Rc<Doc>) {
             }
         }
         info.insert("objects".into(), live.len().into());
-        info.insert("targets".into(), json!(live));
+        info.insert(
+            "targets".into(),
+            json!(live.iter().take(16).collect::<Vec<_>>()),
+        );
         info.insert("calls".into(), walk.calls.into());
         info.insert("walkSeconds".into(), walk.seconds().into());
         info.insert(
