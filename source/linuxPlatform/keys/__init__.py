@@ -5,12 +5,16 @@ linuxPlatform.inputHook, which gives it to keyboardHandler as the Windows keyboa
 keys NVDA uses as the NVDA key and the numpad review keys are taken from the applications, so that a
 command reaches NVDA alone; every other key reaches the application and NVDA both, and NVDA's
 scripts for it then read what the application did instead of sending the key on.
+
+On a web page in browse mode the keys browse mode uses, the arrows and the letters among them, are
+captured: the application gets such a key only when NVDA's answer for it says to pass it on, as the
+Windows hook's return value does. In focus mode only Escape is captured.
 """
 
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 #: Whether keys that type text are hidden in the debug log's "Input:" lines. NVDA logs every key at
 #: debug level, and a password typed while debug logging is on would otherwise be in the log. Command
@@ -19,6 +23,9 @@ MASK_TYPED_KEYS_IN_LOG: bool = True
 
 #: Set to "off" in the environment, no key source is started.
 SWITCH_VARIABLE = "BASEDREADER_KEYS"
+
+#: Which keys are captured: none beyond the NVDA keys, Escape alone for focus mode, or browse mode's.
+CaptureMode = Literal["off", "focus", "browse"]
 
 
 @dataclass(frozen=True)
@@ -39,13 +46,21 @@ class KeyEvent:
 	typing: bool
 	#: time.monotonic() when the event arrived.
 	time: float
+	#: Whether the application gets the key only if deliver returns True for it: a captured press.
+	captured: bool = False
 
 
 class KeySource(Protocol):
-	def start(self, deliver: Callable[[KeyEvent], None]) -> None:
-		"""Start watching the keyboard; deliver is called for each event, on the source's own thread."""
+	def start(self, deliver: Callable[[KeyEvent], bool]) -> None:
+		"""Start watching the keyboard; deliver is called for each event, in order, on a thread of the
+		source's own, and returns True to pass the key on to the application, as the Windows hook's
+		callback does. Only a captured press waits for that answer, and not for long: a key with no
+		answer in time reaches the application."""
 
 	def stop(self) -> None: ...
+
+	def setCapture(self, mode: CaptureMode) -> None:
+		"""Capture the keys of this mode from now on, and stop capturing any others."""
 
 	def setConsumed(self, nvdaModifierKeys: int, numpadReview: bool) -> None:
 		"""Take these keys from the applications.

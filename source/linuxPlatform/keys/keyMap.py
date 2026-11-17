@@ -86,6 +86,7 @@ VK = {
 	"OEM_6": 0xDD,
 	"OEM_7": 0xDE,
 	"OEM_102": 0xE2,
+	"PACKET": 0xE7,
 	"NONE": 0xFF,
 }
 
@@ -294,6 +295,28 @@ class Translator:
 		"""Whether the key is AltGr or another key that picks a level instead of being Alt."""
 		syms = self._levelSyms(keycode, self._layout(keycode))
 		return bool(syms) and syms[0] in LEVEL_SHIFT_KEYSYMS
+
+	def level(self, keycode: int) -> int:
+		"""The level the key types at in the current state: 0 alone, 1 shifted, 2 and above with AltGr."""
+		layout = self._layout(keycode)
+		if layout is None:
+			return 0
+		try:
+			return self.state.key_get_level(keycode, layout)
+		except xkb.XKBError:
+			return 0
+
+	def levelThreeMask(self) -> int:
+		"""The X modifier mask AltGr sets, or 0 when no key of the keymap is AltGr."""
+		third = xkb.keysym_from_name("ISO_Level3_Shift")
+		for keycode in range(self.keymap.min_keycode(), self.keymap.max_keycode() + 1):
+			syms = self._levelSyms(keycode, self._layout(keycode))
+			if syms and syms[0] == third:
+				state = self.keymap.state_new()
+				state.update_key(keycode, xkb.KeyDirection.XKB_KEY_DOWN)
+				# The real modifiers only, which are all a core grab knows.
+				return state.serialize_mods(xkb.StateComponent.XKB_STATE_MODS_DEPRESSED) & 0xFF
+		return 0
 
 	def keycodeFor(self, vk: int, extended: bool) -> int | None:
 		"""The X key code that gives vk, for injecting it."""

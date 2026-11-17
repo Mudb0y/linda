@@ -11,12 +11,14 @@ states raises NoLinuxImplementation.
 """
 
 import logging
+import os
 import re
 import string
 import threading
+import time
 
 from linuxPlatform import NoLinuxImplementation, keys
-from linuxPlatform.keys import KeyEvent, KeySource
+from linuxPlatform.keys import CaptureMode, KeyEvent, KeySource
 
 _refCount = 0
 
@@ -29,8 +31,12 @@ VK_CAPITAL = 0x14
 VK_NONE = 0xFF
 KEYEVENTF_EXTENDEDKEY = 0x1
 KEYEVENTF_KEYUP = 0x2
-#: Seconds between looks at the configuration's NVDA keys and at whether input help is on.
+#: Seconds between looks at the configuration's NVDA keys, at whether input help is on, and at
+#: whether the focus is in a document in browse mode.
 WATCH_INTERVAL = 0.05
+#: Set to "off" in the environment, browse mode's keys are never captured, and reach the application
+#: and NVDA both, as every other key does.
+BROWSE_KEYS_VARIABLE = "BASEDREADER_BROWSE_KEYS"
 
 _source: KeySource | None = None
 _delivering = threading.local()
@@ -95,17 +101,20 @@ def _stopSource() -> None:
 
 def _watch(source: KeySource) -> None:
 	"""Keep the keys the source takes in step with the configuration, which the settings dialog, the
-	welcome dialog and profile switches all change, and hold the keyboard while input help is on, so
-	that the keys it describes do nothing.
+	welcome dialog and profile switches all change, hold the keyboard while input help is on, so
+	that the keys it describes do nothing, and capture browse mode's keys while the focus is in a
+	document in browse mode.
 
 	A thread of its own, so that the keyboard is let go during watchdog recovery even when the main
 	thread is frozen."""
+	import api
 	import config
 	import inputCore
 	import watchdog
 
 	nvdaKeys = None
 	held = False
+	captured: CaptureMode = "off"
 	while True:
 		wanted = config.conf["keyboard"]["NVDAModifierKeys"]
 		if wanted != nvdaKeys:
@@ -116,15 +125,61 @@ def _watch(source: KeySource) -> None:
 		if hold != held:
 			source.holdKeyboard(hold)
 			held = hold
+		capture = "off" if watchdog.isAttemptingRecovery else captureModeFor(api.getFocusObject())
+		if capture != captured:
+			source.setCapture(capture)
+			captured = capture
 		if _stopWatching.wait(WATCH_INTERVAL):
 			break
 	if held:
 		source.holdKeyboard(False)
+	if captured != "off":
+		source.setCapture("off")
 
 
-def _onKey(event: KeyEvent) -> None:
-	"""Called by the key source for each key, on its thread."""
+def captureModeFor(focus) -> CaptureMode:
+	"""Which keys to capture with this focus: browse mode's while it is in a document in browse mode,
+	Escape alone while that document is in focus mode, and otherwise none.
+
+	Asked off the main thread: the focus's tree interceptor is the one api.setFocusObject set on it,
+	so asking for it calls nothing in the application.
+	"""
+	if os.environ.get(BROWSE_KEYS_VARIABLE, "") == "off" or focus is None:
+		return "off"
+	import browseMode
+
+	try:
+		interceptor = focus.treeInterceptor
+	# A focus that has just gone away raises whatever its kind of object raises; it has no document.
+	except Exception:  # noqa: BLE001
+		return "off"
+	if not isinstance(interceptor, browseMode.BrowseModeTreeInterceptor) or not interceptor.isReady:
+		return "off"
+	return "focus" if interceptor.passThrough else "browse"
+
+
+def _isCoreStuck() -> bool:
+	"""Whether NVDA's main thread has been in one cycle of its core longer than the watchdog takes for
+	a possible freeze, so that a command queued now would wait for as long as that lasts."""
+	import watchdog
+
+	if watchdog.isAttemptingRecovery:
+		return True
+	if not watchdog.isRunning or watchdog.isCoreAsleep():
+		return False
+	lastAlive = getattr(watchdog, "_lastAlive", None)
+	return lastAlive is not None and time.perf_counter() - lastAlive > watchdog.MIN_CORE_ALIVE_TIMEOUT
+
+
+def _onKey(event: KeyEvent) -> bool:
+	"""Called by the key source for each key, on its thread.
+
+	:return: True to pass the key on to the application, which matters only for a captured press.
+	"""
 	global _lastKeyDown, _capsLockUsedAsNVDAKey
+	if event.captured and _isCoreStuck():
+		# Its command would run only once NVDA comes back, if ever; the application is better served.
+		return True
 	if not event.isUp:
 		_lastKeyDown = event
 	_delivering.event = event
@@ -142,6 +197,7 @@ def _onKey(event: KeyEvent) -> None:
 			_capsLockUsedAsNVDAKey = False
 			_source.inject(VK_CAPITAL, 0x3A, False, False)
 			_source.inject(VK_CAPITAL, 0x3A, False, True)
+	return passed
 
 
 def deliverKey(vkCode: int, scanCode: int, extended: bool, injected: bool, isUp: bool) -> bool:

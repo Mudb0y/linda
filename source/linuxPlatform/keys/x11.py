@@ -7,23 +7,37 @@ own, since an application that selects slave events on its window stops them rea
 The NVDA keys and the numpad review keys are taken with passive grabs on the root, so a chord with
 the NVDA key held goes to NVDA alone while the grab is active; everything else reaches the
 application too, and is marked as having done so.
+
+The keys of browse mode are captured with synchronous passive grabs on the root: the X server holds
+the whole keyboard on such a press until this source answers it, replaying the key to the
+application as typed or dropping it. NVDA's answer comes from the decider, a thread that hands every
+key to NVDA in order; the X thread only reads events and answers them, and replays a captured key
+NVDA has not answered within CAPTURE_TIMEOUT, so that a slow NVDA costs the user a delay and never a
+key. Should this whole process stop, no thread is left to answer, and the keyboard would stay held:
+a guard, a process of its own that this one feeds a heartbeat, then closes this source's connection
+to the X server, which ends its grabs; the source connects again once it runs again.
 """
 
 import itertools
+import json
 import os
+import queue
 import select
 import struct
+import subprocess
+import sys
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from logHandler import log
 from xkbcommon import xkb
 from Xlib import X, display, error
 from Xlib.ext import xinput, xtest
 
-from . import KeyEvent, keyMap
+from . import CaptureMode, KeyEvent, keyMap
 
 #: Modifiers that make a key a command rather than typing: Control, Alt and Super, as X maps them.
 COMMAND_MODS = X.ControlMask | X.Mod1Mask | X.Mod4Mask
@@ -59,6 +73,100 @@ GENERIC_FOR = {
 	keyMap.VK["RMENU"]: keyMap.VK["MENU"],
 }
 
+#: Seconds the X server holds the keyboard on a captured press for NVDA's answer before the key is
+#: replayed to the application without it.
+CAPTURE_TIMEOUT = 0.1
+#: Seconds a captured press waits for the X server to hold it; it does not when another program had
+#: the keyboard grabbed as the key went down.
+CAPTURE_EXPIRY = 0.5
+#: Each captured combination is grabbed once with each of these, so that the locks do not make the
+#: grab miss. AnyModifier would cover them too, but the window manager's own grabs refuse it.
+LOCK_COMBINATIONS = (0, X.LockMask, NUM_LOCK_MASK, X.LockMask | NUM_LOCK_MASK)
+#: evdev code: the modifier combinations it is captured with in browse mode, besides the character
+#: keys. These are browse mode's own keys: cursorManager's, browseMode's, and its quick navigation.
+BROWSE_KEYS: dict[int, tuple[str, ...]] = {
+	# Up and down arrows: line, paragraph, selection and, with Alt, sentence.
+	103: ("", "control", "shift", "shift+control", "alt"),
+	108: ("", "control", "shift", "shift+control", "alt"),
+	# Left and right arrows.
+	105: ("", "control", "shift", "shift+control"),
+	106: ("", "control", "shift", "shift+control"),
+	# Page up and down.
+	104: ("", "shift"),
+	109: ("", "shift"),
+	# Home and End.
+	102: ("", "control", "shift", "shift+control"),
+	107: ("", "control", "shift", "shift+control"),
+	# Enter and numpad Enter, to activate or to pass through.
+	28: ("", "control", "shift", "shift+control", "alt"),
+	96: ("", "control", "shift", "shift+control", "alt"),
+	1: ("",),
+	15: ("", "shift"),
+	# The applications key, and Shift+F10.
+	127: ("", "shift"),
+	68: ("shift",),
+}
+#: Virtual-key codes captured with Control in browse mode: select all and copy.
+BROWSE_CONTROL_LETTERS = ("A", "C")
+#: Modifier combinations every key that types a character is captured with in browse mode.
+CHARACTER_COMBINATIONS = ("", "shift", "altgr", "shift+altgr")
+SPACE_KEY = 57
+#: evdev code: modifier combinations captured in focus mode, where Escape goes back to browse mode.
+FOCUS_KEYS: dict[int, tuple[str, ...]] = {1: ("",)}
+
+#: Seconds between heartbeats to the guard while it guards.
+HEARTBEAT_INTERVAL = 0.5
+#: Seconds of silence after which the guard frees the keyboard.
+GUARD_SILENCE = 2.0
+#: Attempts, a second apart, to connect again after the X server closed the connection.
+RECONNECT_ATTEMPTS = 10
+#: The guard. It shares nothing with NVDA's interpreter, so that it runs whatever NVDA's threads do.
+#: Its standard input carries the heartbeat: "1 ID" while the keyboard can be held, "0 ID" while it
+#: cannot, ID being a resource of the source's connection. After GUARD_SILENCE without one while
+#: it can, it closes that connection; it ends when its input does.
+GUARD_PROGRAM = r"""
+import json, os, select, sys, time
+sys.path[:0] = json.loads(sys.argv[1])
+silence = float(sys.argv[2])
+from Xlib import display, error
+from Xlib.xobject.resource import Resource
+connection = display.Display()
+guarding, resource, heard, pending = False, 0, time.monotonic(), b""
+while True:
+	timeout = max(0.0, heard + silence - time.monotonic()) if guarding and resource else None
+	readable, _w, _x = select.select([0], [], [], timeout)
+	if readable:
+		chunk = os.read(0, 4096)
+		if not chunk:
+			break
+		*lines, pending = (pending + chunk).split(b"\n")
+		for line in lines:
+			state, _space, number = line.partition(b" ")
+			guarding, resource, heard = state == b"1", int(number or 0), time.monotonic()
+	elif guarding and resource:
+		try:
+			Resource(connection.display, resource).kill_client()
+			connection.sync()
+		except error.XError:
+			pass
+		resource = 0
+"""
+
+
+@dataclass
+class _Ticket:
+	"""A captured press, which the X server holds the keyboard on until it is answered."""
+
+	keycode: int
+	#: time.monotonic() when the source learnt of the press.
+	arrival: float
+	#: True to replay the key to the application, False to drop it; None until NVDA says.
+	verdict: bool | None = None
+	#: Whether the X server's held press has come.
+	frozen: bool = False
+	#: Whether it has been answered, by its verdict or without one.
+	answered: bool = False
+
 
 class X11KeySource:
 	"""A KeySource reading the X display named by DISPLAY."""
@@ -69,7 +177,10 @@ class X11KeySource:
 		self._wakeRead, self._wakeWrite = os.pipe()
 		self._stopping = False
 		self._thread: threading.Thread | None = None
-		self._deliver: Callable[[KeyEvent], None] | None = None
+		self._decider: threading.Thread | None = None
+		#: (event, ticket) for the decider, in the order the keys came; None ends it.
+		self._decisions: queue.SimpleQueue[tuple[KeyEvent, _Ticket | None] | None] = queue.SimpleQueue()
+		self._deliver: Callable[[KeyEvent], bool] | None = None
 		self._display: display.Display | None = None
 		self._rulesNames: tuple[str, ...] | None = None
 		self._context = xkb.Context()
@@ -91,56 +202,54 @@ class X11KeySource:
 		#: The grabbed key whose press made a grab active, which lasts until it is released.
 		self._activeGrab: int | None = None
 		self._held = False
+		#: What was last asked for, to be set up again on a new connection.
+		self._consumedWanted: tuple[int, bool] | None = None
+		self._holdWanted = False
+		self._captureMode: CaptureMode = "off"
+		#: Key code: the modifier masks it is captured with now, the lock combinations among them.
+		self._captured: dict[int, set[int]] = {}
+		#: Captured presses not yet answered, in the order they came.
+		self._tickets: deque[_Ticket] = deque()
+		#: The captured key whose press was dropped, which keeps its grab active until released.
+		self._captureGrab: int | None = None
+		#: Key code: (vk, scan) a press was delivered as when it was not the key's own, for its release.
+		self._pressedAs: dict[int, tuple[int, int]] = {}
+		self._guard: subprocess.Popen | None = None
+		#: The guard's standard input, written without blocking.
+		self._guardInput: int | None = None
+		#: The resource of this connection the guard would close it by.
+		self._guardResource = 0
+		#: (time, guarding) of the last heartbeat sent.
+		self._lastBeat: tuple[float, bool] = (0.0, False)
 
-	def start(self, deliver: Callable[[KeyEvent], None]) -> None:
+	def start(self, deliver: Callable[[KeyEvent], bool]) -> None:
 		self._deliver = deliver
-		self._display = display.Display()
-		try:
-			if not self._display.has_extension("XInputExtension"):
-				raise RuntimeError("the X server has no XInput extension")
-			version = xinput.XIQueryVersion(
-				display=self._display.display,
-				opcode=self._display.display.get_extension_major(xinput.extname),
-				major_version=XI_VERSION[0],
-				minor_version=XI_VERSION[1],
-			)
-			if (version.major_version, version.minor_version) < XI_VERSION:
-				raise RuntimeError(
-					f"the X server has XInput {version.major_version}.{version.minor_version}, not 2.2",
-				)
-			root = self._display.screen().root
-			root.xinput_select_events(
-				[
-					(
-						xinput.AllDevices,
-						xinput.KeyPressMask | xinput.KeyReleaseMask | xinput.HierarchyChangedMask,
-					),
-					(xinput.AllMasterDevices, xinput.RawKeyPressMask | xinput.RawKeyReleaseMask),
-				],
-			)
-			root.change_attributes(event_mask=X.PropertyChangeMask)
-			self._rulesAtom = self._display.intern_atom(RULES_NAMES_PROPERTY)
-			self._findXtestDevices()
-			self._loadKeymap()
-			self._display.sync()
-		except Exception:
-			self._display.close()
-			self._display = None
-			raise
+		self._connect()
+		self._startGuard()
+		self._decider = threading.Thread(target=self._decide, name="X11KeySource decider", daemon=True)
+		self._decider.start()
 		self._thread = threading.Thread(target=self._run, name="X11KeySource", daemon=True)
 		self._thread.start()
 
 	def stop(self) -> None:
 		self._stopping = True
 		self._wake()
+		self._decisions.put(None)
 		if self._thread is not None:
 			self._thread.join(2)
 			self._thread = None
+		if self._decider is not None:
+			self._decider.join(2)
+			self._decider = None
+		self._stopGuard()
 		os.close(self._wakeRead)
 		os.close(self._wakeWrite)
 
 	def setConsumed(self, nvdaModifierKeys: int, numpadReview: bool) -> None:
 		self._post(lambda: self._applyGrabs(nvdaModifierKeys, numpadReview))
+
+	def setCapture(self, mode: CaptureMode) -> None:
+		self._post(lambda: self._applyCapture(mode))
 
 	def holdKeyboard(self, hold: bool) -> None:
 		self._post(lambda: self._hold(hold))
@@ -192,31 +301,142 @@ class X11KeySource:
 		except OSError:
 			pass
 
+	def _connect(self) -> None:
+		self._display = display.Display()
+		try:
+			if not self._display.has_extension("XInputExtension"):
+				raise RuntimeError("the X server has no XInput extension")
+			version = xinput.XIQueryVersion(
+				display=self._display.display,
+				opcode=self._display.display.get_extension_major(xinput.extname),
+				major_version=XI_VERSION[0],
+				minor_version=XI_VERSION[1],
+			)
+			if (version.major_version, version.minor_version) < XI_VERSION:
+				raise RuntimeError(
+					f"the X server has XInput {version.major_version}.{version.minor_version}, not 2.2",
+				)
+			root = self._display.screen().root
+			root.xinput_select_events(
+				[
+					(
+						xinput.AllDevices,
+						xinput.KeyPressMask | xinput.KeyReleaseMask | xinput.HierarchyChangedMask,
+					),
+					(xinput.AllMasterDevices, xinput.RawKeyPressMask | xinput.RawKeyReleaseMask),
+				],
+			)
+			root.change_attributes(event_mask=X.PropertyChangeMask)
+			self._rulesAtom = self._display.intern_atom(RULES_NAMES_PROPERTY)
+			# Any resource of the connection names it to the X server; the guard needs one.
+			self._guardResource = root.create_pixmap(1, 1, self._display.screen().root_depth).id
+			self._findXtestDevices()
+			self._loadKeymap()
+			self._display.sync()
+		except Exception:
+			self._display.close()
+			self._display = None
+			raise
+
+	def _reconnect(self) -> bool:
+		"""Connect again after the X server closed the connection, and take back every key taken."""
+		try:
+			self._display.close()
+		except (OSError, error.ConnectionClosedError):
+			pass
+		self._display = None
+		self._grabbed = {}
+		self._captured = {}
+		self._activeGrab = None
+		self._captureGrab = None
+		self._held = False
+		for ticket in self._tickets:
+			ticket.answered = True
+		self._tickets.clear()
+		self._raw.clear()
+		for attempt in range(RECONNECT_ATTEMPTS):
+			if self._stopping:
+				return False
+			try:
+				self._connect()
+				break
+			except Exception:
+				if attempt == RECONNECT_ATTEMPTS - 1:
+					log.warning(
+						"NVDA cannot connect to the X display again, and reads no more keys", exc_info=True
+					)
+					return False
+				time.sleep(1)
+		if self._consumedWanted is not None:
+			self._applyGrabs(*self._consumedWanted)
+		if self._holdWanted:
+			self._hold(True)
+		self._applyCapture(self._captureMode)
+		self._lastBeat = (0.0, False)
+		log.info("Keys are read from the X display again")
+		return True
+
 	def _run(self) -> None:
-		d = self._display
 		try:
 			while not self._stopping:
-				while self._commands:
-					self._commands.popleft()()
-				while d.pending_events():
-					self._handle(d.next_event())
-				self._flushRaw(time.monotonic())
-				timeout = (self._raw[0][0] + RAW_WAIT - time.monotonic()) if self._raw else None
-				readable, _w, _x = select.select(
-					[d.fileno(), self._wakeRead],
-					[],
-					[],
-					None if timeout is None else max(0, timeout),
-				)
-				if self._wakeRead in readable:
-					os.read(self._wakeRead, 4096)
+				try:
+					self._serve()
+				except (error.ConnectionClosedError, OSError):
+					if self._stopping:
+						break
+					# The guard closes it when this process stopped answering while it held the keyboard.
+					log.warning("The X server closed the key source's connection; connecting again")
+					if not self._reconnect():
+						break
 		except Exception:
 			log.exception("Keys stopped being read from the X display")
 		finally:
+			if self._display is not None:
+				try:
+					self._display.close()
+				except (OSError, error.ConnectionClosedError):
+					log.debugWarning("Closing the key source's X connection", exc_info=True)
+
+	def _serve(self) -> None:
+		d = self._display
+		while not self._stopping:
+			while self._commands:
+				self._commands.popleft()()
+			while d.pending_events():
+				self._handle(d.next_event())
+			now = time.monotonic()
+			self._flushRaw(now)
+			deadlines = [self._answer(now), self._beat(now)]
+			if self._raw:
+				deadlines.append(self._raw[0][0] + RAW_WAIT)
+			due = min((t for t in deadlines if t is not None), default=None)
+			readable, _w, _x = select.select(
+				[d.fileno(), self._wakeRead],
+				[],
+				[],
+				None if due is None else max(0, due - time.monotonic()),
+			)
+			if self._wakeRead in readable:
+				os.read(self._wakeRead, 4096)
+
+	def _decide(self) -> None:
+		while True:
+			item = self._decisions.get()
+			if item is None:
+				return
+			event, ticket = item
+			if ticket is not None and ticket.answered:
+				# The application has had the key, as NVDA did not answer in time; NVDA acting on it as
+				# well would act twice.
+				continue
 			try:
-				d.close()
-			except (OSError, error.ConnectionClosedError):
-				log.debugWarning("Closing the key source's X connection", exc_info=True)
+				passed = self._deliver(event)
+			except Exception:
+				log.exception("Delivering a key")
+				passed = True
+			if ticket is not None:
+				ticket.verdict = passed is not False
+				self._wake()
 
 	def _findXtestDevices(self) -> None:
 		devices = self._display.xinput_query_device(xinput.AllDevices).devices
@@ -247,6 +467,9 @@ class X11KeySource:
 			self._translator = keyMap.Translator(keymap, keymap.state_new())
 			self._rulesNames = names
 		log.debug(f"Keyboard layout {layout or 'us'} {variant}".rstrip())
+		if self._captureMode != "off":
+			# Which keys type characters, and which modifier AltGr is, are the layout's.
+			self._applyCapture(self._captureMode)
 
 	def _handle(self, event) -> None:
 		evtype = getattr(event, "evtype", None)
@@ -268,6 +491,11 @@ class X11KeySource:
 			self._raw.append((time.monotonic(), keycode, isUp, sourceid))
 		elif evtype == xinput.HierarchyChanged:
 			self._findXtestDevices()
+		elif event.type == X.KeyPress:
+			self._onHeld(event)
+		elif event.type == X.KeyRelease:
+			if event.detail == self._captureGrab:
+				self._captureGrab = None
 		elif event.type == X.MappingNotify:
 			self._display.refresh_keyboard_mapping(event)
 			self._loadKeymap()
@@ -293,6 +521,33 @@ class X11KeySource:
 				self._slaveSeen.append((now, keycode, isUp))
 		self._process(keycode, isUp, repeat, data.mods, data.groups, data.sourceid, now)
 
+	def _onHeld(self, event) -> None:
+		"""A core key press, which comes only through a grab; one of a captured key holds the keyboard
+		until it is answered."""
+		keycode = event.detail
+		if self._held or self._activeGrab is not None or self._captureGrab is not None:
+			# A grab was active already, so this press activated none and holds nothing.
+			return
+		for ticket in self._tickets:
+			if ticket.keycode == keycode and not ticket.frozen:
+				ticket.frozen = True
+				return
+		if not self._captureMatches(keycode, event.state):
+			return
+		# Its slave event has not come, and may never: deliver it from its raw event.
+		now = time.monotonic()
+		ticket = _Ticket(keycode, now, frozen=True)
+		self._tickets.append(ticket)
+		for index, (arrival, rawKeycode, rawIsUp, sourceid) in enumerate(self._raw):
+			if (rawKeycode, rawIsUp) == (keycode, False):
+				del self._raw[index]
+				self._rawDelivered.append((now, keycode, False))
+				self._process(keycode, False, False, None, None, sourceid, arrival, ticket)
+				return
+		# Delivered already without being taken for captured, or never seen at all: the application
+		# gets it, which is where a key goes that NVDA was not asked about.
+		ticket.verdict = True
+
 	def _flushRaw(self, now: float) -> None:
 		while self._rawDelivered and now - self._rawDelivered[0][0] > 1:
 			self._rawDelivered.popleft()
@@ -313,7 +568,7 @@ class X11KeySource:
 					return True
 		return False
 
-	def _process(self, keycode, isUp, repeat, mods, groups, sourceid, arrival) -> None:
+	def _process(self, keycode, isUp, repeat, mods, groups, sourceid, arrival, ticket=None) -> None:
 		with self._lock:
 			translator = self._translator
 			state = translator.state
@@ -332,6 +587,7 @@ class X11KeySource:
 			vk, scan, extended = translator.translate(keycode)
 			levelShift = translator.isLevelShift(keycode)
 			text = "" if isUp else state.key_get_string(keycode)
+			level = translator.level(keycode)
 			if not repeat:
 				# What the server's state is after this key, for keyState until the next event says.
 				state.update_key(
@@ -345,13 +601,26 @@ class X11KeySource:
 					self._down.discard(code)
 				else:
 					self._down.add(code)
-		consumed = self._held or self._activeGrab is not None
+		consumed = self._held or self._activeGrab is not None or self._captureGrab is not None
 		if not consumed and not isUp and self._grabMatches(keycode, effective):
 			consumed = True
 			self._activeGrab = keycode
+		if ticket is None and not consumed and not isUp and self._captureMatches(keycode, effective):
+			ticket = _Ticket(keycode, arrival)
+			self._tickets.append(ticket)
 		try:
 			if self._isEcho(keycode, isUp, arrival) or levelShift:
+				if ticket is not None:
+					# NVDA sent it to the application; it goes there at once.
+					ticket.verdict = True
 				return
+			if ticket is not None and text and len(text) == 1 and text.isprintable() and level >= 2:
+				# AltGr is not a modifier to NVDA, so the key would be taken for its letter alone, and
+				# run that letter's quick navigation; as the character it types, it is trapped.
+				vk, scan, extended = keyMap.VK["PACKET"], ord(text), False
+				self._pressedAs[keycode] = (vk, scan)
+			elif isUp and keycode in self._pressedAs:
+				vk, scan = self._pressedAs.pop(keycode)
 			event = KeyEvent(
 				vkCode=vk,
 				scanCode=scan,
@@ -359,18 +628,108 @@ class X11KeySource:
 				injected=sourceid in self._xtestDevices,
 				isUp=isUp,
 				repeat=repeat,
-				reachedApplication=not consumed,
+				reachedApplication=not consumed and ticket is None,
 				text=text,
 				typing=bool(text) and text.isprintable() and not effective & COMMAND_MODS,
 				time=arrival,
+				captured=ticket is not None,
 			)
-			try:
-				self._deliver(event)
-			except Exception:
-				log.exception("Delivering a key")
+			self._decisions.put((event, ticket))
 		finally:
 			if isUp and keycode == self._activeGrab:
 				self._activeGrab = None
+			if isUp and keycode == self._captureGrab:
+				self._captureGrab = None
+
+	def _answer(self, now: float) -> float | None:
+		"""Answer the press the keyboard is held on once NVDA has, or once it is overdue.
+
+		:return: When to look again, or None when no press waits.
+		"""
+		while self._tickets:
+			while (
+				self._tickets
+				and not self._tickets[0].frozen
+				and now - self._tickets[0].arrival >= CAPTURE_EXPIRY
+			):
+				self._tickets.popleft().answered = True
+			held = next((ticket for ticket in self._tickets if ticket.frozen), None)
+			if held is None:
+				return self._tickets[0].arrival + CAPTURE_EXPIRY if self._tickets else None
+			if held.verdict is None and now < held.arrival + CAPTURE_TIMEOUT:
+				return held.arrival + CAPTURE_TIMEOUT
+			# Presses before the held one were never held, as the server holds them in order.
+			while (ticket := self._tickets.popleft()) is not held:
+				ticket.answered = True
+			held.answered = True
+			if held.verdict is False:
+				self._display.allow_events(X.AsyncKeyboard, X.CurrentTime)
+				self._captureGrab = held.keycode
+			else:
+				self._display.allow_events(X.ReplayKeyboard, X.CurrentTime)
+				if held.verdict is None:
+					log.debug(f"Key {held.keycode} replayed without NVDA's answer")
+			self._display.flush()
+		return None
+
+	def _beat(self, now: float) -> float | None:
+		"""Tell the guard the source is alive, and whether the keyboard can be held.
+
+		:return: When the next heartbeat is due, or None while none is.
+		"""
+		if self._guardInput is None:
+			return None
+		guarding = self._captureMode != "off" or self._held
+		lastTime, lastGuarding = self._lastBeat
+		if guarding != lastGuarding or (guarding and now - lastTime >= HEARTBEAT_INTERVAL):
+			try:
+				os.write(self._guardInput, f"{int(guarding)} {self._guardResource}\n".encode())
+			except BlockingIOError:
+				pass
+			except OSError:
+				log.warning(
+					"The guard that frees the keyboard should NVDA stop answering has gone", exc_info=True
+				)
+				self._guardInput = None
+				return None
+			self._lastBeat = lastTime, lastGuarding = (now, guarding)
+		return lastTime + HEARTBEAT_INTERVAL if guarding else None
+
+	def _startGuard(self) -> None:
+		try:
+			self._guard = subprocess.Popen(
+				[
+					sys.executable,
+					"-I",
+					"-c",
+					GUARD_PROGRAM,
+					json.dumps([path for path in sys.path if path]),
+					str(GUARD_SILENCE),
+				],
+				stdin=subprocess.PIPE,
+				stdout=subprocess.DEVNULL,
+			)
+		except OSError:
+			log.warning("No guard frees the keyboard should NVDA stop answering", exc_info=True)
+			self._guard = None
+			return
+		self._guardInput = self._guard.stdin.fileno()
+		os.set_blocking(self._guardInput, False)
+
+	def _stopGuard(self) -> None:
+		guard, self._guard = self._guard, None
+		self._guardInput = None
+		if guard is None:
+			return
+		try:
+			guard.stdin.close()
+		except OSError:
+			pass
+		try:
+			guard.wait(1)
+		except subprocess.TimeoutExpired:
+			guard.kill()
+			guard.wait()
 
 	def _grabMatches(self, keycode: int, effective: int) -> bool:
 		if keycode not in self._grabbed:
@@ -380,7 +739,12 @@ class X11KeySource:
 			return True
 		return effective in modifiers
 
+	def _captureMatches(self, keycode: int, effective: int) -> bool:
+		masks = self._captured.get(keycode)
+		return masks is not None and effective & 0xFF in masks
+
 	def _applyGrabs(self, nvdaModifierKeys: int, numpadReview: bool) -> None:
+		self._consumedWanted = (nvdaModifierKeys, numpadReview)
 		root = self._display.screen().root
 		for keycode, modifiers in self._grabbed.items():
 			for mod in [X.AnyModifier] if modifiers is None else modifiers:
@@ -422,7 +786,66 @@ class X11KeySource:
 				"is another screen reader running?",
 			)
 
+	def _captureSet(self, mode: CaptureMode) -> dict[int, set[int]]:
+		"""Key code: the modifier masks, without the locks, it is captured with in mode."""
+		if mode == "off" or self._translator is None:
+			return {}
+		masks = {"": 0, "shift": X.ShiftMask, "control": X.ControlMask, "alt": X.Mod1Mask}
+		levelThree = self._translator.levelThreeMask()
+		if levelThree:
+			masks["altgr"] = levelThree
+
+		def combinations(names: tuple[str, ...]) -> set[int]:
+			found = set()
+			for name in names:
+				parts = name.split("+") if name else [""]
+				if all(part in masks for part in parts):
+					found.add(sum(masks[part] for part in parts))
+			return found
+
+		wanted: dict[int, set[int]] = {}
+		keys = dict(FOCUS_KEYS) if mode == "focus" else dict(BROWSE_KEYS)
+		if mode == "browse":
+			for evdev in (*keyMap.LAYOUT, SPACE_KEY):
+				keys[evdev] = tuple(dict.fromkeys(keys.get(evdev, ()) + CHARACTER_COMBINATIONS))
+		for evdev, names in keys.items():
+			wanted.setdefault(evdev + 8, set()).update(combinations(names))
+		if mode == "browse":
+			for letter in BROWSE_CONTROL_LETTERS:
+				keycode = self._translator.keycodeFor(ord(letter), False)
+				if keycode is not None:
+					wanted.setdefault(keycode, set()).add(X.ControlMask)
+		return wanted
+
+	def _applyCapture(self, mode: CaptureMode) -> None:
+		self._captureMode = mode
+		root = self._display.screen().root
+		for keycode, masks in self._captured.items():
+			for mask in masks:
+				root.ungrab_key(keycode, mask)
+		self._captured = {}
+		catchers: list[tuple[int, int, error.CatchError]] = []
+		for keycode, bases in self._captureSet(mode).items():
+			for base in bases:
+				for lock in LOCK_COMBINATIONS:
+					catcher = error.CatchError(error.BadAccess)
+					root.grab_key(
+						keycode, base | lock, False, X.GrabModeAsync, X.GrabModeSync, onerror=catcher
+					)
+					catchers.append((keycode, base | lock, catcher))
+		self._display.sync()
+		refused = 0
+		for keycode, mask, catcher in catchers:
+			if catcher.get_error():
+				refused += 1
+			else:
+				self._captured.setdefault(keycode, set()).add(mask)
+		if refused:
+			log.debugWarning(f"{refused} key combinations for {mode} mode are held by another program")
+		log.debug(f"Keys captured for {mode} mode")
+
 	def _hold(self, hold: bool) -> None:
+		self._holdWanted = hold
 		d = self._display
 		if hold:
 			status = d.screen().root.grab_keyboard(False, X.GrabModeAsync, X.GrabModeAsync, X.CurrentTime)
@@ -436,13 +859,15 @@ class X11KeySource:
 			d.sync()
 			self._held = False
 			self._activeGrab = None
+			self._captureGrab = None
 
 	def _fake(self, keycode: int, isUp: bool) -> None:
 		d = self._display
-		if self._activeGrab is not None and not self._held:
-			# A key sent while an NVDA key's grab is active would come back to that grab, not reach the
-			# application.
+		if (self._activeGrab is not None or self._captureGrab is not None) and not self._held:
+			# A key sent while a grab of this source is active would come back to that grab, not reach
+			# the application.
 			d.ungrab_keyboard(X.CurrentTime)
 			self._activeGrab = None
+			self._captureGrab = None
 		xtest.fake_input(d, X.KeyRelease if isUp else X.KeyPress, keycode)
 		d.flush()
