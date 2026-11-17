@@ -8,6 +8,8 @@ The transcript holds what the synthesizer is given after symbols are spoken as w
 "a dot txt" and "Alt+N" is "Alt plus N".
 """
 
+import os
+import subprocess
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -269,3 +271,36 @@ def test_matePanel(desktop: DesktopSession):
 	step(desktop, "Escape")
 	desktopSession.activate(title)
 	assertQuitCleanly(desktop, nvda)
+
+
+def notificationDaemon() -> list[str]:
+	"""The command that runs mate-notification-daemon, which its package keeps in libexec, off PATH; the
+	dev shell names the package in XDG_DATA_DIRS for its settings schemas."""
+	for directory in os.environ.get("XDG_DATA_DIRS", "").split(":"):
+		if "-mate-notification-daemon-" in directory:
+			daemon = Path(directory.split("/share/")[0]) / "libexec" / "mate-notification-daemon"
+			if daemon.is_file():
+				return [str(daemon)]
+	raise AssertionError("mate-notification-daemon is not in the dev shell")
+
+
+def test_notifications(desktop: DesktopSession):
+	folder = makeFolder(Path.home() / "notify", "a.txt")
+	daemon = subprocess.Popen(notificationDaemon(), stderr=subprocess.DEVNULL)
+	try:
+		startPluma(desktop, folder / "a.txt")
+		nvda = startNVDA(desktop, "a dot txt (  slash notify) - Pluma", "edit multi line hello")
+		# Spoken as NVDA speaks a Windows toast: the title and the text, once, and the focus stays.
+		mark = desktop.mark()
+		subprocess.run(["notify-send", "Backup finished", "All 12 files were copied."], check=True)
+		desktop.expect("Backup finished All 12 files were copied.", since=mark)
+		subprocess.run(["notify-send", "Second", "Another one."], check=True)
+		desktop.expect("Second Another one.", since=mark)
+		time.sleep(1)
+		spoken = desktop.spokenSince(mark)
+		assert spoken == ["Backup finished All 12 files were copied.", "Second Another one."], spoken
+		step(desktop, "Insert+Tab", "edit multi line hello")
+		assertQuitCleanly(desktop, nvda)
+	finally:
+		daemon.terminate()
+		daemon.wait(5)

@@ -46,6 +46,8 @@ ROW_COLUMN_LIMIT = 12
 #: Objects visited at most, and how deep, to name an object from the text inside it.
 DESCENDANT_TEXT_LIMIT = 20
 DESCENDANT_TEXT_DEPTH = 4
+#: Objects visited at most to read a desktop notification's text.
+NOTIFICATION_TEXT_LIMIT = 40
 #: Objects visited at most to find a status bar in a window that has no Collection interface.
 STATUS_BAR_SEARCH_LIMIT = 400
 
@@ -250,6 +252,8 @@ class AtSpi(NVDAObject):
 			clsList.append(ProgressBar)
 		elif role == Role.TOOLTIP:
 			clsList.append(ToolTip)
+		elif role == Role.ALERT and self.atspiParentRole == "application":
+			clsList.append(DesktopNotification)
 		elif role == Role.ALERT:
 			clsList.append(Notification)
 		if self.atspiParentRole == "application":
@@ -402,8 +406,9 @@ class AtSpi(NVDAObject):
 			# GTK's open and save dialogs, which Windows users know as the Open and Save As dialogs.
 			return Role.DIALOG
 		if raw == "alert" and self.atspiParentRole == "application":
-			# GTK's message dialog is a top-level alert; Windows presents a message box as a dialog.
-			return Role.DIALOG
+			# GTK's message dialog is a top-level alert; Windows presents a message box as a dialog. A
+			# desktop notification is one that is not modal and never takes the focus.
+			return Role.DIALOG if "modal" in self.atspiStates else Role.ALERT
 		if raw == "invalid":
 			return Role.UNKNOWN
 		if raw == "button" and "Hyperlink" in self.atspiInterfaces:
@@ -986,6 +991,50 @@ class TopLevelWindow(AtSpi):
 	def _get_indexInParent(self) -> int | None:
 		siblings = _topLevelNodes()
 		return siblings.index(self.node) if self.node in siblings else None
+
+
+class DesktopNotification(Notification, AtSpi):
+	"""A notification from the desktop's notification daemon, a window of its own that never takes the
+	focus: spoken as NVDA speaks a Windows toast, its text alone, once."""
+
+	#: The notification spoken last, and its text, which a daemon announces both as it creates the
+	#: window and as it shows it.
+	_lastSpoken: tuple[tuple[str, str], str] | None = None
+
+	def _get_notificationText(self) -> str:
+		c = _client()
+		texts: list[str] = []
+		stack = [self.node]
+		visited = 0
+		try:
+			while stack and visited < NOTIFICATION_TEXT_LIMIT:
+				node = stack.pop()
+				visited += 1
+				stack.extend(reversed(childNodes(node, limit=NOTIFICATION_TEXT_LIMIT)))
+				if (
+					node != self.node
+					and c.role(node) in ("label", "text", "static")
+					and (name := c.name(node))
+				):
+					texts.append(name)
+		except NodeGone:
+			pass
+		return " ".join(texts)
+
+	def event_alert(self) -> None:
+		import config
+		import ui
+
+		if not config.conf["presentation"]["reportHelpBalloons"]:
+			return
+		text = self.notificationText
+		spoken = (self.node.key, text)
+		if not text or DesktopNotification._lastSpoken == spoken:
+			return
+		DesktopNotification._lastSpoken = spoken
+		ui.message(text)
+
+	event_show = event_alert
 
 
 class ComboBoxButton(AtSpi):
