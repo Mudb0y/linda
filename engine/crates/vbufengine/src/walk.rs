@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use futures_util::future::LocalBoxFuture;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use mirror::client::{Client, is_gone, is_timeout};
-use mirror::consts::{IFACE_ACCESSIBLE, IFACE_PROPERTIES, IFACE_TEXT, interface_bits};
+use mirror::consts::{
+    IFACE_ACCESSIBLE, IFACE_COLLECTION, IFACE_PROPERTIES, IFACE_TEXT, interface_bits,
+};
 use mirror::decode;
 use zbus::{Message, ObjectPath, Variant};
 
@@ -49,6 +51,55 @@ pub enum Field {
     Value,
     Relations,
     LinkUri,
+    /// A whole subtree in one Collection.GetTree: structure, names, descriptions, attributes and
+    /// the interfaces its properties show, leaving roles, states and text to ask for each object.
+    Tree,
+}
+
+/// New children of one parent from which a GetTree on the parent replaces one on each.
+const PARENT_TREE_CHILDREN: usize = 16;
+
+/// What a subtree's GetTree carries for each object. An interface's property is there only for an
+/// object that has the interface.
+const TREE_PROPERTIES: [&str; 10] = [
+    "Name",
+    "Description",
+    "Parent",
+    "ChildCount",
+    "Attributes",
+    "Text.CharacterCount",
+    "Table.NRows",
+    "Table.NColumns",
+    "Value.CurrentValue",
+    "TableCell.Position",
+];
+
+/// The match rule `(aiia{ss}iaiiasib)` matching everything; the bridge parses it for GetTree and
+/// does not apply it.
+type MatchAll = (
+    Vec<i32>,
+    i32,
+    HashMap<String, String>,
+    i32,
+    Vec<i32>,
+    i32,
+    Vec<String>,
+    i32,
+    bool,
+);
+
+fn match_all() -> MatchAll {
+    (
+        vec![0, 0],
+        1,
+        HashMap::new(),
+        1,
+        vec![0; 5],
+        1,
+        Vec::new(),
+        1,
+        false,
+    )
 }
 
 const BASE: [Field; 7] = [
@@ -105,6 +156,10 @@ pub struct Obj {
     pub escalate: bool,
     /// Set by the renderer: what its children were rendered with.
     pub child_ctx: crate::render::Ctx,
+    /// The interfaces are what a GetTree's properties showed, which leaves out some.
+    pub partial_interfaces: bool,
+    /// Its data is to come from a GetTree, its own or its parent's.
+    pub awaiting_tree: bool,
 }
 
 impl Obj {
@@ -131,7 +186,10 @@ pub fn has(states: [u32; 2], b: u32) -> bool {
 /// Roles whose name is always what they read as, so a label elsewhere does not change how they
 /// are rendered.
 fn name_is_content_by_role(role: u32) -> bool {
-    let nvda = NVDA_ROLES.get(role as usize).copied().unwrap_or(ROLE_UNKNOWN);
+    let nvda = NVDA_ROLES
+        .get(role as usize)
+        .copied()
+        .unwrap_or(ROLE_UNKNOWN);
     matches!(
         nvda,
         ROLE_LINK
@@ -160,7 +218,7 @@ pub struct Outer {
     pub reuse: bool,
 }
 
-type Reply = (u64, zbus::Result<Message>);
+type Reply = (u64, zbus::Result<Message>, Duration);
 
 pub struct Walk {
     client: Rc<Client>,
@@ -185,11 +243,20 @@ pub struct Walk {
     /// Starting points that no longer exist in the application.
     pub gone: Vec<String>,
     pub first_link: Option<String>,
+    /// The longest any one call took, and the call.
+    pub slowest: (Duration, Option<Field>, String),
+    /// Time spent waiting with the window full.
+    started: Instant,
     starts: HashSet<String>,
 }
 
 impl Walk {
-    pub fn new(client: Rc<Client>, outer: Option<Outer>, max_objects: usize, max_time: Duration) -> Self {
+    pub fn new(
+        client: Rc<Client>,
+        outer: Option<Outer>,
+        max_objects: usize,
+        max_time: Duration,
+    ) -> Self {
         Walk {
             client,
             objs: HashMap::new(),
@@ -210,6 +277,8 @@ impl Walk {
             reused: HashSet::new(),
             gone: Vec::new(),
             first_link: None,
+            slowest: (Duration::ZERO, None, String::new()),
+            started: Instant::now(),
             starts: HashSet::new(),
         }
     }
@@ -230,12 +299,18 @@ impl Walk {
     }
 
     fn queue(&mut self, path: &str, f: Field) {
-        let Some(o) = self.objs.get_mut(path) else { return };
+        let Some(o) = self.objs.get_mut(path) else {
+            return;
+        };
         if o.queued & bit(f) != 0 {
             return;
         }
         o.queued |= bit(f);
         self.heap.push(Reverse((o.key.clone(), f, path.to_owned())));
+    }
+
+    pub fn seconds(&self) -> f64 {
+        self.started.elapsed().as_secs_f64()
     }
 
     pub fn idle(&self) -> bool {
@@ -255,23 +330,34 @@ impl Walk {
             return false;
         }
         while self.inflight.len() < WINDOW {
-            let Some(Reverse((_, f, path))) = self.heap.pop() else { break };
+            let Some(Reverse((_, f, path))) = self.heap.pop() else {
+                break;
+            };
             let id = self.next_id;
             self.next_id += 1;
             self.calls += 1;
-            self.inflight.push(issue(self.client.clone(), id, path.clone(), f));
+            self.inflight
+                .push(issue(self.client.clone(), id, path.clone(), f));
             self.pending.insert(id, (path, f));
         }
-        let Some((id, r)) = self.inflight.next().await else {
+        let Some((id, r, took)) = self.inflight.next().await else {
             return false;
         };
         if let Some((path, f)) = self.pending.remove(&id) {
+            if took > self.slowest.0 {
+                self.slowest = (took, Some(f), path.clone());
+            }
             self.reply(path, f, r);
         }
         !self.idle()
     }
 
     fn reply(&mut self, path: String, f: Field, r: zbus::Result<Message>) {
+        if f == Field::Tree {
+            self.tree(&path, r.as_ref().ok());
+            self.finish(&path, f);
+            return;
+        }
         let msg = match r {
             Ok(m) => m,
             Err(e) => {
@@ -309,7 +395,9 @@ impl Walk {
     }
 
     fn finish(&mut self, path: &str, f: Field) {
-        let Some(o) = self.objs.get_mut(path) else { return };
+        let Some(o) = self.objs.get_mut(path) else {
+            return;
+        };
         let was = o.complete();
         o.done |= bit(f);
         if !was && o.complete() {
@@ -318,7 +406,9 @@ impl Walk {
     }
 
     fn children(&mut self, path: &str, msg: &Message) {
-        let Ok(kids) = decode::children(msg) else { return };
+        let Ok(kids) = decode::children(msg) else {
+            return;
+        };
         let app = self.client.app_bus.clone();
         let mut own = Vec::with_capacity(kids.len());
         let mut here = HashSet::with_capacity(kids.len());
@@ -340,23 +430,170 @@ impl Walk {
             self.truncated = true;
             return;
         }
-        let key = self.objs.get(path).map(|o| o.key.clone()).unwrap_or_default();
+        let key = self
+            .objs
+            .get(path)
+            .map(|o| o.key.clone())
+            .unwrap_or_default();
+        let new: HashSet<&String> = own.iter().filter(|c| self.is_new(c)).collect();
+        // Many new children come cheaper in one GetTree on their parent, which Firefox answers in a
+        // fraction of the time it takes to answer one for each.
+        let through_parent = new.len() >= PARENT_TREE_CHILDREN && new.len() * 2 >= own.len();
         for (i, c) in own.iter().enumerate() {
             let mut k = key.clone();
             k.push(i as u32);
-            if self.reusable(c, path) {
+            if new.contains(c) {
+                self.admit_tree(c, Some(path.to_owned()), k, !through_parent);
+            } else if self.reusable(c, path) {
                 self.reused.insert(c.clone());
-                continue;
+            } else {
+                self.admit(c, Some(path.to_owned()), k);
             }
-            self.admit(c, Some(path.to_owned()), k);
+        }
+        if through_parent {
+            self.queue(path, Field::Tree);
         }
         if let Some(o) = self.objs.get_mut(path) {
             o.children = own;
         }
     }
 
+    /// An object the document did not hold before a change, in a walk of the changed parts: its
+    /// whole subtree is new, and comes cheapest in one GetTree.
+    fn is_new(&self, path: &str) -> bool {
+        self.outer
+            .as_ref()
+            .is_some_and(|o| !o.objs.borrow().contains_key(path))
+    }
+
+    fn admit_tree(&mut self, path: &str, parent: Option<String>, key: Vec<u32>, own_call: bool) {
+        let o = self.objs.entry(path.to_owned()).or_default();
+        o.parent = parent;
+        o.key = key;
+        o.awaiting_tree = true;
+        if own_call {
+            self.queue(path, Field::Tree);
+        }
+    }
+
+    /// Takes in a subtree from its GetTree: the objects waiting for it, and everything new under
+    /// them. Without an answer, they are asked for object by object.
+    fn tree(&mut self, path: &str, msg: Option<&Message>) {
+        let entries = msg.and_then(|m| tree_entries(m, &self.client.app_bus).ok());
+        let Some(entries) = entries.filter(|e| e.first().is_some_and(|f| f.path == path)) else {
+            let mut waiting: Vec<String> = Vec::new();
+            if let Some(o) = self.objs.get(path) {
+                if o.awaiting_tree {
+                    waiting.push(path.to_owned());
+                }
+                waiting.extend(
+                    o.children
+                        .iter()
+                        .filter(|c| self.objs.get(*c).is_some_and(|k| k.awaiting_tree))
+                        .cloned(),
+                );
+            }
+            for w in waiting {
+                if let Some(o) = self.objs.get_mut(&w) {
+                    o.awaiting_tree = false;
+                }
+                for f in BASE {
+                    self.queue(&w, f);
+                }
+            }
+            return;
+        };
+        let given = bit(Field::Children)
+            | bit(Field::Name)
+            | bit(Field::Description)
+            | bit(Field::Interfaces)
+            | bit(Field::Attributes)
+            | bit(Field::TableRows)
+            | bit(Field::TableColumns);
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        let mut taken: Vec<String> = Vec::with_capacity(entries.len());
+        let mut filled: HashSet<String> = HashSet::new();
+        for e in entries {
+            let (parent, key) = if let Some(o) = self.objs.get(&e.path) {
+                if !o.awaiting_tree {
+                    continue;
+                }
+                (o.parent.clone(), o.key.clone())
+            } else {
+                let Some(p) = e.parent.clone().filter(|p| filled.contains(p)) else {
+                    continue;
+                };
+                if self.objs.len() >= self.max_objects {
+                    self.truncated = true;
+                    continue;
+                }
+                let n = counts.entry(p.clone()).or_default();
+                let mut key = self.objs[&p].key.clone();
+                key.push(*n as u32);
+                *n += 1;
+                if let Some(po) = self.objs.get_mut(&p) {
+                    po.children.push(e.path.clone());
+                }
+                (Some(p), key)
+            };
+            let o = self.objs.entry(e.path.clone()).or_default();
+            o.parent = parent;
+            o.key = key;
+            o.awaiting_tree = false;
+            filled.insert(e.path.clone());
+            o.name = e.name;
+            o.description = e.description;
+            o.attributes = e.attributes;
+            o.interfaces = iface_bit(IFACE_ACCESSIBLE);
+            o.partial_interfaces = true;
+            if let Some(chars) = e.characters {
+                o.interfaces |= iface_bit(IFACE_TEXT);
+                if chars == 0 {
+                    o.text = Some(String::new());
+                    o.queued |= bit(Field::Text);
+                    o.done |= bit(Field::Text);
+                } else if Some(chars) == e.child_count {
+                    // Text that is all embedded objects, one for each child.
+                    o.text = Some("\u{fffc}".repeat(chars as usize));
+                    o.queued |= bit(Field::Text);
+                    o.done |= bit(Field::Text);
+                } else if e.child_count == Some(0)
+                    && o.attr("explicit-name") != Some("true")
+                    && o.name.encode_utf16().count() == chars as usize
+                {
+                    // A leaf named from its own text, such as a link or a heading, reads as its name.
+                    o.text = Some(o.name.clone());
+                    o.queued |= bit(Field::Text);
+                    o.done |= bit(Field::Text);
+                }
+            }
+            if let (Some(r), Some(c)) = (e.rows, e.columns) {
+                o.interfaces |= iface_bit(IFACE_TABLE);
+                o.table = Some((r, c));
+            }
+            if let Some(v) = e.value {
+                o.interfaces |= iface_bit(IFACE_VALUE);
+                o.value = Some(v);
+                o.queued |= bit(Field::Value);
+                o.done |= bit(Field::Value);
+            }
+            if e.cell {
+                o.interfaces |= iface_bit(IFACE_TABLE_CELL);
+            }
+            o.queued |= given;
+            o.done |= given;
+            taken.push(e.path);
+        }
+        for p in taken {
+            self.queue(&p, Field::Role);
+            self.queue(&p, Field::States);
+        }
+    }
+
     fn reusable(&self, child: &str, parent: &str) -> bool {
-        let Some(outer) = &self.outer else { return false };
+        let Some(outer) = &self.outer else {
+            return false;
+        };
         if !outer.reuse || outer.dirty.contains(child) {
             return false;
         }
@@ -368,10 +605,10 @@ impl Walk {
     }
 
     fn parent_of(&self, path: &str) -> Option<String> {
-        if let Some(o) = self.objs.get(path) {
-            if o.parent.is_some() {
-                return o.parent.clone();
-            }
+        if let Some(o) = self.objs.get(path)
+            && o.parent.is_some()
+        {
+            return o.parent.clone();
         }
         self.outer.as_ref()?.objs.borrow().get(path)?.parent.clone()
     }
@@ -395,16 +632,36 @@ impl Walk {
             if i & iface_bit(IFACE_TABLE) != 0 {
                 more.extend([Field::TableRows, Field::TableColumns]);
             }
-            if i & iface_bit(IFACE_TABLE_CELL) != 0 {
+            let rn = role_name(o.role);
+            let cell_role =
+                o.known(Field::Role) && matches!(rn, "table cell" | "column header" | "row header");
+            if i & iface_bit(IFACE_TABLE_CELL) != 0 || (o.partial_interfaces && cell_role) {
                 more.extend([Field::CellSpan, Field::ColumnHeaders, Field::RowHeaders]);
             }
-            if i & iface_bit(IFACE_VALUE) != 0 && o.known(Field::Attributes) && o.attr("valuetext").is_none() {
+            let value_role = o.known(Field::Role)
+                && matches!(
+                    rn,
+                    "slider" | "spin button" | "progress bar" | "level bar" | "scroll bar" | "dial"
+                );
+            if (i & iface_bit(IFACE_VALUE) != 0 || (o.partial_interfaces && value_role))
+                && o.known(Field::Attributes)
+                && o.attr("valuetext").is_none()
+            {
                 more.push(Field::Value);
             }
         }
-        if o.known(Field::Attributes) && o.known(Field::Role) && o.attr("explicit-name") == Some("true") {
-            let nvda = NVDA_ROLES.get(o.role as usize).copied().unwrap_or(ROLE_UNKNOWN);
-            if !name_is_content_by_role(o.role) || nvda == ROLE_CHECKBOX || role_name(o.role) == "radio button" {
+        if o.known(Field::Attributes)
+            && o.known(Field::Role)
+            && o.attr("explicit-name") == Some("true")
+        {
+            let nvda = NVDA_ROLES
+                .get(o.role as usize)
+                .copied()
+                .unwrap_or(ROLE_UNKNOWN);
+            if !name_is_content_by_role(o.role)
+                || nvda == ROLE_CHECKBOX
+                || role_name(o.role) == "radio button"
+            {
                 more.push(Field::Relations);
             }
         }
@@ -421,10 +678,10 @@ impl Walk {
         for f in more {
             self.queue(path, f);
         }
-        if let Some(l) = link {
-            if self.objs.contains_key(&l) {
-                self.queue(&l, Field::LinkUri);
-            }
+        if let Some(l) = link
+            && self.objs.contains_key(&l)
+        {
+            self.queue(&l, Field::LinkUri);
         }
     }
 
@@ -444,34 +701,78 @@ impl Walk {
 
 fn issue(client: Rc<Client>, id: u64, path: String, f: Field) -> LocalBoxFuture<'static, Reply> {
     Box::pin(async move {
+        let t = Instant::now();
         let p = path.as_str();
         let r = match f {
             Field::Children => client.call(p, IFACE_ACCESSIBLE, "GetChildren", &()).await,
             Field::Role => client.call(p, IFACE_ACCESSIBLE, "GetRole", &()).await,
             Field::States => client.call(p, IFACE_ACCESSIBLE, "GetState", &()).await,
-            Field::Name => client.call(p, IFACE_PROPERTIES, "Get", &(IFACE_ACCESSIBLE, "Name")).await,
+            Field::Name => {
+                client
+                    .call(p, IFACE_PROPERTIES, "Get", &(IFACE_ACCESSIBLE, "Name"))
+                    .await
+            }
             Field::Description => {
                 client
-                    .call(p, IFACE_PROPERTIES, "Get", &(IFACE_ACCESSIBLE, "Description"))
+                    .call(
+                        p,
+                        IFACE_PROPERTIES,
+                        "Get",
+                        &(IFACE_ACCESSIBLE, "Description"),
+                    )
                     .await
             }
             Field::Interfaces => client.call(p, IFACE_ACCESSIBLE, "GetInterfaces", &()).await,
             Field::Attributes => client.call(p, IFACE_ACCESSIBLE, "GetAttributes", &()).await,
             Field::Text => client.call(p, IFACE_TEXT, "GetText", &(0i32, -1i32)).await,
-            Field::TableRows => client.call(p, IFACE_PROPERTIES, "Get", &(IFACE_TABLE, "NRows")).await,
-            Field::TableColumns => client.call(p, IFACE_PROPERTIES, "Get", &(IFACE_TABLE, "NColumns")).await,
-            Field::CellSpan => client.call(p, IFACE_TABLE_CELL, "GetRowColumnSpan", &()).await,
-            Field::ColumnHeaders => client.call(p, IFACE_TABLE_CELL, "GetColumnHeaderCells", &()).await,
-            Field::RowHeaders => client.call(p, IFACE_TABLE_CELL, "GetRowHeaderCells", &()).await,
+            Field::TableRows => {
+                client
+                    .call(p, IFACE_PROPERTIES, "Get", &(IFACE_TABLE, "NRows"))
+                    .await
+            }
+            Field::TableColumns => {
+                client
+                    .call(p, IFACE_PROPERTIES, "Get", &(IFACE_TABLE, "NColumns"))
+                    .await
+            }
+            Field::CellSpan => {
+                client
+                    .call(p, IFACE_TABLE_CELL, "GetRowColumnSpan", &())
+                    .await
+            }
+            Field::ColumnHeaders => {
+                client
+                    .call(p, IFACE_TABLE_CELL, "GetColumnHeaderCells", &())
+                    .await
+            }
+            Field::RowHeaders => {
+                client
+                    .call(p, IFACE_TABLE_CELL, "GetRowHeaderCells", &())
+                    .await
+            }
             Field::Value => {
                 client
                     .call(p, IFACE_PROPERTIES, "Get", &(IFACE_VALUE, "CurrentValue"))
                     .await
             }
-            Field::Relations => client.call(p, IFACE_ACCESSIBLE, "GetRelationSet", &()).await,
+            Field::Relations => {
+                client
+                    .call(p, IFACE_ACCESSIBLE, "GetRelationSet", &())
+                    .await
+            }
             Field::LinkUri => client.call(p, IFACE_HYPERLINK, "GetURI", &(0i32,)).await,
+            Field::Tree => {
+                client
+                    .call(
+                        p,
+                        IFACE_COLLECTION,
+                        "GetTree",
+                        &(match_all(), TREE_PROPERTIES.to_vec()),
+                    )
+                    .await
+            }
         };
-        (id, r)
+        (id, r, t.elapsed())
     })
 }
 
@@ -533,11 +834,112 @@ fn decode_into(o: &mut Obj, f: Field, msg: &Message) -> zbus::Result<()> {
             o.table = Some((o.table.map_or(0, |t| t.0), n));
         }
         Field::CellSpan => o.cell = Some(row_column_span(msg)?),
-        Field::ColumnHeaders => o.column_headers = decode::children(msg)?.into_iter().map(|r| r.path).collect(),
-        Field::RowHeaders => o.row_headers = decode::children(msg)?.into_iter().map(|r| r.path).collect(),
+        Field::ColumnHeaders => {
+            o.column_headers = decode::children(msg)?.into_iter().map(|r| r.path).collect()
+        }
+        Field::RowHeaders => {
+            o.row_headers = decode::children(msg)?.into_iter().map(|r| r.path).collect()
+        }
         Field::Value => o.value = Some(number_property(msg)?),
         Field::Relations => o.label_visible = labelled_by(msg)?,
         Field::LinkUri => o.link_uri = Some(decode::string(msg)?),
+        Field::Tree => {}
     }
     Ok(())
+}
+
+/// One object of a GetTree reply.
+struct Entry {
+    path: String,
+    parent: Option<String>,
+    name: String,
+    description: String,
+    child_count: Option<i32>,
+    attributes: Vec<(String, String)>,
+    characters: Option<i32>,
+    rows: Option<i32>,
+    columns: Option<i32>,
+    value: Option<f64>,
+    cell: bool,
+}
+
+fn variant_str<'v>(v: &'v Variant<'_>) -> Option<&'v str> {
+    match v {
+        Variant::Str(s) => Some(s.as_str()),
+        Variant::Variant(inner) => variant_str(inner),
+        _ => None,
+    }
+}
+
+fn variant_parent(v: &Variant<'_>) -> Option<(String, String)> {
+    match v {
+        Variant::Structure(s) => match s.fields() {
+            [Variant::Str(bus), Variant::ObjectPath(p)] => {
+                Some((bus.as_str().to_owned(), p.as_str().to_owned()))
+            }
+            _ => None,
+        },
+        Variant::Variant(inner) => variant_parent(inner),
+        _ => None,
+    }
+}
+
+fn variant_attributes(v: &Variant<'_>) -> Option<Vec<(String, String)>> {
+    match v {
+        Variant::Dict(d) => {
+            let mut out = Vec::new();
+            for (k, val) in d.iter() {
+                out.push((variant_str(k)?.to_owned(), variant_str(val)?.to_owned()));
+            }
+            out.sort();
+            Some(out)
+        }
+        Variant::Variant(inner) => variant_attributes(inner),
+        _ => None,
+    }
+}
+
+type RawEntry<'a> = ((&'a str, ObjectPath<'a>), HashMap<&'a str, Variant<'a>>);
+
+/// The entries of a GetTree reply that belong to the application, in its order: each parent before
+/// its children, and children in order.
+fn tree_entries(msg: &Message, app: &str) -> zbus::Result<Vec<Entry>> {
+    let body = msg.body();
+    let raw: Vec<RawEntry<'_>> = body.deserialize()?;
+    let mut out = Vec::with_capacity(raw.len());
+    for ((bus, path), props) in &raw {
+        if *bus != app {
+            continue;
+        }
+        let number = |k: &str| props.get(k).and_then(variant_number).map(|n| n as i32);
+        out.push(Entry {
+            path: path.as_str().to_owned(),
+            parent: props
+                .get("Parent")
+                .and_then(variant_parent)
+                .filter(|(b, _)| b == app)
+                .map(|(_, p)| p),
+            name: props
+                .get("Name")
+                .and_then(variant_str)
+                .unwrap_or("")
+                .to_owned(),
+            description: props
+                .get("Description")
+                .and_then(variant_str)
+                .unwrap_or("")
+                .to_owned(),
+            child_count: number("ChildCount"),
+            attributes: props
+                .get("Attributes")
+                .and_then(variant_attributes)
+                .unwrap_or_default(),
+            characters: number("Text.CharacterCount"),
+            rows: number("Table.NRows"),
+            columns: number("Table.NColumns"),
+            value: props.get("Value.CurrentValue").and_then(variant_number),
+            cell: props.contains_key("TableCell.Position"),
+        });
+    }
+    Ok(out)
 }

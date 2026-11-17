@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import warnings
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
@@ -338,7 +339,10 @@ def named(root, role, name: str):
 
 def documentURL(document) -> str:
 	Atspi = desktopSession._atspi()
-	return Atspi.Document.get_attribute_value(document, "DocURL") or ""
+	# libatspi marks every way to read a document's attributes deprecated, and offers no other.
+	with warnings.catch_warnings():
+		warnings.simplefilter("ignore", DeprecationWarning)
+		return (Atspi.Document.get_document_attributes(document) or {}).get("DocURL", "")
 
 
 def batches(engine: ModuleType, until: float, done) -> list:

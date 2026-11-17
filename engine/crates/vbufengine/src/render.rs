@@ -34,7 +34,11 @@ pub struct Ctx {
 /// the ATK bridge counts up from 1 and never reuses one, Qt counts from 2^31. A path without one
 /// is given no field.
 pub fn id_of(path: &str) -> Option<i32> {
-    path.rsplit('/').next()?.parse::<u32>().ok().map(|n| n as i32)
+    path.rsplit('/')
+        .next()?
+        .parse::<u32>()
+        .ok()
+        .map(|n| n as i32)
 }
 
 /// Gecko fills the second unit of each astral character with U+FEFF, so that its text has as many
@@ -63,25 +67,25 @@ pub fn name_for_url(url: &str) -> String {
     let find = |c: char| url.iter().position(|x| *x == c);
     let rfind = |c: char, before: usize| url[..before.min(url.len())].iter().rposition(|x| *x == c);
     let colon = find(':');
-    if let Some(cp) = colon {
-        if url[cp..].iter().take(3).collect::<String>() != "://" {
-            let lower: String = url.iter().take(11).collect::<String>().to_lowercase();
-            if lower == "data:image/" {
-                return String::new();
-            }
-            return url[cp + 1..].iter().collect();
+    if let Some(cp) = colon
+        && url[cp..].iter().take(3).collect::<String>() != "://"
+    {
+        let lower: String = url.iter().take(11).collect::<String>().to_lowercase();
+        if lower == "data:image/" {
+            return String::new();
         }
+        return url[cp + 1..].iter().collect();
     }
     let query = rfind('?', url.len());
     let anchor = rfind('#', url.len());
     let mut strip_extension = true;
     let path_end_excl = query.or(anchor).unwrap_or(url.len());
     let mut end: Option<usize> = path_end_excl.checked_sub(1);
-    if let Some(e) = end {
-        if url[e] == '/' {
-            end = e.checked_sub(1);
-            strip_extension = false;
-        }
+    if let Some(e) = end
+        && url[e] == '/'
+    {
+        end = e.checked_sub(1);
+        strip_extension = false;
     }
     let mut start = 0;
     if let Some(e) = end {
@@ -94,12 +98,11 @@ pub fn name_for_url(url: &str) -> String {
                 }
             }
         }
-        if strip_extension {
-            if let Some(dot) = rfind('.', e + 1) {
-                if dot > start {
-                    end = Some(dot - 1);
-                }
-            }
+        if strip_extension
+            && let Some(dot) = rfind('.', e + 1)
+            && dot > start
+        {
+            end = Some(dot - 1);
         }
     }
     let mut name: String = match end {
@@ -327,7 +330,10 @@ impl<'a> Renderer<'a> {
         } else {
             String::new()
         };
-        let mut role = NVDA_ROLES.get(o.role as usize).copied().unwrap_or(ROLE_UNKNOWN);
+        let mut role = NVDA_ROLES
+            .get(o.role as usize)
+            .copied()
+            .unwrap_or(ROLE_UNKNOWN);
         let mut name: String = o.name.clone();
         let mut text: &str = &full_text;
         if raw_name == "static" && tag == Some("img") {
@@ -338,28 +344,47 @@ impl<'a> Renderer<'a> {
             }
             text = "";
         } else if raw_name == "text" || raw_name == "static" {
-            role = if has(raw, ATSPI_EDITABLE) { ROLE_EDITABLETEXT } else { ROLE_STATICTEXT };
+            role = if has(raw, ATSPI_EDITABLE) {
+                ROLE_EDITABLETEXT
+            } else {
+                ROLE_STATICTEXT
+            };
         }
         let states = nvda_states(raw, role);
         let is_root = path == self.root;
         let is_editable = has(raw, ATSPI_EDITABLE) && role != ROLE_DOCUMENT;
         let in_link = ctx.in_link || role == ROLE_LINK;
-        let embedded_app = raw_name == "embedded" || (!is_root && (raw_name == "application" || raw_name == "dialog"));
+        let embedded_app = raw_name == "embedded"
+            || (!is_root && (raw_name == "application" || raw_name == "dialog"));
         let unavailable = states.contains(&STATE_UNAVAILABLE);
-        let never_interactive = !is_editable && (is_root || role == ROLE_DOCUMENT || role == ROLE_INTERNALFRAME);
+        let never_interactive =
+            !is_editable && (is_root || role == ROLE_DOCUMENT || role == ROLE_INTERNALFRAME);
         let mut interactive = !never_interactive
-            && (is_editable || in_link || states.contains(&STATE_FOCUSABLE) || unavailable || embedded_app);
+            && (is_editable
+                || in_link
+                || states.contains(&STATE_FOCUSABLE)
+                || unavailable
+                || embedded_app);
         let name_explicit = o.attr("explicit-name") == Some("true");
         let img_map = role == ROLE_GRAPHIC && !o.children.is_empty();
         let name_is_content = embedded_app
             || matches!(
                 role,
-                ROLE_LINK | ROLE_BUTTON | ROLE_TOGGLEBUTTON | ROLE_MENUITEM | ROLE_HEADING | ROLE_TAB | ROLE_MENUBUTTON
+                ROLE_LINK
+                    | ROLE_BUTTON
+                    | ROLE_TOGGLEBUTTON
+                    | ROLE_MENUITEM
+                    | ROLE_HEADING
+                    | ROLE_TAB
+                    | ROLE_MENUBUTTON
             )
             || (role == ROLE_GRAPHIC && !img_map)
             || (role == ROLE_STATICTEXT && !is_editable)
             || ((role == ROLE_CHECKBOX || role == ROLE_RADIOBUTTON) && !o.label_visible);
-        let label_visible = name_explicit && !name.is_empty() && (!name_is_content || role == ROLE_TABLE) && o.label_visible;
+        let label_visible = name_explicit
+            && !name.is_empty()
+            && (!name_is_content || role == ROLE_TABLE)
+            && o.label_visible;
 
         let is_block = if has(raw, ATSPI_MULTI_LINE) {
             true
@@ -368,7 +393,13 @@ impl<'a> Renderer<'a> {
         } else {
             matches!(
                 role,
-                ROLE_TABLE | ROLE_TABLECELL | ROLE_SECTION | ROLE_DOCUMENT | ROLE_INTERNALFRAME | ROLE_UNKNOWN | ROLE_SEPARATOR
+                ROLE_TABLE
+                    | ROLE_TABLECELL
+                    | ROLE_SECTION
+                    | ROLE_DOCUMENT
+                    | ROLE_INTERNALFRAME
+                    | ROLE_UNKNOWN
+                    | ROLE_SEPARATOR
             )
         };
 
@@ -455,7 +486,10 @@ impl<'a> Renderer<'a> {
         out.push(b'C' as u16);
         push(out, &format!("{},{},", self.doc_handle, id));
         let flags_at = out.len();
-        push(out, &format!("{},{};", if is_block { FLAG_BLOCK } else { 0 }, field.len()));
+        push(
+            out,
+            &format!("{},{};", if is_block { FLAG_BLOCK } else { 0 }, field.len()),
+        );
         for (k, v) in &field {
             push_string(out, k);
             push_string(out, v);
@@ -471,7 +505,9 @@ impl<'a> Renderer<'a> {
             || raw_name == "tree table";
         let text_unneeded_space = !text.is_empty()
             && !is_editable
-            && text.chars().all(|c| c != '\n' && c != EMBEDDED_OBJECT && c.is_whitespace());
+            && text
+                .chars()
+                .all(|c| c != '\n' && c != EMBEDDED_OBJECT && c.is_whitespace());
         let render_children = !(text_unneeded_space
             || (role == ROLE_COMBOBOX && !is_editable)
             || render_selected_only
@@ -545,17 +581,22 @@ impl<'a> Renderer<'a> {
 
         let length = self.units - start_units;
         let useful = length > 3 || self.useful_units > start_useful;
-        if !is_editable && (name_is_content || role == ROLE_SECTION || role == ROLE_TEXTFRAME) && !useful {
+        if !is_editable
+            && (name_is_content || role == ROLE_SECTION || role == ROLE_TEXTFRAME)
+            && !useful
+        {
             if !name.is_empty() {
                 self.text(&name);
-            } else if role == ROLE_LINK {
-                if let Some(uri) = o.link_uri.as_deref() {
-                    self.text(&name_for_url(uri));
-                }
+            } else if role == ROLE_LINK
+                && let Some(uri) = o.link_uri.as_deref()
+            {
+                self.text(&name_for_url(uri));
             }
         }
-        if matches!(role, ROLE_TABLECELL | ROLE_TABLEROWHEADER | ROLE_TABLECOLUMNHEADER | ROLE_UNKNOWN)
-            && self.units == start_units
+        if matches!(
+            role,
+            ROLE_TABLECELL | ROLE_TABLEROWHEADER | ROLE_TABLECOLUMNHEADER | ROLE_UNKNOWN
+        ) && self.units == start_units
         {
             self.text(EMPTY_TEXT);
             self.out[flags_at] = b'0' as u16;
@@ -567,17 +608,20 @@ impl<'a> Renderer<'a> {
         }
         self.out.push(b'E' as u16);
 
-        let is_row_group = in_table && o.cell.is_none() && o.table.is_none() && role != ROLE_TABLEROW;
+        let is_row_group =
+            in_table && o.cell.is_none() && o.table.is_none() && role != ROLE_TABLEROW;
         self.marks.push(Mark {
             path: path.to_owned(),
-            child_reuse: !child_ctx.no_reuse && !(in_table && o.cell.is_none()) && child_ctx.table_id.is_none(),
+            child_reuse: !child_ctx.no_reuse
+                && !(in_table && o.cell.is_none())
+                && child_ctx.table_id.is_none(),
             escalate: is_row_group,
             child_ctx,
         });
-        if let Some(c) = selected_child {
-            if let Some(m) = self.marks.iter_mut().rev().find(|m| m.path == c) {
-                m.escalate = true;
-            }
+        if let Some(c) = selected_child
+            && let Some(m) = self.marks.iter_mut().rev().find(|m| m.path == c)
+        {
+            m.escalate = true;
         }
     }
 
@@ -597,12 +641,14 @@ impl<'a> Renderer<'a> {
     /// The name of the item selected in a combo box's popup.
     fn combo_value(&self, o: &Obj) -> Option<String> {
         for c in &o.children {
-            let Some(popup) = self.objs.get(c) else { continue };
+            let Some(popup) = self.objs.get(c) else {
+                continue;
+            };
             for item in &popup.children {
-                if let Some(i) = self.objs.get(item) {
-                    if has(i.states, ATSPI_SELECTED) {
-                        return Some(i.name.clone());
-                    }
+                if let Some(i) = self.objs.get(item)
+                    && has(i.states, ATSPI_SELECTED)
+                {
+                    return Some(i.name.clone());
                 }
             }
         }
@@ -618,16 +664,101 @@ mod tests {
     fn names_for_urls_follow_utils_cpp() {
         assert_eq!(name_for_url("file:///tmp/pages/second.html"), "second");
         assert_eq!(name_for_url("https://example.com/"), "example.com");
-        assert_eq!(name_for_url("https://example.com/a/b/picture.png?x=1#top"), "picture x=1 top");
-        assert_eq!(name_for_url("mailto:someone@example.com"), "someone@example.com");
+        assert_eq!(
+            name_for_url("https://example.com/a/b/picture.png?x=1#top"),
+            "picture x=1 top"
+        );
+        assert_eq!(
+            name_for_url("mailto:someone@example.com"),
+            "someone@example.com"
+        );
         assert_eq!(name_for_url("data:image/png;base64,AAAA"), "");
         assert_eq!(name_for_url("picture.png"), "picture");
+    }
+
+    const TEXT: u32 = 1 << 13;
+    const VISIBLE_ENABLED: [u32; 2] = [(1 << 30) | (1 << 8) | (1 << 24), 0];
+
+    fn obj(role: u32, parent: Option<&str>, text: Option<&str>, children: &[&str]) -> Obj {
+        Obj {
+            parent: parent.map(str::to_owned),
+            children: children.iter().map(|c| (*c).to_owned()).collect(),
+            role,
+            states: VISIBLE_ENABLED,
+            interfaces: if text.is_some() { TEXT } else { 0 },
+            text: text.map(str::to_owned),
+            ..Obj::default()
+        }
+    }
+
+    fn page() -> HashMap<String, Obj> {
+        let mut objs = HashMap::new();
+        objs.insert(
+            "/a/1".into(),
+            obj(95, None, Some("\u{fffc}\u{fffc}"), &["/a/2", "/a/4"]),
+        );
+        objs.insert(
+            "/a/2".into(),
+            obj(73, Some("/a/1"), Some("Hi \u{fffc}"), &["/a/3"]),
+        );
+        let mut link = obj(88, Some("/a/2"), Some("there"), &[]);
+        link.name = "there".into();
+        objs.insert("/a/3".into(), link);
+        objs.insert("/a/4".into(), obj(56, Some("/a/1"), Some(""), &[]));
+        objs
+    }
+
+    fn decoded(out: &[u16]) -> String {
+        String::from_utf16(out).unwrap()
+    }
+
+    #[test]
+    fn a_document_is_written_in_order_with_its_fields() {
+        let objs = page();
+        let none = HashSet::new();
+        let mut r = Renderer::new(&objs, 7, "/a/1", false, &none);
+        r.render("/a/1", Ctx::default());
+        let s = decoded(&r.out);
+        assert!(s.starts_with("C7,1,"), "{s}");
+        let hi = s.find("T3:Hi 0;").expect("the paragraph's text");
+        let link = s.find("C7,3,").expect("the link's field");
+        let there = s.find("T5:there0;").expect("the link's text");
+        assert!(hi < link && link < there, "{s}");
+        // An empty cell reads as a space and is not a block of its own.
+        assert!(s.contains("C7,4,0,"), "{s}");
+        assert!(s.ends_with("T1: 0;EE"), "{s}");
+        assert_eq!(r.nodes, 4);
+        assert_eq!(r.marks.len(), 4);
+    }
+
+    #[test]
+    fn an_update_replaces_a_field_and_keeps_the_children_it_is_told_to() {
+        let mut objs = page();
+        for o in objs.values_mut() {
+            o.rendered = true;
+        }
+        let keep: HashSet<String> = ["/a/3".to_owned()].into();
+        let mut r = Renderer::new(&objs, 7, "/a/1", false, &keep);
+        r.replace("/a/2");
+        let s = decoded(&r.out);
+        assert!(s.starts_with("S7,2;C7,2,"), "{s}");
+        assert!(s.contains("T3:Hi 0;R7,3;E"), "{s}");
+        assert!(!s.contains("there"), "{s}");
+        objs.get_mut("/a/3").unwrap().states = [0, 0];
+        let none = HashSet::new();
+        let mut r = Renderer::new(&objs, 7, "/a/1", true, &none);
+        r.render("/a/1", Ctx::default());
+        // The top of a document still being walked stops at the first object not complete.
+        assert_eq!(decoded(&r.out), "");
     }
 
     #[test]
     fn ids_are_the_path_number_as_signed() {
         assert_eq!(id_of("/org/a11y/atspi/accessible/42"), Some(42));
-        assert_eq!(id_of("/org/a11y/atspi/accessible/2147483648"), Some(i32::MIN));
+        assert_eq!(
+            id_of("/org/a11y/atspi/accessible/2147483648"),
+            Some(i32::MIN)
+        );
         assert_eq!(id_of("/org/a11y/atspi/accessible/root"), None);
     }
 }

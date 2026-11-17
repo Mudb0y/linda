@@ -7,6 +7,7 @@
 //! starts; the functions below hand it requests and take what it produced.
 
 #[allow(dead_code)]
+#[rustfmt::skip]
 mod tables;
 
 mod engine;

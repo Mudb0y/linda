@@ -8,7 +8,6 @@ publish.workspace = true
 [lib]
 name = "bre_vbuf"
 crate-type = ["cdylib"]
-test = false
 
 [dependencies]
 mirror.workspace = true

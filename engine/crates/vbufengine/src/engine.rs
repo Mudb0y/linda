@@ -50,7 +50,14 @@ const PROPERTIES: [&str; 4] = [
     "accessible-value",
 ];
 /// State changes that change nothing the buffer holds, or that come in floods.
-const IGNORED_STATES: [&str; 6] = ["focused", "showing", "active", "stale", "armed", "selectable-text"];
+const IGNORED_STATES: [&str; 6] = [
+    "focused",
+    "showing",
+    "active",
+    "stale",
+    "armed",
+    "selectable-text",
+];
 /// Changes are gathered this long after the first before the changed parts are walked again.
 const COALESCE: Duration = Duration::from_millis(100);
 /// The top of a large document is returned once this many objects are complete, or once this much
@@ -149,7 +156,9 @@ impl State {
         let t = Instant::now();
         let conn = self.bus().await?;
         // Subscribed before anything is fetched, so that no change after the fetch is missed.
-        let streams = subscribe(&conn, bus_name).await.map_err(|e| format!("subscribing: {e}"))?;
+        let streams = subscribe(&conn, bus_name)
+            .await
+            .map_err(|e| format!("subscribing: {e}"))?;
         if !self.registered.get() {
             for e in EVENTS {
                 app::register_event(&conn, e)
@@ -158,7 +167,9 @@ impl State {
             }
             self.registered.set(true);
         }
-        let owner = app::owner(&conn, bus_name).await.map_err(|e| e.to_string())?;
+        let owner = app::owner(&conn, bus_name)
+            .await
+            .map_err(|e| e.to_string())?;
         let address = app::activate(&Client::bus(conn.clone(), bus_name))
             .await
             .map_err(|e| e.to_string())?;
@@ -180,7 +191,9 @@ impl State {
             primed: Cell::new(false),
             actions_primed: Cell::new(false),
         });
-        self.apps.borrow_mut().insert(bus_name.to_owned(), a.clone());
+        self.apps
+            .borrow_mut()
+            .insert(bus_name.to_owned(), a.clone());
         Ok(a)
     }
 
@@ -194,7 +207,10 @@ impl State {
     }
 
     fn doc(&self, bus: &str, path: &str) -> Option<Rc<Doc>> {
-        self.docs.borrow().get(&(bus.to_owned(), path.to_owned())).cloned()
+        self.docs
+            .borrow()
+            .get(&(bus.to_owned(), path.to_owned()))
+            .cloned()
     }
 
     fn is_current(&self, d: &Rc<Doc>) -> bool {
@@ -210,12 +226,22 @@ impl State {
         }
     }
 
-    fn emit(&self, bus: &str, doc: &str, events: &[&str], stream: Option<Vec<u16>>, mut info: Map<String, Value>) {
+    fn emit(
+        &self,
+        bus: &str,
+        doc: &str,
+        events: &[&str],
+        stream: Option<Vec<u16>>,
+        mut info: Map<String, Value>,
+    ) {
         info.insert("bus".into(), bus.into());
         info.insert("doc".into(), doc.into());
         info.insert("events".into(), json!(events));
         if !info.contains_key("docURL") {
-            let url = self.doc(bus, doc).map(|d| d.url.borrow().clone()).unwrap_or_default();
+            let url = self
+                .doc(bus, doc)
+                .map(|d| d.url.borrow().clone())
+                .unwrap_or_default();
             info.insert("docURL".into(), url.into());
         }
         self.shared.push(stream, Value::Object(info).to_string());
@@ -233,13 +259,15 @@ impl State {
                 continue;
             }
             if p.walking {
-                p.early.push((path.to_owned(), format!("{why} while walking")));
+                p.early
+                    .push((path.to_owned(), format!("{why} while walking")));
                 continue;
             }
             let objs = d.objs.borrow();
             if let Some(t) = target_for(&objs, path, &d.root) {
                 if p.why.len() < 8 {
-                    p.why.push(format!("{why} {}", path.rsplit('/').next().unwrap_or("")));
+                    p.why
+                        .push(format!("{why} {}", path.rsplit('/').next().unwrap_or("")));
                 }
                 p.invalid.insert(t);
                 p.since.get_or_insert_with(Instant::now);
@@ -255,16 +283,21 @@ impl State {
 
     fn on_signal(self: &Rc<Self>, msg: &Message) {
         let header = msg.header();
-        if header.member().is_some_and(|m| m.as_str() == "NameOwnerChanged") {
+        if header
+            .member()
+            .is_some_and(|m| m.as_str() == "NameOwnerChanged")
+        {
             let body = msg.body();
-            if let Ok((name, _old, new)) = body.deserialize::<(&str, &str, &str)>() {
-                if new.is_empty() {
-                    self.app_gone(name);
-                }
+            if let Ok((name, _old, new)) = body.deserialize::<(&str, &str, &str)>()
+                && new.is_empty()
+            {
+                self.app_gone(name);
             }
             return;
         }
-        let Ok(Some(e)) = decode::event(msg) else { return };
+        let Ok(Some(e)) = decode::event(msg) else {
+            return;
+        };
         match (e.class.as_str(), e.member.as_str()) {
             ("Document", "LoadComplete") => self.load_complete(&e.sender, &e.path),
             ("Document", "Reload") => {
@@ -294,15 +327,19 @@ impl State {
                     }
                     ("busy", Some(_)) => {}
                     (s, _) if IGNORED_STATES.contains(&s) => {}
-                    _ => self.invalidate(&e.sender, &e.path, &format!("state-changed:{} {}", e.minor, e.detail1)),
+                    _ => self.invalidate(
+                        &e.sender,
+                        &e.path,
+                        &format!("state-changed:{} {}", e.minor, e.detail1),
+                    ),
                 }
             }
             ("Object", "PropertyChange") => {
                 self.invalidate(&e.sender, &e.path, &format!("property-change:{}", e.minor));
-                if e.minor == "accessible-name" {
-                    if let Some(d) = self.doc(&e.sender, &e.path) {
-                        self.check_url(&d);
-                    }
+                if e.minor == "accessible-name"
+                    && let Some(d) = self.doc(&e.sender, &e.path)
+                {
+                    self.check_url(&d);
                 }
             }
             _ => {}
@@ -324,8 +361,12 @@ impl State {
         let bus = bus.to_owned();
         let path = path.to_owned();
         self.spawned.borrow_mut().push(Box::pin(async move {
-            let Some(a) = st.apps.borrow().get(&bus).cloned() else { return };
-            let Some(frame) = parent_of(&a.client, &path).await else { return };
+            let Some(a) = st.apps.borrow().get(&bus).cloned() else {
+                return;
+            };
+            let Some(frame) = parent_of(&a.client, &path).await else {
+                return;
+            };
             for d in st.docs_of(&bus) {
                 if d.root != path && d.frame.borrow().as_deref() == Some(frame.as_str()) {
                     st.lifecycle(&d, "gone");
@@ -388,7 +429,9 @@ fn target_for(objs: &HashMap<String, Obj>, path: &str, root: &str) -> Option<Str
         let mut up = objs.get(&cur).and_then(|o| o.parent.clone());
         loop {
             let Some(u) = up else { return Some(cur) };
-            let Some(o) = objs.get(&u) else { return Some(cur) };
+            let Some(o) = objs.get(&u) else {
+                return Some(cur);
+            };
             if o.rendered {
                 cur = u;
                 break;
@@ -440,7 +483,9 @@ async fn subscribe(conn: &Connection, bus: &str) -> zbus::Result<Vec<MessageStre
     );
     let mut streams = Vec::new();
     for rule in rules {
-        streams.push(MessageStream::for_match_rule(rule, conn, NonZeroUsize::new(SIGNAL_QUEUE)).await?);
+        streams.push(
+            MessageStream::for_match_rule(rule, conn, NonZeroUsize::new(SIGNAL_QUEUE)).await?,
+        );
     }
     Ok(streams)
 }
@@ -470,10 +515,12 @@ async fn doc_url(client: &Client, doc: &str) -> String {
 /// for the object attributes asks for all of them: attributes, actions, text, tables and values.
 async fn prime(client: &Client, doc: &str) -> usize {
     for attempt in 0..20 {
-        if let Ok(msg) = client.call(doc, IFACE_ACCESSIBLE, "GetAttributes", &()).await {
-            if decode::attributes(&msg).is_ok_and(|a| !a.is_empty()) {
-                return attempt + 1;
-            }
+        if let Ok(msg) = client
+            .call(doc, IFACE_ACCESSIBLE, "GetAttributes", &())
+            .await
+            && decode::attributes(&msg).is_ok_and(|a| !a.is_empty())
+        {
+            return attempt + 1;
         }
         if let Ok(s) = time::sleep(Duration::from_millis(50)) {
             s.await;
@@ -494,10 +541,10 @@ async fn prime_actions(client: &Client, link: &str) -> bool {
                 if matches!(v, zbus::Variant::I32(n) if n > 0) {
                     return true;
                 }
-                if let zbus::Variant::Variant(inner) = v {
-                    if matches!(*inner, zbus::Variant::I32(n) if n > 0) {
-                        return true;
-                    }
+                if let zbus::Variant::Variant(inner) = v
+                    && matches!(*inner, zbus::Variant::I32(n) if n > 0)
+                {
+                    return true;
                 }
             }
         }
@@ -524,7 +571,12 @@ fn apply_marks(objs: &mut HashMap<String, Obj>, marks: Vec<Mark>, everything: bo
     }
 }
 
-fn render_whole(objs: &HashMap<String, Obj>, root: &str, handle: i32, prefix_only: bool) -> (Vec<u16>, usize, Vec<Mark>) {
+fn render_whole(
+    objs: &HashMap<String, Obj>,
+    root: &str,
+    handle: i32,
+    prefix_only: bool,
+) -> (Vec<u16>, usize, Vec<Mark>) {
     let none = HashSet::new();
     let mut r = Renderer::new(objs, handle, root, prefix_only, &none);
     r.render(root, Default::default());
@@ -559,7 +611,11 @@ async fn render_task(
             ..Pending::default()
         }),
     });
-    if let Some(old) = st.docs.borrow_mut().insert((bus.clone(), root.clone()), d.clone()) {
+    if let Some(old) = st
+        .docs
+        .borrow_mut()
+        .insert((bus.clone(), root.clone()), d.clone())
+    {
         old.p.borrow_mut().unwatched = true;
     }
     let client = app.client.clone();
@@ -583,7 +639,8 @@ async fn render_task(
         if progressive
             && !first_sent
             && (walk.complete >= FIRST_PART_OBJECTS
-                || (t_walk.elapsed() >= FIRST_PART_TIME && walk.objs.get(&root).is_some_and(Obj::complete)))
+                || (t_walk.elapsed() >= FIRST_PART_TIME
+                    && walk.objs.get(&root).is_some_and(Obj::complete)))
         {
             let (out, nodes, _) = render_whole(&walk.objs, &root, handle, true);
             let mut part = info.clone();
@@ -598,13 +655,17 @@ async fn render_task(
             first_sent = true;
         }
     }
-    if !d.p.borrow().unwatched && !app.actions_primed.get() {
-        if let Some(link) = walk.first_link.clone() {
-            app.actions_primed.set(prime_actions(&client, &link).await);
-        }
+    if !d.p.borrow().unwatched
+        && !app.actions_primed.get()
+        && let Some(link) = walk.first_link.clone()
+    {
+        app.actions_primed.set(prime_actions(&client, &link).await);
     }
     info.insert("walkSeconds".into(), t_walk.elapsed().as_secs_f64().into());
-    info.insert("calls".into(), (client.counters().calls - calls_before).into());
+    info.insert(
+        "calls".into(),
+        (client.counters().calls - calls_before).into(),
+    );
     info.insert("walkErrors".into(), walk.errors.into());
     info.insert("walkTimeouts".into(), walk.timeouts.into());
     info.insert("walkTruncated".into(), walk.truncated.into());
@@ -612,7 +673,10 @@ async fn render_task(
     info.insert("busy".into(), busy(&walk.objs, &root).into());
     let t_render = Instant::now();
     let (out, nodes, marks) = render_whole(&walk.objs, &root, handle, false);
-    info.insert("renderSeconds".into(), t_render.elapsed().as_secs_f64().into());
+    info.insert(
+        "renderSeconds".into(),
+        t_render.elapsed().as_secs_f64().into(),
+    );
     info.insert("objects".into(), nodes.into());
     info.insert("complete".into(), true.into());
     info.insert("seconds".into(), t0.elapsed().as_secs_f64().into());
@@ -624,7 +688,9 @@ async fn render_task(
     if first_sent {
         if st.is_current(&d) {
             let mut stream = vec![b'S' as u16];
-            stream.extend(format!("{handle},{};", crate::render::id_of(&root).unwrap_or(0)).encode_utf16());
+            stream.extend(
+                format!("{handle},{};", crate::render::id_of(&root).unwrap_or(0)).encode_utf16(),
+            );
             stream.extend(out);
             st.emit(&bus, &root, &["complete"], Some(stream), info);
         }
@@ -648,12 +714,16 @@ async fn render_task(
 }
 
 fn busy(objs: &HashMap<String, Obj>, root: &str) -> bool {
-    objs.get(root).is_some_and(|o| has(o.states, mirror::consts::STATE_BUSY))
+    objs.get(root)
+        .is_some_and(|o| has(o.states, mirror::consts::STATE_BUSY))
 }
 
 /// The objects that have to be walked again: each changed one whose ancestors have not changed.
 /// And every changed object with its ancestors, none of which can be kept as it was.
-fn targets(objs: &HashMap<String, Obj>, invalid: &HashSet<String>) -> (Vec<String>, HashSet<String>) {
+fn targets(
+    objs: &HashMap<String, Obj>,
+    invalid: &HashSet<String>,
+) -> (Vec<String>, HashSet<String>) {
     let mut dirty = HashSet::new();
     let mut out = Vec::new();
     for t in invalid {
@@ -674,7 +744,12 @@ fn targets(objs: &HashMap<String, Obj>, invalid: &HashSet<String>) -> (Vec<Strin
 }
 
 /// Swaps each target's subtree for what the walk found, keeping the children it kept.
-fn merge(objs: &mut HashMap<String, Obj>, mut found: HashMap<String, Obj>, targets: &[String], kept: &HashSet<String>) {
+fn merge(
+    objs: &mut HashMap<String, Obj>,
+    mut found: HashMap<String, Obj>,
+    targets: &[String],
+    kept: &HashSet<String>,
+) {
     let mut parents = HashMap::new();
     let mut remove = Vec::new();
     for t in targets {
@@ -736,7 +811,11 @@ async fn update_task(st: Rc<State>, d: Rc<Doc>) {
             return;
         }
         let gone: HashSet<String> = walk.gone.iter().cloned().collect();
-        let live: Vec<String> = targets.iter().filter(|t| !gone.contains(*t)).cloned().collect();
+        let live: Vec<String> = targets
+            .iter()
+            .filter(|t| !gone.contains(*t))
+            .cloned()
+            .collect();
         let reused = std::mem::take(&mut walk.reused);
         let found: HashMap<String, Obj> = std::mem::take(&mut walk.objs)
             .into_iter()
@@ -766,7 +845,17 @@ async fn update_task(st: Rc<State>, d: Rc<Doc>) {
             }
         }
         info.insert("objects".into(), live.len().into());
+        info.insert("targets".into(), json!(live));
         info.insert("calls".into(), walk.calls.into());
+        info.insert("walkSeconds".into(), walk.seconds().into());
+        info.insert(
+            "slowestCall".into(),
+            json!([
+                walk.slowest.0.as_secs_f64(),
+                format!("{:?}", walk.slowest.1),
+                walk.slowest.2
+            ]),
+        );
         info.insert("reused".into(), reused.len().into());
     }
     if url_check || stream.is_some() {
@@ -834,28 +923,28 @@ pub async fn run(inbox: Arc<Inbox>, shared: Arc<Shared>) {
                         }
                     }
                     1 => {
-                        if !signals.is_empty() {
-                            if let Poll::Ready(Some(m)) = signals.poll_next_unpin(cx) {
-                                return Poll::Ready(match m {
-                                    Ok(m) => Wake::Signal(m),
-                                    Err(_) => Wake::Nothing,
-                                });
-                            }
+                        if !signals.is_empty()
+                            && let Poll::Ready(Some(m)) = signals.poll_next_unpin(cx)
+                        {
+                            return Poll::Ready(match m {
+                                Ok(m) => Wake::Signal(m),
+                                Err(_) => Wake::Nothing,
+                            });
                         }
                     }
                     2 => {
-                        if !tasks.is_empty() {
-                            if let Poll::Ready(Some(())) = tasks.poll_next_unpin(cx) {
-                                return Poll::Ready(Wake::Nothing);
-                            }
+                        if !tasks.is_empty()
+                            && let Poll::Ready(Some(())) = tasks.poll_next_unpin(cx)
+                        {
+                            return Poll::Ready(Wake::Nothing);
                         }
                     }
                     _ => {
-                        if let Some((_, t)) = timer.as_mut() {
-                            if t.poll_unpin(cx).is_ready() {
-                                timer = None;
-                                return Poll::Ready(Wake::Nothing);
-                            }
+                        if let Some((_, t)) = timer.as_mut()
+                            && t.poll_unpin(cx).is_ready()
+                        {
+                            timer = None;
+                            return Poll::Ready(Wake::Nothing);
                         }
                     }
                 }
@@ -870,11 +959,102 @@ pub async fn run(inbox: Arc<Inbox>, shared: Arc<Shared>) {
                 handle,
                 flags,
                 reply,
-            }) => tasks.push(Box::pin(render_task(st.clone(), bus, doc, handle, flags, reply))),
+            }) => tasks.push(Box::pin(render_task(
+                st.clone(),
+                bus,
+                doc,
+                handle,
+                flags,
+                reply,
+            ))),
             Wake::Request(Request::Unwatch { bus, doc }) => st.unwatch(&bus, &doc),
             Wake::Request(Request::Shutdown) => break,
             Wake::Signal(m) => st.on_signal(&m),
             Wake::Nothing => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree() -> HashMap<String, Obj> {
+        let mut objs = HashMap::new();
+        for (path, parent, children) in [
+            ("/r", None, vec!["/p", "/q"]),
+            ("/p", Some("/r"), vec!["/l"]),
+            ("/l", Some("/p"), vec![]),
+            ("/q", Some("/r"), vec!["/i"]),
+            ("/i", Some("/q"), vec![]),
+        ] {
+            objs.insert(
+                path.to_owned(),
+                Obj {
+                    parent: parent.map(str::to_owned),
+                    children: children.into_iter().map(str::to_owned).collect(),
+                    rendered: path != "/i",
+                    ..Obj::default()
+                },
+            );
+        }
+        objs
+    }
+
+    #[test]
+    fn a_change_inside_a_changed_object_is_walked_with_it() {
+        let objs = tree();
+        let invalid: HashSet<String> = ["/p", "/l"].iter().map(|s| (*s).to_owned()).collect();
+        let (walked, dirty) = targets(&objs, &invalid);
+        assert_eq!(walked, vec!["/p".to_owned()]);
+        let mut dirty: Vec<_> = dirty.into_iter().collect();
+        dirty.sort();
+        assert_eq!(dirty, vec!["/l", "/p", "/r"]);
+    }
+
+    #[test]
+    fn a_change_goes_to_the_nearest_rendered_object_and_past_one_rendered_with_its_parent() {
+        let mut objs = tree();
+        assert_eq!(target_for(&objs, "/i", "/r").as_deref(), Some("/q"));
+        objs.get_mut("/q").unwrap().escalate = true;
+        assert_eq!(target_for(&objs, "/i", "/r").as_deref(), Some("/r"));
+        assert_eq!(target_for(&objs, "/elsewhere", "/r"), None);
+    }
+
+    #[test]
+    fn a_merge_swaps_the_subtree_and_keeps_what_was_kept() {
+        let mut objs = tree();
+        let mut found = HashMap::new();
+        found.insert(
+            "/q".to_owned(),
+            Obj {
+                children: vec!["/n".into()],
+                ..Obj::default()
+            },
+        );
+        found.insert(
+            "/n".to_owned(),
+            Obj {
+                parent: Some("/q".into()),
+                ..Obj::default()
+            },
+        );
+        merge(&mut objs, found, &["/q".to_owned()], &HashSet::new());
+        assert!(!objs.contains_key("/i"));
+        assert_eq!(objs["/q"].parent.as_deref(), Some("/r"));
+        assert_eq!(objs["/q"].children, vec!["/n".to_owned()]);
+        let kept: HashSet<String> = ["/l".to_owned()].into();
+        let found = HashMap::from([(
+            "/p".to_owned(),
+            Obj {
+                children: vec!["/l".into()],
+                ..Obj::default()
+            },
+        )]);
+        merge(&mut objs, found, &["/p".to_owned()], &kept);
+        assert!(
+            objs["/l"].rendered,
+            "a kept child stays as the buffer holds it"
+        );
     }
 }
