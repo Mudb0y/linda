@@ -372,6 +372,16 @@ def test_hostIsUnreachableWithTheVariable():
 				listener.accept()
 
 
+def test_hostAddressesAreShutOffWithTheVariable():
+	# The caller here has only the address pasta copied into it, which the inner rig shares and so
+	# reaches inside itself; a real host has more, and these routes are what keeps them out.
+	network.requireNetwork()
+	done = rig("sh", "-c", "ip -o -4 route show type prohibit && ip -o -6 route show type prohibit")
+	assert done.returncode == 0, done.stderr
+	shutOff = {line.split()[1] for line in done.stdout.splitlines()}
+	assert set(hostAddresses()) <= shutOff, done.stdout
+
+
 def test_abstractSocketIsUnreachableWithTheVariable():
 	network.requireNetwork()
 	name = f"\0basedreader-test_rig-{os.getpid()}"
