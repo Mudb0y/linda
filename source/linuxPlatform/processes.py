@@ -265,6 +265,15 @@ def _readCommandLine(processID: int) -> list[str]:
 	return [os.fsdecode(arg) for arg in raw.removesuffix(b"\0").split(b"\0")]
 
 
+def _firstArgument(args: list[str]) -> str:
+	"""argv[0], also of a program that has written its whole command line over it, joined by spaces, as
+	Chromium and every Electron program do for their process title; their path then ends at the first
+	space."""
+	if len(args) == 1 and " " in args[0]:
+		return args[0].split(" ", 1)[0]
+	return args[0]
+
+
 def getExecutablePath(processID: int) -> str:
 	"""The executable's path. Raises OSError when it cannot be read, as for another user's process."""
 	return os.readlink(f"/proc/{processID}/exe").removesuffix(" (deleted)")
@@ -300,7 +309,7 @@ def getAppName(processID: int | None) -> str:
 			return ""
 		args = _readCommandLine(processID)
 		if args:
-			executable = os.path.basename(args[0])
+			executable = os.path.basename(_firstArgument(args))
 		else:
 			try:
 				with open(f"/proc/{processID}/comm", encoding="utf-8", errors="surrogateescape") as f:
