@@ -372,6 +372,10 @@ def setLanguage(lang: str) -> None:
 		trans, validatedLocalName = _createGettextTranslation("en")
 	_language = validatedLocalName
 
+	if sys.platform != "win32":
+		from linuxPlatform import branding
+
+		trans = branding.RenamingTranslations(trans)
 	trans.install(names=["pgettext", "npgettext", "ngettext"])
 	setLocale(getLanguage())
 

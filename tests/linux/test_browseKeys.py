@@ -288,7 +288,7 @@ def enterField(desktop: DesktopSession, nvda: harness.Launch) -> None:
 
 
 def quitNVDA(desktop: DesktopSession, nvda: harness.Launch, *, ignoring: tuple[str, ...] = ()) -> None:
-	step(desktop, "Insert+q", "Exit NVDA" + PREFIX_MARK)
+	step(desktop, "Insert+q", "Exit Linda" + PREFIX_MARK)
 	desktop.press("Return")
 	nvda.waitForExit(10)
 	nvda.assertClean(ignoring=ignoring, logNames=("nvda.log",))

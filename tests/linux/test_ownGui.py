@@ -204,7 +204,7 @@ def test_voiceSettingsSpeakEachControlAndItsChanges(desktop: DesktopSession, tmp
 	mark = step(
 		desktop,
 		"Insert+control+v",
-		"NVDA Settings: Speech (normal configuration) dialog",
+		"Linda Settings: Speech (normal configuration) dialog",
 		"Synthesizer grouping",
 		"Synthesizer edit read only Voiced transcript (testing)",
 	)
@@ -241,7 +241,7 @@ def test_voiceSettingsSpeakEachControlAndItsChanges(desktop: DesktopSession, tmp
 def test_welcomeDialogOfAFirstStartSetsUpTheKeyboard(desktop: DesktopSession, tmp_path: Path):
 	config = sessionConfig(tmp_path / "config", drop=("showWelcomeDialogAtStartup", "NVDAModifierKeys"))
 	nvda = start(desktop, config)
-	welcome = "Welcome to NVDA dialog Welcome to NVDA! Most commands for controlling NVDA require you…"
+	welcome = "Welcome to Linda dialog Welcome to Linda! Most commands for controlling Linda require you…"
 	desktop.expect(
 		welcome,
 		"Options grouping",
@@ -250,15 +250,15 @@ def test_welcomeDialogOfAFirstStartSetsUpTheKeyboard(desktop: DesktopSession, tm
 		timeout=STARTUP_BOUND,
 	)
 	spoken = desktop.spokenSince(0)
-	texts = [text for text in spoken if text.startswith("Welcome to NVDA dialog")]
+	texts = [text for text in spoken if text.startswith("Welcome to Linda dialog")]
 	assert len(texts) == 1, spoken
-	assert texts[0].endswith("access other NVDA functions."), texts[0]
+	assert texts[0].endswith("access other Linda functions."), texts[0]
 
 	step(desktop, "Down", "laptop")
 	# Enter in the open list chooses from it, and leaves the dialog open.
 	step(desktop, "alt+Down", "laptop 2 of 2")
 	step(desktop, "Return", "Keyboard layout: combo box laptop collapsed Alt plus K")
-	step(desktop, "Tab", "Use Caps Lock as an NVDA modifier key check box not checked Alt plus U")
+	step(desktop, "Tab", "Use Caps Lock as a Linda modifier key check box not checked Alt plus U")
 	step(desktop, "space", "checked")
 	step(desktop, "shift+Tab", "Keyboard layout: combo box laptop collapsed Alt plus K")
 	# Enter on the closed list presses OK, as on Windows.
@@ -318,7 +318,7 @@ def test_inputGesturesAreReadAndChangedFromTheKeyboard(desktop: DesktopSession):
 	step(desktop, "Right", "expanded")
 	step(desktop, "Down", "level 3 shift plus f 12 (keyboard, all layouts) 1 of 3")
 	# The item that takes its place is read.
-	step(desktop, "Delete", "NVDA plus numpad 5 (keyboard, all layouts) 1 of 2…")
+	step(desktop, "Delete", "Linda plus numpad 5 (keyboard, all layouts) 1 of 2…")
 	step(desktop, "alt+o", *AT_START)
 	mark = desktop.mark()
 	desktop.press("shift+F12")
@@ -333,7 +333,7 @@ def test_logViewerIsReadByLine(desktop: DesktopSession):
 	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
 	step(desktop, "t", "View log L 1 of …")
-	mark = step(desktop, "l", "NVDA Log Viewer", "edit read only DEBUG - …")
+	mark = step(desktop, "l", "Linda Log Viewer", "edit read only DEBUG - …")
 	# Each line is read as the caret moves, as in a read-only edit field on Windows.
 	for key in ("Down", "Down", "Up"):
 		mark = desktop.mark()
@@ -365,7 +365,7 @@ def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSe
 	mark = step(
 		desktop,
 		"Return",
-		"NVDA Settings: General (normal configuration) dialog",
+		"Linda Settings: General (normal configuration) dialog",
 		"Categories: list General",
 	)
 	time.sleep(SETTLE)
@@ -383,7 +383,7 @@ def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSe
 	downToKeyboard(desktop)
 	# Applied, and kept although the dialog was then cancelled.
 	step(desktop, "Tab", "Keyboard layout: combo box laptop collapsed Alt plus K")
-	step(desktop, "Tab", "Select NVDA Modifier Keys list", "caps lock check box not checked 1 of 3")
+	step(desktop, "Tab", "Select Linda Modifier Keys list", "caps lock check box not checked 1 of 3")
 	step(desktop, "space", "checked")
 	step(desktop, "Return", *AT_START)
 	step(desktop, "Caps_Lock+t", "Fixture window")

@@ -914,7 +914,7 @@ class KeyboardInputGesture(inputCore.InputGesture):
 		try:
 			# If present, the NVDA key should appear first.
 			keys.remove("nvda")
-			names.append("NVDA")
+			names.append("NVDA" if sys.platform == "win32" else localizedKeyLabels["nvda"])
 		except KeyError:
 			pass
 		for key in keys:

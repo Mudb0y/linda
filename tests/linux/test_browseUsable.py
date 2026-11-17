@@ -347,7 +347,7 @@ def test_largePage(session: Session):
 
 
 def test_exitIsClean(session: Session):
-	step(session, "Insert+q", "Exit NVDA…")
+	step(session, "Insert+q", "Exit Linda…")
 	session.desktop.press("Return")
 	nvda = session.nvda
 	nvda.waitForExit(EXIT_BOUND)

@@ -9,6 +9,8 @@ As there are localizable strings at module level, this can only be imported once
 To access version information for programmatic version checks before languageHandler.initialize, use the buildVersion module which contains all the non-localizable version information such as major and minor version, and version string etc.
 """
 
+import sys
+
 from buildVersion import (
 	copyrightYears,
 	name,
@@ -45,3 +47,19 @@ If you find NVDA useful and want it to continue to improve, please consider dona
 	url=url,
 	copyright=copyright,
 )
+
+if sys.platform != "win32":
+	# Linda is not NV Access's NVDA, which upstream's long name and About message say it is.
+	from linuxPlatform import branding
+
+	longName = branding.LONG_NAME
+	# NVDA's own notice, which the translation would otherwise give to Linda's contributors.
+	copyright = branding.upstreamGettext("Copyright (C) {years} NVDA Contributors").format(
+		years=copyrightYears,
+	)
+	aboutMessage = branding.aboutMessage(
+		version=version,
+		version_detailed=version_detailed,
+		url=url,
+		copyright=copyright,
+	)

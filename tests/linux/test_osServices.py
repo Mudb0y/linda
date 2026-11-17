@@ -382,6 +382,89 @@ def test_polishCatalogueLoadsFromLang(tmp_path):
 	assert done.value["described"] == "portugalski (Brazylia)"
 
 
+def test_messagesNameLindaInEveryLanguage(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		import languageHandler
+		from linuxPlatform import branding
+
+		PROFILE = "Can't change the active profile while an NVDA dialog is open"
+		languageHandler.setLanguage("en")
+		english = {
+			"plain": _("Exit NVDA"),
+			"words": _("NVDA+n opens the NVDA menu with NVDA's settings, not nvda.ini or NVDAObjects"),
+			"articles": _(PROFILE + ". An NVDA key"),
+			"aboutNVAccess": _("NVDA is developed by NV Access"),
+			"aboutItsSite": _("NVDA is at https://www.nvaccess.org/"),
+			"plural": ngettext("an NVDA copy", "{n} NVDA copies", 1),
+			"context": pgettext("keyLabel", "NVDA"),
+			"pluralContext": npgettext("context", "an NVDA copy", "{n} NVDA copies", 2),
+			"untouched": branding.upstreamGettext("Copyright (C) {years} NVDA Contributors"),
+		}
+		languageHandler.setLanguage("pl")
+		polish = {
+			"exit": _("Exit NVDA"),
+			"profile": _(PROFILE),
+			"untouched": branding.upstreamGettext("Copyright (C) {years} NVDA Contributors"),
+		}
+		import versionInfo
+
+		languageHandler.setLanguage("de")
+		german = {"profile": _(PROFILE)}
+		languageHandler.setLanguage("ja")
+		japanese = {"portable": _("Create Portable NVDA")}
+		result = {
+			"english": english,
+			"polish": polish,
+			"german": german,
+			"japanese": japanese,
+			"installed": type(languageHandler.installedTranslation()).__name__,
+			"name": versionInfo.name,
+			"longName": versionInfo.longName,
+			"copyright": versionInfo.copyright,
+			"about": versionInfo.aboutMessage,
+		}
+		""",
+	)
+	done.assertClean()
+	assert done.value["english"] == {
+		"plain": "Exit Linda",
+		"words": "Linda+n opens the Linda menu with Linda's settings, not nvda.ini or NVDAObjects",
+		"articles": "Can't change the active profile while a Linda dialog is open. A Linda key",
+		"aboutNVAccess": "NVDA is developed by NV Access",
+		"aboutItsSite": "NVDA is at https://www.nvaccess.org/",
+		"plural": "a Linda copy",
+		"context": "Linda",
+		"pluralContext": "{n} Linda copies",
+		"untouched": "Copyright (C) {years} NVDA Contributors",
+	}
+	assert done.value["polish"] == {
+		"exit": "Zakończ Linda",
+		"profile": "Nie można zmienić aktualnie używanego profilu konfiguracyjnego, gdy jest otwarte okno "
+		"dialogowe Linda",
+		"untouched": "Copyright (C) {years} Współautorzy NVDA",
+	}
+	assert done.value["german"] == {
+		"profile": "Das aktive Profil konnte nicht geändert werden, solange ein Dialogfeld von Linda noch "
+		"geöffnet ist",
+	}
+	# Japanese writes no space between words, and the name still changes.
+	assert done.value["japanese"] == {"portable": "ポータブル版Lindaの作成"}
+	assert done.value["installed"] == "RenamingTranslations"
+	assert done.value["name"] == "Linda"
+	assert done.value["longName"] == "Linda Is Non-visual Desktop Access"
+	assert done.value["copyright"].startswith("Copyright (C) 2006-")
+	assert done.value["copyright"].endswith(" Współautorzy NVDA")
+	about = done.value["about"]
+	assert about.startswith("Linda Is Non-visual Desktop Access (Linda)\nVersion: ")
+	assert "based on NVDA " in about
+	assert "not affiliated with or endorsed by NV Access" in about
+	assert "GNU General Public License (Version 2 or later)" in about
+	assert done.value["copyright"] in about
+	assert "developed by NV Access" not in about
+
+
 def test_interfaceLanguageFollowsPosixPrecedence(tmp_path):
 	# Each case: the environment, what getWindowsLanguage reports, and the interface language that
 	# setLanguage("Windows") then settles on.

@@ -62,7 +62,7 @@ def test_siteIsReadAndNavigated(tmp_path: Path, site: str):
 		assert any("heading level" in text for text in heard), f"h found no heading: {heard}"
 		mark = desktop.mark()
 		desktop.press("Insert+q")
-		desktop.expect("Exit NVDA…", since=mark, timeout=KEY_BOUND)
+		desktop.expect("Exit Linda…", since=mark, timeout=KEY_BOUND)
 		time.sleep(SETTLE)
 		desktop.press("Return")
 		nvda.waitForExit(10)

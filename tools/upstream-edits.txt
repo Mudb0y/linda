@@ -163,6 +163,9 @@ source/browseMode.py
   Linux runtime: _extractStyles imports the UI Automation Word
   document class only on Windows; Linux has no UI Automation and uses an
   empty tuple, which no isinstance test matches
+source/buildVersion.py
+  Linux runtime: name is Linda, the name NVDA has on Linux, so that the
+  main window, the notification area icon and versionInfo say it
   Linux runtime: the elements list's tree passes on Tab and keys with Alt
   or Control, which wx on GTK hands it as characters to search for, so
   that they move between the dialog's controls as on Windows
@@ -314,7 +317,11 @@ source/keyboardHandler.py
   nothing when the key also reached the application, which on X every key
   but the NVDA keys and the numpad review keys does, so that a caret script
   does not type its key twice. send() does not wait for the echo of the
-  keys it sends, which the key source drops
+  keys it sends, which the key source drops. The NVDA key in a gesture's
+  description is named by keyLabels, which names it Linda on Linux
+source/keyLabels.py
+  Linux runtime: the NVDA key has the label Linda, which input help and the
+  input gestures dialog say, while gesture identifiers keep nvda
 source/languageHandler.py
   Linux runtime: the interface language, the C locale, language names and the
   measurement system come from linuxPlatform.posixLocale, which reads the
@@ -325,7 +332,11 @@ source/languageHandler.py
   to a Windows locale identifier gives LCID_NONE and the reverse uses
   Python's table. The English names of a locale's language and country come
   from ICU; asking for its ANSI code page raises NoLinuxImplementation, as
-  the code page only names a Windows C runtime locale, which Linux never sets
+  the code page only names a Windows C runtime locale, which Linux never sets.
+  setLanguage installs the translation inside a
+  linuxPlatform.branding.RenamingTranslations, which says Linda where a
+  message says NVDA, so that no message or translation of upstream's is
+  edited to rename the program
 source/logHandler.py
   Linux runtime: the time comes from logging's own formatTime, not Win32
   time conversion; a record that cannot be written is reported on the real
@@ -521,3 +532,9 @@ source/cursorManager.py
   script_find destroys it once ShowModal returns, because wxGTK's ShowModal
   still uses the dialog's window after its loop ends and NVDA crashed when
   that window was destroyed inside the loop
+source/versionInfo.py
+  Linux runtime: the long name is Linda Is Non-visual Desktop Access, the
+  copyright notice keeps NVDA's name, and the About message, from
+  linuxPlatform.branding, says Linda is based on NVDA by NV Access and is
+  not affiliated with or endorsed by it, in place of upstream's, which says
+  NV Access develops it

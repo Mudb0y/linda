@@ -4,6 +4,7 @@
 # See the file COPYING for more details.
 
 import os
+import sys
 
 """
 This module contains non-localizable version information for NVDA such as the version string and major and minor numbers etc.
@@ -63,6 +64,9 @@ def formatVersionForGUI(year, major, minor):
 
 # Version information for NVDA
 name = "NVDA"
+if sys.platform != "win32":
+	# NVDA brought to Linux is Linda.
+	name = "Linda"
 version_year = 2026
 version_major = 3
 version_minor = 1

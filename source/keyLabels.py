@@ -10,6 +10,8 @@ As there are localizable strings at module level,
 this can only be imported once localization is set up via `languageHandler.initialize`.
 """
 
+import sys
+
 localizedKeyLabels = {
 	# Translators: This is the name of the back key found on multimedia keyboards for controlling the web-browser.
 	"browserback": _("back"),
@@ -180,3 +182,10 @@ def getKeyCombinationLabel(keyCombination):
 	"""
 	keys = keyCombination.lower().split("+")
 	return "+".join(localizedKeyLabels.get(key, key) for key in keys)
+
+
+if sys.platform != "win32":
+	import buildVersion
+
+	# The NVDA key is Linda's key, though gesture identifiers still call it nvda.
+	localizedKeyLabels["nvda"] = buildVersion.name

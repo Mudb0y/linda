@@ -144,7 +144,7 @@ def browse(desktop: DesktopSession, tmp_path: Path, page: str, title: str, *sayA
 
 
 def quit(desktop: DesktopSession, nvda: Launch) -> None:
-	step(desktop, "Insert+q", "Exit NVDA…")
+	step(desktop, "Insert+q", "Exit Linda…")
 	desktop.press("Return")
 	nvda.waitForExit(10)
 	assert nvda.process.returncode == 0, nvda.describe()

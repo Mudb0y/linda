@@ -138,7 +138,7 @@ def test_usableSession(desktop: DesktopSession):
 	# The NVDA key of the laptop layout's users, which this configuration also makes one.
 	step(desktop, "Caps_Lock+t", "Fixture window")
 
-	step(desktop, "Insert+q", "Exit NVDA…")
+	step(desktop, "Insert+q", "Exit Linda…")
 	desktop.press("Return")
 	nvda.waitForExit(EXIT_BOUND)
 	assertExitedCleanly(nvda)

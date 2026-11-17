@@ -34,9 +34,9 @@ WARNING_CHECK_BOX = "Don't show this message again check box not checked Alt plu
 FETCH_FAILURE = "Add-on data update failure dialog Unable to fetch latest add-on data…"
 FETCH_FAILURE_TITLE = "Add-on data update failure"
 STORE = "Add-on Store - …"
-WELCOME = "Welcome to NVDA dialog Welcome to NVDA!…"
+WELCOME = "Welcome to Linda dialog Welcome to Linda!…"
 DESKTOP_LAYOUT = "Keyboard layout: combo box desktop collapsed Alt plus K"
-EXIT_DIALOG = ("Exit NVDA dialog", "What would you like to do? combo box Exit collapsed Alt plus D")
+EXIT_DIALOG = ("Exit Linda dialog", "What would you like to do? combo box Exit collapsed Alt plus D")
 REFUSED = "Action unavailable while a dialog requires a response"
 
 
@@ -158,14 +158,16 @@ def openAddonStoreWarning(desktop: DesktopSession) -> None:
 
 
 def openUnsavedSettings(desktop: DesktopSession) -> None:
-	step(desktop, "Insert+control+k", "NVDA Settings: Keyboard (normal configuration) dialog", DESKTOP_LAYOUT)
+	step(
+		desktop, "Insert+control+k", "Linda Settings: Keyboard (normal configuration) dialog", DESKTOP_LAYOUT
+	)
 	step(desktop, "Down", "laptop")
 
 
 def openFileDialog(desktop: DesktopSession) -> None:
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
 	step(desktop, "t", "View log L 1 of 6")
-	step(desktop, "l", "NVDA Log Viewer")
+	step(desktop, "l", "Linda Log Viewer")
 	step(desktop, "control+s", "Save As dialog")
 
 

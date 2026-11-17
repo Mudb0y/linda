@@ -113,7 +113,7 @@ def test_clipboardIsSharedWithOtherPrograms(desktop: DesktopSession):
 	# The About dialog's Copy version number.
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
 	step(desktop, "h", "User Guide U 1 of …")
-	step(desktop, "a", "About NVDA dialog…")
+	step(desktop, "a", "About Linda dialog…")
 	mark = step(desktop, "alt+c", "Copied to clipboard")
 	version = readClipboard()
 	assert version and " (" in version, version

@@ -297,7 +297,7 @@ class TestChromium:
 		)
 
 	def test_exitIsClean(self, session: Session):
-		step(session, "Insert+q", "Exit NVDA…")
+		step(session, "Insert+q", "Exit Linda…")
 		session.desktop.press("Return")
 		nvda = session.nvda
 		nvda.waitForExit(EXIT_BOUND)
@@ -412,7 +412,7 @@ class TestElectron:
 		step(session, "Escape", "Browse mode")
 
 	def test_exitIsClean(self, session: Session):
-		step(session, "Insert+q", "Exit NVDA…")
+		step(session, "Insert+q", "Exit Linda…")
 		session.desktop.press("Return")
 		nvda = session.nvda
 		nvda.waitForExit(EXIT_BOUND)
@@ -452,7 +452,7 @@ class TestElectronSignIn:
 		step(session, "Escape", "Browse mode")
 
 	def test_exitIsClean(self, session: Session):
-		step(session, "Insert+q", "Exit NVDA…")
+		step(session, "Insert+q", "Exit Linda…")
 		session.desktop.press("Return")
 		nvda = session.nvda
 		nvda.waitForExit(EXIT_BOUND)
@@ -514,7 +514,7 @@ class TestChromiumComposer:
 		step(session, "Return", "Focus mode")
 
 	def test_exitIsClean(self, session: Session):
-		step(session, "Insert+q", "Exit NVDA…")
+		step(session, "Insert+q", "Exit Linda…")
 		session.desktop.press("Return")
 		nvda = session.nvda
 		nvda.waitForExit(EXIT_BOUND)
@@ -543,7 +543,7 @@ class TestChromiumStartedFirst:
 			assert webSession._application(browser) is None, "Chromium joined the accessibility bus after all"
 			mark = desktop.mark()
 			desktop.press("Insert+q")
-			desktop.expect("Exit NVDA…", since=mark, timeout=STEP_BOUND)
+			desktop.expect("Exit Linda…", since=mark, timeout=STEP_BOUND)
 			time.sleep(SETTLE)
 			desktop.press("Return")
 			nvda.waitForExit(EXIT_BOUND)

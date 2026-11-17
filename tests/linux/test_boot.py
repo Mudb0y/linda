@@ -916,7 +916,7 @@ def test_magnifierToggleSaysItCannotStart(start: Start):
 	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
 	nvda.assertClean(logNames=("nvda.log",))
 	spoken = nvda.spokenTexts()
-	assert "Cannot start magnifier. NVDA's magnifier is not available on Linux." in spoken
+	assert "Cannot start magnifier. Linda's magnifier is not available on Linux." in spoken
 	assert "Magnifier enabled" not in spoken
 
 

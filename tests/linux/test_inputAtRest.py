@@ -270,8 +270,12 @@ def test_gestureNamesRoundTrip(tmp_path: Path, layout: str):
 	done.assertClean()
 	labels = value["labels"]
 
+	# The NVDA key is Linda's key wherever it is said or shown, and nvda in an identifier.
+	assert labels["nvda"] == "Linda"
+	assert value["NVDA+t"]["display"] == "Linda+t"
+
 	def label(key: str) -> str:
-		return "NVDA" if key == "NVDA" else labels.get(key.lower(), key)
+		return labels.get(key.lower(), key)
 
 	for name, main, modifiers in GESTURE_NAMES:
 		got = value[name]
@@ -295,7 +299,7 @@ def test_gestureNamesRoundTrip(tmp_path: Path, layout: str):
 		assert layoutText == allText
 		described = layoutText.split("+")
 		if "NVDA" in modifiers:
-			assert described[0] == "NVDA"
+			assert described[0] == "Linda"
 		assert described[-1] == label(main)
 		assert sorted(described) == sorted(label(k) for k in modifiers + [main])
 
