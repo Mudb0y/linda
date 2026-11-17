@@ -312,6 +312,10 @@ _QT_MENU_ROLES = frozenset({"menu item", "check menu item", "radio menu item", "
 
 
 def _focusIn(window: Node) -> Node | None:
+	"""The focus inside window, if it can be read.
+
+	:raise AppHung: Its application does not answer, so the focus is not known yet.
+	"""
 	c = client()
 	try:
 		if "focused" in c.states(window):
@@ -320,6 +324,8 @@ def _focusIn(window: Node) -> Node | None:
 			focused = _qtFocusAmong(c.matchesWithState(window, "focused", FOCUS_CANDIDATES))
 		else:
 			focused = c.firstMatchWithState(window, "focused")
+	except AppHung:
+		raise
 	except NodeGone:
 		return None
 	return activeDescendant(focused) or focused if focused else None
@@ -377,7 +383,10 @@ def nodeForRelation(relation: str | tuple[int, int]) -> Node | None:
 	if relation == "foreground":
 		return window
 	if relation == "focus":
-		return _focusIn(window) if window else None
+		try:
+			return _focusIn(window) if window else None
+		except NodeGone:
+			return None
 	if isinstance(relation, tuple) and len(relation) == 2:
 		x, y = relation
 		c = client()
@@ -699,6 +708,13 @@ def _processFocus(event, mayRetry: bool = True) -> bool:
 		return False
 	if obj is None:
 		return False
+	# What speech reads first, read now, in the same core cycle, whose cache speech then reads from: an
+	# application that stops answering part way would otherwise be spoken with a role and no name.
+	for prop in _FOCUS_PROPERTIES:
+		try:
+			getattr(obj, prop)
+		except NotImplementedError:
+			pass
 	if client().isHung(node.busName):
 		# Made while its application stopped answering, the object knows nothing of itself, and as the
 		# focus would be spoken as an unknown, unavailable object.
@@ -714,6 +730,8 @@ def _processFocus(event, mayRetry: bool = True) -> bool:
 _focusWhileHung: dict[str, tuple[tuple, float]] = {}
 #: Seconds after which such a focus event is given up.
 HUNG_FOCUS_SECONDS = 10.0
+#: The properties of a new focus that speech reads, read before it is queued.
+_FOCUS_PROPERTIES = ("role", "name", "states", "value", "description", "keyboardShortcut", "positionInfo")
 
 
 def _deferWhileHung(event) -> None:
@@ -724,6 +742,28 @@ def _deferWhileHung(event) -> None:
 	waiting = _focusWhileHung.get(busName)
 	_focusWhileHung[busName] = (event, waiting[1] if waiting else time.monotonic())
 	core.requestPump()
+
+
+def _resumeFocusIn(event, since: float) -> None:
+	"""Take the focus an application has now, once it answers again after its own focus event no longer
+	holds: a busy program moves its focus while NVDA waits, as Caja does while it fills a list view."""
+	busName = event[1].busName
+	if _foreground is None or not _foregroundActive or _foreground.busName != busName:
+		return
+	try:
+		node = _focusIn(_foreground)
+	except AppHung:
+		# Still too busy to say; waited for again, within the time the first event had.
+		_focusWhileHung[busName] = (event, since)
+		import core
+
+		core.requestPump()
+		return
+	except NodeGone:
+		return
+	if node is not None:
+		log.debug(f"AT-SPI focus: {busName} answers again; its focus is now {node}")
+		_processFocus(("object:state-changed:focused", node, 1, 0, None), mayRetry=False)
 
 
 def _focusedItemIn(container: Node) -> Node | None:
@@ -952,18 +992,23 @@ def pumpAll() -> None:
 		events = list(_queue)
 		_queue.clear()
 	events = [converted for event in events if (converted := _asWindowEvent(event)) is not None]
+	resumed = []
 	for busName, (event, since) in list(_focusWhileHung.items()):
 		if now - since > HUNG_FOCUS_SECONDS:
 			del _focusWhileHung[busName]
 		elif not client().isHung(busName):
 			del _focusWhileHung[busName]
-			due.append(event)
+			log.debug(f"AT-SPI focus: trying {event[0]} on {event[1]} again")
+			resumed.append((event, since))
 	if _retries or _rescans or _focusWhileHung:
 		core.requestPump()
-	if not events and not due:
+	if not events and not due and not resumed:
 		return
 	for event in due:
 		_processFocus(event, mayRetry=False)
+	for event, since in resumed:
+		if not _processFocus(event, mayRetry=False):
+			_resumeFocusIn(event, since)
 	if len(_firstSeen) > MAX_QUEUED:
 		for key in [k for k, at in _firstSeen.items() if now - at >= NEW_OBJECT_SECONDS]:
 			del _firstSeen[key]

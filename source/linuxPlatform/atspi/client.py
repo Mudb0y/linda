@@ -10,6 +10,7 @@ more than once: libatspi waits for an answer on NVDA's main thread, and a proper
 returns 0 instead of failing.
 """
 
+import collections
 import dataclasses
 import inspect
 import threading
@@ -29,10 +30,16 @@ ROOT_PATH = "/org/a11y/atspi/accessible/root"
 TIMEOUT_MS = 300
 #: A call that takes this long is logged, for finding out which applications answer slowly and when.
 SLOW_ANSWER_SECONDS = 0.05
-#: A call that takes this long marks its application hung.
-HUNG_AFTER_SECONDS = 0.25
-#: A call that takes this long has met libatspi's deadline, and its answer, if any, is not one.
+#: A call that takes this long has met libatspi's deadline. What it returns then is libatspi's, not the
+#: application's: zero for most reads, and the states it last saw for a state set. The application is
+#: taken for hung.
 TIMED_OUT_AFTER_SECONDS = TIMEOUT_MS / 1000 - 0.01
+#: Waiting on one application that answers, summed over its slow answers of the last
+#: BUDGET_WINDOW_SECONDS, after which it is not asked for a while either. A busy program answers late
+#: now and then, which is no hang; one that answers everything late would hold NVDA up as surely as
+#: one that never answers.
+WAIT_BUDGET_SECONDS = 1.0
+BUDGET_WINDOW_SECONDS = 2.0
 #: How long a hung application that sends no event is left alone before one call may try it again.
 PROBE_AFTER_SECONDS = 2.0
 #: Children read from one accessible at most; one GetChildren on Caja's list view froze it 4 s.
@@ -80,6 +87,8 @@ callSeconds = 0.0
 _hungSince: dict[str, float] = {}
 #: Applications no longer asked anything, by bus name.
 _refused: set[str] = set()
+#: When each application last answered slowly, and how long it took, over the budget's window.
+_slowAnswers: dict[str, collections.deque[tuple[float, float]]] = {}
 _mainThreadId = threading.main_thread().ident
 
 
@@ -92,8 +101,10 @@ def call[T](node: Node, func: Callable[..., T], *args) -> T:
 	start with node.ref or func is a Python function or bound method.
 
 	Main thread only: libatspi is not thread safe. A call to an application marked hung raises AppHung
-	without asking it; a call that takes HUNG_AFTER_SECONDS or more marks it; and one that met libatspi's
-	deadline raises AppHung, since its answer cannot be told from a real zero.
+	without asking it. A call that met libatspi's deadline marks it and raises AppHung, since what
+	libatspi returns then cannot be told from a real answer, so an application that really hangs holds
+	NVDA up for TIMEOUT_MS at a time. An answer before the deadline, however late, is kept: a busy
+	application is not a hung one, until its slow answers add up to WAIT_BUDGET_SECONDS.
 
 	:raise NodeGone: The accessible is gone, or this is not the main thread.
 	:raise AppHung: Its application does not answer.
@@ -124,27 +135,39 @@ def call[T](node: Node, func: Callable[..., T], *args) -> T:
 		error = None
 	elapsed = time.monotonic() - start
 	callSeconds += elapsed
-	if elapsed >= SLOW_ANSWER_SECONDS:
-		from logHandler import log
-
-		log.debug(
-			f"AT-SPI: slow answer {elapsed * 1000:.0f} ms from {busName} to {getattr(func, '__name__', func)}"
-		)
-	if elapsed >= HUNG_AFTER_SECONDS:
-		if busName not in _hungSince:
-			from logHandler import log
-
-			log.debugWarning(
-				f"AT-SPI: {busName} took {elapsed * 1000:.0f} ms to answer; not asking it for now"
-			)
-		_hungSince[busName] = time.monotonic()
-		if elapsed >= TIMED_OUT_AFTER_SECONDS:
-			raise AppHung(busName) from None
-	elif since is not None:
+	if elapsed >= TIMED_OUT_AFTER_SECONDS:
+		_markHung(busName, f"did not answer within {TIMEOUT_MS} ms")
+		raise AppHung(busName) from None
+	if since is not None:
 		_hungSince.pop(busName, None)
+	if elapsed >= SLOW_ANSWER_SECONDS:
+		_noteSlowAnswer(busName, elapsed, getattr(func, "__name__", ""))
 	if error is not None:
 		raise error
 	return result
+
+
+def _markHung(busName: str, why: str) -> None:
+	if busName not in _hungSince:
+		from logHandler import log
+
+		log.debugWarning(f"AT-SPI: {busName} {why}; not asking it for now")
+	_hungSince[busName] = time.monotonic()
+	_slowAnswers.pop(busName, None)
+
+
+def _noteSlowAnswer(busName: str, elapsed: float, funcName: str) -> None:
+	from logHandler import log
+
+	log.debug(f"AT-SPI: slow answer {elapsed * 1000:.0f} ms from {busName} to {funcName}")
+	now = time.monotonic()
+	answers = _slowAnswers.setdefault(busName, collections.deque())
+	answers.append((now, elapsed))
+	while answers and now - answers[0][0] > BUDGET_WINDOW_SECONDS:
+		answers.popleft()
+	waited = sum(seconds for _at, seconds in answers)
+	if waited >= WAIT_BUDGET_SECONDS:
+		_markHung(busName, f"kept NVDA waiting {waited * 1000:.0f} ms in {BUDGET_WINDOW_SECONDS:g} s")
 
 
 def heardFrom(busName: str) -> None:
@@ -159,6 +182,7 @@ def refuse(busName: str) -> None:
 
 def forgetApplications() -> None:
 	_hungSince.clear()
+	_slowAnswers.clear()
 	_toolkits.clear()
 
 
@@ -194,7 +218,11 @@ class Client:
 		return apps
 
 	def isHung(self, busName: str) -> bool:
-		return busName in _hungSince
+		"""Whether busName is not to be asked now: once PROBE_AFTER_SECONDS have passed, the next call is
+		the one that tries it again, so an application that went quiet as it recovered is not waited on
+		for ever."""
+		since = _hungSince.get(busName)
+		return since is not None and time.monotonic() - since < PROBE_AFTER_SECONDS
 
 	def toolkit(self, node: Node) -> str:
 		"""The application's ToolkitName: "gtk" for GTK 3, "GTK" for GTK 4, "Qt", and so on."""
@@ -469,7 +497,11 @@ class Client:
 	def stopListening(self, eventTypes: list[str]) -> None:
 		if self._listener:
 			for eventType in eventTypes:
-				self._listener.deregister(eventType)
+				try:
+					self._listener.deregister(eventType)
+				except GLib.Error:
+					# A registry too busy to answer in time; the registration ends with NVDA's connection.
+					break
 			self._listener = None
 
 
