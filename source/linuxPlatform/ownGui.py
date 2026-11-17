@@ -510,15 +510,17 @@ def _quietAutoSettingsAtExit() -> None:
 	NVDAHighlighter keeps its settings in a class attribute and globalVars.settingsRing keeps the last
 	synth, so AutoSettings.__del__ runs only as the interpreter takes config apart, when there is no
 	extension point left to leave, and its AttributeError was printed on standard error.
+
+	The class is changed rather than each live instance: finding those takes an isinstance check
+	against an abstract base class for every object in the process, which slows the exit enough that
+	the copy a restart starts finds this one still there and its SIGTERM ends it.
 	"""
 	from autoSettingsUtils.autoSettings import AutoSettings
 
-	for obj in gc.get_objects():
-		if isinstance(obj, AutoSettings):
-			obj._unregisterConfigSaveAction = _leaveNothing
+	AutoSettings._unregisterConfigSaveAction = _leaveNothing
 
 
-def _leaveNothing() -> None:
+def _leaveNothing(self) -> None:
 	pass
 
 
