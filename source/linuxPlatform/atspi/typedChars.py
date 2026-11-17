@@ -11,6 +11,7 @@ character, whatever the field holds.
 
 import ctypes
 import time
+from difflib import SequenceMatcher
 from typing import Literal
 
 import textUtils
@@ -26,6 +27,19 @@ VK_BACK = 0x08
 NOT_ECHOED = frozenset({"\n", "\r", "\r\n", " ", " "})
 #: What a character typed into a protected field is spoken as, as speech.PROTECTED_CHAR.
 PROTECTED_CHARACTER = "*"
+#: Characters a terminal program shows in place of what was typed, as at a password prompt.
+MASKS = frozenset("*\u2022")
+#: Seconds within which VTE's report of the text a change removed is paired with what replaced it.
+REPLACED_SECONDS = 0.05
+
+#: The last text removed from an object, as (its node, offset, text, time.monotonic()).
+_lastRemoved: tuple[object, int, str, float] | None = None
+
+
+def _terminalRole():
+	from controlTypes import Role
+
+	return Role.TERMINAL
 
 
 def _lastKeyDown():
@@ -67,6 +81,26 @@ def _typedPart(text: str, key) -> str:
 	return typed if text[: -len(typed)].isspace() else text
 
 
+def _typedInTerminal(removed: str | None, inserted: str, key) -> str | None:
+	"""What a key typed in a terminal, out of a change, or None. VTE reports everything from the first
+	to the last difference on its screen as one change, so a typed letter comes with a spinner or a
+	status line that changed with it; and a program's spinner changes one character at a time, which
+	is not typing however soon after a key it comes."""
+	typed = key.text if key is not None else ""
+	if not typed.strip():
+		# A space shows as nothing but itself.
+		return typed if removed is None and inserted == typed else None
+	if removed is None:
+		inserted = _typedPart(inserted, key)
+		return inserted if inserted == typed or inserted in MASKS else None
+	found = []
+	for tag, i1, i2, j1, j2 in SequenceMatcher(None, removed, inserted, autojunk=False).get_opcodes():
+		added = inserted[j1:j2].strip()
+		if tag != "equal" and not removed[i1:i2].strip() and (added == typed or added in MASKS):
+			found.append(added)
+	return found[0] if len(found) == 1 else None
+
+
 def handleTextChange(
 	obj,
 	kind: Literal["insert", "delete"],
@@ -89,9 +123,22 @@ def handleTextChange(
 	node = getattr(focus, "node", None)
 	if node is None or getattr(obj, "node", None) != node:
 		return
+	global _lastRemoved
 	key = _lastKeyDown()
 	isRecent = key is not None and time.monotonic() - key.time <= TYPING_WINDOW
+	removed = None
+	if _lastRemoved is not None:
+		removedNode, removedOffset, removedText, removedAt = _lastRemoved
+		if (
+			removedNode == node
+			and removedOffset == offset
+			and time.monotonic() - removedAt <= REPLACED_SECONDS
+		):
+			removed = removedText
+	_lastRemoved = None
 	if kind == "delete":
+		if text is not None:
+			_lastRemoved = (node, offset, text, time.monotonic())
 		# Clears the character from the word NVDA builds for typed word echo; nothing is spoken.
 		if isRecent and key.vkCode == VK_BACK:
 			eventHandler.queueEvent("typedCharacter", focus, ch="\b")
@@ -107,6 +154,10 @@ def handleTextChange(
 		if length > (2 if unitFor(toolkit) == "utf16" else 1):
 			return
 		character = PROTECTED_CHARACTER
+	elif getattr(focus, "role", None) == _terminalRole():
+		character = _typedInTerminal(removed, text, key)
+		if character is None or not isOneCharacter(character):
+			return
 	else:
 		text = _typedPart(text, key)
 		if text in NOT_ECHOED or not isOneCharacter(text):
