@@ -184,6 +184,14 @@ def _pwmon(value: str) -> None:
 	assert _storePath(path) != _storePath(Path(os.environ["BASEDREADER_PWSINK_LIB"])), value
 
 
+def _vbufLib(value: str) -> None:
+	assert _elfFile(value).name == "libnvdaVbuf.so", value
+
+
+def _vbufEngine(value: str) -> None:
+	assert _elfFile(value).name == "libbre_vbuf.so", value
+
+
 def _benchBin(value: str) -> None:
 	# Named without depending on the bench, so that entering the shell never builds the engine: it
 	# exists once nix build .#basedreader-bench has built it.
@@ -206,6 +214,8 @@ SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
 	"BASEDREADER_WIREPLUMBER_BIN": _wireplumberBin,
 	"BASEDREADER_PWSINK_LIB": _pwsinkLib,
 	"BASEDREADER_PWMON": _pwmon,
+	"BASEDREADER_VBUF_LIB": _vbufLib,
+	"BASEDREADER_VBUF_ENGINE": _vbufEngine,
 	"BASEDREADER_BENCH_BIN": _benchBin,
 	"BASEDREADER_QT6_PLUGIN_PATH": _qt6PluginPath,
 	"BASEDREADER_BASH": _bash,
