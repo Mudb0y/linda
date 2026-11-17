@@ -5,6 +5,7 @@
 # For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
 import ctypes
+import sys
 from enum import IntEnum
 
 import api
@@ -135,6 +136,11 @@ def sendKey(vk: int | None = None, scan: int | None = None, extended: bool = Fal
 	:param extended: Whether this is an extended key, defaults to False
 	:param pressed: ``True`` if key pressed; ``False`` if released, defaults to True
 	"""
+	if sys.platform != "win32":
+		from linuxPlatform import inputHook
+
+		inputHook.typeKey(vk, bool(extended), not pressed)
+		return
 	input = user32.INPUT()
 	input.ii.ki.wVk = vk
 	if scan:

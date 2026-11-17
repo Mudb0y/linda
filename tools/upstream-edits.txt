@@ -160,7 +160,13 @@ source/_magnifier/__init__.py
 source/_remoteClient/client.py
   Linux runtime: no secure desktop handler is made, as Linux has no secure
   desktop for a session to follow its user onto and the handler is built on
-  Windows events; upstream logged an error and went on without one
+  Windows events; upstream logged an error and went on without one. When
+  the connection as follower is lost, the keys the leaders held down are
+  released, as nothing else would let them go on the X display
+source/_remoteClient/input.py
+  Linux runtime: sendKey presses or releases the leader's key on the X
+  display through linuxPlatform.inputHook.typeKey instead of SendInput, so
+  that NVDA has it as Windows' hook has an injected key
 source/_remoteClient/localMachine.py
   every platform: winreg comes from linuxPlatform.windowsOnly, whose
   placeholder for HKEY_LOCAL_MACHINE the SAS policy class body holds on
@@ -174,6 +180,10 @@ source/_remoteClient/server.py
   socket so that it does not claim the port's IPv4 side, which the other
   socket has, and sets SO_REUSEADDR, so that a server restarted with NVDA
   can listen again at once
+source/_remoteClient/session.py
+  Linux runtime: a follower session releases the keys its leaders held down
+  when its last leader goes or it closes, as nothing else would let them go
+  on the X display
 source/_remoteClient/transport.py
   Linux runtime: an outbound connection gets the same TCP keep-alive as on
   Windows, on with the first probe after 60 s idle, then every 2 s, and 10

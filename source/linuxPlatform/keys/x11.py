@@ -125,6 +125,29 @@ class _XkbLatchLockState(rq.Request):
 	)
 
 
+class _XkbGetState(rq.ReplyRequest):
+	"""The keyboard's modifiers as the X server has them now, rather than as the last event had them."""
+
+	_request = rq.Struct(
+		rq.Card8("opcode"),
+		rq.Opcode(4),
+		rq.RequestLength(),
+		rq.Card16("deviceSpec"),
+		rq.Pad(2),
+	)
+	_reply = rq.Struct(
+		rq.ReplyCode(),
+		rq.Card8("deviceID"),
+		rq.Card16("sequence_number"),
+		rq.ReplyLength(),
+		rq.Card8("mods"),
+		rq.Card8("baseMods"),
+		rq.Card8("latchedMods"),
+		rq.Card8("lockedMods"),
+		rq.Pad(20),
+	)
+
+
 #: Modifiers that make a key a command rather than typing: Control, Alt and Super, as X maps them.
 COMMAND_MODS = X.ControlMask | X.Mod1Mask | X.Mod4Mask
 #: Num Lock's modifier, as X maps it.
@@ -364,8 +387,12 @@ class X11KeySource:
 		self._keyboardDown: set[int] = set()
 		#: Key codes held down by XTEST.
 		self._xtestDown: set[int] = set()
-		#: (key code, isUp) of keys to send once the keyboard has let go of the first one's key.
-		self._unsent: deque[tuple[int, bool]] = deque()
+		#: (key code, isUp, echo) of keys to send once the keyboard has let go of the first one's key.
+		self._unsent: deque[tuple[int, bool, bool]] = deque()
+		#: Key codes typeKey holds down.
+		self._typedDown: set[int] = set()
+		#: Whether Num Lock was on before typeKey changed it for a numpad key; None while it has not.
+		self._numLockBefore: bool | None = None
 		#: Virtual-key code of each lock key held down: whether its lock was on as it went down.
 		self._locksHeld: dict[int, bool] = {}
 		self._xtestDevices: set[int] = set()
@@ -483,6 +510,12 @@ class X11KeySource:
 				log.debugWarning(f"No key on this keyboard sends virtual key {vkCode:#x}")
 				return
 		self._post(lambda: self._fake(keycode, isUp))
+
+	def typeKey(self, vkCode: int, extended: bool, isUp: bool) -> None:
+		self._post(lambda: self._typeKey(vkCode, extended, isUp))
+
+	def releaseTypedKeys(self) -> None:
+		self._post(self._releaseTypedKeys)
 
 	def keyState(self, vkCode: int) -> int:
 		with self._lock:
@@ -651,6 +684,12 @@ class X11KeySource:
 			log.exception("Keys stopped being read from the X display")
 		finally:
 			if self._display is not None:
+				try:
+					# Keys another computer held would stay down on the display after NVDA.
+					self._releaseTypedKeys()
+					self._display.flush()
+				except (OSError, error.ConnectionClosedError):
+					pass
 				try:
 					self._display.close()
 				except (OSError, error.ConnectionClosedError):
@@ -1558,7 +1597,7 @@ class X11KeySource:
 			self._held = False
 			self._grabKey = self._serverGrab = None
 
-	def _fake(self, keycode: int, isUp: bool) -> None:
+	def _fake(self, keycode: int, isUp: bool, echo: bool = True) -> None:
 		"""Send a key through XTEST, or as soon as it can reach the application.
 
 		The X server drops a press of a key that another device holds down, as the keyboard does the key
@@ -1566,16 +1605,65 @@ class X11KeySource:
 		waits for the keyboard to let the key go. A release of a key only the keyboard holds is dropped
 		here, as the server would drop it. Sent while a grab of this source holds the keyboard, the key
 		comes to that grab, which replays it to the application as one sent here.
+
+		:param echo: Whether the key's own event is dropped rather than delivered to NVDA.
 		"""
 		if self._unsent or (not isUp and keycode in self._keyboardDown):
-			self._unsent.append((keycode, isUp))
+			self._unsent.append((keycode, isUp, echo))
 			return
 		if isUp and keycode in self._keyboardDown and keycode not in self._xtestDown:
 			return
-		with self._lock:
-			self._echoes.append((time.monotonic(), keycode, isUp))
+		if echo:
+			with self._lock:
+				self._echoes.append((time.monotonic(), keycode, isUp))
 		xtest.fake_input(self._display, X.KeyRelease if isUp else X.KeyPress, keycode)
 		self._display.flush()
+
+	def _typeKey(self, vkCode: int, extended: bool, isUp: bool) -> None:
+		"""Press or release a key as a keyboard of the X server's would, so that the grabs take it and
+		NVDA has it as it has any key, as Windows' hook has a key another program sends."""
+		with self._lock:
+			translator = self._translator
+			keycode = translator.keycodeFor(vkCode, extended) if translator else None
+		if keycode is None:
+			log.debugWarning(f"No key on this keyboard sends virtual key {vkCode:#x}")
+			return
+		if isUp:
+			if keycode not in self._typedDown:
+				return
+			self._typedDown.discard(keycode)
+			self._fake(keycode, True, echo=False)
+			if self._numLockBefore is not None and not any(
+				code - 8 in keyMap.NUMPAD for code in self._typedDown
+			):
+				self._setLock(NUM_LOCK_MASK, self._numLockBefore)
+				self._numLockBefore = None
+			return
+		numpad = keyMap.NUMPAD.get(keycode - 8)
+		if numpad is not None and not extended and vkCode in numpad[1:] and self._xkbOpcode is not None:
+			# The key has one code with Num Lock on and another with it off, and the X server picks by the
+			# lock; it is put back once no such key is held. Asked of the server, as the last event's state
+			# is behind a lock changed here.
+			wanted = vkCode == numpad[1]
+			if self._numLockBefore is None:
+				state = _XkbGetState(
+					display=self._display.display, opcode=self._xkbOpcode, deviceSpec=XKB_CORE_KEYBOARD
+				)
+				numLockOn = bool(state.lockedMods & NUM_LOCK_MASK)
+				if numLockOn != wanted:
+					self._numLockBefore = numLockOn
+			if self._numLockBefore is not None:
+				self._setLock(NUM_LOCK_MASK, wanted)
+		self._typedDown.add(keycode)
+		self._fake(keycode, False, echo=False)
+
+	def _releaseTypedKeys(self) -> None:
+		for keycode in list(self._typedDown):
+			self._fake(keycode, True, echo=False)
+		self._typedDown.clear()
+		if self._numLockBefore is not None:
+			self._setLock(NUM_LOCK_MASK, self._numLockBefore)
+			self._numLockBefore = None
 
 	def _sendUnsent(self) -> None:
 		"""Send what waited for the keyboard to let a key go, up to the next key it still holds."""
@@ -1587,15 +1675,18 @@ class X11KeySource:
 				return
 
 	def _setCapsLock(self, on: bool) -> None:
+		self._setLock(X.LockMask, on)
+
+	def _setLock(self, mask: int, on: bool) -> None:
 		if self._xkbOpcode is None:
-			log.debugWarning("The X server has no XKB extension to set Caps Lock with")
+			log.debugWarning("The X server has no XKB extension to set a lock with")
 			return
 		_XkbLatchLockState(
 			display=self._display.display,
 			opcode=self._xkbOpcode,
 			deviceSpec=XKB_CORE_KEYBOARD,
-			affectModLocks=X.LockMask,
-			modLocks=X.LockMask if on else 0,
+			affectModLocks=mask,
+			modLocks=mask if on else 0,
 			lockGroup=False,
 			groupLock=0,
 			affectModLatches=0,

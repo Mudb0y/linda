@@ -482,6 +482,11 @@ class RemoteClient:
 	@alwaysCallAfter
 	def onDisconnectedAsFollower(self):
 		log.info("Control connector disconnected")
+		if sys.platform != "win32":
+			from linuxPlatform import inputHook
+
+			# The leaders are gone with the connection, and keys they held would stay down on the X display.
+			inputHook.releaseTypedKeys()
 		if self.menu:
 			self.menu.handleConnected(ConnectionMode.FOLLOWER, False)
 

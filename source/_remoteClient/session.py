@@ -65,6 +65,7 @@ See Also:
 
 from collections.abc import Collection  # noqa: I001
 import hashlib
+import sys
 from collections import defaultdict
 from typing import Any, Final
 
@@ -347,6 +348,11 @@ class FollowerSession(RemoteSession):
 		self.callbacksAdded = True
 
 	def unregisterCallbacks(self) -> None:
+		if sys.platform != "win32":
+			from linuxPlatform import inputHook
+
+			# Keys the leaders held stay down on the X display once they have gone.
+			inputHook.releaseTypedKeys()
 		if not self.callbacksAdded:
 			return
 		self.transport.unregisterOutbound(RemoteMessageType.TONE)

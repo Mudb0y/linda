@@ -379,6 +379,27 @@ def keybdEvent(vk: int, scan: int, flags: int, extraInfo: int) -> None:
 	_source.inject(vk, scan, bool(flags & KEYEVENTF_EXTENDEDKEY), bool(flags & KEYEVENTF_KEYUP))
 
 
+def typeKey(vk: int, extended: bool, isUp: bool) -> None:
+	"""Press or release a key as SendInput does for another program on Windows: NVDA has it as it has
+	any key, and the application then has it unless NVDA takes it."""
+	if vk is None or vk == VK_NONE:
+		# Windows sends VK_NONE so that an application sees a modifier was not pressed alone; no X key
+		# has it.
+		return
+	if _source is None:
+		from logHandler import log
+
+		log.debugWarning(f"No keyboard to type virtual key {vk:#x} on")
+		return
+	_source.typeKey(vk, extended, isUp)
+
+
+def releaseTypedKeys() -> None:
+	"""Release every key typeKey holds down."""
+	if _source is not None:
+		_source.releaseTypedKeys()
+
+
 def vkKeyScan(char: str) -> tuple[int, int]:
 	"""The modifiers and virtual-key code that type char, as winUser.VkKeyScanEx returns them.
 
