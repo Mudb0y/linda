@@ -93,6 +93,12 @@ class RemoteClient:
 					)
 		core.postNvdaStartup.register(self.performAutoconnect)
 		inputCore.decide_handleRawKey.register(self.processKeyInput)
+		if sys.platform != "win32":
+			from linuxPlatform import inputHook
+
+			# A key the hook blocks reaches no application on Windows; on X only a held keyboard does that.
+			self._takesKeyboard = lambda: self.sendingKeys
+			inputHook.keyboardTakers.append(self._takesKeyboard)
 
 	def performAutoconnect(self):
 		controlServerConfig = configuration.getRemoteConfig()["controlServer"]
@@ -125,6 +131,10 @@ class RemoteClient:
 		self.localScripts.clear()
 		core.postNvdaStartup.unregister(self.performAutoconnect)
 		inputCore.decide_handleRawKey.unregister(self.processKeyInput)
+		if sys.platform != "win32":
+			from linuxPlatform import inputHook
+
+			inputHook.keyboardTakers.remove(self._takesKeyboard)
 		if not isInstalledCopy():
 			urlHandler.unregisterURLHandler()
 

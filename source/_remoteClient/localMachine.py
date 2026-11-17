@@ -170,6 +170,14 @@ class LocalMachine:
 		"""
 		if self.isMuted:
 			return
+		if sys.platform != "win32" and not os.path.exists(fileName):
+			import ntpath
+
+			import globalVars
+
+			# The follower names a file of its own computer, from Windows a path no Linux computer has; NVDA's
+			# own sounds, the ones it sends, are found by their name among this copy's.
+			fileName = os.path.join(globalVars.appDir, "waves", ntpath.basename(fileName))
 		if os.path.exists(fileName):
 			nvwave.playWaveFile(fileName=fileName, asynchronous=True)
 
@@ -339,6 +347,7 @@ class LocalMachine:
 		vk_code: int | None = None,
 		extended: bool | None = None,
 		pressed: bool | None = None,
+		scan_code: int | None = None,
 	) -> None:
 		"""Simulate a keyboard event on the local machine.
 
@@ -346,6 +355,10 @@ class LocalMachine:
 		:param extended: Whether this is an extended key
 		:param pressed: True for key press, False for key release
 		"""
+		if sys.platform != "win32":
+			# The scan code tells the left Control Windows reports with AltGr from a real one.
+			wx.CallAfter(input.sendKey, vk_code, scan_code, extended, pressed)
+			return
 		wx.CallAfter(input.sendKey, vk_code, None, extended, pressed)
 
 	def setClipboardText(self, text: str) -> None:

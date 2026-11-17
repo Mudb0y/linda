@@ -139,7 +139,7 @@ def sendKey(vk: int | None = None, scan: int | None = None, extended: bool = Fal
 	if sys.platform != "win32":
 		from linuxPlatform import inputHook
 
-		inputHook.typeKey(vk, bool(extended), not pressed)
+		inputHook.typeKey(vk, bool(extended), not pressed, scan)
 		return
 	input = user32.INPUT()
 	input.ii.ki.wVk = vk

@@ -16,6 +16,7 @@ import re
 import string
 import threading
 import time
+from collections.abc import Callable
 
 from linuxPlatform import NoLinuxImplementation, keys
 from linuxPlatform.keys import CaptureMode, GestureKey, KeyEvent, KeySource
@@ -29,6 +30,7 @@ stickyKeysFlags: int = 0
 
 VK_CAPITAL = 0x14
 VK_NONE = 0xFF
+VK_LCONTROL = 0xA2
 KEYEVENTF_EXTENDEDKEY = 0x1
 KEYEVENTF_KEYUP = 0x2
 #: Seconds between looks at the configuration's NVDA keys, at whether input help is on, and at
@@ -43,6 +45,10 @@ _delivering = threading.local()
 _lastKeyDown: KeyEvent | None = None
 #: Whether Caps Lock was on before the press NVDA blocked that is still held; None when none is.
 _capsLockBlockedWasOn: bool | None = None
+#: Callables that say whether another computer has the keyboard, as Remote Access does while it sends
+#: the keys typed here to the computer it controls: the keyboard is held while any says so, as for
+#: input help, since only a held key reaches NVDA alone, as one the Windows hook blocks does.
+keyboardTakers: list[Callable[[], bool]] = []
 _watcher: threading.Thread | None = None
 _stopWatching = threading.Event()
 #: Set when NVDA's focus enters or leaves a document or changes its mode, to have the watcher look at
@@ -135,7 +141,9 @@ def _watch(source: KeySource) -> None:
 			source.setConsumed(wanted, numpadReview=True)
 			nvdaKeys = wanted
 		manager = inputCore.manager
-		hold = bool(manager and manager.isInputHelpActive) and not watchdog.isAttemptingRecovery
+		hold = (
+			bool(manager and manager.isInputHelpActive) or any(taker() for taker in keyboardTakers)
+		) and not watchdog.isAttemptingRecovery
 		if hold != held:
 			source.holdKeyboard(hold)
 			held = hold
@@ -379,12 +387,19 @@ def keybdEvent(vk: int, scan: int, flags: int, extraInfo: int) -> None:
 	_source.inject(vk, scan, bool(flags & KEYEVENTF_EXTENDEDKEY), bool(flags & KEYEVENTF_KEYUP))
 
 
-def typeKey(vk: int, extended: bool, isUp: bool) -> None:
+def typeKey(vk: int, extended: bool, isUp: bool, scan: int | None = None) -> None:
 	"""Press or release a key as SendInput does for another program on Windows: NVDA has it as it has
-	any key, and the application then has it unless NVDA takes it."""
+	any key, and the application then has it unless NVDA takes it.
+
+	:param scan: The key's scan code, when the sender gave one.
+	"""
 	if vk is None or vk == VK_NONE:
 		# Windows sends VK_NONE so that an application sees a modifier was not pressed alone; no X key
 		# has it.
+		return
+	if vk == VK_LCONTROL and scan == keys.ALTGR_CONTROL_SCAN:
+		# Windows reports AltGr as this Control and right Alt. Right Alt alone is AltGr on an X layout
+		# that has one, and with Control the letter after it would be a shortcut instead of typing.
 		return
 	if _source is None:
 		from logHandler import log

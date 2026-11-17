@@ -162,7 +162,10 @@ source/_remoteClient/client.py
   desktop for a session to follow its user onto and the handler is built on
   Windows events; upstream logged an error and went on without one. When
   the connection as follower is lost, the keys the leaders held down are
-  released, as nothing else would let them go on the X display
+  released, as nothing else would let them go on the X display. While keys
+  are sent to the follower, the keyboard is held through
+  linuxPlatform.inputHook.keyboardTakers, as only a held key reaches no
+  application on X, where Windows' hook blocks it
 source/_remoteClient/input.py
   Linux runtime: sendKey presses or releases the leader's key on the X
   display through linuxPlatform.inputHook.typeKey instead of SendInput, so
@@ -170,10 +173,15 @@ source/_remoteClient/input.py
 source/_remoteClient/localMachine.py
   every platform: winreg comes from linuxPlatform.windowsOnly, whose
   placeholder for HKEY_LOCAL_MACHINE the SAS policy class body holds on
-  Linux.
+  Linux. sendKey takes the scan code a key message carries, which Windows
+  goes on ignoring.
   Linux runtime: _canSendSAS answers False on Linux, which has no secure
   attention sequence, so a remote control+alt+delete is refused with
-  upstream's own message for a SAS it cannot send
+  upstream's own message for a SAS it cannot send. sendKey passes the scan
+  code on, which tells the left Control Windows reports with AltGr from a
+  real one. playWave plays a sound the follower names by a path this
+  computer does not have, as a Windows follower always does, from this
+  copy's waves directory when it has one of that name
 source/_remoteClient/server.py
   Linux runtime: the relay server binds every IPv6 address as ::, which
   upstream writes in a form only Windows resolves, takes IPv6 only on that

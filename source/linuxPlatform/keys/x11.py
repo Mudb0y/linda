@@ -45,7 +45,7 @@ from Xlib import X, display, error
 from Xlib.ext import xinput, xtest
 from Xlib.protocol import rq
 
-from . import CaptureMode, GestureKey, KeyEvent, keyMap
+from . import ALTGR_CONTROL_SCAN, CaptureMode, GestureKey, KeyEvent, keyMap
 
 XKB_EXTENSION = "XKEYBOARD"
 #: XkbUseCoreKbd: the keyboard the core protocol uses, the master keyboard.
@@ -1006,7 +1006,7 @@ class X11KeySource:
 			# The keyboard's own events are never the echo of a key sent here, even when the same key was
 			# sent just now; a release taken for one would leave NVDA thinking it still down.
 			echo = sourceid in self._xtestDevices and self._isEcho(keycode, isUp, arrival)
-			if echo or levelShift:
+			if echo or (levelShift and not self._held):
 				if ticket is not None:
 					# NVDA sent it to the application, where it goes at once; AltGr changes only the level
 					# the next key comes in, and is kept under a grab with the other modifiers.
@@ -1034,6 +1034,20 @@ class X11KeySource:
 				capsLockWasOn=capsLockWasOn,
 				nvdaKeyGrab=ticket is not None and ticket.kind == NVDA_GRAB,
 			)
+			if levelShift:
+				# Held for input help or for another computer, AltGr is what Windows' hook reports for it: a
+				# left Control of its own scan code, then right Alt, so that it types on a Windows computer
+				# that the keys are sent to.
+				self._decisions.put(
+					(
+						replace(
+							event, vkCode=keyMap.VK["LCONTROL"], scanCode=ALTGR_CONTROL_SCAN, extended=False
+						),
+						None,
+						keycode,
+						effective,
+					)
+				)
 			self._decisions.put((event, ticket, keycode, effective))
 		finally:
 			if isUp and keycode == self._grabKey:

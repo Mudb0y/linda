@@ -19,8 +19,8 @@ import pytest
 import remotePeer
 from desktopSession import DesktopSession
 from remotePeer import RemotePeer
-from test_clipboard import ownClipboard, readClipboard
-from test_keys import ENTRY_TEXT, configText, entryState, waitForEntry
+from test_clipboard import readClipboard
+from test_keys import ENTRY_TEXT, Keyboard, _DeviceFakeInput, configText, entryState, waitForEntry
 from Xlib import display
 
 #: Seconds NVDA has to start and speak the focus.
@@ -53,16 +53,27 @@ GAP = 0.03
 PROBE_PLUGIN = """
 import os
 
-import api
 import globalPluginHandler
 import globalVars
 import nvwave
 import tones
 import _remoteClient
+from logHandler import log
 from scriptHandler import script
 
 
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
+	def __init__(self):
+		super().__init__()
+		nvwave.decide_playWaveFile.register(self._logWave)
+
+	def terminate(self):
+		nvwave.decide_playWaveFile.unregister(self._logWave)
+
+	def _logWave(self, fileName, **kwargs):
+		log.info(f"remote probe: wave {fileName}")
+		return True
+
 	@script(gesture="kb:NVDA+shift+f9")
 	def script_beep(self, gesture):
 		tones.beep(880, 40)
@@ -164,6 +175,39 @@ def desktop(tmp_path: Path) -> Iterator[DesktopSession]:
 		yield session
 
 
+#: The X key code of the right Alt key, AltGr on a Polish layout. Its keysym also names a key no
+#: keyboard has, which the X server would look up instead.
+RIGHT_ALT_KEYCODE = 108
+
+
+class AltGrKeyboard(Keyboard):
+	"""The rig's keyboard, on which "AltGr" is the right Alt key."""
+
+	def _send(self, key: str, down: bool) -> None:
+		if key != "AltGr":
+			super()._send(key, down)
+			return
+		_DeviceFakeInput(
+			display=self._display.display,
+			opcode=self._xtest,
+			eventType=self._firstEvent + (1 if down else 2),
+			detail=RIGHT_ALT_KEYCODE,
+			time=0,
+			root=0,
+			x=0,
+			y=0,
+			deviceid=self._device,
+		)
+		self._display.sync()
+
+
+@pytest.fixture
+def keyboard() -> Iterator[Keyboard]:
+	board = AltGrKeyboard()
+	yield board
+	board.close()
+
+
 def test_controlledComputerTypesTheLeadersKeys(desktop: DesktopSession, tmp_path: Path):
 	controlled = Controlled(desktop, tmp_path)
 	try:
@@ -244,16 +288,7 @@ def test_controlledComputerSendsWhatItSaysAndPlays(desktop: DesktopSession, tmp_
 		)
 		# The clipboard both ways.
 		peer.send("set_clipboard_text", text="from the leader")
-		deadline = time.monotonic() + 5
-		while True:
-			try:
-				if readClipboard() == "from the leader":
-					break
-			except subprocess.CalledProcessError:
-				# Nothing owns the clipboard yet.
-				pass
-			assert time.monotonic() < deadline, "the leader's text did not reach the clipboard"
-			time.sleep(0.05)
+		waitForClipboard("from the leader")
 		owner = ownClipboard("from this computer")
 		try:
 			mark = peer.mark()
@@ -294,4 +329,237 @@ def test_leaderGoingAwayLeavesNoKeyDown(desktop: DesktopSession, tmp_path: Path)
 	assert launch.waitForExit(20) == 0, launch.describe()
 	waitForNoKeysDown()
 	controlled.peer.close()
+	launch.assertClean(logNames=("nvda.log",))
+
+
+def startControlling(desktop: DesktopSession, tmpPath: Path) -> RemotePeer:
+	"""The GTK fixture with its text field focused, NVDA beside it as Remote Access's leader, and the
+	peer joined as the follower it controls."""
+	desktop.startApp(desktop.fixture("gtkFixture"), title="Fixture window")
+	desktop.startNVDA(remoteConfig(tmpPath / "config", 1), env=probeHooks(tmpPath))
+	desktop.expect("Fixture window", since=0, timeout=STARTUP_TIMEOUT)
+	mark = desktop.mark()
+	desktop.press("Tab", "Tab", "Tab", "Tab")
+	desktop.expect("Name: edit\N{HORIZONTAL ELLIPSIS}", since=mark)
+	desktop.nvda.waitForLog("Successfully connected as leader", STARTUP_TIMEOUT)
+	peer = RemotePeer(PORT, CHANNEL, remotePeer.FOLLOWER)
+	desktop.nvda.waitForLog("Client connected: {'id': 2", 5)
+	return peer
+
+
+def keyMessages(peer: RemotePeer, mark: int) -> list[tuple[int, bool, bool, int | None]]:
+	"""(vk, extended, pressed, scan code) of each key message the peer had after mark."""
+	return [(m["vk_code"], m["extended"], m["pressed"], m.get("scan_code")) for m in peer.since(mark, "key")]
+
+
+def tapped(vk: int, extended: bool, scan: int) -> list[tuple[int, bool, bool, int]]:
+	return [(vk, extended, True, scan), (vk, extended, False, scan)]
+
+
+def waitForClipboard(text: str) -> None:
+	deadline = time.monotonic() + 5
+	while True:
+		try:
+			if readClipboard() == text:
+				return
+		except subprocess.CalledProcessError:
+			# Nothing owns the clipboard yet.
+			pass
+		assert time.monotonic() < deadline, f"the clipboard does not hold {text!r}"
+		time.sleep(0.05)
+
+
+def ownClipboard(text: str) -> subprocess.Popen:
+	"""Have xclip own the clipboard with text, from a moment when nothing may own it."""
+	process = subprocess.Popen(
+		["xclip", "-quiet", "-selection", "clipboard", "-t", "UTF8_STRING", "-i"],
+		stdin=subprocess.PIPE,
+		stdout=subprocess.DEVNULL,
+		stderr=subprocess.DEVNULL,
+	)
+	process.stdin.write(text.encode("utf-8"))
+	process.stdin.close()
+	waitForClipboard(text)
+	return process
+
+
+def test_controllingComputerSendsTheKeysTypedHere(
+	desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path
+):
+	peer = startControlling(desktop, tmp_path)
+	try:
+		mark = desktop.mark()
+		keyboard.press("Insert+alt+Tab")
+		desktop.expect("Controlling remote computer", since=mark)
+		# The keyboard is taken for the follower within the key watcher's turn.
+		time.sleep(0.3)
+		keyMark = peer.mark()
+		mark = desktop.mark()
+		keyboard.press("shift+a", "b", "Delete", "control+Left", "F5", "KP_Enter", "Insert+t")
+		expected = [
+			(VK_LSHIFT, False, True, 0x2A),
+			*tapped(ord("A"), False, 0x1E),
+			(VK_LSHIFT, False, False, 0x2A),
+			*tapped(ord("B"), False, 0x30),
+			*tapped(VK_DELETE, True, 0x53),
+			(VK_LCONTROL, False, True, 0x1D),
+			*tapped(VK_LEFT, True, 0x4B),
+			(VK_LCONTROL, False, False, 0x1D),
+			*tapped(VK_F5, False, 0x3F),
+			*tapped(VK_RETURN, True, 0x1C),
+			(VK_INSERT, True, True, 0x52),
+			*tapped(ord("T"), False, 0x14),
+			(VK_INSERT, True, False, 0x52),
+		]
+		deadline = time.monotonic() + 5
+		while len(keyMessages(peer, keyMark)) < len(expected):
+			assert time.monotonic() < deadline, keyMessages(peer, keyMark)
+			time.sleep(0.05)
+		assert keyMessages(peer, keyMark) == expected
+		time.sleep(0.3)
+		# None of them acted here: the field is as it was, and NVDA+t said nothing.
+		assert entryState()[0] == ENTRY_TEXT
+		assert "Fixture window" not in desktop.spokenSince(mark)
+		# What the follower says and plays is heard here.
+		peer.send("speak", sequence=["Hello from the follower"], priority=0)
+		desktop.expect("Hello from the follower", since=mark)
+		peer.send("tone", hz=440, length=50, left=50, right=50)
+		desktop.nvda.waitForLog("Beep at pitch 440, for 50 ms", 5)
+		# A Windows follower names its own copy's sound, which is played from this one's.
+		peer.send("wave", fileName="C:\\Program Files (x86)\\NVDA\\waves\\exit.wav", asynchronous=True)
+		desktop.nvda.waitForLog("remote probe: wave /", 5)
+		# Switched back, the keys act here again, and the follower is told the modifiers are up.
+		mark = desktop.mark()
+		keyMark = peer.mark()
+		keyboard.press("Insert+alt+Tab")
+		desktop.expect("Controlling local computer", since=mark)
+		time.sleep(0.3)
+		keyboard.press("x")
+		waitForEntry("x")
+		sent = keyMessages(peer, keyMark)
+		assert (VK_INSERT, True, False, None) in sent
+		assert (VK_LMENU, False, False, None) in sent
+		assert not any(vk == ord("X") for vk, *_rest in sent)
+		# The clipboard both ways.
+		owner = ownClipboard("from the leader")
+		try:
+			clipMark = peer.mark()
+			keyboard.press("Insert+shift+F11")
+			pushed = peer.waitFor(lambda m: m["type"] == "set_clipboard_text", since=clipMark)
+			assert pushed["text"] == "from the leader"
+		finally:
+			owner.terminate()
+			owner.wait()
+		peer.send("set_clipboard_text", text="from the follower")
+		waitForClipboard("from the follower")
+		# Exiting while the keys go to the follower leaves the keyboard to the applications.
+		mark = desktop.mark()
+		keyboard.press("Insert+alt+Tab")
+		desktop.expect("Controlling remote computer", since=mark)
+		time.sleep(0.3)
+		launch = desktop.nvda
+		launch.process.send_signal(signal.SIGTERM)
+		assert launch.waitForExit(20) == 0, launch.describe()
+		keyboard.press("y")
+		waitForEntry("xy")
+		waitForNoKeysDown()
+	finally:
+		peer.close()
+	launch.assertClean(logNames=("nvda.log",))
+
+
+VK_RMENU = 0xA5
+#: The scan code Windows' hook gives the left Control it reports with AltGr.
+ALTGR_CONTROL_SCAN = 0x21D
+
+
+def test_controlledComputerTypesTheLeadersAltGrLetters(desktop: DesktopSession, tmp_path: Path):
+	subprocess.run(["setxkbmap", "pl"], check=True)
+	try:
+		controlled = Controlled(desktop, tmp_path)
+		try:
+			# AltGr+a on a Windows leader with a Polish layout, as its keyboard hook reports it.
+			peer = controlled.peer
+			for vk, extended, pressed, scan in (
+				(VK_LCONTROL, False, True, ALTGR_CONTROL_SCAN),
+				(VK_RMENU, True, True, 0x38),
+				(ord("A"), False, True, 0x1E),
+				(ord("A"), False, False, 0x1E),
+				(VK_LCONTROL, False, False, ALTGR_CONTROL_SCAN),
+				(VK_RMENU, True, False, 0x38),
+			):
+				peer.key(vk, pressed, extended, scan)
+				time.sleep(GAP)
+			# The next letter comes without AltGr.
+			controlled.tap(ord("L"))
+			waitForEntry("ąl")
+			waitForNoKeysDown()
+		finally:
+			launch = controlled.close()
+		launch.assertClean(logNames=("nvda.log",))
+	finally:
+		subprocess.run(["setxkbmap", "us"], check=True)
+
+
+def test_controllingComputerSendsAltGrAsWindowsReportsIt(
+	desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path
+):
+	subprocess.run(["setxkbmap", "pl"], check=True)
+	try:
+		peer = startControlling(desktop, tmp_path)
+		try:
+			mark = desktop.mark()
+			keyboard.press("Insert+alt+Tab")
+			desktop.expect("Controlling remote computer", since=mark)
+			time.sleep(0.3)
+			keyMark = peer.mark()
+			keyboard.press("AltGr+a")
+			expected = [
+				(VK_LCONTROL, False, True, ALTGR_CONTROL_SCAN),
+				(VK_RMENU, True, True, 0x38),
+				*tapped(ord("A"), False, 0x1E),
+				(VK_LCONTROL, False, False, ALTGR_CONTROL_SCAN),
+				(VK_RMENU, True, False, 0x38),
+			]
+			deadline = time.monotonic() + 5
+			while len(keyMessages(peer, keyMark)) < len(expected):
+				assert time.monotonic() < deadline, keyMessages(peer, keyMark)
+				time.sleep(0.05)
+			assert keyMessages(peer, keyMark) == expected
+			assert entryState()[0] == ENTRY_TEXT
+			launch = desktop.nvda
+			launch.process.send_signal(signal.SIGTERM)
+			assert launch.waitForExit(20) == 0, launch.describe()
+		finally:
+			peer.close()
+		launch.assertClean(logNames=("nvda.log",))
+	finally:
+		subprocess.run(["setxkbmap", "us"], check=True)
+
+
+def test_controlledComputerTypesKeysThatArriveTogether(desktop: DesktopSession, tmp_path: Path):
+	# A slow network hands over several of the leader's key messages at once.
+	controlled = Controlled(desktop, tmp_path)
+	peer = controlled.peer
+	try:
+		events = [(VK_LSHIFT, True), (ord("H"), True), (ord("H"), False), (VK_LSHIFT, False)]
+		for char in "ello":
+			events += [(ord(char.upper()), True), (ord(char.upper()), False)]
+		for vk, pressed in events:
+			peer.key(vk, pressed)
+		waitForEntry("Hello")
+		desktopMark = desktop.mark()
+		for vk, pressed, extended in (
+			(VK_INSERT, True, True),
+			(ord("T"), True, False),
+			(ord("T"), False, False),
+			(VK_INSERT, False, True),
+		):
+			peer.key(vk, pressed, extended)
+		desktop.expect("Fixture window", since=desktopMark)
+		time.sleep(0.3)
+		assert entryState()[0] == "Hello"
+		waitForNoKeysDown()
+	finally:
+		launch = controlled.close()
 	launch.assertClean(logNames=("nvda.log",))

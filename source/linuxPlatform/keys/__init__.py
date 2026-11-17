@@ -26,6 +26,9 @@ MASK_TYPED_KEYS_IN_LOG: bool = True
 #: Set to "off" in the environment, no key source is started.
 SWITCH_VARIABLE = "LINDA_KEYS"
 
+#: The scan code Windows' hook gives the left Control it reports with AltGr, before right Alt.
+ALTGR_CONTROL_SCAN = 0x21D
+
 #: Which keys are captured: none beyond the NVDA keys, Escape alone for focus mode, or browse mode's.
 CaptureMode = Literal["off", "focus", "browse"]
 
