@@ -93,6 +93,8 @@ DESCENDANT_NAMED_ROLES = frozenset(
 )
 #: Roles whose descendants are not read when an object is named from the text inside it.
 _OPAQUE_RAW_ROLES = frozenset({"list", "list box", "table", "tree", "tree table", "menu", "popup menu"})
+#: How the names GTK's own dialogs give their layout boxes end.
+_LAYOUT_NAME_SUFFIXES = (" Revealer", " Stack", " Layer")
 _keyName = re.compile(r"<(\w+)>")
 _MODIFIERS = {"control": "Ctrl", "primary": "Ctrl", "alt": "Alt", "shift": "Shift", "super": "Windows"}
 _QT_MODIFIERS = {"Ctrl": "Ctrl", "Alt": "Alt", "Shift": "Shift", "Meta": "Windows"}
@@ -241,7 +243,8 @@ class AtSpi(NVDAObject):
 			clsList.append(IconItem)
 		elif role == Role.TABLECELL and "TableCell" in ifaces:
 			clsList.append(TableCell)
-		if role == Role.DIALOG:
+		if role == Role.DIALOG and self.atspiRole != "file chooser":
+			# A file chooser's labels are its controls' names, not a message to read as it opens.
 			clsList.append(Dialog)
 		elif role == Role.PROGRESSBAR:
 			clsList.append(ProgressBar)
@@ -288,9 +291,14 @@ class AtSpi(NVDAObject):
 
 	def _get_atspiName(self) -> str:
 		try:
-			return _client().name(self.node)
+			name = _client().name(self.node)
 		except NodeGone:
 			return ""
+		if name.endswith(_LAYOUT_NAME_SUFFIXES) and self.atspiRole in ("panel", "filler"):
+			# GTK's file chooser names its boxes after their place in its own layout, "Browse Header
+			# Stack" and the like, which a user has no use for.
+			return ""
+		return name
 
 	def _get_atspiParentNode(self) -> Node | None:
 		try:
@@ -389,6 +397,9 @@ class AtSpi(NVDAObject):
 			return Role.TOGGLEBUTTON
 		if raw == "frame" and self.atspiAttributes.get("window-type") == "dialog":
 			# wx's dialogs are GTK windows marked only by this attribute.
+			return Role.DIALOG
+		if raw == "file chooser" and self.atspiParentRole == "application":
+			# GTK's open and save dialogs, which Windows users know as the Open and Save As dialogs.
 			return Role.DIALOG
 		if raw == "alert" and self.atspiParentRole == "application":
 			# GTK's message dialog is a top-level alert; Windows presents a message box as a dialog.
@@ -495,23 +506,27 @@ class AtSpi(NVDAObject):
 		return name
 
 	def _get_isPresentableFocusAncestor(self) -> bool:
-		if self.toolkit == GTK3 and self.atspiRole in ("page tab", "page tab list") and self._isHiddenTab:
-			# Caja and Pluma keep a notebook with its tabs hidden around every view, which Windows
-			# programs do not have, and which would be announced on every move into the view.
+		if self.atspiRole == "file chooser" and self.role != Role.DIALOG:
+			# The chooser inside GTK's open and save dialogs, named "File Chooser Widget".
 			return False
+		if self.toolkit == GTK3 and self.atspiRole in ("page tab", "page tab list"):
+			# A GTK notebook holds its pages inside its tabs, where a Windows tab control sits beside the
+			# page, so every move into a page would announce the notebook: Caja and Pluma keep one around
+			# their views even with the tabs hidden. Only a tab of several, which says which document
+			# or page the focus is in, is announced, and the tab list only when its tab has the focus.
+			if self.atspiRole == "page tab list":
+				focus = api.getFocusObject()
+				return isinstance(focus, AtSpi) and focus.atspiParentNode == self.node
+			if not self.atspiName or self._tabCount <= 1:
+				return False
 		return super().isPresentableFocusAncestor
 
-	def _get__isHiddenTab(self) -> bool:
-		"""Whether this GTK 3 tab, or the selected tab of this tab list, has no label: the notebook shows
-		no tabs."""
-		c = _client()
+	def _get__tabCount(self) -> int:
+		parent = self.atspiParentNode
 		try:
-			if self.atspiRole == "page tab":
-				return not self.atspiName
-			selected = c.selectedChild(self.node) if "Selection" in self.atspiInterfaces else None
-			return selected is not None and not c.name(selected)
+			return _client().childCount(parent) if parent is not None else 0
 		except NodeGone:
-			return False
+			return 0
 
 	def _get__gridTitle(self) -> str:
 		"""For a value a GTK 3 dialog shows as a label the keyboard can reach and relates to no title, the

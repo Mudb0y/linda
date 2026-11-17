@@ -152,3 +152,90 @@ def test_cajaDesktop(desktop: DesktopSession, tmp_path: Path):
 	step(desktop, "End", "Trash 5 of 5")
 	step(desktop, "Insert+t", "Desktop")
 	assertQuitCleanly(desktop, nvda)
+
+
+def startPluma(desktop: DesktopSession, *paths: Path) -> str:
+	"""Start Pluma on paths and give it the keyboard; return its window's title."""
+	title = f"{paths[0].name} (~/{paths[0].parent.relative_to(Path.home())}) - Pluma"
+	desktop.startApp(["pluma", *map(str, paths)], title=title, timeout=WINDOW_TIMEOUT)
+	desktopSession.activate(title)
+	return title
+
+
+def test_pluma(desktop: DesktopSession):
+	folder = makeFolder(Path.home() / "pluma")
+	document = folder / "a.txt"
+	document.write_text("first line\nsecond line here\nthird\n")
+	startPluma(desktop, document)
+	nvda = startNVDA(desktop, "a dot txt (  slash pluma) - Pluma", "edit multi line first line")
+	step(desktop, "Down", "second line here")
+	step(desktop, "Insert+Up", "second line here")
+	for letter in "xy":
+		mark = desktop.mark()
+		desktop.typeText(letter)
+		desktop.expect(letter, since=mark)
+
+	step(desktop, "F10", "File sub Menu Alt plus F 1 of 7")
+	step(desktop, "Down", "New Ctrl plus N N 1 of 10")
+	step(desktop, "Right", "Undo Ctrl plus Z U 1 of…")
+	step(desktop, "Escape", "edit multi line…")
+
+	step(desktop, "control+f", "Find dialog Search for:", "Search for: combo box collapsed", "edit…")
+	step(desktop, "Escape", "star a dot txt (  slash pluma) - Pluma", "edit multi line…")
+	step(desktop, "control+h", "Replace dialog…", "Search for: combo box collapsed", "edit…")
+	step(desktop, "Escape", "star a dot txt (  slash pluma) - Pluma", "edit multi line…")
+
+	# Documents are tabs, and switching between them says which one the focus is in.
+	step(desktop, "control+n", "Unsaved Document 1 tab selected 2 of 2", "edit multi line blank")
+	step(desktop, "control+alt+Page_Up", "star a dot txt tab selected 1 of 2", "edit multi line…")
+	assertQuitCleanly(desktop, nvda)
+
+
+def test_plumaBigFile(desktop: DesktopSession):
+	document = makeFolder(Path.home() / "bigtext") / "big.txt"
+	document.write_text("".join(f"Line {number} of a big file.\n" for number in range(20000)))
+	startPluma(desktop, document)
+	nvda = startNVDA(
+		desktop, "big dot txt (  slash bigtext) - Pluma", "edit multi line Line 0 of a big file."
+	)
+	# Pluma keeps a file's last newline out of its text.
+	step(desktop, "control+End", "Line 19999 of a big file.")
+	step(desktop, "Up", "Line 19998 of a big file.")
+	step(desktop, "control+Home", "Line 0 of a big file.")
+	step(desktop, "Insert+Down", "Line 0 of a big file.", "Line 1 of a big file.", "Line 2 of a big file.")
+	desktop.press("Control_L")
+	assertQuitCleanly(desktop, nvda)
+
+
+def test_gtkDialogs(desktop: DesktopSession):
+	folder = makeFolder(Path.home() / "dialogs", "sub/", "a.txt", "b.txt")
+	startPluma(desktop, folder / "a.txt")
+	nvda = startNVDA(desktop, "a dot txt (  slash dialogs) - Pluma", "edit multi line hello")
+
+	# GTK's open dialog, with its files spoken as a Windows list view's.
+	step(desktop, "control+o", "Open Files dialog", "Files list")
+	step(desktop, "Down", "b dot txt; Size: 6 bytes; Type: …")
+	step(desktop, "Tab", "Character Encoding: combo box Automatically Detected collapsed Alt plus H")
+	step(desktop, "Escape", "a dot txt (  slash dialogs) - Pluma", "edit multi line hello")
+
+	step(desktop, "control+shift+s", "Save As... dialog", "Name: edit Alt plus N selected a")
+	step(desktop, "Escape", "a dot txt (  slash dialogs) - Pluma", "edit multi line hello")
+
+	# A message dialog reads its message as it opens, as NVDA reads a Windows message box.
+	mark = desktop.mark()
+	desktop.typeText("z")
+	desktop.expect("z", since=mark)
+	step(
+		desktop,
+		"control+w",
+		"Question dialog Save changes to document  a dot txt  before closing?…",
+		"Save button Alt plus S",
+	)
+	step(desktop, "Tab", "Close without Saving button Alt plus W")
+	step(desktop, "Escape", "star a dot txt (  slash dialogs) - Pluma", "edit multi line…")
+
+	step(desktop, "alt+h", "Contents F 1 C 1 of 2")
+	step(desktop, "Up", "About A 2 of 2")
+	step(desktop, "Return", "About Pluma dialog Pluma 1.…", "Credits toggle button not pressed Alt plus R")
+	step(desktop, "Escape", "star a dot txt (  slash dialogs) - Pluma", "edit multi line…")
+	assertQuitCleanly(desktop, nvda)
