@@ -258,7 +258,9 @@ impl State {
             if p.unwatched {
                 continue;
             }
-            if p.walking {
+            // The objects a walk in progress finds are not known until it ends, and a change to one
+            // of them would be lost; it is looked at once the walk's objects are in.
+            if p.walking || p.updating {
                 p.early
                     .push((path.to_owned(), format!("{why} while walking")));
                 continue;
@@ -815,7 +817,7 @@ async fn update_task(st: Rc<State>, d: Rc<Doc>) {
         )
     };
     let Some(app) = st.apps.borrow().get(&d.bus).cloned() else {
-        d.p.borrow_mut().updating = false;
+        end_update(&st, &d);
         return;
     };
     let t0 = Instant::now();
@@ -835,6 +837,7 @@ async fn update_task(st: Rc<State>, d: Rc<Doc>) {
         }
         while walk.step().await {}
         if d.p.borrow().unwatched || !st.is_current(&d) {
+            end_update(&st, &d);
             return;
         }
         let gone: HashSet<String> = walk.gone.iter().cloned().collect();
@@ -891,6 +894,7 @@ async fn update_task(st: Rc<State>, d: Rc<Doc>) {
     if url_check || stream.is_some() {
         let url = doc_url(&app.client, &d.root).await;
         if d.p.borrow().unwatched {
+            end_update(&st, &d);
             return;
         }
         if !url.is_empty() && *d.url.borrow() != url {
@@ -903,7 +907,22 @@ async fn update_task(st: Rc<State>, d: Rc<Doc>) {
     if (stream.is_some() || !events.is_empty()) && st.is_current(&d) {
         st.emit(&d.bus, &d.root, &events, stream, info);
     }
-    d.p.borrow_mut().updating = false;
+    end_update(&st, &d);
+}
+
+/// Ends an update: the changes that came while it walked are looked at now that its objects are in.
+fn end_update(st: &State, d: &Rc<Doc>) {
+    let early = {
+        let mut p = d.p.borrow_mut();
+        p.updating = false;
+        std::mem::take(&mut p.early)
+    };
+    let mut seen = HashSet::new();
+    for (path, why) in early {
+        if seen.insert(path.clone()) {
+            st.invalidate(&d.bus, &path, &why);
+        }
+    }
 }
 
 enum Wake {

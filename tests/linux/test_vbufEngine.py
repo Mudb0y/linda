@@ -45,6 +45,8 @@ LARGE_TITLE = "Basedreader bench large page"
 #: Seconds a page has to finish loading, and how long it must stay loaded to count as finished.
 LOAD_BOUND = 120.0
 STEADY = 0.5
+#: Seconds realGrowing.html takes to build itself, from two seconds after it loads, with time to spare.
+GROWING_SECONDS = 6.0
 #: Text basic.html reads as, in this order.
 BASIC_TEXT = (
 	"Basic page",
@@ -604,6 +606,33 @@ def test_framesFromOtherSitesAreRenderedInPlaceAndFollowed(
 		updated = bufferText(vbufLib, Units(encode(model, [])))
 		assert "The frame changed its text." in updated, [b.info for b in got]
 		assert "Text of the other site's frame." not in updated
+
+
+def test_aPageThatBuildsItselfInStepsIsFollowedWhole(
+	desktop: DesktopSession,
+	engine: ModuleType,
+	vbufLib: ModuleType,
+):
+	webSession.startFirefox(desktop, "realGrowing.html")
+	_document, bus, path = documentFor("Growing page")
+	rendered = engine.render(bus, path, DOC_HANDLE, progressive=False)
+	try:
+		model = parseDocument(_units(rendered.stream))
+	finally:
+		rendered.stream.free()
+	for batch in batches(engine, time.monotonic() + GROWING_SECONDS, lambda b: False):
+		if batch.stream is not None:
+			if batch.docPath == path:
+				model = applyBatch(model, parseBatch(_units(batch.stream)))
+			batch.stream.free()
+	updated = bufferText(vbufLib, Units(encode(model, [])))
+	rendered = engine.render(bus, path, DOC_HANDLE, progressive=False)
+	try:
+		fresh = bufferText(vbufLib, rendered.stream)
+	finally:
+		rendered.stream.free()
+	assert "The growing page is complete." in fresh, fresh
+	assert updated == fresh
 
 
 def test_tablesAreGeneratedFromNVDARoles(tmp_path: Path):

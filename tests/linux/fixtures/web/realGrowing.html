@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Growing page</title></head>
+<body>
+<main id="main"><h1>Growing page</h1>
+<div id="column"><div role="progressbar" aria-valuenow="50">Loading</div></div>
+<div id="filler"></div>
+</main>
+<script>
+// As a script-built application does: a loading placeholder gives way to an empty feed while much of
+// the page around it is made anew, and the feed's posts arrive while that change is still being
+// read, all at once and never again.
+function lines(count) {
+	const made = [];
+	for (let line = 0; line < count; line++) {
+		const paragraph = document.createElement("p");
+		paragraph.textContent = `Filler line ${line}.`;
+		made.push(paragraph);
+	}
+	return made;
+}
+document.getElementById("filler").append(...lines(10));
+setTimeout(() => {
+	const feed = document.createElement("div");
+	feed.setAttribute("role", "feed");
+	document.getElementById("column").replaceChildren(feed);
+	document.getElementById("filler").replaceChildren(...lines(6000));
+	setTimeout(() => {
+		for (let post = 0; post < 40; post++) {
+			const article = document.createElement("article");
+			article.textContent = `Post ${post} of the feed.`;
+			feed.append(article);
+		}
+		const last = document.createElement("p");
+		last.textContent = "The growing page is complete.";
+		feed.append(last);
+	}, 400);
+}, 2000);
+</script>
+</body></html>
