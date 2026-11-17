@@ -579,8 +579,30 @@ class AtSpiBuffer(VirtualBuffer):
 
 	event_gainFocus.ignoreIsReady = True
 
+	#: Where the browser put its caret while the focus was outside the page, as Firefox's find bar
+	#: selects each match it finds.
+	_caretWhileAway = None
+
+	def event_treeInterceptor_gainFocus(self):
+		caretWhileAway, self._caretWhileAway = self._caretWhileAway, None
+		if caretWhileAway is not None and self._hadFirstGainFocus and not self.passThrough:
+			try:
+				info = self.makeTextInfo(caretWhileAway)
+			except (LookupError, NotImplementedError, RuntimeError):
+				info = None
+			if info is not None:
+				info.collapse()
+				# What the page says as it takes the focus back is then read from the match.
+				self.selection = info
+		super().event_treeInterceptor_gainFocus()
+
 	def event_caret(self, obj, nextHandler):
 		if self.passThrough:
+			return nextHandler()
+		if api.getFocusObject().treeInterceptor is not self:
+			# The page is not read while the focus is in the find bar; the caret goes to the match
+			# once the find bar closes.
+			self._caretWhileAway = obj
 			return nextHandler()
 		# Firefox moves its caret, and sends no scrolling event, when a same-page link is followed or
 		# a script moves the focus; the virtual caret follows it there.

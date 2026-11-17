@@ -440,6 +440,24 @@ class TestSemantics:
 		step(semantics, "Insert+space", "Browse mode")
 
 
+class TestFindInPage:
+	"""Firefox's own find bar: the page is not read while the search is typed, and closing the find bar
+	reads the line with the match, where browse mode then goes on."""
+
+	def test_findAndClose(self, semantics: Session):
+		desktop = semantics.desktop
+		stepSaying(semantics, "Control_L+Home", "Semantics")
+		stepSaying(semantics, "ctrl+f", "edit")
+		mark = desktop.mark()
+		desktop.typeText("Large")
+		desktop.expect("e", since=mark)
+		time.sleep(1.0)
+		spoken = desktop.spokenSince(mark)
+		assert not any("radio button" in text for text in spoken), spoken
+		stepSaying(semantics, "Escape", "radio button not checked Large")
+		stepSaying(semantics, "Down", "An ARIA heading")
+
+
 class TestElementsList:
 	"""NVDA+F7 lists the page's links, headings, form fields, buttons and landmarks in NVDA's own
 	dialog, which moves to or activates the one chosen."""
@@ -463,4 +481,3 @@ class TestElementsList:
 		time.sleep(SETTLE)
 		stepSaying(semantics, "Shift+Tab", "Page two 1 of 1 level 1")
 		stepSaying(semantics, "Return", "Page two link")
-
