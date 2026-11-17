@@ -35,17 +35,18 @@
     "openevv": {
       "flake": false,
       "locked": {
-        "lastModified": 1794623733,
-        "narHash": "sha256-PNyagZO9dF0huYUYec/ms1s/eV53HOcWJNJpqU8yUWM=",
-        "ref": "refs/heads/main",
-        "rev": "aaebca3f6656ddee6592a4e001da6594e79a2cff",
-        "revCount": 984,
-        "type": "git",
-        "url": "file:///home/stas/Projects/openevv"
+        "lastModified": 1794370731,
+        "narHash": "sha256-Ux/dUiysTt8OeXU+aNGg4UFjBAnWEqsA0EPZUomgHnI=",
+        "owner": "Mudb0y",
+        "repo": "openevv",
+        "rev": "7ffd7549e985a46ac1dcb0264c95b9111cbde304",
+        "type": "github"
       },
       "original": {
-        "type": "git",
-        "url": "file:///home/stas/Projects/openevv"
+        "owner": "Mudb0y",
+        "repo": "openevv",
+        "rev": "7ffd7549e985a46ac1dcb0264c95b9111cbde304",
+        "type": "github"
       }
     },
     "root": {

@@ -7,10 +7,10 @@
   # brings in. Move it when upstream moves that pin; tests/linux/test_ruff.py
   # fails until the two agree.
   inputs.nixpkgs-ruff.url = "github:NixOS/nixpkgs/8b7dc2ca50dd99ca3af5af1436b06b5adb1e54c9";
-  # openevv's source, for its engine library and its NVDA driver. The local
-  # clone, because its newest commits are not published.
+  # openevv's source, for its engine library and its NVDA driver, by revision
+  # so that a build anywhere compiles the same engine.
   inputs.openevv = {
-    url = "git+file:///home/stas/Projects/openevv";
+    url = "github:Mudb0y/openevv/7ffd7549e985a46ac1dcb0264c95b9111cbde304";
     flake = false;
   };
 
@@ -74,7 +74,7 @@
 
       # What git describe says of the locked revision, which a flake input
       # does not record; evaluation stops until it is set again for a new one.
-      openevvVersion = "0.7-5-gaaebca3";
+      openevvVersion = "0.7-0-g7ffd754";
       openevvLibeci =
         assert lib.assertMsg (lib.hasSuffix openevv.shortRev openevvVersion)
           "openevvVersion is not of ${openevv.rev}: set it to what git describe says of that commit";
