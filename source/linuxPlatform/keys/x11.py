@@ -123,13 +123,29 @@ RECONNECT_ATTEMPTS = 10
 #: The guard. It shares nothing with NVDA's interpreter, so that it runs whatever NVDA's threads do.
 #: Its standard input carries the heartbeat: "1 ID" while the keyboard can be held, "0 ID" while it
 #: cannot, ID being a resource of the source's connection. After GUARD_SILENCE without one while
-#: it can, it closes that connection; it ends when its input does.
+#: it can, it frees the keyboard and closes that connection; it ends when its input does.
+#:
+#: Closing the connection alone would free the keyboard but lose every key held up behind the
+#: captured press: the X server ends a closing client's active grab before its passive ones, and
+#: each held-up press then activates a passive grab of the client that is going and goes with it.
+#: So the guard first writes to the source's own connection, whose socket it was handed, the
+#: requests the source would have made: release every passive key grab on the root, replay the
+#: held press to the application, and let go of the keyboard. The source's next request would then
+#: be numbered wrongly, which is one more reason to close the connection after them.
 GUARD_PROGRAM = r"""
-import json, os, select, sys, time
-sys.path[:0] = json.loads(sys.argv[1])
-silence = float(sys.argv[2])
-from Xlib import display, error
+import json, os, select, struct, sys, time
+socket, root = int(sys.argv[1]), int(sys.argv[2])
+sys.path[:0] = json.loads(sys.argv[3])
+silence = float(sys.argv[4])
+from Xlib import X, display, error
 from Xlib.xobject.resource import Resource
+# UngrabKey, AllowEvents and UngrabKeyboard, in the byte order the source's connection uses: this
+# machine's.
+FREE = (
+	struct.pack("=BBHIHxx", 34, X.AnyKey, 3, root, X.AnyModifier)
+	+ struct.pack("=BBHI", 35, X.ReplayKeyboard, 2, X.CurrentTime)
+	+ struct.pack("=BxHI", 32, 2, X.CurrentTime)
+)
 connection = display.Display()
 guarding, resource, heard, pending = False, 0, time.monotonic(), b""
 while True:
@@ -144,6 +160,10 @@ while True:
 			state, _space, number = line.partition(b" ")
 			guarding, resource, heard = state == b"1", int(number or 0), time.monotonic()
 	elif guarding and resource:
+		try:
+			os.write(socket, FREE)
+		except OSError:
+			pass
 		try:
 			Resource(connection.display, resource).kill_client()
 			connection.sync()
@@ -340,6 +360,7 @@ class X11KeySource:
 
 	def _reconnect(self) -> bool:
 		"""Connect again after the X server closed the connection, and take back every key taken."""
+		self._stopGuard()
 		try:
 			self._display.close()
 		except (OSError, error.ConnectionClosedError):
@@ -367,6 +388,7 @@ class X11KeySource:
 					)
 					return False
 				time.sleep(1)
+		self._startGuard()
 		if self._consumedWanted is not None:
 			self._applyGrabs(*self._consumedWanted)
 		if self._holdWanted:
@@ -696,6 +718,9 @@ class X11KeySource:
 		return lastTime + HEARTBEAT_INTERVAL if guarding else None
 
 	def _startGuard(self) -> None:
+		"""Start a guard for the connection there is now; it holds that connection's socket, so one is
+		started afresh for each connection."""
+		socket = self._display.fileno()
 		try:
 			self._guard = subprocess.Popen(
 				[
@@ -703,11 +728,14 @@ class X11KeySource:
 					"-I",
 					"-c",
 					GUARD_PROGRAM,
+					str(socket),
+					str(self._display.screen().root.id),
 					json.dumps([path for path in sys.path if path]),
 					str(GUARD_SILENCE),
 				],
 				stdin=subprocess.PIPE,
 				stdout=subprocess.DEVNULL,
+				pass_fds=(socket,),
 			)
 		except OSError:
 			log.warning("No guard frees the keyboard should NVDA stop answering", exc_info=True)

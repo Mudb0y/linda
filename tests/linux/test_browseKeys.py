@@ -10,6 +10,7 @@ BASEDREADER_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q t
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -168,51 +169,89 @@ def waitForCapture(nvda: harness.Launch, mode: str, timeout: float = 5) -> None:
 		time.sleep(0.05)
 
 
-def waitForPageLog(expected: list[str], timeout: float = 3) -> float:
-	"""Wait until the keys page has logged expected; returns when it had."""
-	deadline = time.monotonic() + timeout
-	while (logged := webSession.pageKeyLog()) != expected:
-		assert time.monotonic() < deadline, f"the page logged {logged}, not {expected}"
-		time.sleep(0.02)
-	return time.monotonic()
-
-
-def fieldText() -> str:
-	"""What the keys page's text field holds, read over the accessibility bus."""
-	Atspi = desktopSession._atspi()
-	desktop = Atspi.get_desktop(0)
-	desktop.clear_cache()
+def _matches(Atspi, root, role):
 	rule = Atspi.MatchRule.new(
 		None,
 		Atspi.CollectionMatchType.ALL,
 		None,
 		Atspi.CollectionMatchType.ALL,
-		[Atspi.Role.ENTRY],
+		[role],
 		Atspi.CollectionMatchType.ANY,
 		None,
 		Atspi.CollectionMatchType.ALL,
 		False,
 	)
-	for index in range(desktop.get_child_count()):
-		app = desktop.get_child_at_index(index)
-		if app is None or app.get_toolkit_name() != "Gecko":
-			continue
-		for entry in Atspi.Collection.get_matches(app, rule, Atspi.CollectionSortOrder.CANONICAL, 0, True):
-			entry.clear_cache()
-			if entry.get_name() == "Field":
-				return Atspi.Text.get_text(entry, 0, -1)
-	raise AssertionError("the keys page has no text field named Field")
+	return Atspi.Collection.get_matches(root, rule, Atspi.CollectionSortOrder.CANONICAL, 0, True) or []
 
 
-def waitForField(text: str, timeout: float = 3) -> float:
-	deadline = time.monotonic() + timeout
-	while (found := fieldText()) != text:
-		assert time.monotonic() < deadline, f"the field holds {found!r}, not {text!r}"
-		time.sleep(0.02)
-	return time.monotonic()
+def _byId(node, wanted: str, depth: int = 0):
+	if (node.get_attributes() or {}).get("id") == wanted:
+		return node
+	if depth > 20:
+		return None
+	for index in range(node.get_child_count()):
+		child = node.get_child_at_index(index)
+		if child is not None and (found := _byId(child, wanted, depth + 1)) is not None:
+			return found
+	return None
 
 
-def startPage(desktop: DesktopSession, tmp_path: Path) -> harness.Launch:
+class KeysPage:
+	"""The keys page's text field and key log, found once and then read straight from Firefox.
+
+	Nothing here asks another application anything once found, so it reads on while NVDA, whose own
+	windows are on the accessibility desktop too, does not answer.
+	"""
+
+	def __init__(self) -> None:
+		Atspi = self._Atspi = desktopSession._atspi()
+		desktop = Atspi.get_desktop(0)
+		desktop.clear_cache()
+		for index in range(desktop.get_child_count()):
+			app = desktop.get_child_at_index(index)
+			if app is None or app.get_toolkit_name() != "Gecko":
+				continue
+			documents = [
+				d for d in _matches(Atspi, app, Atspi.Role.DOCUMENT_WEB) if d.get_name() == "Keys page"
+			]
+			if documents:
+				break
+		else:
+			raise AssertionError("no Firefox shows the keys page")
+		self._field = next(
+			e for e in _matches(Atspi, documents[0], Atspi.Role.ENTRY) if e.get_name() == "Field"
+		)
+		self._log = _byId(documents[0], "log")
+		assert self._log is not None, "the keys page has no key log"
+		# Firefox fills the text part of its cache the first time a client asks for it.
+		self.log()
+		self.field()
+		time.sleep(webSession.CACHE_FILL_SECONDS)
+
+	def log(self) -> list[str]:
+		"""Each key press that reached the page, as webSession.pageKeyLog names it."""
+		return self._Atspi.Text.get_text(self._log, 0, -1).split()
+
+	def field(self) -> str:
+		return self._Atspi.Text.get_text(self._field, 0, -1)
+
+	def waitForLog(self, expected: list[str], timeout: float = 3) -> float:
+		"""Wait until the page has logged expected; returns when it had."""
+		deadline = time.monotonic() + timeout
+		while (logged := self.log()) != expected:
+			assert time.monotonic() < deadline, f"the page logged {logged}, not {expected}"
+			time.sleep(0.01)
+		return time.monotonic()
+
+	def waitForField(self, text: str, timeout: float = 3) -> float:
+		deadline = time.monotonic() + timeout
+		while (found := self.field()) != text:
+			assert time.monotonic() < deadline, f"the field holds {found!r}, not {text!r}"
+			time.sleep(0.01)
+		return time.monotonic()
+
+
+def startPage(desktop: DesktopSession, tmp_path: Path) -> tuple[harness.Launch, KeysPage]:
 	"""Firefox on the keys page, then NVDA, with its buffer built and browse mode's keys captured."""
 	webSession.requireBrowseLibraries()
 	webSession.startFirefox(desktop, "keys.html")
@@ -220,15 +259,22 @@ def startPage(desktop: DesktopSession, tmp_path: Path) -> harness.Launch:
 	nvda.waitForLog("Buffer rendered", BUFFER_BOUND)
 	waitForCapture(nvda, "browse", timeout=BUFFER_BOUND)
 	time.sleep(SETTLE)
-	assert webSession.pageKeyLog() == []
-	return nvda
+	page = KeysPage()
+	assert page.log() == []
+	return nvda, page
 
 
-def quitNVDA(desktop: DesktopSession, nvda: harness.Launch) -> None:
+def enterField(desktop: DesktopSession, nvda: harness.Launch) -> None:
+	"""From the top of the page, Tab into its text field, which turns focus mode on."""
+	step(desktop, "Tab", "Focus mode")
+	waitForCapture(nvda, "focus")
+
+
+def quitNVDA(desktop: DesktopSession, nvda: harness.Launch, *, ignoring: tuple[str, ...] = ()) -> None:
 	step(desktop, "Insert+q", "Exit NVDA" + PREFIX_MARK)
 	desktop.press("Return")
 	nvda.waitForExit(10)
-	nvda.assertClean(logNames=("nvda.log",))
+	nvda.assertClean(ignoring=ignoring, logNames=("nvda.log",))
 
 
 @pytest.fixture
@@ -259,13 +305,12 @@ def test_heldKeysAreReplayedWithoutAnAnswer(desktop: DesktopSession, tmp_path: P
 
 
 def test_browseAndFocusModeKeys(desktop: DesktopSession, tmp_path: Path):
-	nvda = startPage(desktop, tmp_path)
+	nvda, page = startPage(desktop, tmp_path)
 
-	step(desktop, "Tab", "Focus mode")
-	waitForCapture(nvda, "focus")
+	enterField(desktop, nvda)
 	desktop.typeText("ab")
-	waitForPageLog(["a", "b"])
-	waitForField("ab")
+	page.waitForLog(["a", "b"])
+	page.waitForField("ab")
 	step(desktop, "Escape", "Browse mode")
 	waitForCapture(nvda, "browse")
 
@@ -278,8 +323,8 @@ def test_browseAndFocusModeKeys(desktop: DesktopSession, tmp_path: Path):
 	desktop.press("space", gap=SETTLE)
 	assert nvda.text("nvda.log").count("Input: kb(desktop):(typing key)") == typed + 1
 	step(desktop, "1", "No next heading at level 1")
-	assert webSession.pageKeyLog() == ["a", "b"]
-	assert fieldText() == "ab"
+	assert page.log() == ["a", "b"]
+	assert page.field() == "ab"
 
 	mark = desktop.mark()
 	subprocess.run(["xdotool", "keydown", "Down"], check=True)
@@ -287,18 +332,189 @@ def test_browseAndFocusModeKeys(desktop: DesktopSession, tmp_path: Path):
 	subprocess.run(["xdotool", "keyup", "Down"], check=True)
 	time.sleep(SETTLE)
 	assert len(desktop.spokenSince(mark)) >= 3, desktop.spokenSince(mark)
-	assert webSession.pageKeyLog() == ["a", "b"]
+	assert page.log() == ["a", "b"]
 
 	step(desktop, "Insert+shift+space", "Single letter navigation off")
 	desktop.press("h")
-	waitForPageLog(["a", "b", "h"])
+	page.waitForLog(["a", "b", "h"])
 	step(desktop, "Insert+shift+space", "Single letter navigation on")
-	time.sleep(SETTLE)
-	assert webSession.pageKeyLog() == ["a", "b", "h"]
+	assert page.log() == ["a", "b", "h"]
 
 	step(desktop, "control+l", "combo box Search with Google or enter address" + PREFIX_MARK)
 	waitForCapture(nvda, "off")
 	# Firefox shows a page the shortcuts it does not reserve before acting on them, as it does with no
 	# screen reader running; once is right.
-	assert webSession.pageKeyLog() == ["a", "b", "h", "Control+l"]
+	assert page.log() == ["a", "b", "h", "Control+l"]
+	quitNVDA(desktop, nvda)
+
+
+def gtkEntryText() -> str:
+	"""What the GTK fixture's text field holds."""
+	Atspi = desktopSession._atspi()
+	desktop = Atspi.get_desktop(0)
+	for appIndex in range(desktop.get_child_count()):
+		app = desktop.get_child_at_index(appIndex)
+		for index in range(app.get_child_count() if app else 0):
+			window = app.get_child_at_index(index)
+			if window is not None and window.get_name() == "Fixture window":
+				entries = _matches(Atspi, window, Atspi.Role.TEXT)
+				assert entries, "the fixture has no text field"
+				return Atspi.Text.get_text(entries[0], 0, -1)
+	raise AssertionError("no fixture window")
+
+
+def test_altTabLeavesThePageItsKeys(desktop: DesktopSession, tmp_path: Path):
+	webSession.requireBrowseLibraries()
+	desktop.startApp(desktop.fixture("gtkFixture"), title="Fixture window")
+	desktopSession.activate("Fixture window")
+	# To the text field, which holds "Alice".
+	desktop.press("Tab", "Tab", "Tab", "Tab")
+	nvda, page = startPage(desktop, tmp_path)
+
+	step(desktop, "alt+Tab", "Fixture window" + PREFIX_MARK)
+	waitForCapture(nvda, "off")
+	desktop.typeText("x")
+	deadline = time.monotonic() + 3
+	while "x" not in (text := gtkEntryText()):
+		assert time.monotonic() < deadline, f"x did not reach the fixture's field, which holds {text!r}"
+		time.sleep(0.05)
+
+	step(desktop, "alt+Tab", "Keys page" + PREFIX_MARK)
+	waitForCapture(nvda, "browse")
+	step(desktop, "control+Home", "heading level 1 Keys page")
+	step(desktop, "h", "Field and link heading level 2")
+	assert page.log() == []
+	quitNVDA(desktop, nvda)
+
+
+def inputs(log: harness.Launch | str, *names: str) -> int:
+	"""How many times NVDA's log says a gesture was input, by any of its names: the order of the
+	modifiers in a name is the order they were pressed in."""
+	text = log.text("nvda.log") if isinstance(log, harness.Launch) else log
+	return sum(text.count(f"Input: kb(desktop):{name}\n") for name in names)
+
+
+def test_bothNVDAKeysOnAPage(desktop: DesktopSession, tmp_path: Path):
+	nvda, page = startPage(desktop, tmp_path)
+	enterField(desktop, nvda)
+	desktop.typeText("ab")
+	page.waitForLog(["a", "b"])
+	step(desktop, "Escape", "Browse mode")
+	waitForCapture(nvda, "browse")
+
+	for key in ("Insert", "Caps_Lock"):
+		# In browse mode, and then in focus mode, which NVDA+space turns on and off.
+		step(desktop, f"{key}+space", "Focus mode")
+		waitForCapture(nvda, "focus")
+		step(desktop, f"{key}+space", "Browse mode")
+		waitForCapture(nvda, "browse")
+		for mode in ("browse", "focus"):
+			if mode == "focus":
+				step(desktop, f"{key}+space", "Focus mode")
+				waitForCapture(nvda, "focus")
+			log = nvda.text("nvda.log")
+			# F5 reaching Firefox would load the page again, and empty its log.
+			desktop.press(f"{key}+F5", gap=1)
+			assert inputs(nvda, "NVDA+f5") == inputs(log, "NVDA+f5") + 1
+			mark = desktop.mark()
+			desktop.press(f"{key}+control+f", gap=1)
+			find = ("control+NVDA+f", "NVDA+control+f")
+			assert inputs(nvda, *find) == inputs(log, *find) + 1
+			if mode == "browse":
+				expect(desktop, "Find" + PREFIX_MARK, since=mark)
+				desktop.press("Escape", gap=1)
+				waitForCapture(nvda, "browse")
+			else:
+				step(desktop, f"{key}+space", "Browse mode")
+				waitForCapture(nvda, "browse")
+			assert page.log() == ["a", "b"]
+	assert not desktopSession.capsLockIsOn()
+	# Closing NVDA's find dialog has GTK complain of a window that is not one; the dialog's own, and
+	# nothing to do with keys.
+	quitNVDA(desktop, nvda, ignoring=("stderr",))
+	unexpected = harness.unexpectedStandardError(nvda.text("stderr.txt"))
+	assert all(
+		"gtk_window_set_modal: assertion 'GTK_IS_WINDOW (window)' failed" in line
+		for line in unexpected.splitlines()
+		if line.strip()
+	), unexpected
+
+
+def test_polishAltGrLettersOnAPage(desktop: DesktopSession, tmp_path: Path):
+	subprocess.run(["setxkbmap", "pl"], check=True)
+	try:
+		nvda, page = startPage(desktop, tmp_path)
+		enterField(desktop, nvda)
+		mark = desktop.mark()
+		desktop.typeText("ął")
+		page.waitForField("ął")
+		time.sleep(SETTLE)
+		spoken = desktop.spokenSince(mark)
+		assert spoken.count("ą") == 1 and spoken.count("ł") == 1, spoken
+		logged = page.log()
+		assert len(logged) == 2, logged
+		step(desktop, "Escape", "Browse mode")
+		waitForCapture(nvda, "browse")
+
+		mark = desktop.mark()
+		trapped = nvda.text("nvda.log").count("Trapped a key in browse mode")
+		desktop.typeText("ął")
+		time.sleep(SETTLE)
+		assert nvda.text("nvda.log").count("Trapped a key in browse mode") == trapped + 2
+		assert page.log() == logged
+		assert page.field() == "ął"
+		# AltGr+a and AltGr+l are not a and l: no annotation or list was looked for.
+		assert desktop.spokenSince(mark) == []
+		quitNVDA(desktop, nvda)
+	finally:
+		subprocess.run(["setxkbmap", "us"], check=True)
+
+
+def test_blockedMainThreadLetsKeysThrough(desktop: DesktopSession, tmp_path: Path):
+	nvda, page = startPage(desktop, tmp_path)
+	desktop.press("Insert+shift+F11", gap=0)
+	nvda.waitForLog("Blocking the main thread", 5)
+	blocked = time.monotonic()
+	# The key source passes captured keys once the core has been stuck as long as the watchdog takes
+	# for a possible freeze.
+	time.sleep(0.7)
+	logged: list[str] = []
+	for key, name in (("h", "h"), ("Down", "ArrowDown"), ("j", "j"), ("space", "Space")):
+		pressed = time.monotonic()
+		subprocess.run(["xdotool", "key", key], check=True)
+		logged.append(name)
+		arrived = page.waitForLog(logged, timeout=1)
+		assert arrived - pressed < CAPTURE_TIMEOUT + ARRIVAL_SLACK + 0.2, (
+			f"{key} came {arrived - pressed:.3f} s late"
+		)
+	assert time.monotonic() - blocked < BLOCK_SECONDS, "the keys were not all pressed while NVDA was blocked"
+	nvda.waitForLog("The main thread is free again", BLOCK_SECONDS + 5)
+	time.sleep(SETTLE)
+	step(desktop, "control+Home", "heading level 1 Keys page")
+	step(desktop, "h", "Field and link heading level 2")
+	assert page.log() == logged
+	quitNVDA(desktop, nvda)
+
+
+def test_stoppedNVDALetsTheKeyboardGo(desktop: DesktopSession, tmp_path: Path):
+	nvda, page = startPage(desktop, tmp_path)
+	enterField(desktop, nvda)
+	step(desktop, "Escape", "Browse mode")
+	waitForCapture(nvda, "browse")
+	# Firefox's focus stays in the field, so keys that reach the page type there. h is captured, so
+	# the X server holds the keyboard on it, with xyz behind it, until the guard lets it go; none of
+	# them may be lost.
+	os.kill(nvda.process.pid, signal.SIGSTOP)
+	try:
+		pressed = time.monotonic()
+		subprocess.run(["xdotool", "key", "h"], check=True)
+		desktop.typeText("xyz")
+		page.waitForField("hxyz", timeout=pressed + 3 - time.monotonic())
+	finally:
+		os.kill(nvda.process.pid, signal.SIGCONT)
+	nvda.waitForLog("Keys are read from the X display again", 10)
+	waitForCapture(nvda, "browse")
+	logged = page.log()
+	step(desktop, "shift+h", "Field and link heading level 2")
+	assert page.log() == logged
 	quitNVDA(desktop, nvda)
