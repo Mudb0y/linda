@@ -372,10 +372,6 @@ def test_sayAllKeepsItsPlaceAsThePageChangesAboveIt(desktop: DesktopSession):
 	quit(desktop, nvda)
 
 
-@pytest.mark.xfail(
-	strict=True,
-	reason="NVDAObjects.AtSpi asks virtualBuffers.atspi for a buffer class only for a document, not a dialog",
-)
 def test_dialogOverThePageIsReadInBrowseMode(desktop: DesktopSession):
 	# As on Windows, a dialog on a page gets a buffer of its own, which keeps reading inside it.
 	nvda = startFirst(desktop)

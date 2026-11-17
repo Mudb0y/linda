@@ -338,6 +338,44 @@ class AtSpiBuffer(VirtualBuffer):
 		focus = api.getFocusObject()
 		if focus.treeInterceptor is None and focus in self:
 			focus.treeInterceptor = self
+		else:
+			self._startDialogBuffer()
+
+	def event_treeInterceptor_loseFocus(self):
+		self._startDialogBuffer()
+
+	def _startDialogBuffer(self) -> None:
+		"""Give the dialog the focus has moved into a buffer of its own, when the dialog is on this
+		buffer's page and has none yet.
+
+		This buffer leaves a dialog's content out, as an application, and the focus inside it then has
+		no tree interceptor: arrows and quick navigation say nothing, and NVDA+Space does not help. On
+		Windows behaviors.WebDialog gives such a dialog a buffer; the AT-SPI objects ask
+		treeInterceptorClassFor only for a document, so the buffer is started here, as
+		treeInterceptorHandler.update would start it, once the focus has left this buffer for it.
+		"""
+		focus = api.getFocusObject()
+		if focus.treeInterceptor is not None:
+			return
+		chain = [*api.getFocusAncestors(), focus]
+		try:
+			ownIndex = next(i for i, obj in enumerate(chain) if obj == self.rootNVDAObject)
+			dialog = next(
+				obj for obj in reversed(chain[ownIndex + 1 :]) if getattr(obj, "atspiRole", None) == "dialog"
+			)
+		except (StopIteration, NodeGone):
+			return
+		for running in treeInterceptorHandler.runningTable:
+			if isinstance(running, AtSpiBuffer) and running.rootNVDAObject == dialog:
+				return
+		buffer = AtSpiBuffer(dialog)
+		if not buffer.isAlive:
+			return
+		treeInterceptorHandler.runningTable.add(buffer)
+		log.debug(f"Adding a buffer for a dialog on the page: {buffer}")
+		# Once loaded, it takes the focus, which is in it by then (_takeFocus).
+		if buffer.shouldPrepare:
+			buffer.prepare()
 
 	def onEngineEvents(self, events: tuple[str, ...], info: dict) -> None:
 		"""On the main thread, after the update that came with events, if any, was applied."""
