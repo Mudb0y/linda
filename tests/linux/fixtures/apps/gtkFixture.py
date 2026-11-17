@@ -9,7 +9,8 @@ import sys
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import GLib, Gtk
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GLib, Gtk
 
 
 def labelled(box, text, widget):
@@ -129,8 +130,87 @@ def build():
 	return win
 
 
+#: The document the reader window shows, and the lines of it that are headings, with their levels.
+READER_TEXT = (
+	"Chapter one\nThe first paragraph of chapter one.\nSection A\nText in section A.\n"
+	"Chapter two\nThe second chapter begins here."
+)
+READER_HEADINGS = {0: 1, 2: 2, 4: 1}
+
+
+def presentMessage(text):
+	"""Ask the screen reader to speak text through Orca's remote control, as Paperback does."""
+	import subprocess
+
+	subprocess.Popen(
+		[
+			"gdbus",
+			"call",
+			"--session",
+			"--dest",
+			"org.gnome.Orca.Service",
+			"--object-path",
+			"/org/gnome/Orca/Service",
+			"--method",
+			"org.gnome.Orca.Service.PresentMessage",
+			text,
+		],
+		stdout=subprocess.DEVNULL,
+	)
+
+
+def buildReader():
+	"""A document reader's window: the document is text the keyboard reads but cannot change, and h moves
+	to the next heading and announces it. Below it, a list of files with a column of check boxes first,
+	whose cursor is in the name column."""
+	win = Gtk.Window(title="Reader window")
+	win.set_default_size(500, 400)
+	win.connect("destroy", Gtk.main_quit)
+	box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+	scroller = Gtk.ScrolledWindow()
+	scroller.set_size_request(-1, 200)
+	view = Gtk.TextView()
+	view.set_editable(False)
+	view.set_cursor_visible(True)
+	buffer = view.get_buffer()
+	buffer.set_text(READER_TEXT)
+	buffer.place_cursor(buffer.get_start_iter())
+	scroller.add(view)
+	box.pack_start(scroller, True, True, 0)
+	store = Gtk.ListStore(bool, str, str)
+	for row in ((True, "a.txt", "6 bytes"), (False, "b.png", "2 KB")):
+		store.append(list(row))
+	files = Gtk.TreeView(model=store)
+	files.append_column(Gtk.TreeViewColumn("Use", Gtk.CellRendererToggle(), active=0))
+	nameColumn = Gtk.TreeViewColumn("Name", Gtk.CellRendererText(), text=1)
+	files.append_column(nameColumn)
+	files.append_column(Gtk.TreeViewColumn("Size", Gtk.CellRendererText(), text=2))
+	files.set_cursor(Gtk.TreePath.new_first(), nameColumn, False)
+	box.pack_start(files, False, False, 0)
+	win.add(box)
+
+	def onKey(_view, event):
+		if event.keyval not in (Gdk.KEY_h, Gdk.KEY_H):
+			return False
+		line = buffer.get_iter_at_mark(buffer.get_insert()).get_line()
+		following = [n for n in sorted(READER_HEADINGS) if n > line]
+		if not following:
+			presentMessage("No next heading.")
+			return True
+		target = following[0]
+		buffer.place_cursor(buffer.get_iter_at_line(target))
+		lineText = READER_TEXT.split("\n")[target]
+		presentMessage(f"{lineText} Heading level {READER_HEADINGS[target]}")
+		return True
+
+	view.connect("key-press-event", onKey)
+	win.show_all()
+	view.grab_focus()
+	return win
+
+
 def main():
-	win = build()
+	win = buildReader() if sys.argv[1:] == ["reader"] else build()
 
 	def announce():
 		# Without a window manager GDK gives itself the X input focus here.
