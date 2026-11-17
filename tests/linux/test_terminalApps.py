@@ -212,22 +212,15 @@ def test_silencingAndRealCursor(desktop: DesktopSession, tmp_path: Path):
 	assert cancels and cancels[0]["t"] - pressed <= KEY_BOUND, records(nvda)[-10:]
 	afterCancel = desktop.mark()
 
-	# A key gets its answer at once while the reply streams.
+	# A key gets its answer at once while the reply streams: NVDA+Up reads the empty input line.
 	desktop.expect("Here is what each file does:", since=afterCancel, timeout=REPLY_BOUND)
 	pressed = time.monotonic()
 	desktop.press("Insert+Up", gap=0)
-	deadline = time.monotonic() + 1
-	answer = []
-	while not answer and time.monotonic() < deadline:
-		answer = [
-			r
-			for r in records(nvda)
-			if r["kind"] == "speak"
-			and r["t"] >= pressed
-			and harness.transcriptRecords().spokenText(r) == "blank"
-		]
-		time.sleep(0.01)
-	assert answer and answer[0]["t"] - pressed <= KEY_BOUND, records(nvda)[-10:]
+	time.sleep(1)
+	answer = [r for r in records(nvda) if r["kind"] == "speak" and r["t"] >= pressed]
+	texts = harness.transcriptRecords().spokenTexts(answer)
+	assert texts and texts[0] == "blank", texts
+	assert answer[0]["t"] - pressed <= KEY_BOUND, answer[0]["t"] - pressed
 
 	desktop.expect(QUESTION_END, since=afterCancel, timeout=REPLY_BOUND)
 	time.sleep(SETTLE)

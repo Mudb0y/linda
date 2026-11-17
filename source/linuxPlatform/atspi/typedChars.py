@@ -34,6 +34,19 @@ REPLACED_SECONDS = 0.05
 
 #: The last text removed from an object, as (its node, offset, text, time.monotonic()).
 _lastRemoved: tuple[object, int, str, float] | None = None
+#: When the key went down whose character a terminal last echoed, so that it is echoed once whether
+#: VTE's report or the terminal's own reading of its screen finds it first.
+echoedKeyTime: float | None = None
+
+
+def claimEcho(keyTime: float | None) -> bool:
+	"""Whether the character typed into a terminal by the key that went down at keyTime is still to be
+	echoed, neither it nor a later one having been; it is not from now on."""
+	global echoedKeyTime
+	if keyTime is None or (echoedKeyTime is not None and echoedKeyTime >= keyTime):
+		return False
+	echoedKeyTime = keyTime
+	return True
 
 
 def _terminalRole():
@@ -156,7 +169,7 @@ def handleTextChange(
 		character = PROTECTED_CHARACTER
 	elif getattr(focus, "role", None) == _terminalRole():
 		character = _typedInTerminal(removed, text, key)
-		if character is None or not isOneCharacter(character):
+		if character is None or not isOneCharacter(character) or not claimEcho(key.time):
 			return
 	else:
 		text = _typedPart(text, key)

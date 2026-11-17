@@ -83,6 +83,9 @@ KEY_SECONDS = 0.5
 #: and how many are.
 VANISHED_SECONDS = 3.0
 VANISHED_KEPT = 64
+#: Seconds after a key before its character, seen in the line typed in, is echoed by the terminal
+#: itself, when VTE's report of it did not echo it.
+ECHO_FALLBACK_SECONDS = 0.12
 #: Caret positions kept, to tell where the caret was when a key went down.
 CARET_HISTORY = 16
 #: Prompt characters of a line typed in, which reading that line leaves out.
@@ -327,6 +330,8 @@ class ScreenTracker:
 		self.immediate: list[str] = []
 		#: The column the program's own cursor is in, in the line typed in.
 		self.inputColumn: int | None = None
+		#: The last typing key whose character showed in the line typed in.
+		self.typedKey: Key | None = None
 
 	def reset(self, texts: list[str], caret: tuple[int, int] | None, now: float) -> None:
 		"""Start from a screen, all of it heard, as when the terminal gains the focus."""
@@ -433,17 +438,13 @@ class ScreenTracker:
 		def rank(row: Row) -> int:
 			if row.text == text:
 				return 4
-			if text.startswith(row.text) and row.text.strip():
+			if row.text.strip() and text.startswith(row.text) and _endsWord(text, len(row.text)):
 				return 3
 			if row.animatedUntil > now and isSmallEdit(row.text, text):
 				return 2
 			heard = row.heard
 			# Whole words only: "line 1" said is not the start of "line 18664".
-			if (
-				heard.strip()
-				and text.startswith(heard)
-				and (heard[-1:].isspace() or text[len(heard) : len(heard) + 1] in ("", " "))
-			):
+			if heard.strip() and text.startswith(heard) and _endsWord(text, len(heard)):
 				return 1
 			return 0
 
@@ -499,6 +500,8 @@ class ScreenTracker:
 			and typedNow.endswith(typed)
 			and len(typedNow) <= 4
 		)
+		if isTyping:
+			self.typedKey = key
 		if self.caret is not None and index == self.caret[0] and not self.isCaretParked():
 			if isTyping:
 				row.isInput = row.inputAtCaret = True
@@ -615,27 +618,38 @@ class ScreenTracker:
 		if (
 			inputRow is not None
 			and self.rows[inputRow].inputAtCaret
+			and key is not None
+			and key.kind == "enter"
+			and now - key.time <= KEY_SECONDS
 			and self.caret is not None
 			and self.caret[0] > inputRow
 		):
-			# The cursor went on under the line typed in: it was a command line, run.
+			# Enter took the cursor on under the line typed in: it was a command line, run.
 			self.rows[inputRow].isInput = self.rows[inputRow].inputAtCaret = False
 			self.inputColumn = None
 		newInput = [index for index in created if self.rows[index].isInput]
 		if newInput:
 			for index, row in enumerate(self.rows):
 				row.isInput = index == newInput[-1]
+		elif self.inputRow() is None:
+			# A line typed in that was drawn while a redraw was being read.
+			for index in range(len(self.rows) - 1, -1, -1):
+				if looksTypedIn(self.rows[index].text, self.rows[index - 1].text if index else ""):
+					self.rows[index].isInput = True
+					self.inputColumn = inputContentEnd(self.rows[index].text)
+					break
 
 	# Speaking
 
 	def isFlooding(self, now: float) -> bool:
 		return sum(1 for at in self.outputTimes if now - at <= 1.0) >= FLOOD_ROWS_PER_SECOND
 
-	def cancel(self, now: float) -> None:
-		"""Speech was stopped: what waits is dropped, and a flood stays silent until it pauses."""
+	def cancel(self, at: float, now: float) -> None:
+		"""Speech was stopped by a key that went down at at: what waited since before it is dropped, and a
+		flood stays silent until it pauses."""
 		self.immediate.clear()
 		for row in self.rows:
-			if row.pending():
+			if row.pending() and (row.pendingSince is None or row.pendingSince < at):
 				row.hear()
 		if self.isFlooding(now):
 			self.silenced = True
@@ -709,6 +723,11 @@ class ScreenTracker:
 
 	def hasPending(self) -> bool:
 		return bool(self.immediate) or any(row.pending() for row in self.rows)
+
+
+def _endsWord(text: str, length: int) -> bool:
+	"""Whether text's first length characters end at a word's end."""
+	return text[length - 1 : length].isspace() or text[length : length + 1] in ("", " ")
 
 
 def _commonPrefix(a: str, b: str) -> str:
@@ -834,14 +853,15 @@ class VteTerminal(EnhancedTermTypedCharSupport):
 
 	def _caretScriptPostMovedHelper(self, speakUnit, gesture, info=None) -> None:
 		if speakUnit == textInfos.UNIT_CHARACTER and info is not None and self._isPastTyping(info):
-			# Past what is typed there is only a box's padding, which an edit field does not have.
+			# Past what is typed there is only the row's end or a box's padding, which in an edit field is
+			# the end of the line.
 			super()._caretScriptPostMovedHelper(None, gesture, info)
 			speech.speakMessage(_("blank"))
 			return
 		super()._caretScriptPostMovedHelper(speakUnit, gesture, info)
 
 	def _isPastTyping(self, info) -> bool:
-		"""Whether nothing but the padding of a box follows the caret on its row."""
+		"""Whether nothing but the row's end, or the padding of a box, follows the caret on its row."""
 		rest = info.copy()
 		try:
 			rest.expand(textInfos.UNIT_LINE)
@@ -849,6 +869,8 @@ class VteTerminal(EnhancedTermTypedCharSupport):
 			text = rest.text
 		except (RuntimeError, NotImplementedError, LookupError):
 			return False
+		if not text.strip("\n"):
+			return True
 		return any(isBoxCharacter(ch) for ch in text) and not stripFrame(text)
 
 	def _get_diffAlgo(self):
@@ -927,9 +949,10 @@ class VteTerminal(EnhancedTermTypedCharSupport):
 				tracker.reset(rows, caret, time.monotonic())
 		except Exception:
 			log.exception("Error getting initial text")
+		echo: Key | None = None
 		while self._keepMonitoring:
 			with self._lock:
-				waiting = tracker.hasPending() or tracker.silenced
+				waiting = tracker.hasPending() or tracker.silenced or echo is not None
 			changed = self._event.wait(0.05 if waiting else None)
 			if not self._keepMonitoring:
 				break
@@ -945,6 +968,11 @@ class VteTerminal(EnhancedTermTypedCharSupport):
 					key = lastKey()
 					with self._lock:
 						tracker.update(rows, caret, time.monotonic(), key)
+						if tracker.typedKey is not None:
+							echo, tracker.typedKey = tracker.typedKey, None
+				if echo is not None and time.monotonic() - echo.time >= ECHO_FALLBACK_SECONDS:
+					self._echoIfMissed(echo)
+					echo = None
 				with self._lock:
 					now = time.monotonic()
 					lines = tracker.due(now)
@@ -961,11 +989,35 @@ class VteTerminal(EnhancedTermTypedCharSupport):
 
 	# Speaking
 
+	def _echoIfMissed(self, key: Key) -> None:
+		"""Echo what key typed, which showed in the line typed in, if VTE's report of it did not: VTE
+		reports a letter typed in the same write as a redrawn spinner as one wide change."""
+		from linuxPlatform.atspi import typedChars
+
+		if not typedChars.claimEcho(key.time):
+			return
+		import eventHandler
+
+		queueHandler.queueFunction(
+			queueHandler.eventQueue,
+			eventHandler.queueEvent,
+			"typedCharacter",
+			self,
+			ch=key.text,
+		)
+
 	def _onSpeechCanceled(self) -> None:
 		now = time.monotonic()
-		self._cancelledAt = now
+		# A key stops speech once NVDA's main thread gets to it, which can be after the program has
+		# answered the key: what it answered is not what the key stopped.
+		key = inputHook.lastKeyDown()
 		with self._lock:
-			self._tracker.cancel(now)
+			at = key.time if key is not None and now - key.time <= KEY_SECONDS else now
+			if self._tracker.isFlooding(now):
+				# A flood is silenced whole, whenever it was found.
+				at = now
+			self._cancelledAt = at
+			self._tracker.cancel(at, now)
 
 	def _reportNewLines(self, lines: list[str], foundAt: float | None = None) -> None:
 		if foundAt is not None and foundAt <= self._cancelledAt:
