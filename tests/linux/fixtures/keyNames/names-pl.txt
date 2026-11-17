@@ -159,12 +159,12 @@ evdev=81 xkeysym=KP_3 numlock=on hook=(vk=0x63, scan=0x51, ext=False) -> kb:numL
 evdev=82 xkeysym=KP_0 numlock=on hook=(vk=0x60, scan=0x52, ext=False) -> kb:numLockNumpad0 character=False command=True speech=cancel
 evdev=83 xkeysym=KP_Separator numlock=on hook=(vk=0x6e, scan=0x53, ext=False) -> kb:numpadDecimal character=False command=True speech=cancel
 evdev=98 xkeysym=KP_Divide numlock=on hook=(vk=0x6f, scan=0x35, ext=True) -> kb:numLock+numpadDivide character=False command=True speech=cancel
-combo insert+t (NVDA+t): -> kb:NVDA+t display='NVDA+t' character=False speech=cancel
+combo insert+t (NVDA+t): -> kb:NVDA+t display='Linda+t' character=False speech=cancel
 combo control+alt+n: -> kb:control+alt+n display='ctrl+alt+n' character=False speech=cancel
 combo altgr+a as Windows reports it (fake left control and right alt): -> kb:control+alt+a display='ctrl+alt+a' character=False speech=cancel
 combo right alt+a without the fake control: -> kb:alt+a display='alt+a' character=False speech=cancel
 combo shift+a: -> kb:shift+a display='shift+a' character=True speech=cancel
-combo numpad insert+downArrow (NVDA+downArrow): -> kb:NVDA+downArrow display='NVDA+down arrow' character=False speech=cancel
+combo numpad insert+downArrow (NVDA+downArrow): -> kb:NVDA+downArrow display='Linda+down arrow' character=False speech=cancel
 combo capsLock+t: -> kb:capsLock+t display='caps lock+t' character=False speech=cancel
 combo windows+d: -> kb:windows+d display='windows+d' character=False speech=cancel
 fromName 'a': kb:a
