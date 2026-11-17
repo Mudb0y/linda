@@ -368,6 +368,10 @@ class AtSpi(NVDAObject):
 			# Windows presents a password field as an edit field with the protected state.
 			return Role.EDITABLETEXT
 		if raw == "label":
+			# A page's label element is IAccessible2's label, which NVDA leaves out of the focus
+			# ancestry: a radio button inside one would be announced after its own name.
+			if self.toolkit == GECKO:
+				return Role.LABEL
 			return Role.STATICTEXT
 		if raw == "filler" or (raw == "viewport" and not self.atspiName):
 			# GTK's boxes and the viewport that scrolls a box: layout, and a container
