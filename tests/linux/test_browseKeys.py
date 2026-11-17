@@ -269,8 +269,11 @@ def startPage(desktop: DesktopSession, tmp_path: Path) -> tuple[harness.Launch, 
 
 def enterField(desktop: DesktopSession, nvda: harness.Launch) -> None:
 	"""From the top of the page, Tab into its text field, which turns focus mode on."""
-	step(desktop, "Tab", "Focus mode")
+	mark = step(desktop, "Tab", "Field edit" + PREFIX_MARK, "Focus mode")
 	waitForCapture(nvda, "focus")
+	# A grab that took the focus from Firefox, however briefly, would have NVDA announce its window.
+	spoken = desktop.spokenSince(mark)
+	assert not [text for text in spoken if "Mozilla Firefox" in text], spoken
 
 
 def quitNVDA(desktop: DesktopSession, nvda: harness.Launch, *, ignoring: tuple[str, ...] = ()) -> None:

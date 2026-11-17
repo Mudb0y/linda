@@ -30,7 +30,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
 from logHandler import log
 from xkbcommon import xkb
@@ -78,7 +78,7 @@ GENERIC_FOR = {
 CAPTURE_TIMEOUT = 0.1
 #: Seconds a captured press waits for the X server to hold it; it does not when another program had
 #: the keyboard grabbed as the key went down.
-CAPTURE_EXPIRY = 0.5
+CAPTURE_EXPIRY = 0.25
 #: Each captured combination is grabbed once with each of these, so that the locks do not make the
 #: grab miss. AnyModifier would cover them too, but the window manager's own grabs refuse it.
 LOCK_COMBINATIONS = (0, X.LockMask, NUM_LOCK_MASK, X.LockMask | NUM_LOCK_MASK)
@@ -121,17 +121,19 @@ GUARD_SILENCE = 2.0
 #: Attempts, a second apart, to connect again after the X server closed the connection.
 RECONNECT_ATTEMPTS = 10
 #: The guard. It shares nothing with NVDA's interpreter, so that it runs whatever NVDA's threads do.
-#: Its standard input carries the heartbeat: "1 ID" while the keyboard can be held, "0 ID" while it
-#: cannot, ID being a resource of the source's connection. After GUARD_SILENCE without one while
-#: it can, it frees the keyboard and closes that connection; it ends when its input does.
+#: Its standard input carries the heartbeat, "STATE RESOURCE WINDOW": STATE 1 while the keyboard can
+#: be held and 0 while it cannot, RESOURCE one of the source's connection, WINDOW the one the captured
+#: keys are grabbed on. After GUARD_SILENCE without one while the keyboard can be held, it frees the
+#: keyboard and closes that connection; it ends when its input does.
 #:
 #: Closing the connection alone would free the keyboard but lose every key held up behind the
 #: captured press: the X server ends a closing client's active grab before its passive ones, and
 #: each held-up press then activates a passive grab of the client that is going and goes with it.
 #: So the guard first writes to the source's own connection, whose socket it was handed, the
-#: requests the source would have made: release every passive key grab on the root, replay the
-#: held press to the application, and let go of the keyboard. The source's next request would then
-#: be numbered wrongly, which is one more reason to close the connection after them.
+#: requests the source would have made: release every passive key grab on the root and on the
+#: window, replay the held press to the application, and let go of the keyboard. The source's next
+#: request would then be numbered wrongly, which is one more reason to close the connection after
+#: them.
 GUARD_PROGRAM = r"""
 import json, os, select, struct, sys, time
 socket, root = int(sys.argv[1]), int(sys.argv[2])
@@ -139,15 +141,25 @@ sys.path[:0] = json.loads(sys.argv[3])
 silence = float(sys.argv[4])
 from Xlib import X, display, error
 from Xlib.xobject.resource import Resource
-# UngrabKey, AllowEvents and UngrabKeyboard, in the byte order the source's connection uses: this
-# machine's.
-FREE = (
-	struct.pack("=BBHIHxx", 34, X.AnyKey, 3, root, X.AnyModifier)
-	+ struct.pack("=BBHI", 35, X.ReplayKeyboard, 2, X.CurrentTime)
-	+ struct.pack("=BxHI", 32, 2, X.CurrentTime)
-)
+
+
+def free(window):
+	# UngrabKey, AllowEvents and UngrabKeyboard, in the byte order the source's connection uses: this
+	# machine's.
+	requests = b"".join(
+		struct.pack("=BBHIHxx", 34, X.AnyKey, 3, grabWindow, X.AnyModifier)
+		for grabWindow in {root, window or root}
+	)
+	requests += struct.pack("=BBHI", 35, X.ReplayKeyboard, 2, X.CurrentTime)
+	requests += struct.pack("=BxHI", 32, 2, X.CurrentTime)
+	try:
+		os.write(socket, requests)
+	except OSError:
+		pass
+
+
 connection = display.Display()
-guarding, resource, heard, pending = False, 0, time.monotonic(), b""
+guarding, resource, window, heard, pending = False, 0, 0, time.monotonic(), b""
 while True:
 	timeout = max(0.0, heard + silence - time.monotonic()) if guarding and resource else None
 	readable, _w, _x = select.select([0], [], [], timeout)
@@ -156,20 +168,15 @@ while True:
 		if not chunk:
 			# NVDA has gone, or let the connection go; this guard's copy of the socket is the last.
 			if guarding:
-				try:
-					os.write(socket, FREE)
-				except OSError:
-					pass
+				free(window)
 			break
 		*lines, pending = (pending + chunk).split(b"\n")
 		for line in lines:
-			state, _space, number = line.partition(b" ")
-			guarding, resource, heard = state == b"1", int(number or 0), time.monotonic()
+			state, number, grabWindow = (line.split() + [b"0", b"0", b"0"])[:3]
+			guarding, resource, window = state == b"1", int(number), int(grabWindow)
+			heard = time.monotonic()
 	elif guarding and resource:
-		try:
-			os.write(socket, FREE)
-		except OSError:
-			pass
+		free(window)
 		try:
 			Resource(connection.display, resource).kill_client()
 			connection.sync()
@@ -192,6 +199,8 @@ class _Ticket:
 	frozen: bool = False
 	#: Whether it has been answered, by its verdict or without one.
 	answered: bool = False
+	#: Set once the X server's held press has come, or once it is known that none will.
+	settled: threading.Event = field(default_factory=threading.Event)
 
 
 class X11KeySource:
@@ -234,6 +243,8 @@ class X11KeySource:
 		self._captureMode: CaptureMode = "off"
 		#: Key code: the modifier masks it is captured with now, the lock combinations among them.
 		self._captured: dict[int, set[int]] = {}
+		#: The window the captured keys are grabbed on: the one with the keyboard focus.
+		self._captureWindow = None
 		#: Captured presses not yet answered, in the order they came.
 		self._tickets: deque[_Ticket] = deque()
 		#: The captured key whose press was dropped, which keeps its grab active until released.
@@ -245,8 +256,8 @@ class X11KeySource:
 		self._guardInput: int | None = None
 		#: The resource of this connection the guard would close it by.
 		self._guardResource = 0
-		#: (time, guarding) of the last heartbeat sent.
-		self._lastBeat: tuple[float, bool] = (0.0, False)
+		#: (time, text) of the last heartbeat sent.
+		self._lastBeat: tuple[float, str] = (0.0, "")
 
 	def start(self, deliver: Callable[[KeyEvent], bool]) -> None:
 		self._deliver = deliver
@@ -374,11 +385,13 @@ class X11KeySource:
 		self._display = None
 		self._grabbed = {}
 		self._captured = {}
+		self._captureWindow = None
 		self._activeGrab = None
 		self._captureGrab = None
 		self._held = False
 		for ticket in self._tickets:
 			ticket.answered = True
+			ticket.settled.set()
 		self._tickets.clear()
 		self._raw.clear()
 		for attempt in range(RECONNECT_ATTEMPTS):
@@ -400,7 +413,7 @@ class X11KeySource:
 		if self._holdWanted:
 			self._hold(True)
 		self._applyCapture(self._captureMode)
-		self._lastBeat = (0.0, False)
+		self._lastBeat = (0.0, "")
 		log.info("Keys are read from the X display again")
 		return True
 
@@ -453,10 +466,17 @@ class X11KeySource:
 			if item is None:
 				return
 			event, ticket = item
-			if ticket is not None and ticket.answered:
-				# The application has had the key, as NVDA did not answer in time; NVDA acting on it as
-				# well would act twice.
-				continue
+			if ticket is not None:
+				# Taken for captured from the grabs as they were; whether the server held it decides.
+				ticket.settled.wait(CAPTURE_EXPIRY)
+				if not ticket.frozen:
+					# The application had it as it was typed, as it has every key not captured.
+					event = replace(event, captured=False, reachedApplication=True)
+					ticket = None
+				elif ticket.answered:
+					# The application has had the key, as NVDA did not answer in time; NVDA acting on it
+					# as well would act twice.
+					continue
 			try:
 				passed = self._deliver(event)
 			except Exception:
@@ -524,6 +544,12 @@ class X11KeySource:
 		elif event.type == X.KeyRelease:
 			if event.detail == self._captureGrab:
 				self._captureGrab = None
+		elif event.type in (X.FocusOut, X.DestroyNotify):
+			# The keys are captured on the window with the focus, which this one may no longer be; a
+			# grab moves the focus only for as long as it lasts.
+			moved = event.type == X.DestroyNotify or event.mode in (X.NotifyNormal, X.NotifyWhileGrabbed)
+			if moved and self._captureWindow is not None and event.window.id == self._captureWindow.id:
+				self._applyCapture(self._captureMode)
 		elif event.type == X.MappingNotify:
 			self._display.refresh_keyboard_mapping(event)
 			self._loadKeymap()
@@ -559,12 +585,14 @@ class X11KeySource:
 		for ticket in self._tickets:
 			if ticket.keycode == keycode and not ticket.frozen:
 				ticket.frozen = True
+				ticket.settled.set()
 				return
 		if not self._captureMatches(keycode, event.state):
 			return
 		# Its slave event has not come, and may never: deliver it from its raw event.
 		now = time.monotonic()
 		ticket = _Ticket(keycode, now, frozen=True)
+		ticket.settled.set()
 		self._tickets.append(ticket)
 		for index, (arrival, rawKeycode, rawIsUp, sourceid) in enumerate(self._raw):
 			if (rawKeycode, rawIsUp) == (keycode, False):
@@ -680,7 +708,9 @@ class X11KeySource:
 				and not self._tickets[0].frozen
 				and now - self._tickets[0].arrival >= CAPTURE_EXPIRY
 			):
-				self._tickets.popleft().answered = True
+				expired = self._tickets.popleft()
+				expired.answered = True
+				expired.settled.set()
 			held = next((ticket for ticket in self._tickets if ticket.frozen), None)
 			if held is None:
 				return self._tickets[0].arrival + CAPTURE_EXPIRY if self._tickets else None
@@ -689,6 +719,7 @@ class X11KeySource:
 			# Presses before the held one were never held, as the server holds them in order.
 			while (ticket := self._tickets.popleft()) is not held:
 				ticket.answered = True
+				ticket.settled.set()
 			held.answered = True
 			if held.verdict is False:
 				self._display.allow_events(X.AsyncKeyboard, X.CurrentTime)
@@ -708,10 +739,12 @@ class X11KeySource:
 		if self._guardInput is None:
 			return None
 		guarding = self._captureMode != "off" or self._held
-		lastTime, lastGuarding = self._lastBeat
-		if guarding != lastGuarding or (guarding and now - lastTime >= HEARTBEAT_INTERVAL):
+		window = self._captureWindow.id if self._captureWindow is not None else 0
+		beat = f"{int(guarding)} {self._guardResource} {window}\n"
+		lastTime, lastBeat = self._lastBeat
+		if beat != lastBeat or (guarding and now - lastTime >= HEARTBEAT_INTERVAL):
 			try:
-				os.write(self._guardInput, f"{int(guarding)} {self._guardResource}\n".encode())
+				os.write(self._guardInput, beat.encode())
 			except BlockingIOError:
 				pass
 			except OSError:
@@ -720,7 +753,7 @@ class X11KeySource:
 				)
 				self._guardInput = None
 				return None
-			self._lastBeat = lastTime, lastGuarding = (now, guarding)
+			self._lastBeat = lastTime, lastBeat = (now, beat)
 		return lastTime + HEARTBEAT_INTERVAL if guarding else None
 
 	def _startGuard(self) -> None:
@@ -853,21 +886,35 @@ class X11KeySource:
 
 	def _applyCapture(self, mode: CaptureMode) -> None:
 		self._captureMode = mode
-		root = self._display.screen().root
-		for keycode, masks in self._captured.items():
-			for mask in masks:
-				root.ungrab_key(keycode, mask)
+		d = self._display
+		root = d.screen().root
+		old, self._captureWindow = self._captureWindow, None
+		if old is not None:
+			# The window may have gone, and its grabs with it.
+			gone = error.CatchError(error.BadWindow)
+			for keycode, masks in self._captured.items():
+				for mask in masks:
+					old.ungrab_key(keycode, mask, onerror=gone)
+			if old.id != root.id:
+				old.change_attributes(event_mask=X.NoEventMask, onerror=gone)
 		self._captured = {}
+		wanted = self._captureSet(mode)
+		if not wanted:
+			d.sync()
+			log.debug(f"Keys captured for {mode} mode")
+			return
+		window = self._focusWindow()
 		catchers: list[tuple[int, int, error.CatchError]] = []
-		for keycode, bases in self._captureSet(mode).items():
+		for keycode, bases in wanted.items():
 			for base in bases:
 				for lock in LOCK_COMBINATIONS:
-					catcher = error.CatchError(error.BadAccess)
-					root.grab_key(
+					catcher = error.CatchError(error.BadAccess, error.BadWindow)
+					window.grab_key(
 						keycode, base | lock, False, X.GrabModeAsync, X.GrabModeSync, onerror=catcher
 					)
 					catchers.append((keycode, base | lock, catcher))
-		self._display.sync()
+		self._captureWindow = window
+		d.sync()
 		refused = 0
 		for keycode, mask, catcher in catchers:
 			if catcher.get_error():
@@ -877,6 +924,24 @@ class X11KeySource:
 		if refused:
 			log.debugWarning(f"{refused} key combinations for {mode} mode are held by another program")
 		log.debug(f"Keys captured for {mode} mode")
+
+	def _focusWindow(self):
+		"""The window to grab captured keys on, watched for the focus leaving it.
+
+		A grab on the window that has the keyboard focus moves no focus as it activates; one on any
+		other window, the root included, takes the focus from the application for as long as the key
+		is held, and Firefox then reports its window inactive and active again for every key.
+		"""
+		d = self._display
+		root = d.screen().root
+		focus = d.get_input_focus().focus
+		if isinstance(focus, int) or focus.id == root.id:
+			# No window, or the one under the pointer: only the root holds every key.
+			return root
+		gone = error.CatchError(error.BadWindow)
+		focus.change_attributes(event_mask=X.FocusChangeMask | X.StructureNotifyMask, onerror=gone)
+		d.sync()
+		return root if gone.get_error() else focus
 
 	def _hold(self, hold: bool) -> None:
 		self._holdWanted = hold
