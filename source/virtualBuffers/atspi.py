@@ -155,6 +155,10 @@ class AtSpiBufferTextInfo(VirtualBufferTextInfo):
 			role = Role.STATICTEXT
 		if atspiRole == "password text":
 			states.add(State.PROTECTED)
+		if atspiRole in ("list", "list item"):
+			# Gecko marks an HTML list read-only through IAccessible2, which tells it from a list box: one
+			# without it is spoken on every line inside it.
+			states.add(State.READONLY)
 		popupState = aria.ariaHaspopupValuesToNVDAStates.get(attrs.get("haspopup"))
 		if popupState:
 			states.discard(State.HASPOPUP)
@@ -184,8 +188,9 @@ class AtSpiBufferTextInfo(VirtualBufferTextInfo):
 
 	def _addTableFacts(self, attrs: textInfos.ControlField) -> None:
 		"""Row and column counts and the layout guess for a table field that the renderer left them out
-		of, asked of the table itself."""
-		if "table-rowcount" in attrs and "table-layout" in attrs:
+		of, asked of the table itself on the main thread."""
+		# The renderer gives the counts, and table-layout only to a table Firefox guesses is for layout.
+		if "table-rowcount" in attrs:
 			return
 		try:
 			facts = self.obj._tableFacts(
