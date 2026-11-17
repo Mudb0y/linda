@@ -10,7 +10,6 @@ test types little:
 	lines N prints N numbered lines
 """
 
-import glob
 import os
 import shutil
 import subprocess
@@ -33,13 +32,9 @@ def hasLineEditing(bash: str) -> bool:
 
 
 def interactiveBash() -> str:
-	"""A bash built with readline. The build environment's own bash has none, so the arrows would type
-	escape sequences; nix keeps an interactive one in the store wherever a dev shell was entered."""
-	candidates = [
-		shutil.which("bash"),
-		*sorted(glob.glob("/nix/store/*-bash-interactive-*/bin/bash"), reverse=True),
-	]
-	for candidate in candidates:
+	"""A bash built with readline, which the dev shell names. The build environment's own bash, first on
+	PATH, has none, so the arrows would type escape sequences."""
+	for candidate in (os.environ.get("BASEDREADER_BASH"), shutil.which("bash")):
 		if candidate and hasLineEditing(candidate):
 			return candidate
 	raise SystemExit("no bash with line editing found")

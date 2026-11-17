@@ -252,6 +252,11 @@
         # rig env to give Qt its X platform plugin. PyQt6's own Qt.
         BASEDREADER_QT6_PLUGIN_PATH = "${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}";
 
+        # The terminal fixture's shell. The bash on PATH is stdenv's, built
+        # without readline, so arrows and Control with them would type escape
+        # sequences instead of editing the line.
+        BASEDREADER_BASH = "${pkgs.bashInteractive}/bin/bash";
+
         # Every locale, so that which ones the tests can set does not depend
         # on the ones the host happens to have built.
         LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";

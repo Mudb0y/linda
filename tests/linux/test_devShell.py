@@ -159,6 +159,14 @@ def _qt6PluginPath(value: str) -> None:
 	_holds(_directory(value), "platforms/libqxcb.so")
 
 
+def _bash(value: str) -> None:
+	path = _elfFile(value)
+	assert path.name == "bash" and os.access(path, os.X_OK), value
+	# Only a bash built with readline accepts emacs line editing.
+	result = subprocess.run([value, "--norc", "-c", "set -o emacs"], capture_output=True, check=False)
+	assert result.returncode == 0, result.stderr
+
+
 def _storePath(path: Path) -> Path:
 	"""The store path a file is in."""
 	return Path(STORE) / path.relative_to(STORE).parts[0]
@@ -200,6 +208,7 @@ SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
 	"BASEDREADER_PWMON": _pwmon,
 	"BASEDREADER_BENCH_BIN": _benchBin,
 	"BASEDREADER_QT6_PLUGIN_PATH": _qt6PluginPath,
+	"BASEDREADER_BASH": _bash,
 	"BASEDREADER_RIG_PATH": _searchPath,
 	"BASEDREADER_RIG_XDG_DATA_DIRS": _searchPath,
 }
