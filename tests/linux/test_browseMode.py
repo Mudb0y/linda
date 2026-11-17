@@ -195,7 +195,8 @@ def test_quickNavigationAndRefresh(desktop: DesktopSession, tmp_path: Path):
 	step(desktop, "g", "A small square graphic")
 	step(desktop, "3", "Frame and application heading level 3")
 	step(desktop, "m", "Inner frame frame Text inside the frame.")
-	step(desktop, "o", "Text inside the application. Embedded application application")
+	# An application's content is its own, as Gecko's buffer leaves it on Windows.
+	step(desktop, "o", "Embedded application application")
 	step(desktop, "h", "content info landmark Contact heading level 2")
 	step(desktop, "h", "no next heading")
 	step(desktop, "Insert+F5", "Refreshed")
@@ -220,7 +221,8 @@ def test_followingLinks(desktop: DesktopSession, tmp_path: Path):
 	# Firefox moves its caret to the target, and the buffer follows.
 	step(desktop, "Return", "heading level 2 News")
 	step(desktop, "control+Home", "heading level 1 Welcome")
-	step(desktop, "k", "the news link")
+	# Firefox marks a link to a place on the page visited once it is followed.
+	step(desktop, "k", "the news visited link")
 	step(desktop, "k", "the second page link")
 	step(
 		desktop,
