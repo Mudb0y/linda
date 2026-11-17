@@ -757,7 +757,7 @@ class VteTextInfo(AtspiTextInfo):
 			return fields
 		first, last = strings[0], strings[-1]
 		rowStart = self._startOffset in self.obj._rowStarts
-		promptEnd = self.obj._inputPromptEnd(self._startOffset)
+		promptEnd = self.obj._inputPromptEnd(self._startOffset, fields[first])
 		if promptEnd is not None and len(fields[first]) >= promptEnd:
 			fields[first] = fields[first][promptEnd:]
 		head = fields[first]
@@ -1075,13 +1075,18 @@ class VteTerminal(EnhancedTermTypedCharSupport):
 		start = sum(len(text) + 1 for text in self._rawRows[:inputRow])
 		return start + min(max(column, inputContentStart(row)), inputContentEnd(row))
 
-	def _inputPromptEnd(self, offset: int) -> int | None:
-		"""How far into the row starting at offset its prompt reaches, when it is the line typed in."""
+	def _inputPromptEnd(self, offset: int, text: str | None = None) -> int | None:
+		"""How far into the row starting at offset, reading text, its prompt reaches, when it is the line
+		typed in."""
 		inputRow = self._inputRowNow()
 		rows = self._rawRows
 		if inputRow is None or inputRow >= len(rows):
 			return None
-		if offset != sum(len(row) + 1 for row in rows[:inputRow]):
+		# Output streaming above the line typed in moves it down between the screen the rows were taken
+		# from and the one being read, so the row is known by its text as well as by where it was.
+		if offset != sum(len(row) + 1 for row in rows[:inputRow]) and (
+			text is None or text.rstrip("\n").rstrip() != rows[inputRow].rstrip()
+		):
 			return None
 		start = inputContentStart(rows[inputRow])
 		return start if start and rows[inputRow][start - 2 : start - 1] in PROMPT_MARKS else None
