@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Tables page</title>
+</head>
+<body>
+<h1>Tables</h1>
+<p>Before the tables.</p>
+<table id="rooms" border="1">
+<caption>Rooms</caption>
+<tr><th>Room</th><th>Monday</th><th>Tuesday</th></tr>
+<tr><th>Kitchen</th><td>Cook</td><td>Clean</td></tr>
+<tr><th>Hall</th><td colspan="2">Paint all week</td></tr>
+<tr><th>Garden</th><td>Dig</td><td>
+<table id="inner" border="1"><caption>Tools</caption>
+<tr><th>Tool</th><th>Count</th></tr>
+<tr><td>Spade</td><td>2</td></tr>
+</table>
+</td></tr>
+</table>
+<p>Between the tables.</p>
+<table id="layout"><tr><td>Layout left</td><td>Layout right</td></tr><tr><td>Layout below</td><td>Layout end</td></tr></table>
+<div role="grid" aria-label="Scores" aria-rowcount="2" aria-colcount="2">
+<div role="row"><span role="columnheader">Player</span><span role="columnheader">Points</span></div>
+<div role="row"><span role="gridcell">Ann</span><span role="gridcell">7</span></div>
+</div>
+<p>After the tables.</p>
+</body>
+</html>

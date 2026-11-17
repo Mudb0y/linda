@@ -8,11 +8,14 @@ already running. Within a page the tests are steps in order, each starting where
 left the page.
 """
 
+import os
+import subprocess
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+import desktopSession
 import harness
 import pytest
 import webSession
@@ -26,6 +29,12 @@ STEP_BOUND = 5.0
 SETTLE = 0.5
 #: Seconds the page's own reading on load has to start.
 LOAD_BOUND = 10.0
+#: marco's keys for moving between workspaces are Control+Alt+arrows, which NVDA moves between table
+#: cells with: a desktop where NVDA reads tables has them off, set where GSettings' keyfile backend
+#: reads them.
+WORKSPACE_KEYS_OFF = "[org/mate/marco/global-keybindings]\n" + "".join(
+	f"switch-to-workspace-{direction}='disabled'\n" for direction in ("left", "right", "up", "down")
+)
 
 
 @dataclass
@@ -33,12 +42,43 @@ class Session:
 	desktop: DesktopSession
 	nvda: harness.Launch
 	firefox: webSession.FirefoxProcess
+	#: Whether marco leaves Control+Alt+arrows alone.
+	workspaceKeysOff: bool = False
 
 
-def _openPage(tmp_path_factory: pytest.TempPathFactory, page: str, firstLine: str) -> Iterator[Session]:
+def _startWindowManagerWithoutWorkspaceKeys(desktop: DesktopSession) -> None:
+	config = desktop.directory / "config"
+	keyfile = config / "glib-2.0" / "settings" / "keyfile"
+	keyfile.parent.mkdir(parents=True)
+	keyfile.write_text(WORKSPACE_KEYS_OFF)
+	with open(desktop.directory / "wm.log", "w") as log:
+		# The session's close stops the window manager it holds.
+		desktop._windowManager = subprocess.Popen(
+			["marco", "--no-force-fullscreen"],
+			stdout=log,
+			stderr=subprocess.STDOUT,
+			env=dict(os.environ, GSETTINGS_BACKEND="keyfile", XDG_CONFIG_HOME=str(config)),
+		)
+	deadline = time.monotonic() + desktopSession.WINDOW_MANAGER_TIMEOUT
+	while not desktopSession.windowManagerIsRunning():
+		assert desktop._windowManager.poll() is None, (desktop.directory / "wm.log").read_text()
+		assert time.monotonic() < deadline, "marco did not set up its desktops"
+		time.sleep(0.05)
+
+
+def _openPage(
+	tmp_path_factory: pytest.TempPathFactory,
+	page: str,
+	firstLine: str,
+	*,
+	workspaceKeysOff: bool = False,
+) -> Iterator[Session]:
 	webSession.requireBrowseLibraries()
 	directory = tmp_path_factory.mktemp(Path(page).stem)
-	with DesktopSession(directory / "desktop") as desktop:
+	ownWindowManager = workspaceKeysOff and not desktopSession.windowManagerIsRunning()
+	with DesktopSession(directory / "desktop", windowManager=not ownWindowManager) as desktop:
+		if ownWindowManager:
+			_startWindowManagerWithoutWorkspaceKeys(desktop)
 		nvda = desktop.startNVDA(webSession.BROWSE_CONFIG)
 		nvda.waitForLog("NVDA initialized", STARTUP_BOUND)
 		mark = desktop.mark()
@@ -47,7 +87,7 @@ def _openPage(tmp_path_factory: pytest.TempPathFactory, page: str, firstLine: st
 		# Say all on load is cut short, so that what a step says is not queued behind it.
 		desktop.press("Control_L")
 		time.sleep(SETTLE)
-		yield Session(desktop, nvda, firefox)
+		yield Session(desktop, nvda, firefox, ownWindowManager)
 
 
 def step(session: Session, chord: str, *expected: str, timeout: float = STEP_BOUND) -> int:
@@ -56,6 +96,22 @@ def step(session: Session, chord: str, *expected: str, timeout: float = STEP_BOU
 	mark = desktop.mark()
 	desktop.press(chord)
 	desktop.expect(*expected, since=mark, timeout=timeout)
+	time.sleep(SETTLE)
+	return mark
+
+
+def stepSaying(session: Session, chord: str, fragment: str, timeout: float = STEP_BOUND) -> int:
+	"""Press chord and wait for something said that holds fragment; return the mark taken before the
+	key. For keys whose speech starts with where the caret came from: "out of table"."""
+	desktop = session.desktop
+	mark = desktop.mark()
+	desktop.press(chord)
+	deadline = time.monotonic() + timeout
+	while not any(fragment in text for text in desktop.spokenSince(mark)):
+		assert time.monotonic() < deadline, (
+			f"NVDA did not say {fragment!r} within {timeout} s; it spoke {desktop.spokenSince(mark)}"
+		)
+		time.sleep(0.05)
 	time.sleep(SETTLE)
 	return mark
 
@@ -136,3 +192,74 @@ class TestLiveRegions:
 		time.sleep(2.0)
 		press(live, "Stop log")
 		assert not any(text.startswith("Log line") for text in spoken), spoken
+
+
+@pytest.fixture(scope="class")
+def tables(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Session]:
+	yield from _openPage(
+		tmp_path_factory, "featureTables.html", "heading level 1 Tables", workspaceKeysOff=True
+	)
+
+
+def requireTableKeys(session: Session) -> None:
+	if not session.workspaceKeysOff:
+		pytest.xfail("marco was started with its workspace keys, Control+Alt+arrows, before the test")
+
+
+class TestTables:
+	def test_tableSaysItsSize(self, tables: Session):
+		stepSaying(tables, "Control_L+Home", "heading level 1 Tables")
+		step(tables, "t", "Rooms table with 4 rows and 3 columns caption Rooms")
+
+	def test_moveByCell(self, tables: Session):
+		"""Each move says the cell and what changed: the row or column, with its header."""
+		requireTableKeys(tables)
+		stepSaying(tables, "Control_L+Home", "heading level 1 Tables")
+		step(tables, "t", "Rooms table…")
+		step(tables, "Down", "out of caption row 1 column 1 Room")
+		step(tables, "Control_L+Alt_L+Right", "column 2 Monday")
+		step(tables, "Control_L+Alt_L+Right", "column 3 Tuesday")
+		step(tables, "Control_L+Alt_L+Down", "Kitchen row 2 Clean")
+		step(tables, "Control_L+Alt_L+Down", "Hall row 3 Monday column 2 through 3 Paint all week")
+		step(tables, "Control_L+Alt_L+Right", "Edge of table")
+		step(tables, "Control_L+Alt_L+Left", "Room column 1 Hall")
+
+	def test_tableInATable(self, tables: Session):
+		requireTableKeys(tables)
+		stepSaying(tables, "Control_L+Home", "heading level 1 Tables")
+		step(tables, "t", "Rooms table…")
+		step(tables, "Down", "out of caption row 1 column 1 Room")
+		for _ in range(3):
+			step(tables, "Control_L+Alt_L+Down", "…")
+		step(tables, "Control_L+Alt_L+Right", "Monday column 2 Dig")
+		step(tables, "Down", "Tuesday column 3 table with 2 rows and 2 columns caption Tools")
+		step(tables, "Down", "out of caption row 1 column 1 Tool")
+		step(tables, "Control_L+Alt_L+Down", "row 2 Spade")
+		step(tables, "Control_L+Alt_L+Right", "Count column 2 2")
+
+	def test_layoutTableIsNotATable(self, tables: Session):
+		"""t passes over a table used for layout, and its cells are read as text."""
+		requireTableKeys(tables)
+		stepSaying(tables, "Control_L+Home", "heading level 1 Tables")
+		step(tables, "t", "Rooms table…")
+		stepSaying(tables, "t", "Tools table")
+		stepSaying(tables, "t", "Scores table with 2 rows and 2 columns")
+		stepSaying(tables, "Shift+t", "Tools table")
+		stepSaying(tables, "Control_L+End", "After the tables.")
+		for _ in range(6):
+			mark = step(tables, "Up", "…")
+			if "Layout below" in tables.desktop.spokenSince(mark):
+				break
+		else:
+			raise AssertionError("Up never reached the layout table")
+		step(tables, "Control_L+Alt_L+Right", "Not in a table cell")
+
+	def test_ariaGrid(self, tables: Session):
+		requireTableKeys(tables)
+		stepSaying(tables, "Control_L+Home", "heading level 1 Tables")
+		step(tables, "t", "Rooms table…")
+		stepSaying(tables, "t", "Tools table")
+		stepSaying(tables, "t", "Scores table with 2 rows and 2 columns")
+		stepSaying(tables, "Down", "Player")
+		stepSaying(tables, "Control_L+Alt_L+Down", "Ann")
+		step(tables, "Control_L+Alt_L+Right", "Points column 2 7")
