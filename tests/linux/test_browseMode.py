@@ -256,8 +256,11 @@ def test_find(desktop: DesktopSession, tmp_path: Path):
 	step(desktop, "Insert+control+f", "Find dialog Type the text you wish to find")
 	mark = desktop.mark()
 	desktop.typeText("Contact")
+	expect(desktop, "C", "o", "n", "t", "a", "c", "t", since=mark)
+	# Return pressed while the dialog still echoes the last letter can leave its modal loop running.
+	time.sleep(SETTLE)
+	mark = desktop.mark()
 	desktop.press("Return")
-	# The search waits for NVDA's dialog to be gone, which GTK can take seconds over.
 	expect(desktop, "heading level 2 Contact", since=mark, timeout=PAGE_BOUND)
 	time.sleep(SETTLE)
 	step(desktop, "Down", "Write to us.")
