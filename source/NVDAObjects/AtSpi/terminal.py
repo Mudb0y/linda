@@ -33,8 +33,9 @@ SCREEN_READ_TIMEOUT = 1.0
 #: Output spoken within this many seconds of the output before it is one stream: a key that stops
 #: speech while a stream flows silences the rest of it.
 STREAM_GAP_SECONDS = 0.5
-#: Lines spoken at once at most, and how many more each second allows: VTE shows a cat of 50,000
-#: lines as a few whole screens, each new to the diff, which would otherwise be read for minutes.
+#: Lines spoken at once at most, or the screen's height when that is more, and how many more each
+#: second allows: VTE shows a cat of 50,000 lines as a few whole screens, each new to the diff, which
+#: would otherwise be read for minutes.
 LINE_BUDGET = 30
 LINES_PER_SECOND = 4.0
 #: Seconds after a caret script spoke a line within which text on that line is not spoken again as
@@ -242,7 +243,9 @@ class VteTerminal(EnhancedTermTypedCharSupport):
 		if self._silenced and continuing:
 			return
 		self._silenced = False
-		self._budget = min(LINE_BUDGET, self._budget + (now - self._budgetAt) * LINES_PER_SECOND)
+		# A whole screen of output is always heard whole, however tall the screen.
+		capacity = max(LINE_BUDGET, self._lastScreen.count("\n") + 1)
+		self._budget = min(capacity, self._budget + (now - self._budgetAt) * LINES_PER_SECOND)
 		self._budgetAt = now
 		if self._budget < 1:
 			log.debug("Terminal output is coming faster than it can be spoken; a line was not spoken")
