@@ -302,7 +302,8 @@ def test_notifications(desktop: DesktopSession):
 		time.sleep(1)
 		spoken = desktop.spokenSince(mark)
 		assert spoken == ["Backup finished All 12 files were copied.", "Second Another one."], spoken
-		step(desktop, "Insert+Tab", "edit multi line hello")
+		# Nothing takes the keyboard focus while Insert is held, and a query keeps the focused state.
+		step(desktop, "Insert+Tab", "edit focused multi line hello")
 		assertQuitCleanly(desktop, nvda)
 	finally:
 		daemon.terminate()
