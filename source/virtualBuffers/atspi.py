@@ -2,23 +2,40 @@
 
 NVDA's own buffer storage holds the document (linuxPlatform.vbufLib), and the engine's renderer fills
 it (linuxPlatform.vbufEngine), walking the document over its own connection on a thread. Nothing is
-injected into the browser, so there is no binding handle: prepare does not ask for one.
+injected into the browser, so there is no binding handle: prepare does not ask for one. The engine
+watches each rendered document; its changes reach the buffer through linuxPlatform.vbufUpdates, and
+its document events through onEngineEvents.
 """
 
 import ctypes
 import threading
 import time
 
+import api
 import aria
+import config
 import queueHandler
 import textInfos
-from controlTypes import Role, State
+import tones
+import treeInterceptorHandler
+from controlTypes import IsCurrent, Role, State
 from linuxPlatform import vbufEngine, vbufLib
 from linuxPlatform.atspi import accessibleFor, handler
 from linuxPlatform.atspi.client import Node, NodeGone
 from logHandler import log
 
-from . import VBufStorage_findMatch_word, VirtualBuffer, VirtualBufferTextInfo
+from . import (
+	VBufStorage_findMatch_notEmpty,
+	VBufStorage_findMatch_word,
+	VirtualBuffer,
+	VirtualBufferTextInfo,
+)
+
+try:
+	from linuxPlatform import vbufUpdates
+except ImportError:
+	# Without the update thread a buffer keeps the page as it was rendered, until NVDA+F5.
+	vbufUpdates = None
 
 #: The object path every accessible of the ATK bridge and of Qt has, with a number at its end.
 _PATH_PREFIX = "/org/a11y/atspi/accessible/"
@@ -65,11 +82,16 @@ class Identifiers:
 #: another.
 identifiers = Identifiers()
 
+#: Applications whose actions the buffer has asked for once. Firefox fills each part of its
+#: accessibility cache only when a client first asks for it, and until then answers that an object has
+#: no actions and drops DoAction, so the first Enter on a link would do nothing.
+_actionsPrimed: set[str] = set()
+
+#: Role.LIST is left out: the renderer gives it to HTML lists as well as to list boxes.
 _FORM_FIELD_ROLES = (
 	Role.BUTTON,
 	Role.CHECKBOX,
 	Role.COMBOBOX,
-	Role.LIST,
 	Role.TREEVIEW,
 	Role.RADIOBUTTON,
 	Role.TAB,
@@ -78,6 +100,17 @@ _FORM_FIELD_ROLES = (
 	Role.SLIDER,
 	Role.SPINBUTTON,
 )
+
+#: Firefox's AT-SPI roles that linuxPlatform.atspi.roles leaves out, as Gecko's IAccessible2 role
+#: presents them on Windows.
+_EXTRA_ROLES = {
+	"panel": Role.GROUPING,
+	"label": Role.LABEL,
+	"menu": Role.POPUPMENU,
+}
+
+#: The roles NVDA treats as an application inside a document, whose content browse mode leaves alone.
+_APPLICATION_ROLES = (Role.APPLICATION, Role.DIALOG)
 
 
 def _role(*roles: Role) -> list[str]:
@@ -91,21 +124,81 @@ def _state(state: State) -> str:
 class AtSpiBufferTextInfo(VirtualBufferTextInfo):
 	def _normalizeControlField(self, attrs: textInfos.ControlField):
 		role = Role(int(attrs.get("role", Role.UNKNOWN.value)))
-		states = set()
-		for key in list(attrs):
-			if key.startswith("state_"):
-				states.add(State(int(key[6:])))
+		atspiRole = attrs.get("atspi::role", "")
+		states = {State(int(key[6:])) for key in attrs if key.startswith("state_")}
 		xmlRoles = attrs.get("xml-roles", "").split(" ")
-		landmark = next((r for r in xmlRoles if r in aria.landmarkRoles), None)
-		if role == Role.LANDMARK and landmark is None:
-			landmark = "region"
-		if role in (Role.LANDMARK, Role.SECTION) and xmlRoles[0] == "region":
+		tag = attrs.get("tag", "").lower()
+		if role == Role.UNKNOWN:
+			role = _EXTRA_ROLES.get(atspiRole, Role.UNKNOWN)
+		if tag == "img" and role == Role.STATICTEXT:
+			# Firefox gives an image with alt text the static role, where IAccessible2 says graphic.
+			role = Role.GRAPHIC
+		elif tag == "blockquote":
+			role = Role.BLOCKQUOTE
+		elif xmlRoles[0] == "application":
+			# Gecko's ATK mapping makes an ARIA application an embedded object.
+			role = Role.APPLICATION
+		elif role == Role.DOCUMENT and xmlRoles[0] == "article":
+			role = Role.ARTICLE
+		elif role in (Role.GROUPING, Role.SECTION) and xmlRoles[0] == "figure":
+			role = Role.FIGURE
+		elif role in (Role.LANDMARK, Role.SECTION) and xmlRoles[0] == "region":
 			role = Role.REGION
+		elif xmlRoles[0] == "switch":
+			role = Role.SWITCH
+			states.discard(State.PRESSED)
+			states.discard(State.CHECKABLE)
+			if State.CHECKED in states:
+				states.discard(State.CHECKED)
+				states.add(State.ON)
+		elif role == Role.EDITABLETEXT and not states & {State.EDITABLE, State.FOCUSABLE, State.UNAVAILABLE}:
+			role = Role.STATICTEXT
+		if atspiRole == "password text":
+			states.add(State.PROTECTED)
+		popupState = aria.ariaHaspopupValuesToNVDAStates.get(attrs.get("haspopup"))
+		if popupState:
+			states.discard(State.HASPOPUP)
+			states.add(popupState)
+		landmark = next((r for r in xmlRoles if r in aria.landmarkRoles), None)
+		if landmark and role != Role.LANDMARK and landmark != xmlRoles[0]:
+			landmark = None
 		if landmark:
 			attrs["landmark"] = landmark
+		if roleText := attrs.get("roledescription"):
+			attrs["roleText"] = roleText
+		placeholder = self._getPlaceholderAttribute(attrs, "placeholder-text")
+		if placeholder is not None:
+			attrs["placeholder"] = placeholder
+		current = attrs.get("current", "false")
+		try:
+			isCurrent = IsCurrent(current)
+		except ValueError:
+			isCurrent = IsCurrent.YES
+		if isCurrent != IsCurrent.NO:
+			attrs["current"] = isCurrent
+		if role == Role.TABLE:
+			self._addTableFacts(attrs)
 		attrs["role"] = role
 		attrs["states"] = states
 		return super()._normalizeControlField(attrs)
+
+	def _addTableFacts(self, attrs: textInfos.ControlField) -> None:
+		"""Row and column counts and the layout guess for a table field that the renderer left them out
+		of, asked of the table itself."""
+		if "table-rowcount" in attrs and "table-layout" in attrs:
+			return
+		try:
+			facts = self.obj._tableFacts(
+				int(attrs["controlIdentifier_docHandle"]), int(attrs["controlIdentifier_ID"])
+			)
+		except (KeyError, ValueError):
+			return
+		if facts is None:
+			return
+		rows, columns, isLayout = facts
+		attrs.setdefault("table-rowcount", str(rows))
+		attrs.setdefault("table-columncount", str(columns))
+		attrs.setdefault("table-layout", "1" if isLayout else "0")
 
 	def _get_location(self):
 		obj = self._getNVDAObjectFromOffset(self._startOffset)
@@ -119,8 +212,14 @@ class AtSpiBuffer(VirtualBuffer):
 		root = rootNVDAObject.node
 		self.busName: str = root.busName
 		self.docPath: str = root.path
+		#: Whether the whole document is in the buffer; a large one arrives in parts.
 		self.complete = False
 		self._docURL: str | None = None
+		#: Set when the engine says the document was reloaded or replaced; nothing brings it back.
+		self._gone = False
+		self._terminated = False
+		#: (rows, columns, layout) of each table, by (docHandle, ID), or None when it could not be asked.
+		self._tables: dict[tuple[int, int], tuple[int, int, bool] | None] = {}
 		super().__init__(rootNVDAObject, backendName="atspi")
 
 	def prepare(self):
@@ -129,9 +228,9 @@ class AtSpiBuffer(VirtualBuffer):
 		self.loadBuffer()
 
 	def loadBuffer(self):
-		self.isLoading = True
 		import wx
 
+		self.isLoading = True
 		self._loadProgressCallLater = wx.CallLater(1000, self._loadProgress)
 		threading.Thread(
 			name=f"{self.__class__.__module__}.{self.loadBuffer.__qualname__}",
@@ -144,7 +243,7 @@ class AtSpiBuffer(VirtualBuffer):
 		start = time.perf_counter()
 		handle = None
 		try:
-			rendered = vbufEngine.render(busName, path, docHandle)
+			rendered = vbufEngine.render(busName, path, docHandle, progressive=True)
 			renderedAt = time.perf_counter()
 			try:
 				handle = vbufLib.create()
@@ -155,21 +254,112 @@ class AtSpiBuffer(VirtualBuffer):
 			if handle:
 				vbufLib.destroy(handle)
 			log.exception("The engine could not render the document")
-			queueHandler.queueFunction(queueHandler.eventQueue, self._loadBufferDone, success=False)
+			queueHandler.queueFunction(queueHandler.eventQueue, self._engineLoadDone, None, {})
 			return
-		self.VBufHandle = ctypes.c_void_p(handle)
-		self._docURL = rendered.info.get("docURL") or None
-		self.complete = bool(rendered.info.get("complete"))
 		log.info(
 			f"Buffer rendered by the engine in {renderedAt - start:.3f} s, built in "
 			f"{time.perf_counter() - renderedAt:.4f} s, {vbufLib.lib().VBuf_getTextLength(handle)} "
 			f"code units: {rendered.info}",
 		)
-		queueHandler.queueFunction(queueHandler.eventQueue, self._loadBufferDone)
+		queueHandler.queueFunction(queueHandler.eventQueue, self._engineLoadDone, handle, rendered.info)
+
+	def _engineLoadDone(self, handle: int | None, info: dict) -> None:
+		"""On the main thread: take the built buffer, unless this interceptor died while it rendered."""
+		if self._terminated:
+			self._loadProgressCallLater.Stop()
+			if handle:
+				vbufLib.destroy(handle)
+			self._unwatch()
+			return
+		if not handle:
+			self._loadBufferDone(success=False)
+			return
+		self.VBufHandle = ctypes.c_void_p(handle)
+		self._docURL = info.get("docURL") or self._docURL
+		self.complete = bool(info.get("complete"))
+		self._tables.clear()
+		if vbufUpdates is not None:
+			vbufUpdates.register(self)
+		focus = api.getFocusObject()
+		if focus.treeInterceptor is None and focus in self:
+			# The focus came before the buffer, when membership could not yet be answered from the
+			# buffer alone, as it is when Firefox restores the focus to a link on going back.
+			focus.treeInterceptor = self
+		self._loadBufferDone()
+		self._primeActions()
+
+	def onEngineEvents(self, events: tuple[str, ...], info: dict) -> None:
+		"""On the main thread, after the update that came with events, if any, was applied."""
+		if self._terminated:
+			return
+		self._tables.clear()
+		if "urlChanged" in events or info.get("docURL"):
+			self._docURL = info.get("docURL") or self._docURL
+		if "complete" in events:
+			self.complete = True
+		if "reload" in events or "gone" in events:
+			# Firefox makes a new document object for a reload and for every page followed, and
+			# that one gets a buffer of its own when it takes the focus.
+			self._gone = True
+			treeInterceptorHandler.killTreeInterceptor(self)
+			return
+		if self.VBufHandle:
+			self._handleUpdate()
+		if "loadComplete" in events:
+			self.event_documentLoadComplete(self.rootNVDAObject, lambda: None)
+
+	def _unwatch(self) -> None:
+		unwatch = getattr(vbufEngine, "unwatch", None)
+		# An engine that does not watch documents has nothing to forget.
+		if unwatch is not None:
+			try:
+				unwatch(self.busName, self.docPath)
+			except Exception:
+				log.exception("The engine could not stop watching the document")
+
+	def unloadBuffer(self):
+		if vbufUpdates is not None:
+			vbufUpdates.unregister(self)
+		self._unwatch()
+		if self.VBufHandle:
+			vbufLib.destroy(self.VBufHandle.value)
+		self.VBufHandle = None
+		self._tables.clear()
+
+	def terminate(self):
+		self._terminated = True
+		super().terminate()
+
+	def _primeActions(self) -> None:
+		if self.busName in _actionsPrimed:
+			return
+		_actionsPrimed.add(self.busName)
+		try:
+			link = next(self._iterNodesByType("link"), None)
+			obj = link.obj if link is not None else None
+			if obj is not None:
+				handler.client().actions(obj.node)
+		except (NodeGone, LookupError):
+			pass
+
+	def _tableFacts(self, docHandle: int, ID: int) -> tuple[int, int, bool] | None:
+		key = (docHandle, ID)
+		if key not in self._tables:
+			self._tables[key] = None
+			try:
+				obj = self.getNVDAObjectFromIdentifier(docHandle, ID)
+				if obj is not None:
+					rows, columns = handler.client().tableSize(obj.node)
+					isLayout = obj.atspiAttributes.get("layout-guess") == "true"
+					self._tables[key] = (rows, columns, isLayout)
+			except NodeGone:
+				pass
+		return self._tables[key]
 
 	def __contains__(self, obj):
+		# Local state only: a browser that hangs must not stall every event NVDA handles.
 		node = getattr(obj, "node", None)
-		if node is None or node.busName != self.busName:
+		if not isinstance(node, Node) or node.busName != self.busName:
 			return False
 		if node == self.rootNVDAObject.node:
 			return True
@@ -177,18 +367,21 @@ class AtSpiBuffer(VirtualBuffer):
 			return False
 		docHandle, ID = identifiers.of(node)
 		found = ctypes.c_uint64()
-		vbufLib.lib().VBuf_getControlFieldNodeWithIdentifier(
-			self.VBufHandle, docHandle, ID, ctypes.byref(found)
-		)
+		lib = vbufLib.lib()
+		lib.VBuf_getControlFieldNodeWithIdentifier(self.VBufHandle, docHandle, ID, ctypes.byref(found))
 		if not found:
 			return False
-		return not self._isNVDAObjectInApplication(obj)
+		start = ctypes.c_int()
+		end = ctypes.c_int()
+		if not lib.VBuf_getFieldNodeOffsets(self.VBufHandle, found, ctypes.byref(start), ctypes.byref(end)):
+			return False
+		pos = self.makeTextInfo(textInfos.offsets.Offsets(start.value, start.value))
+		inApplication = self._iterNodesByAttribs({"role": _role(*_APPLICATION_ROLES)}, "up", pos)
+		return next(inApplication, None) is None
 
 	def _get_isAlive(self):
-		# Never a call into the browser: a hung browser must not stall every focus change (#7818).
-		if self.isLoading:
-			return True
-		return not handler.client().isHung(self.busName)
+		# Never a call into the browser (#7818). A hung browser keeps its buffer, as on Windows.
+		return not self._gone
 
 	def getNVDAObjectFromIdentifier(self, docHandle, ID):
 		busName = identifiers.busName(docHandle)
@@ -205,10 +398,42 @@ class AtSpiBuffer(VirtualBuffer):
 	def _get_documentConstantIdentifier(self):
 		return self._docURL
 
+	def _get_documentURL(self) -> str | None:
+		return self._docURL
+
 	def _shouldIgnoreFocus(self, obj):
 		if obj.role == Role.DOCUMENT and State.EDITABLE not in obj.states:
 			return True
 		return super()._shouldIgnoreFocus(obj)
+
+	def event_caret(self, obj, nextHandler):
+		if self.passThrough:
+			return nextHandler()
+		# Firefox moves its caret, and sends no scrolling event, when a same-page link is followed or
+		# a script moves the focus; the virtual caret follows it there.
+		if obj != self.rootNVDAObject and obj in self:
+			self._handleScrollTo(obj)
+
+	def script_trapNonCommandGesture(self, gesture):
+		tones.beep(500, 30)
+
+	def _quickNavScript(self, gesture, itemType, direction, errorMessage, readUnit):
+		if not self.complete:
+			# Translators: Reported when a browse mode search finds nothing in the part of a page loaded
+			# so far.
+			errorMessage = _("Loading")
+		return super()._quickNavScript(gesture, itemType, direction, errorMessage, readUnit)
+
+	def _iterNodesByType(self, nodeType, direction="next", pos=None):
+		items = super()._iterNodesByType(nodeType, direction, pos)
+		if nodeType != "table" or config.conf["documentFormatting"]["includeLayoutTables"]:
+			return items
+		return (item for item in items if not self._isLayoutTable(item))
+
+	def _isLayoutTable(self, item) -> bool:
+		docHandle, ID = item.vbufFieldIdentifier
+		facts = self._tableFacts(docHandle, ID)
+		return bool(facts and facts[2])
 
 	def _searchableAttribsForNodeType(self, nodeType):
 		if nodeType.startswith("heading") and nodeType[7:].isdigit():
@@ -217,57 +442,85 @@ class AtSpiBuffer(VirtualBuffer):
 			"heading": _role(Role.HEADING),
 			"list": _role(Role.LIST),
 			"listItem": _role(Role.LISTITEM),
-			"graphic": _role(Role.GRAPHIC),
 			"separator": _role(Role.SEPARATOR),
 			"radioButton": _role(Role.RADIOBUTTON),
 			"comboBox": _role(Role.COMBOBOX),
-			"checkBox": _role(Role.CHECKBOX, Role.SWITCH),
 			"button": _role(Role.BUTTON, Role.TOGGLEBUTTON, Role.MENUBUTTON),
 			"frame": _role(Role.INTERNALFRAME),
-			"blockQuote": _role(Role.BLOCKQUOTE),
 			"tab": _role(Role.TAB),
 			"progressBar": _role(Role.PROGRESSBAR),
 			"toggleButton": _role(Role.TOGGLEBUTTON),
-			"menuItem": _role(Role.MENUITEM, Role.CHECKMENUITEM, Role.RADIOMENUITEM),
+			"menuItem": _role(Role.MENUITEM, Role.CHECKMENUITEM, Role.RADIOMENUITEM, Role.MENUBUTTON),
 			"math": _role(Role.MATH),
-			"slider": _role(Role.SLIDER),
 		}
 		if nodeType in simple:
 			return {"role": simple[nodeType]}
 		if nodeType == "link":
-			return {"role": _role(Role.LINK)}
+			return {"role": _role(Role.LINK), _state(State.LINKED): ["1"]}
 		if nodeType == "visitedLink":
 			return {"role": _role(Role.LINK), _state(State.VISITED): ["1"]}
 		if nodeType == "unvisitedLink":
-			return {"role": _role(Role.LINK), _state(State.VISITED): [None]}
+			return {"role": _role(Role.LINK), _state(State.LINKED): ["1"], _state(State.VISITED): [None]}
 		if nodeType == "table":
-			return {"role": _role(Role.TABLE)}
+			attrs = {"role": _role(Role.TABLE)}
+			if not config.conf["documentFormatting"]["includeLayoutTables"]:
+				attrs["table-layout"] = [None]
+			return attrs
+		if nodeType == "graphic":
+			return [{"role": _role(Role.GRAPHIC)}, {"tag": ["img"]}]
+		if nodeType == "blockQuote":
+			return [{"role": _role(Role.BLOCKQUOTE)}, {"tag": ["blockquote"]}]
+		if nodeType == "checkBox":
+			return [
+				{"role": _role(Role.CHECKBOX, Role.SWITCH)},
+				{"xml-roles": [VBufStorage_findMatch_word("switch")]},
+			]
+		if nodeType == "slider":
+			return [{"role": _role(Role.SLIDER)}, {"xml-roles": [VBufStorage_findMatch_word("slider")]}]
 		if nodeType == "formField":
 			return [
 				{"role": _role(*_FORM_FIELD_ROLES), _state(State.READONLY): [None]},
-				{"role": _role(Role.EDITABLETEXT), _state(State.EDITABLE): ["1"]},
+				{"atspi::role": ["list box"], _state(State.READONLY): [None]},
+				{"role": _role(Role.EDITABLETEXT, Role.COMBOBOX), _state(State.EDITABLE): ["1"]},
+				{_state(State.EDITABLE): ["1"], f"parent::{_state(State.EDITABLE)}": [None]},
 			]
 		if nodeType == "edit":
-			return {"role": _role(Role.EDITABLETEXT), _state(State.EDITABLE): ["1"]}
+			return [
+				{"role": _role(Role.EDITABLETEXT), _state(State.EDITABLE): ["1"]},
+				{_state(State.EDITABLE): ["1"], f"parent::{_state(State.EDITABLE)}": [None]},
+			]
 		if nodeType == "focusable":
 			return {_state(State.FOCUSABLE): ["1"]}
 		if nodeType == "landmark":
 			return [
 				{"role": _role(Role.LANDMARK)},
 				{"xml-roles": [VBufStorage_findMatch_word(r) for r in aria.landmarkRoles]},
+				{
+					"xml-roles": [VBufStorage_findMatch_word("region")],
+					"name": [VBufStorage_findMatch_notEmpty],
+				},
 			]
 		if nodeType == "article":
-			return {"role": _role(Role.ARTICLE)}
+			return {"xml-roles": [VBufStorage_findMatch_word("article")]}
 		if nodeType == "grouping":
-			return {"role": _role(Role.GROUPING)}
+			return [
+				{
+					"xml-roles": [VBufStorage_findMatch_word(r) for r in ("group", "radiogroup")],
+					"name": [VBufStorage_findMatch_notEmpty],
+				},
+				{"tag": ["fieldset"], "name": [VBufStorage_findMatch_notEmpty]},
+			]
+		if nodeType == "embeddedObject":
+			return [
+				{"tag": ["embed", "object", "applet", "audio", "video"]},
+				{"role": _role(Role.EMBEDDEDOBJECT, *_APPLICATION_ROLES)},
+			]
 		if nodeType == "figure":
-			return {"role": _role(Role.FIGURE)}
+			return [{"xml-roles": [VBufStorage_findMatch_word("figure")]}, {"tag": ["figure"]}]
 		return None
 
 	def event_stateChange(self, obj, nextHandler):
 		if not self.isAlive:
-			import treeInterceptorHandler
-
 			return treeInterceptorHandler.killTreeInterceptor(self)
 		return nextHandler()
 
