@@ -46,7 +46,9 @@ def startTerminal(desktop: DesktopSession, config: Path) -> harness.Launch:
 
 def laptopConfig(directory: Path) -> Path:
 	config = directory / "laptop.ini"
-	config.write_text(SESSION_CONFIG.read_text().replace("[keyboard]\n", "[keyboard]\n\tkeyboardLayout = laptop\n"))
+	config.write_text(
+		SESSION_CONFIG.read_text().replace("[keyboard]\n", "[keyboard]\n\tkeyboardLayout = laptop\n")
+	)
 	return config
 
 
@@ -126,7 +128,7 @@ def test_shellOutputTypingAndReview(desktop: DesktopSession):
 	step(desktop, "KP_End", "space")
 	step(desktop, "KP_Next", "3")
 	step(desktop, "shift+KP_Home", "$ echo hello there")
-	step(desktop, "KP_Down", "hello there")
+	step(desktop, "KP_Prior", "hello there")
 	step(desktop, "shift+KP_Prior", "blank")
 
 	# A listing of 50,000 lines: read in part, stopped by one key, and NVDA answers at once after.
@@ -167,13 +169,13 @@ def test_fullScreenProgramWithLaptopLayout(desktop: DesktopSession, tmp_path: Pa
 	step(desktop, "space", "star", "1 marked")
 
 	# The laptop layout's review commands, with Caps Lock as the NVDA key.
-	step(desktop, "Caps_Lock+shift+period", "* banana")
+	step(desktop, "Caps_Lock+shift+period", "star  banana")
 	step(desktop, "Caps_Lock+Up", "apple")
 	step(desktop, "Caps_Lock+ctrl+Home", "Fruit list")
 	step(desktop, "Caps_Lock+ctrl+Right", "list")
 	step(desktop, "Caps_Lock+Right", "i")
 	step(desktop, "Caps_Lock+ctrl+End", "Filter:")
-	step(desktop, "Caps_Lock+l", "* banana")
+	step(desktop, "Caps_Lock+l", "star  banana")
 
 	# Leaving it gives back the shell's screen, of which only what is new is spoken.
 	mark = desktop.mark()

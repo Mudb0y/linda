@@ -22,6 +22,7 @@ from linuxPlatform.atspi.roles import ROLES, mapStates
 from locationHelper import RectLTWH
 
 from NVDAObjects import NVDAObject
+from NVDAObjects.AtSpi.terminal import VteTerminal
 from NVDAObjects.AtSpi.textInfo import AtspiTextInfo
 from NVDAObjects.behaviors import (
 	Dialog,
@@ -239,6 +240,8 @@ class AtSpi(NVDAObject):
 			clsList.append(SpinButton)
 		elif "Text" in ifaces and ("editable" in states or role == Role.EDITABLETEXT):
 			clsList.append(EditableTextWithAutoSelectDetection)
+		elif role == Role.TERMINAL and "Text" in ifaces:
+			clsList.append(VteTerminal)
 		if role in (Role.LISTITEM, Role.TREEVIEWITEM) and self.atspiRole == "table cell":
 			clsList.append(TableRowItem)
 		elif role == Role.LISTITEM and self.atspiRole == "icon":

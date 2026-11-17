@@ -18,6 +18,9 @@
 source/NVDAObjects/AtSpi/__init__.py
   Linux runtime: added. NVDAObjects for AT-SPI accessibles, the counterpart
   of NVDAObjects.IAccessible and NVDAObjects.UIA, which only Linux imports
+source/NVDAObjects/AtSpi/terminal.py
+  Linux runtime: added. A terminal's screen over AT-SPI, read as NVDA reads
+  a console, which only Linux imports
 source/NVDAObjects/AtSpi/textInfo.py
   Linux runtime: added. The TextInfo of AT-SPI accessibles with the Text
   interface, which only Linux imports

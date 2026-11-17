@@ -23,8 +23,9 @@ import textInfos
 from diffHandler import Difflib, prefer_difflib
 from linuxPlatform import inputHook
 from logHandler import log
-from NVDAObjects.behaviors import EnhancedTermTypedCharSupport
 from speech.extensions import speechCanceled
+
+from NVDAObjects.behaviors import EnhancedTermTypedCharSupport
 
 #: Seconds the monitor thread waits for the main thread to read the screen before it compares against
 #: the screen it had, and tries again.
@@ -100,12 +101,16 @@ class ScreenDifflib(Difflib):
 
 
 def isNewScreen(oldText: str, newText: str) -> bool:
-	"""Whether most rows changed at once, as when a full-screen program starts or ends, or the screen
-	scrolled by its height."""
+	"""Whether most rows with text changed at once, as when a full-screen program starts or ends, or the
+	screen scrolled by its height."""
 	oldRows = oldText.splitlines()
 	newRows = newText.splitlines()
-	changed = sum(old != new for old, new in zip(oldRows, newRows)) + abs(len(oldRows) - len(newRows))
-	return changed > len(newRows) // 2
+	rows = max(len(oldRows), len(newRows))
+	oldRows += [""] * (rows - len(oldRows))
+	newRows += [""] * (rows - len(newRows))
+	changed = sum(old != new for old, new in zip(oldRows, newRows))
+	withText = sum(bool(old or new) for old, new in zip(oldRows, newRows))
+	return changed > IN_PLACE_ROWS and changed > withText // 2
 
 
 _screenDifflib = ScreenDifflib()
@@ -171,7 +176,7 @@ class VteTerminal(EnhancedTermTypedCharSupport):
 		def readOnMainThread() -> None:
 			try:
 				self._readScreen()
-			except Exception:
+			except (LookupError, RuntimeError, NotImplementedError):
 				log.debugWarning("Could not read the terminal's screen", exc_info=True)
 			finally:
 				done.set()
