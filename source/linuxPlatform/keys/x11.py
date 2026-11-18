@@ -266,6 +266,8 @@ GESTURE_MASKS = {"shift": X.ShiftMask, "control": X.ControlMask, "alt": X.Mod1Ma
 #: evdev code: modifier combinations captured in focus mode, where Escape goes back to browse mode.
 FOCUS_KEYS: dict[int, tuple[str, ...]] = {1: ("",)}
 
+#: Seconds between attempts to hold the keyboard, as for input help, while another program holds it.
+HOLD_RETRY = 0.1
 #: Seconds between heartbeats to the guard while it guards.
 HEARTBEAT_INTERVAL = 0.5
 #: Seconds of silence after which the guard frees the keyboard.
@@ -444,6 +446,9 @@ class X11KeySource:
 		#: the NVDA keys are; None while none is.
 		self._chordKey: int | None = None
 		self._held = False
+		#: When to try again to hold the keyboard that another program held as it was asked for; None
+		#: while there is no need.
+		self._holdRetry: float | None = None
 		#: What was last asked for, to be set up again on a new connection.
 		self._consumedWanted: tuple[int, bool] | None = None
 		self._holdWanted = False
@@ -658,6 +663,7 @@ class X11KeySource:
 		self._chordKey = None
 		self._documentPending = None
 		self._held = False
+		self._holdRetry = None
 		self._unsent.clear()
 		self._modifiersFor.clear()
 		for ticket in self._tickets:
@@ -740,7 +746,7 @@ class X11KeySource:
 				self._handle(d.next_event())
 			now = time.monotonic()
 			self._flushRaw(now)
-			deadlines = [self._answer(now), self._beat(now), self._documentExpiry(now)]
+			deadlines = [self._answer(now), self._beat(now), self._documentExpiry(now), self._retryHold(now)]
 			if self._raw:
 				deadlines.append(self._raw[0][0] + RAW_WAIT)
 			due = min((t for t in deadlines if t is not None), default=None)
@@ -1671,10 +1677,16 @@ class X11KeySource:
 			status = d.screen().root.grab_keyboard(False, X.GrabModeAsync, X.GrabModeAsync, X.CurrentTime)
 			self._held = status == X.GrabSuccess
 			if not self._held:
-				log.warning(
-					"Another program holds the keyboard, so keys still reach applications during input help"
-				)
+				if self._holdRetry is None:
+					log.warning(
+						"Another program holds the keyboard, so keys still reach applications during input help "
+						"until it lets go"
+					)
+				# A menu or a password prompt lets go as it closes, and input help would otherwise go on
+				# describing keys that act on the program as well.
+				self._holdRetry = time.monotonic() + HOLD_RETRY
 			else:
+				self._holdRetry = None
 				# It takes the place of any grab of this source that was active.
 				self._grabKey = self._serverGrab = None
 		else:
@@ -1694,7 +1706,14 @@ class X11KeySource:
 			d.ungrab_keyboard(X.CurrentTime)
 			d.sync()
 			self._held = False
+			self._holdRetry = None
 			self._grabKey = self._serverGrab = None
+
+	def _retryHold(self, now: float) -> float | None:
+		""":return: When to try again to hold the keyboard, or None while there is no need."""
+		if self._holdRetry is not None and now >= self._holdRetry:
+			self._hold(True)
+		return self._holdRetry
 
 	def _fake(
 		self, keycode: int, isUp: bool, echo: bool = True, modifiers: tuple[int, ...] | None = None

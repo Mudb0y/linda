@@ -681,6 +681,31 @@ def test_capsLockChordInAnOpenMenuLeavesTheLockAlone(
 	keys.quit().assertClean(logNames=("nvda.log",))
 
 
+def test_inputHelpTurnedOnInAnOpenMenuHoldsTheKeyboardOnceItCloses(
+	desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path
+):
+	keys = KeySession(desktop, tmp_path, "desktop")
+	keyboard.press("F10")
+	time.sleep(0.5)
+	mark = desktop.mark()
+	keyboard.press(keys.chord("1"))
+	on = "input help on\N{HORIZONTAL ELLIPSIS}"
+	desktop.expect(on, since=mark)
+	# The menu holds the keyboard as input help would, so the keys reach the menu, which closes.
+	keyboard.press("Escape")
+	keyboard.press("Escape")
+	time.sleep(0.5)
+	assert entryState()[0] == ENTRY_TEXT
+	mark = desktop.mark()
+	keyboard.press("q")
+	desktop.expect("q", since=mark)
+	time.sleep(0.3)
+	assert entryState()[0] == ENTRY_TEXT, "the keyboard was not held once the menu let it go"
+	keyboard.press(keys.chord("1"))
+	desktop.expect("q", "input help off", since=mark)
+	keys.quit().assertClean(logNames=("nvda.log",))
+
+
 @pytest.mark.parametrize("layoutName", LAYOUTS)
 def test_controlCancelsReading(desktop: DesktopSession, tmp_path: Path, layoutName: str):
 	keys = KeySession(
