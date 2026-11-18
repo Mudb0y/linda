@@ -35,6 +35,9 @@ HIGHLIGHT_ON = """[vision]
 		highlightBrowseMode = True
 """
 STARTUP_BOUND = 60.0
+#: Seconds marco has to set up its desktops or its compositor, which take it a fraction of one on an
+#: idle machine and several on a loaded one.
+WINDOW_MANAGER_BOUND = 30.0
 #: Seconds the outlines have to follow a change: NVDA's highlighter looks every tenth of one.
 FOLLOW_BOUND = 3.0
 SETTLE = 1.0
@@ -107,7 +110,7 @@ def anyDesktop(request, tmp_path: Path) -> Iterator[DesktopSession]:
 	"""A desktop under marco compositing, as MATE has it by default, and one under marco without."""
 	if request.param == "composited":
 		with DesktopSession(tmp_path / "desktop") as session:
-			assert compositorRunning()
+			waitForCompositor(tmp_path / "desktop" / "wm.log")
 			yield session
 		return
 	if desktopSession.windowManagerIsRunning():
@@ -115,9 +118,12 @@ def anyDesktop(request, tmp_path: Path) -> Iterator[DesktopSession]:
 	log = (tmp_path / "wm.log").open("w")
 	wm = subprocess.Popen(["marco", "--no-composite", "--no-force-fullscreen"], stdout=log, stderr=log)
 	try:
-		deadline = time.monotonic() + desktopSession.WINDOW_MANAGER_TIMEOUT
+		started = time.monotonic()
 		while not desktopSession.windowManagerIsRunning():
-			assert wm.poll() is None and time.monotonic() < deadline, "marco did not start"
+			assert wm.poll() is None and time.monotonic() - started < WINDOW_MANAGER_BOUND, (
+				f"marco --no-composite did not set up its desktops within {WINDOW_MANAGER_BOUND} s, "
+				f"{harness.describeExit(wm.poll())}:\n{(tmp_path / 'wm.log').read_text()}"
+			)
 			time.sleep(0.05)
 		assert not compositorRunning()
 		with DesktopSession(tmp_path / "desktop") as session:
@@ -130,6 +136,25 @@ def anyDesktop(request, tmp_path: Path) -> Iterator[DesktopSession]:
 			wm.kill()
 			wm.wait()
 		log.close()
+
+
+def waitForCompositor(wmLog: Path) -> None:
+	"""Wait until a compositing manager owns the selection that says one runs.
+
+	marco takes it only once it has set up its desktops, which DesktopSession waits for, and then its
+	compositor, which on a loaded machine can take seconds more. One that cannot composite because
+	another compositor holds the screen says so in its log, and that fails at once rather than
+	running out the time.
+	"""
+	started = time.monotonic()
+	while not compositorRunning():
+		log = wmLog.read_text() if wmLog.exists() else ""
+		assert "Another compositing manager" not in log, f"marco could not composite:\n{log}"
+		assert time.monotonic() - started < WINDOW_MANAGER_BOUND, (
+			f"no compositing manager took _NET_WM_CM_S0 within {WINDOW_MANAGER_BOUND} s of marco setting "
+			f"up its desktops; marco's log:\n{log}"
+		)
+		time.sleep(0.05)
 
 
 def compositorRunning() -> bool:
