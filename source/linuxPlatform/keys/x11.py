@@ -1208,6 +1208,9 @@ class X11KeySource:
 				stdin=subprocess.PIPE,
 				stdout=subprocess.DEVNULL,
 				pass_fds=(socket,),
+				# Out of reach of the terminal NVDA may run in: Control+Z there stops NVDA's whole process
+				# group, and a guard stopped with it would leave the keyboard held on the next grabbed key.
+				start_new_session=True,
 			)
 		except OSError:
 			log.warning("No guard frees the keyboard should NVDA stop answering", exc_info=True)

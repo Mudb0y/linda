@@ -678,6 +678,60 @@ source.stop()
 """
 
 
+#: The child's process group stopped, as Control+Z in the terminal it runs in stops its job, by a
+#: helper outside it, which then presses the NVDA key and F5 on the rig's keyboard.
+JOB_STOPPED_CHILD = r"""
+import json, os, signal, subprocess, textwrap
+first = makeWindow()
+time.sleep(0.5)
+helper = textwrap.dedent(f'''
+	import json, os, signal, sys, time
+	sys.path.insert(0, {str(harness.HERE)!r})
+	from Xlib import X, display
+	from test_keys import Keyboard
+	kb = Keyboard()
+	app = display.Display()
+	window = app.create_resource_object("window", {first.id})
+	window.change_attributes(event_mask=X.KeyPressMask)
+	app.sync()
+	os.killpg({os.getpgid(0)}, signal.SIGSTOP)
+	try:
+		time.sleep(0.5)
+		kb.press("Insert")
+		time.sleep(0.3)
+		while app.pending_events():
+			app.next_event()
+		kb.press("F5")
+		deadline = time.monotonic() + 6
+		reached = False
+		while time.monotonic() < deadline and not reached:
+			while app.pending_events():
+				if app.next_event().type == X.KeyPress:
+					reached = True
+			time.sleep(0.05)
+	finally:
+		os.killpg({os.getpgid(0)}, signal.SIGCONT)
+	print(json.dumps(reached))
+''')
+stopper = subprocess.run(
+	[sys.executable, "-c", helper], capture_output=True, text=True, timeout=60, start_new_session=True
+)
+result = {"reached": json.loads(stopper.stdout or "null"), "stderr": stopper.stderr[-2000:]}
+source.stop()
+"""
+
+
+def test_stoppedJobLetsTheKeyboardGo(tmp_path: Path):
+	with DesktopSession(tmp_path / "desktop", windowManager=False):
+		# A group of its own, as the shell gives a job, so that stopping it stops neither pytest nor
+		# the rig.
+		done = harness.runChild(
+			tmp_path, "import os\nos.setpgid(0, 0)\n" + SOURCE_CHILD + JOB_STOPPED_CHILD, timeout=60
+		)
+	assert done.error is None, done.error
+	assert done.value["reached"] is True, f"F5 was held while the job was stopped: {done.value}"
+
+
 @pytest.mark.parametrize("gone", ("destroyed", "unmapped", "parentUnmapped"))
 def test_keyboardGoesFreeAfterTheWindowOfAHeldKeyGoes(tmp_path: Path, gone: str):
 	# The X server ends a grab whose window goes, and the release of the key that made it active
