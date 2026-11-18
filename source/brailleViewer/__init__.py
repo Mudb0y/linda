@@ -124,9 +124,16 @@ def createBrailleViewerTool():
 	if _brailleGui:
 		destroyBrailleViewer()
 
-	_brailleGui = BrailleViewerFrame(
-		braille.handler.displaySize,
-		_onGuiDestroyed,
-	)
+	try:
+		_brailleGui = BrailleViewerFrame(
+			braille.handler.displaySize,
+			_onGuiDestroyed,
+		)
+	except Exception:
+		# Left registered, the filter would give a display of DEFAULT_NUM_CELLS to the braille handler
+		# with no braille display and no viewer; and the menu item, which toggled itself, is unticked.
+		braille.extensions.filter_displayDimensions.unregister(_getDisplayDimensions)
+		postBrailleViewerToolToggledAction.notify(created=False)
+		raise
 	braille.extensions.pre_writeCells.register(_brailleGui.updateBrailleDisplayed)
 	postBrailleViewerToolToggledAction.notify(created=True)

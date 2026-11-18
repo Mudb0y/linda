@@ -3,6 +3,7 @@
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 import enum  # noqa: I001
+import sys
 import time
 from collections.abc import Callable
 
@@ -218,7 +219,10 @@ class TextCellHover:
 
 
 def _setBrailleFont(fontName: str, textCtrl: wx.Control) -> wx.Font:
-	fonts.importFonts()
+	if sys.platform == "win32":
+		fonts.importFonts()
+	# Windows loads the font for the process through GDI, which Linux does not have. GTK takes the braille
+	# patterns from an installed font that has them, FreeMono-FixedBraille itself if it is installed.
 	# Ideally the raw characters should align with the braille dots.
 	#
 	# On most systems, it seems that Windows will fall back to using "Segoe UI Symbol" font.

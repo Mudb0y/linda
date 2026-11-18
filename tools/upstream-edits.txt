@@ -343,6 +343,16 @@ source/braille/brailleHandler.py
 source/braille/display/driver.py
   Linux runtime: an acknowledgement from the display cancels the Linux
   timer object rather than calling CancelWaitableTimer
+source/brailleViewer/__init__.py
+  every platform: createBrailleViewerTool unregisters its display
+  dimensions filter and reports the viewer as not created when the
+  viewer's frame cannot be built, as the filter would otherwise give the
+  braille handler a display of 40 cells that does not exist, and the menu
+  item would stay ticked
+source/brailleViewer/brailleViewerGui.py
+  Linux runtime: the viewer does not load NVDA's braille font, which is
+  loaded through GDI; GTK finds the braille patterns in an installed font,
+  and the viewer could not be opened at all
 source/browseMode.py
   Linux runtime: _extractStyles imports the UI Automation Word
   document class only on Windows; Linux has no UI Automation and uses an

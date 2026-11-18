@@ -406,6 +406,23 @@ def test_logViewerOpensAtOnceOnABigLog(desktop: DesktopSession):
 	assertExitedCleanly(nvda)
 
 
+def test_brailleViewerOpensAndClosesFromTheToolsMenu(desktop: DesktopSession):
+	nvda = start(desktop, SESSION_CONFIG)
+	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
+	for shown in (True, False):
+		step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
+		step(desktop, "t", "View log L 1 of …")
+		desktop.press("b")
+		deadline = time.monotonic() + 5
+		while ("Linda Braille Viewer" in desktopSession.topLevelNames()) != shown:
+			assert time.monotonic() < deadline, (
+				f"the braille viewer was {'not ' if shown else ''}shown\n{nvda.describe()}"
+			)
+			time.sleep(0.1)
+	desktop.close()
+	assertExitedCleanly(nvda)
+
+
 def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSession, tmp_path: Path):
 	# Insert and numpad Insert only, upstream's default.
 	config = sessionConfig(tmp_path / "config", drop=("NVDAModifierKeys",))
