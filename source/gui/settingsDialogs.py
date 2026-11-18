@@ -94,6 +94,9 @@ import api
 import ui
 from . import guiHelper
 
+if sys.platform != "win32":
+	from linuxPlatform import nvdaAddonStore
+
 try:
 	import updateCheck
 except RuntimeError:
@@ -3815,10 +3818,14 @@ class AudioPanel(SettingsPanel):
 class AddonStorePanel(SettingsPanel):
 	# Translators: This is the label for the addon navigation settings panel.
 	title = _("Add-on Store")
+	if sys.platform != "win32":
+		title = nvdaAddonStore.storeName()
 	helpId = "AddonStoreSettings"
 
 	def makeSettings(self, settingsSizer: wx.BoxSizer) -> None:
 		sHelper = guiHelper.BoxSizerHelper(self, sizer=settingsSizer)
+		if sys.platform != "win32":
+			self._storeSwitch = nvdaAddonStore.StoreSwitch(self, sHelper)
 		# Translators: This is a label for the automatic updates combo box in the Add-on Store Settings dialog.
 		automaticUpdatesLabelText = _("Automatic &updates:")
 		self.automaticUpdatesComboBox = sHelper.addLabeledControl(
@@ -3880,6 +3887,13 @@ class AddonStorePanel(SettingsPanel):
 		self.bindHelpEvent("AddonStoreMetadataMirror", mirrorBox)
 		self.mirrorURLTextBox.Bind(wx.EVT_CHAR_HOOK, self._enterTriggersOnChangeMirrorURL)
 		changeMirrorBtn.Bind(wx.EVT_BUTTON, self.onChangeMirrorURL)
+		if sys.platform != "win32":
+			self._storeSwitch.governs(
+				self.automaticUpdatesComboBox,
+				self.defaultUpdateChannelComboBox,
+				self.allowIncompatibleUpdates,
+				mirrorBox,
+			)
 
 	def onChangeMirrorURL(self, evt: wx.CommandEvent | wx.KeyEvent):
 		"""Show the dialog to change the Add-on Store mirror URL, and refresh the dialog in response to the URL being changed."""
@@ -3929,6 +3943,8 @@ class AddonStorePanel(SettingsPanel):
 		config.conf["addonStore"]["automaticUpdates"] = [x.value for x in AddonsAutomaticUpdate][index]
 		config.conf["addonStore"]["allowIncompatibleUpdates"] = self.allowIncompatibleUpdates.IsChecked()
 		config.conf["addonStore"]["defaultUpdateChannel"] = self.defaultUpdateChannelComboBox.GetSelection()
+		if sys.platform != "win32":
+			self._storeSwitch.save()
 
 
 class RemoteSettingsPanel(SettingsPanel):

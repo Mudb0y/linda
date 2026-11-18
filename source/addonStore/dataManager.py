@@ -7,6 +7,7 @@ from copy import deepcopy  # noqa: I001
 import json
 import os
 import pathlib
+import sys
 import threading
 from typing import (
 	TYPE_CHECKING,
@@ -43,6 +44,9 @@ from .network import (
 	_LATEST_API_VER,
 )
 from .settings import _AddonStoreSettings
+
+if sys.platform != "win32":
+	from linuxPlatform import nvdaAddonStore
 
 
 if TYPE_CHECKING:
@@ -108,6 +112,8 @@ class _DataManager:
 			name="initialiseAvailableAddons",
 			daemon=True,
 		)
+		if sys.platform != "win32" and not nvdaAddonStore.isEnabled():
+			return
 		self._initialiseAvailableAddonsThread.start()
 
 	def terminate(self):
@@ -225,6 +231,8 @@ class _DataManager:
 		self,
 		onDisplayableError: Optional["DisplayableError.OnDisplayableErrorT"] = None,
 	) -> "AddonGUICollectionT":
+		if sys.platform != "win32" and not nvdaAddonStore.isEnabled():
+			return _createAddonGUICollection()
 		cacheHash = self._getCacheHash()
 		shouldRefreshData = (
 			not self._compatibleAddonCache
@@ -262,6 +270,8 @@ class _DataManager:
 		self,
 		onDisplayableError: Optional["DisplayableError.OnDisplayableErrorT"] = None,
 	) -> "AddonGUICollectionT":
+		if sys.platform != "win32" and not nvdaAddonStore.isEnabled():
+			return _createAddonGUICollection()
 		cacheHash = self._getCacheHash()
 		shouldRefreshData = (
 			not self._latestAddonCache

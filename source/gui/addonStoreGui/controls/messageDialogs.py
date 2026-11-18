@@ -54,6 +54,9 @@ import windowUtils
 if TYPE_CHECKING:
 	from addonStore.models.version import SupportsVersionCheck
 
+if sys.platform != "win32":
+	from linuxPlatform import nvdaAddonStore
+
 __all__ = [
 	"ErrorAddonInstallDialogWithYesNoButtons",
 	"UpdatableAddonsDialog",
@@ -562,6 +565,9 @@ class UpdatableAddonsDialog(
 
 	@classmethod
 	def _checkForUpdatableAddons(cls):
+		if sys.platform != "win32" and not nvdaAddonStore.isEnabled():
+			log.debug("the add-on store is off")
+			return
 		if not NVDAState.shouldWriteToDisk() or (
 			AddonsAutomaticUpdate.DISABLED == config.conf["addonStore"]["automaticUpdates"]
 		):

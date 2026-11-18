@@ -7,6 +7,7 @@
 # For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
 from io import StringIO  # noqa: I001
+import sys
 from configobj import ConfigObj
 from . import configDefaults
 
@@ -573,3 +574,7 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 #: @type: ConfigObj
 confspec = ConfigObj(StringIO(configSpecString), list_values=False, encoding="UTF-8")
 confspec.newlines = "\r\n"
+if sys.platform != "win32":
+	# NVDA's add-on store holds add-ons written for Windows, so Linux asks it for nothing until the
+	# user turns it on; see linuxPlatform.nvdaAddonStore.
+	confspec["addonStore"]["enabled"] = "boolean(default=false)"

@@ -4,7 +4,7 @@ one of them is open, on the rig's display under marco.
 nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_modalDialogs.py
 
 The session configuration points the add-on store at a port nothing listens on, which is how the
-store behaves without a network.
+store behaves without a network; the tests that open the store turn it on.
 """
 
 import signal
@@ -33,7 +33,7 @@ WARNING = "Add-on Store Warning dialog Add-ons are created by the NVDA community
 WARNING_CHECK_BOX = "Don't show this message again check box not checked Alt plus D"
 FETCH_FAILURE = "Add-on data update failure dialog Unable to fetch latest add-on data…"
 FETCH_FAILURE_TITLE = "Add-on data update failure"
-STORE = "Add-on Store - …"
+STORE = "NVDA Add-on Store - …"
 WELCOME = "Welcome to Linda dialog Welcome to Linda!…"
 DESKTOP_LAYOUT = "Keyboard layout: combo box desktop collapsed Alt plus K"
 EXIT_DIALOG = ("Exit Linda dialog", "What would you like to do? combo box Exit collapsed Alt plus D")
@@ -48,11 +48,21 @@ def desktop(tmp_path: Path) -> Iterator[DesktopSession]:
 	harness.stopRunningCopy()
 
 
-def start(desktop: DesktopSession) -> harness.Launch:
+def storeOnConfig(directory: Path) -> Path:
+	"""The session configuration with NVDA's add-on store turned on."""
+	text = SESSION_CONFIG.read_text(encoding="utf-8").replace(
+		"[addonStore]\n", "[addonStore]\n\tenabled = True\n"
+	)
+	directory.mkdir(parents=True, exist_ok=True)
+	(directory / "nvda.ini").write_text(text, encoding="utf-8")
+	return directory / "nvda.ini"
+
+
+def start(desktop: DesktopSession, config: Path = SESSION_CONFIG) -> harness.Launch:
 	app = desktop.startApp(desktop.fixture(GTK[0]), title=GTK[1])
 	assert app.stdout.readline() == "ready\n"
 	desktopSession.activate(GTK[1])
-	nvda = desktop.startNVDA(SESSION_CONFIG)
+	nvda = desktop.startNVDA(config)
 	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
 	return nvda
 
@@ -68,7 +78,7 @@ def step(desktop: DesktopSession, chord: str, *expected: str, timeout: float = 5
 def openAddonStore(desktop: DesktopSession, *expected: str) -> int:
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
 	step(desktop, "t", "View log L 1 of 6")
-	return step(desktop, "a", *expected)
+	return step(desktop, "n", *expected)
 
 
 def answerFetchFailure(desktop: DesktopSession, since: int) -> None:
@@ -105,8 +115,8 @@ def assertExitedCleanly(nvda: harness.Launch, *logNames: str) -> None:
 	nvda.assertClean(logNames=logNames or ("nvda.log",))
 
 
-def test_addonStoreWarningClosesAndTheStoreIsReadAndCloses(desktop: DesktopSession):
-	nvda = start(desktop)
+def test_addonStoreWarningClosesAndTheStoreIsReadAndCloses(desktop: DesktopSession, tmp_path: Path):
+	nvda = start(desktop, storeOnConfig(tmp_path / "config"))
 	mark = openAddonStore(desktop, WARNING, WARNING_CHECK_BOX)
 	answerFetchFailure(desktop, mark)
 	# The warning waits for an answer, as on Windows.
@@ -190,8 +200,10 @@ OPENERS = {
 
 
 @pytest.mark.parametrize("opened", [*OPENERS, "stopped"])
-def test_startingAgainTakesOverWhateverTheRunningCopyIsDoing(desktop: DesktopSession, opened: str):
-	first = start(desktop)
+def test_startingAgainTakesOverWhateverTheRunningCopyIsDoing(
+	desktop: DesktopSession, opened: str, tmp_path: Path
+):
+	first = start(desktop, storeOnConfig(tmp_path / "config"))
 	if opened == "stopped":
 		first.process.send_signal(signal.SIGSTOP)
 	else:

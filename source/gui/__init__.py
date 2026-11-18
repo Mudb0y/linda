@@ -731,6 +731,12 @@ class SysTrayIcon(wx.adv.TaskBarIcon):
 			# Translators: The label of a menu item to open the Add-on store
 			item = menu_tools.Append(wx.ID_ANY, _("&Add-on store..."))
 			self.Bind(wx.EVT_MENU, frame.onAddonStoreCommand, item)
+			if sys.platform != "win32":
+				from linuxPlatform import nvdaAddonStore
+
+				# The window's name says whether NVDA's store is in it, which the user can change.
+				item.SetItemLabel(nvdaAddonStore.menuLabel())
+				self.menu_tools_addonStore = item
 
 		if not globalVars.appArgs.secure and not config.isAppX:
 			# Translators: The label for the menu item to open NVDA Python Console.

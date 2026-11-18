@@ -4,7 +4,8 @@ Linda is NVDA brought to Linux under a name of its own. NVDA's messages stay as 
 since every message edited here would lose its translations and conflict at each upstream merge.
 The translation languageHandler installs gives Linda instead wherever a message has the whole word
 NVDA, in every language, except in a message that speaks of NV Access, which is about the upstream
-project and its NVDA.
+project and its NVDA, and in one that names something of NVDA's own rather than the program running,
+which UPSTREAM_NAMED_MESSAGES lists as the code gives it.
 """
 
 import gettext
@@ -18,6 +19,9 @@ LONG_NAME = "Linda Is Non-visual Desktop Access"
 UPSTREAM_NAME = "NVDA"
 #: A message holding any of these speaks of NV Access, its site or its repositories.
 _UPSTREAM_MARKS = ("NV Access", "nvaccess")
+#: Messages, as the code gives them, that name something of NVDA's own, which a translation of them
+#: keeps calling NVDA: the add-on store, whose add-ons are NVDA's (linuxPlatform.nvdaAddonStore).
+UPSTREAM_NAMED_MESSAGES = frozenset({"NVDA {addonStore}"})
 # ASCII bounds rather than \b, which would not end the word before a letter of a script that writes
 # no spaces, as in 使用NVDA时.
 _UPSTREAM_WORD = re.compile(r"(?<![A-Za-z0-9_])NVDA(?![A-Za-z0-9_])")
@@ -52,7 +56,7 @@ class RenamingTranslations(gettext.NullTranslations):
 		:param untranslated: The messages as the code gives them, one of which a lookup that found no
 			translation returns as it is, in English.
 		"""
-		if UPSTREAM_NAME not in message:
+		if UPSTREAM_NAME not in message or not UPSTREAM_NAMED_MESSAGES.isdisjoint(untranslated):
 			return message
 		isEnglish = any(message is source for source in untranslated)
 		cache = self._renamedEnglish if isEnglish else self._renamed

@@ -212,6 +212,12 @@ source/addonHandler/__init__.py
   Linux runtime: completeRemove deletes the empty file it reserved before
   moving the add-on's directory to that name, as Linux puts a directory in
   the place of an empty directory only; no add-on could be removed
+source/addonStore/dataManager.py
+  Linux runtime: while the add-on store is off, which is its default on
+  Linux (linuxPlatform.nvdaAddonStore), the data manager starts no fetch
+  at start-up and getLatestCompatibleAddons and getLatestAddons return an
+  empty listing without asking the server, so that nothing is sent to
+  NV Access's server until the user turns the store on
 source/api.py
   Linux runtime: copyToClip and getClipData use the desktop's clipboard
   through linuxPlatform.clipboard, which goes through GTK on the main
@@ -324,6 +330,10 @@ source/config/__init__.py
   the installed-only settings, parts of the update check and part of the
   remote client. getUserDefaultConfigPath() is the XDG configuration directory,
   XDG_CONFIG_HOME/linda, never a directory under appDir
+source/config/configSpec.py
+  Linux runtime: addonStore has an enabled key, false by default, which
+  turns NVDA's add-on store on; Windows has no such key and its store is
+  always on
 source/config/registry.py
   every platform: winreg comes from linuxPlatform.windowsOnly, so
   _deleteKeyAndSubkeys raises NoLinuxImplementation on Linux
@@ -391,10 +401,27 @@ source/gui/__init__.py
   through to NVDA's, and starts linuxPlatform.speakService, which answers on
   the session bus the call scripts make to have Orca speak; terminate stops
   it
+  Linux runtime: the Tools menu's item for the add-on store is named for
+  the window it opens, Add-ons while NVDA's store is off and NVDA Add-on
+  Store while it is on, and linuxPlatform.nvdaAddonStore renames it when
+  the setting changes
   every platform: the help menu's web pages, the donation page and the
   documentation open through startfile from linuxPlatform.windowsOnly,
   which is os.startfile on Windows and on Linux opens them with the
   desktop's default application through xdg-open
+source/gui/addonStoreGui/controls/details.py
+  Linux runtime: _refresh fills the details without freezing the panel, as
+  GTK's text view crashed NVDA in SetInsertionPoint after a thaw while the
+  window was being shown, the first time the store listed an add-on
+source/gui/addonStoreGui/controls/messageDialogs.py
+  Linux runtime: the daily check for updates asks nothing while the add-on
+  store is off
+source/gui/addonStoreGui/controls/storeDialog.py
+  every platform: the tabs are those of _tabKeys, which on Windows holds
+  every status filter as before
+  Linux runtime: the window takes its name from linuxPlatform.nvdaAddonStore,
+  and while the store is off has only the tabs of installed add-ons, the
+  incompatible ones only when there are some, and opens on the installed
 source/gui/addonStoreGui/viewModels/store.py
   every platform: startfile comes from linuxPlatform.windowsOnly, which is
   os.startfile on Windows and on Linux opens an add-on's home page, licence,
@@ -429,7 +456,11 @@ source/gui/settingsDialogs.py
   nothing else in the module uses, is no longer imported.
   Linux runtime: "Start NVDA after I sign in" is enabled outside secure mode,
   installed copy or not, as an XDG autostart entry can start any copy;
-  easeOfAccess tells the user when this copy has no command that would last
+  easeOfAccess tells the user when this copy has no command that would last.
+  Linux runtime: the add-on store's category is called NVDA Add-on Store
+  and starts with the check box that turns the store on, which warns first
+  through linuxPlatform.nvdaAddonStore; the category's other controls are
+  disabled while the store is off
 source/gui/startupDialogs.py
   Linux runtime: the welcome dialog's "Start NVDA after I sign in" is
   enabled outside secure mode, installed copy or not, as an XDG autostart

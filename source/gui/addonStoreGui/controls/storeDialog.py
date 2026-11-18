@@ -4,13 +4,15 @@
 # See the file COPYING for more details.
 
 
-import wx  # noqa: I001
+import sys  # noqa: I001
+import wx
 from wx.adv import BannerWindow
 
 from addonStore.dataManager import addonDataManager
 from addonStore.models.channel import Channel, _channelFilters
 from addonStore.models.status import (
 	EnabledStatus,
+	getStatus,
 	_statusFilters,
 	_StatusFilterKey,
 )
@@ -33,6 +35,9 @@ from .addonList import AddonVirtualList
 from .details import AddonDetails
 from .messageDialogs import _SafetyWarningDialog
 
+if sys.platform != "win32":
+	from linuxPlatform import nvdaAddonStore
+
 
 class AddonStoreDialog(SettingsDialog):
 	# Translators: The title of the addonStore dialog where the user can find and download add-ons
@@ -48,10 +53,25 @@ class AddonStoreDialog(SettingsDialog):
 		self._storeVM.onDisplayableError.register(self.handleDisplayableError)
 		self._actionsContextMenu = _MonoActionsContextMenu(self._storeVM)
 		self.openToTab = openToTab
+		self._tabKeys: list[_StatusFilterKey] = list(_statusFilters)
+		if sys.platform != "win32":
+			self.title = nvdaAddonStore.windowName()
+			if not nvdaAddonStore.isEnabled():
+				self._tabKeys = self._installedTabKeys()
 		super().__init__(parent, resizeable=True, buttons={wx.CLOSE})
 		if addonDataManager.storeSettings.showWarning:
 			displayDialogAsModal(_SafetyWarningDialog(parent))
 		self.Maximize()
+
+	def _installedTabKeys(self) -> list[_StatusFilterKey]:
+		"""The tabs of installed add-ons, the incompatible ones' only when there are some."""
+		incompatible = _StatusFilterKey.INCOMPATIBLE
+		hasIncompatible = any(
+			getStatus(model, incompatible) in _statusFilters[incompatible]
+			for addons in self._storeVM._installedAddons.values()
+			for model in addons.values()
+		)
+		return [_StatusFilterKey.INSTALLED, *([incompatible] if hasIncompatible else [])]
 
 	def _enterActivatesOk_ctrlSActivatesApply(self, evt: wx.KeyEvent):
 		"""Disables parent behaviour which overrides behaviour for enter and ctrl+s"""
@@ -72,7 +92,7 @@ class AddonStoreDialog(SettingsDialog):
 		dynamicTabPage = wx.Panel(self.addonListTabs)
 		tabPageHelper = guiHelper.BoxSizerHelper(dynamicTabPage, wx.VERTICAL)
 		splitViewSizer.Add(tabPageHelper.sizer, flag=wx.EXPAND, proportion=1)
-		for statusFilter in _statusFilters:
+		for statusFilter in self._tabKeys:
 			self.addonListTabs.AddPage(dynamicTabPage, statusFilter.displayString)
 		tabPageHelper.addItem(self.addonListTabs, flag=wx.EXPAND)
 		openToTab = self.openToTab
@@ -81,7 +101,9 @@ class AddonStoreDialog(SettingsDialog):
 				openToTab = _StatusFilterKey.INSTALLED
 			else:
 				openToTab = _StatusFilterKey.AVAILABLE
-		openToTabIndex = list(_statusFilters.keys()).index(openToTab)
+		if openToTab not in self._tabKeys:
+			openToTab = _StatusFilterKey.INSTALLED
+		openToTabIndex = self._tabKeys.index(openToTab)
 		self.addonListTabs.SetSelection(openToTabIndex)
 		self.addonListTabs.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.onListTabPageChange, self.addonListTabs)
 
@@ -300,7 +322,7 @@ class AddonStoreDialog(SettingsDialog):
 	@property
 	def _statusFilterKey(self) -> _StatusFilterKey:
 		index = self.addonListTabs.GetSelection()
-		return list(_statusFilters.keys())[index]
+		return self._tabKeys[index]
 
 	@property
 	def _channelFilterKey(self) -> Channel:

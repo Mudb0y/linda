@@ -3,7 +3,9 @@
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
-from typing import TYPE_CHECKING  # noqa: I001
+import contextlib  # noqa: I001
+import sys
+from typing import TYPE_CHECKING
 
 import wx
 
@@ -242,7 +244,7 @@ class AddonDetails(
 		details = None if self._detailsVM.listItem is None else self._detailsVM.listItem.model
 		numSelectedAddons = self.Parent.addonListView.GetSelectedItemCount()
 
-		with guiHelper.autoThaw(self):
+		with guiHelper.autoThaw(self) if sys.platform == "win32" else contextlib.nullcontext():
 			# AppendText is used to build up the details so that formatting can be set as text is added, via
 			# SetDefaultStyle, however, this means the text control must start empty.
 			self.otherDetailsTextCtrl.SetValue("")
