@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Deep page</title></head>
+<body>
+<p>Top of the deep page.</p>
+<script>
+// Each document nested about as deep as Firefox shows one, the second in a frame at the bottom of the first.
+function nest(doc, at, depth, label) {
+	for (let i = 0; i < depth; i++) {
+		const d = doc.createElement("div");
+		d.append(`${label} ${i} `);
+		at.append(d);
+		at = d;
+	}
+	return at;
+}
+const bottom = nest(document, document.body, 2000, "Outer");
+const frame = document.createElement("iframe");
+frame.title = "Deep frame";
+bottom.append(frame);
+const inner = frame.contentDocument;
+nest(inner, inner.body, 2000, "Inner").append("Bottom of the deep frame.");
+</script>
+<p>After the deep frame.</p>
+</body></html>

@@ -18,6 +18,12 @@ use crate::walk::{Obj, has, iface_bit};
 const EMBEDDED_OBJECT: char = '\u{fffc}';
 const EMPTY_TEXT: &str = " ";
 const FLAG_BLOCK: u16 = 1;
+/// Fields nested deeper than this are written flat, one after another inside the field at this
+/// depth, in the order they come. Each level of nesting is a level of recursion here, on the
+/// engine's thread, and in the buffer's storage on NVDA's threads, so a page nested deeper would
+/// overflow a stack and take the whole reader down. No page nests a thousand levels for its
+/// reader's sake.
+pub const MAX_DEPTH: usize = 1000;
 
 /// What an object's ancestors decide about how it is rendered.
 #[derive(Debug, Clone, Copy, Default)]
@@ -154,6 +160,9 @@ pub struct Renderer<'a> {
     /// The language of the object being written, from it or its nearest ancestor that has one,
     /// which each text field carries as gecko_ia2.cpp gives it from IA2 locale.
     language: Option<String>,
+    /// Objects below MAX_DEPTH waiting to be written flat, with their context and language.
+    deferred: Vec<(String, Ctx, Option<String>)>,
+    flattening: bool,
 }
 
 fn push(out: &mut Vec<u16>, s: &str) {
@@ -251,6 +260,8 @@ impl<'a> Renderer<'a> {
             units: 0,
             useful_units: 0,
             language: None,
+            deferred: Vec::new(),
+            flattening: false,
         }
     }
 
@@ -280,10 +291,24 @@ impl<'a> Renderer<'a> {
         Ctx::default()
     }
 
+    /// How many fields hold path's in the buffer, as far as the last render left them.
+    fn depth_of(&self, path: &str) -> usize {
+        let mut depth = 0;
+        let mut p = self.objs.get(path).and_then(|o| o.parent.clone());
+        while let Some(here) = p {
+            let Some(o) = self.objs.get(&here) else { break };
+            if o.rendered {
+                depth += 1;
+            }
+            p = o.parent.clone();
+        }
+        depth.min(MAX_DEPTH)
+    }
+
     /// Writes path's field, and everything in it.
     pub fn render(&mut self, path: &str, ctx: Ctx) {
         self.language = self.language_for(path);
-        self.node(path, ctx, true);
+        self.node(path, ctx, true, 0);
     }
 
     /// Writes an S, then path's field.
@@ -293,7 +318,32 @@ impl<'a> Renderer<'a> {
         push(&mut self.out, &format!("{},{};", self.doc_handle, id));
         let ctx = self.ctx_for(path);
         self.language = self.language_for(path);
-        self.node(path, ctx, true);
+        let depth = self.depth_of(path);
+        self.node(path, ctx, true, depth);
+    }
+
+    /// Writes a child at depth. Below MAX_DEPTH the child waits until the field above it closes, and
+    /// is then written after it, so that nothing nests, and nothing recurses, deeper than one level
+    /// below MAX_DEPTH.
+    fn child(&mut self, path: &str, ctx: Ctx, depth: usize) {
+        if depth > MAX_DEPTH + 1 {
+            self.deferred
+                .push((path.to_owned(), ctx, self.language.clone()));
+            return;
+        }
+        self.node(path, ctx, false, depth);
+        if depth == MAX_DEPTH + 1 && !self.flattening {
+            self.flattening = true;
+            let outer_language = self.language.clone();
+            let mut stack: Vec<_> = self.deferred.drain(..).rev().collect();
+            while let Some((path, ctx, language)) = stack.pop() {
+                self.language = language;
+                self.node(&path, ctx, false, depth);
+                stack.extend(self.deferred.drain(..).rev());
+            }
+            self.language = outer_language;
+            self.flattening = false;
+        }
     }
 
     fn text(&mut self, s: &str) {
@@ -317,11 +367,12 @@ impl<'a> Renderer<'a> {
             .count();
     }
 
-    fn node(&mut self, path: &str, ctx: Ctx, is_start: bool) {
+    fn node(&mut self, path: &str, ctx: Ctx, is_start: bool, depth: usize) {
         if self.stopped {
             return;
         }
-        if !is_start && self.reuse.contains(path) {
+        // A kept field brings its nesting with it, which a field written flat must not have.
+        if !is_start && depth <= MAX_DEPTH && self.reuse.contains(path) {
             if let Some(id) = id_of(path) {
                 self.out.push(b'R' as u16);
                 push(&mut self.out, &format!("{},{};", self.doc_handle, id));
@@ -342,7 +393,7 @@ impl<'a> Renderer<'a> {
         }
         let Some(id) = id_of(path) else {
             for c in &o.children {
-                self.node(c, ctx, false);
+                self.child(c, ctx, depth + 1);
             }
             return;
         };
@@ -573,14 +624,14 @@ impl<'a> Renderer<'a> {
                 let done = std::mem::take(&mut chunk);
                 self.text(&done);
                 if let Some(child) = embedded.get(index) {
-                    self.node(child, child_ctx, false);
+                    self.child(child, child_ctx, depth + 1);
                 }
                 index += 1;
             }
             self.text(&chunk);
         } else if render_children && text.is_empty() && !o.children.is_empty() {
             for child in &o.children {
-                self.node(child, child_ctx, false);
+                self.child(child, child_ctx, depth + 1);
             }
         } else if render_selected_only {
             let selected = o
@@ -590,7 +641,7 @@ impl<'a> Renderer<'a> {
                 .or(o.children.first());
             if let Some(c) = selected {
                 selected_child = Some(c.clone());
-                self.node(c, child_ctx, false);
+                self.child(c, child_ctx, depth + 1);
             }
         } else if role == ROLE_COMBOBOX {
             if let Some(v) = self.combo_value(o) {
@@ -657,12 +708,15 @@ impl<'a> Renderer<'a> {
 
         let is_row_group =
             in_table && o.cell.is_none() && o.table.is_none() && role != ROLE_TABLEROW;
+        // A field written flat holds none of what is below it, so a change there is written again
+        // from the field that holds them all, and that field's children are never kept.
         self.marks.push(Mark {
             path: path.to_owned(),
             child_reuse: !child_ctx.no_reuse
                 && !(in_table && o.cell.is_none())
-                && child_ctx.table_id.is_none(),
-            escalate: is_row_group,
+                && child_ctx.table_id.is_none()
+                && depth < MAX_DEPTH,
+            escalate: is_row_group || depth > MAX_DEPTH,
             child_ctx,
         });
         if let Some(c) = selected_child
@@ -883,6 +937,135 @@ mod tests {
         assert!(s.contains("19:atspi::action_click1:1"), "{s}");
         assert!(s.contains("10:hasDetails4:true"), "{s}");
         assert!(s.contains("12:errorMessage5:there"), "{s}");
+    }
+
+    /// The identifiers of the fields in a stream, the text in order, and how deep fields nest.
+    fn shape(out: &[u16]) -> (Vec<i64>, String, usize) {
+        let mut at = 0;
+        let number = |at: &mut usize| {
+            let start = *at;
+            while out[*at] != b',' as u16 && out[*at] != b';' as u16 && out[*at] != b':' as u16 {
+                *at += 1;
+            }
+            let n: i64 = String::from_utf16(&out[start..*at])
+                .unwrap()
+                .parse()
+                .unwrap();
+            *at += 1;
+            n
+        };
+        let string = |at: &mut usize| {
+            let n = number(at) as usize;
+            *at += n;
+            String::from_utf16(&out[*at - n..*at]).unwrap()
+        };
+        let (mut ids, mut text, mut depth, mut deepest) = (Vec::new(), String::new(), 0, 0);
+        while at < out.len() {
+            let op = out[at];
+            at += 1;
+            if op == b'C' as u16 || op == b'T' as u16 {
+                if op == b'C' as u16 {
+                    let _handle: i64 = number(&mut at);
+                    ids.push(number(&mut at));
+                    let _flags: i64 = number(&mut at);
+                    depth += 1;
+                    deepest = deepest.max(depth);
+                } else {
+                    text += &string(&mut at);
+                }
+                let pairs = number(&mut at);
+                for _ in 0..pairs * 2 {
+                    string(&mut at);
+                }
+            } else if op == b'E' as u16 {
+                depth -= 1;
+            } else {
+                assert!(op == b'S' as u16 || op == b'R' as u16, "op {op}");
+                number(&mut at);
+                ids.push(-number(&mut at));
+            }
+        }
+        assert_eq!(depth, 0, "every field is closed");
+        (ids, text, deepest)
+    }
+
+    /// A document of sections nested n deep, each saying its level, with the paths in order.
+    fn nested(n: usize) -> (HashMap<String, Obj>, Vec<String>) {
+        let paths: Vec<String> = (1..=n).map(|i| format!("/a/{i}")).collect();
+        let mut objs = HashMap::new();
+        for (i, path) in paths.iter().enumerate() {
+            let parent = i.checked_sub(1).map(|p| paths[p].as_str());
+            let text = format!("{i} \u{fffc}");
+            let children: Vec<&str> = paths.get(i + 1).map(String::as_str).into_iter().collect();
+            objs.insert(path.clone(), obj(85, parent, Some(&text), &children));
+        }
+        (objs, paths)
+    }
+
+    /// Deeper than the engine's stack could recurse, in a release build or a debug one.
+    const DEEP: usize = 50_000;
+
+    /// Runs f on a thread with the engine thread's stack, where the engine renders.
+    fn on_engine_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(crate::ENGINE_STACK)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_document_nested_past_the_limit_is_written_flat_below_it_in_order() {
+        let n = DEEP;
+        let (ids, text, deepest, marks) = on_engine_stack(move || {
+            let (objs, _) = nested(n);
+            let none = HashSet::new();
+            let mut r = Renderer::new(&objs, 7, "/a/1", false, &none);
+            r.render("/a/1", Ctx::default());
+            let (ids, text, deepest) = shape(&r.out);
+            let marks: HashMap<String, (bool, bool)> = r
+                .marks
+                .into_iter()
+                .map(|m| (m.path, (m.child_reuse, m.escalate)))
+                .collect();
+            (ids, text, deepest, marks)
+        });
+        // The document's field counts as one deep.
+        assert_eq!(deepest, MAX_DEPTH + 2);
+        assert_eq!(ids, (1..=n as i64).collect::<Vec<_>>());
+        let expected: String = (0..n).map(|i| format!("{i} ")).collect();
+        assert_eq!(text, expected);
+        let mark = |i: usize| marks[&format!("/a/{i}")];
+        // A change below the field at the limit, /a/{MAX_DEPTH + 1}, writes that field again
+        // whole, and none of the fields in it are kept.
+        assert_eq!(mark(MAX_DEPTH), (true, false));
+        assert_eq!(mark(MAX_DEPTH + 1), (false, false));
+        assert_eq!(mark(MAX_DEPTH + 2), (false, true));
+        assert_eq!(mark(n), (false, true));
+    }
+
+    #[test]
+    fn an_update_deep_in_a_document_is_written_flat_below_the_limit() {
+        let n = DEEP;
+        let (ids, deepest) = on_engine_stack(move || {
+            let (mut objs, paths) = nested(n);
+            for o in objs.values_mut() {
+                o.rendered = true;
+            }
+            let none = HashSet::new();
+            let mut r = Renderer::new(&objs, 7, "/a/1", false, &none);
+            r.replace(&paths[MAX_DEPTH - 2]);
+            let (ids, _, deepest) = shape(&r.out);
+            (ids, deepest)
+        });
+        assert_eq!(ids[0], -(MAX_DEPTH as i64 - 1));
+        assert_eq!(
+            ids[1..],
+            (MAX_DEPTH as i64 - 1..=n as i64).collect::<Vec<_>>()
+        );
+        // The replaced field is MAX_DEPTH - 2 deep already.
+        assert_eq!(deepest, 4);
     }
 
     #[test]

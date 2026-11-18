@@ -1,7 +1,8 @@
 """The engine's document renderer against Firefox, without NVDA: a page renders whole and in order,
 the first action after it is not dropped, each change to a page comes as an update that leaves the
-buffer as a fresh render would, following a link ends the old document, and a large page comes top
-first without holding Firefox up.
+buffer as a fresh render would, following a link ends the old document, a large page comes top
+first without holding Firefox up, and a page nested deeper than a stack could follow is written
+flat below a limit.
 
 LINDA_VBUF_LIB=ROOT/engine/target/vbuf/libnvdaVbuf.so \
 LINDA_VBUF_ENGINE=ROOT/engine/target/release/libbre_vbuf.so \
@@ -11,6 +12,7 @@ LINDA_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/l
 import array
 import ctypes
 import importlib.util
+import json
 import subprocess
 import sys
 import threading
@@ -609,6 +611,68 @@ def test_framesFromOtherSitesAreRenderedInPlaceAndFollowed(
 		updated = bufferText(vbufLib, Units(encode(model, [])))
 		assert "The frame changed its text." in updated, [b.info for b in got]
 		assert "Text of the other site's frame." not in updated
+
+
+#: Renders the document argv[2] of the application argv[1] with the engine at LINDA_VBUF_ENGINE and
+#: builds a buffer of it, in a process of its own, which a stack overflow ends with SIGSEGV.
+RENDER_CHILD = """
+import importlib.util, json, re, sys
+def load(name):
+	spec = importlib.util.spec_from_file_location(name, f"{sys.argv[3]}/linuxPlatform/{name}.py")
+	module = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(module)
+	return module
+vbufEngine, vbufLib = load("vbufEngine"), load("vbufLib")
+rendered = vbufEngine.render(sys.argv[1], sys.argv[2], 1, progressive=False)
+handle = vbufLib.create()
+vbufLib.build(handle, rendered.stream)
+length = vbufLib.lib().VBuf_getTextLength(handle)
+text = vbufLib.VBuf_getTextInRange(handle, 0, length, False)
+markup = vbufLib.VBuf_getTextInRange(handle, 0, length, True)
+vbufLib.destroy(handle)
+depth = deepest = 0
+for tag in re.finditer("<(/?)control[ >]", markup):
+	depth += -1 if tag.group(1) else 1
+	deepest = max(deepest, depth)
+print(json.dumps({"info": rendered.info, "text": text, "nesting": deepest}))
+"""
+
+
+def test_aPageNestedDeeperThanTheStackRendersFlatBelowALimit(desktop: DesktopSession, tmp_path: Path):
+	webSession.requireBrowseLibraries()
+	webSession.startFirefox(desktop, "realDeep.html")
+	_document, bus, path = documentFor("Deep page")
+	script = tmp_path / "render.py"
+	script.write_text(RENDER_CHILD, encoding="utf-8")
+	done = subprocess.run(
+		[sys.executable, "-I", str(script), bus, path, str(harness.SOURCE)],
+		capture_output=True,
+		text=True,
+		timeout=120,
+		check=False,
+	)
+	assert done.returncode == 0, f"{harness.describeExit(done.returncode)}:\n{done.stderr[-4000:]}"
+	value = json.loads(done.stdout)
+	assert value["info"]["complete"] is True, value["info"]
+	text = value["text"]
+	at = 0
+	# Firefox lays out, and so gives text to, only the first thousand or so levels of each document,
+	# though it has objects for all of them.
+	for expected in (
+		"Top of the deep page.",
+		"Outer 0 ",
+		"Outer 1025 ",
+		"Inner 0 ",
+		"Inner 1025 ",
+		"After the deep frame.",
+	):
+		found = text.find(expected, at)
+		assert found >= 0, f"{expected!r} not after offset {at}: {text[at - 100 : at + 100]!r}"
+		at = found + len(expected)
+	# Two documents of 2,000 levels each, nested no deeper than the engine's limit of 1,000 and the
+	# field below it, which holds the rest.
+	assert 4000 < value["info"]["objects"] < 4100, value["info"]
+	assert value["nesting"] == 1002
 
 
 def test_aPageThatBuildsItselfInStepsIsFollowedWhole(

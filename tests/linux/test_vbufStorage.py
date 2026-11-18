@@ -543,6 +543,64 @@ def test_buildRefusesMalformedAndUpdateOps(vbuf: ModuleType):
 			vbuf.destroy(handle)
 
 
+#: Fields nested deeper than vbufLinux.cpp allows, and deep enough that storage.cpp, which recurses
+#: once a level, would overflow the stack reading them.
+TOO_DEEP = 200_000
+#: As deep as vbufLinux.cpp allows.
+MAX_NESTING = 4096
+
+
+def nested(depth: int, firstID: int = 1) -> str:
+	"""Fields nested depth deep, with text at the bottom; built without recursing."""
+	return "".join(f"C1,{ID},0,0;" for ID in range(firstID, firstID + depth)) + text("Bottom.") + "E" * depth
+
+
+def test_nestingTooDeepForTheStackIsRefused(tmp_path: Path, library: Path):
+	script = tmp_path / "deep.py"
+	script.write_text(
+		"\n\n".join(
+			inspect.getsource(f)
+			for f in (units, string, attributes, text, replace, nested, Stream, loadBinding)
+		)
+		+ f"""
+
+import ctypes, importlib.util, json, sys
+vbuf = loadBinding({str(BINDING)!r}, sys.argv[1])
+result = {{}}
+for name, depth in (("tooDeep", {TOO_DEEP}), ("deepest", {MAX_NESTING}), ("deeper", {MAX_NESTING + 1})):
+	handle = vbuf.create()
+	try:
+		vbuf.build(handle, Stream(nested(depth)))
+	except ValueError:
+		result[name] = None
+	else:
+		length = vbuf.lib().VBuf_getTextLength(handle)
+		result[name] = len(vbuf.VBuf_getTextInRange(handle, 0, length, True))
+	if name == "deepest":
+		# A replacement deep in the buffer may not nest past the limit either.
+		result["shallowUpdate"] = vbuf.update(handle, Stream(replace({MAX_NESTING}, nested(1, {MAX_NESTING}))))
+		result["deepUpdate"] = vbuf.update(handle, Stream(replace({MAX_NESTING}, nested(2, {MAX_NESTING}))))
+	vbuf.destroy(handle)
+print(json.dumps(result))
+""",
+		encoding="utf-8",
+	)
+	done = subprocess.run(
+		[sys.executable, "-I", str(script), str(library)],
+		capture_output=True,
+		text=True,
+		timeout=300,
+		check=False,
+	)
+	assert done.returncode == 0, f"{harness.describeExit(done.returncode)}:\n{done.stderr[-4000:]}"
+	result = json.loads(done.stdout)
+	assert result["tooDeep"] is None
+	assert result["deeper"] is None
+	assert result["deepest"] > MAX_NESTING
+	assert result["shallowUpdate"] is True
+	assert result["deepUpdate"] is False
+
+
 def test_badHandlesGetZero(vbuf: ModuleType, buffers):
 	lib = vbuf.lib()
 	handle = buffers(document())

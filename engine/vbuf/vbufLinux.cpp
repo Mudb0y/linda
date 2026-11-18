@@ -25,6 +25,7 @@
 // and, inside those subtrees only,
 //   R<docHandle>,<ID>;   the existing field with that identifier and its subtree, reused in place.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -186,6 +187,18 @@ VBufStorage_fieldNode_t* reuseNode(Reuse& reuse, VBufStorage_buffer_t& temp, VBu
 	return reference;
 }
 
+// Fields nested deeper than this are a malformed stream. storage.cpp recurses once a level to find,
+// read and delete text, on whichever of NVDA's threads asks, so a buffer nested without bound would
+// overflow its stack and take NVDA's process with it. The engine writes nothing deeper than about a
+// thousand (render.rs MAX_DEPTH).
+constexpr size_t MAX_NESTING = 4096;
+
+size_t depthOf(VBufStorage_fieldNode_t* node) {
+	size_t depth = 0;
+	for(auto parent = node ? node->getParent() : nullptr; parent; parent = parent->getParent()) ++depth;
+	return depth;
+}
+
 // Reads C, T and E ops into storage. With reuse, reads exactly one top-level field, which may hold R
 // ops, and stops after it; without, reads to the end of the stream, where R and S are malformed.
 bool readFields(StreamReader& reader, VBufStorage_buffer_t& storage, Reuse* reuse) {
@@ -194,6 +207,7 @@ bool readFields(StreamReader& reader, VBufStorage_buffer_t& storage, Reuse* reus
 	parents.push_back(nullptr);
 	previous.push_back(nullptr);
 	bool discard = reuse && !reuse->target;
+	size_t maxParents = MAX_NESTING + 1 - (reuse ? std::min(depthOf(reuse->target), MAX_NESTING) : 0);
 	uint16_t op;
 	std::wstring text;
 	while(reader.op(&op)) {
@@ -202,6 +216,7 @@ bool readFields(StreamReader& reader, VBufStorage_buffer_t& storage, Reuse* reus
 			case u'C': {
 				long long docHandle, ID, flags;
 				if(!reader.integer(&docHandle, u',') || !reader.integer(&ID, u',') || !reader.integer(&flags, u',')) return false;
+				if(parents.size() >= maxParents) return false;
 				bool insideRefused = parents.size() > 1 && !parents.back();
 				VBufStorage_controlFieldNode_t* node = nullptr;
 				if(!discard && !insideRefused) node = storage.addControlFieldNode(parents.back(), previous.back(), (int)docHandle, (int)ID, (flags & 1) != 0);

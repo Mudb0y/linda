@@ -30,6 +30,10 @@ use futures_util::task::AtomicWaker;
 /// grow.
 const MAX_QUEUED_BATCHES: usize = 4096;
 const RENDER_FLAGS_KNOWN: u32 = 3;
+/// The engine's thread recurses once for each level of a document's nesting, down to
+/// render::MAX_DEPTH: under a kilobyte a level in a release build, over eight in a debug one. An
+/// overflow takes NVDA's whole process down, and only the pages touched are ever committed.
+pub(crate) const ENGINE_STACK: usize = 32 << 20;
 
 pub(crate) enum Request {
     Render {
@@ -128,6 +132,7 @@ fn inbox() -> Arc<Inbox> {
     let thread_inbox = inbox.clone();
     let thread = std::thread::Builder::new()
         .name("vbuf engine".into())
+        .stack_size(ENGINE_STACK)
         .spawn(move || zbus::block_on(engine::run(thread_inbox, shared)))
         .expect("the engine's thread starts");
     *e = Some(Engine {
