@@ -403,6 +403,11 @@ source/fileUtils.py
   os.replace and then syncs the directory, where Windows calls MoveFileEx,
   so that a save replaces nvda.ini whole or not at all. A symbolic link at
   the target is followed and stays a link
+source/globalCommands.py
+  Linux runtime: move navigator object to mouse first finds the object
+  under the pointer through linuxPlatform.pointer, as the mouse object is
+  otherwise the one the last followed move found, which is stale while
+  mouse tracking is off
 source/gui/__init__.py
   Linux runtime: MainFrame.prePopup and postPopup skip their foreground
   window steps. Windows' foreground window has no counterpart for NVDA to
@@ -592,8 +597,9 @@ source/mouseHandler.py
   Linux runtime: initialize takes the pointer position from wx, and
   scrBmpObj is linuxPlatform.screenBitmap's, whose captureImage raises
   NoLinuxImplementation, since Linux has no GDI screen capture, so audio
-  coordinates that read brightness fail naming what is missing; terminate
-  does not ask whether NVDA locked a button, which it cannot do on Linux
+  coordinates that read brightness fail naming what is missing;
+  getLogicalButtonFlags asks linuxPlatform.pointer whether the X pointer
+  mapping swaps the buttons, where Windows asks GetSystemMetrics
 source/nvwave.py
   Linux runtime: playWaveFile stops the previous file's player through a
   copy of fileWavePlayer read once per pass, before upstream's loop, which
@@ -724,7 +730,10 @@ source/winUser.py
   linuxPlatform.inputHook, which answers from the X key source and sends
   keys through XTEST. Through them work keyboardHandler's toggle key report
   and send(), the lower case with caps lock beep and executeScript's
-  VK_NONE, which on Linux sends nothing
+  VK_NONE, which on Linux sends nothing. getKeyState of a mouse button,
+  mouse_event, setCursorPos and getCursorPos go to linuxPlatform.pointer,
+  which reads and drives the X pointer through XTEST; through them work
+  the mouse commands' clicks, locks, scrolls and moves
 source/winVersion.py
   every platform: winreg comes from linuxPlatform.windowsOnly, which on
   Windows is the real module.

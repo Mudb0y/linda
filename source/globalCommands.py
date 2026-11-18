@@ -20,6 +20,7 @@ import audioDucking
 import touchHandler
 import keyboardHandler
 import mouseHandler
+import sys
 import eventHandler
 import review
 import _magnifier
@@ -1424,6 +1425,10 @@ class GlobalCommands(ScriptableObject):
 	def script_moveNavigatorObjectToMouse(self, gesture: inputCore.InputGesture):
 		# Translators: Reported when attempting to move the navigator object to the object under mouse pointer.
 		ui.message(_("Move navigator object to mouse"))
+		if sys.platform != "win32":
+			from linuxPlatform import pointer
+
+			pointer.refreshMouseObject()
 		obj = api.getMouseObject()
 		# This script is available on the lock screen via getSafeScripts,
 		# as such observe the setNavigatorObject result to ensure

@@ -294,11 +294,9 @@ def pumpAll():
 
 def terminate():
 	global scrBmpObj, _shapeTimer
-	# NVDA locks a button by injecting a press, which raises on Linux, so none is ever locked there, and
-	# asking would read Windows' key state.
-	if sys.platform == "win32" and isLeftMouseButtonLocked():
+	if isLeftMouseButtonLocked():
 		unlockLeftMouseButton()
-	if sys.platform == "win32" and isRightMouseButtonLocked():
+	if isRightMouseButtonLocked():
 		unlockRightMouseButton()
 	scrBmpObj = None
 	winInputHook.terminate()
@@ -325,7 +323,12 @@ def getLogicalButtonFlags() -> LogicalButtonFlags:
 	taking into account the Windows user setting
 	for which button (left or right) is primary and which is secondary.
 	"""
-	swappedButtons = user32.GetSystemMetrics(SystemMetrics.SWAP_BUTTON)
+	if sys.platform != "win32":
+		from linuxPlatform import pointer
+
+		swappedButtons = pointer.buttonsSwapped()
+	else:
+		swappedButtons = user32.GetSystemMetrics(SystemMetrics.SWAP_BUTTON)
 	if not swappedButtons:
 		return LogicalButtonFlags(
 			primaryDown=winUser.MOUSEEVENTF_LEFTDOWN,
