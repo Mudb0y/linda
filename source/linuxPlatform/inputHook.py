@@ -136,35 +136,41 @@ def _watch(source: KeySource) -> None:
 	gestures = None
 	interval = WATCH_INTERVAL
 	while True:
-		wanted = config.conf["keyboard"]["NVDAModifierKeys"]
-		if wanted != nvdaKeys:
-			source.setConsumed(wanted, numpadReview=True)
-			nvdaKeys = wanted
-		manager = inputCore.manager
-		hold = (
-			bool(manager and manager.isInputHelpActive) or any(taker() for taker in keyboardTakers)
-		) and not watchdog.isAttemptingRecovery
-		if hold != held:
-			source.holdKeyboard(hold)
-			held = hold
-		focus = api.getFocusObject()
-		capture = "off" if watchdog.isAttemptingRecovery else captureModeFor(focus)
-		if capture != "off":
-			try:
-				interceptor = focus.treeInterceptor
-				signature = _gestureSignature(interceptor)
-				if gestures is None or gestures[0] != signature:
-					gestures = (signature, *_gesturesFor(interceptor))
-					source.setCaptureGestures(gestures[1], gestures[2])
-			# This thread must go on whatever a focus going away or an add-on's gesture map raises: it lets
-			# the keyboard go during recovery. The keys captured anyway are browse mode's own.
-			except Exception:  # noqa: BLE001
-				log.debugWarning("Finding the keys bound in browse mode", exc_info=True)
-		# Asked again while capturing, as the source lets its grabs go when the focus leaves the window
-		# they are on, and takes them again only once asked.
-		if capture != captured or capture != "off":
-			source.setCapture(capture, _processOf(focus) if capture != "off" else None)
-			captured = capture
+		try:
+			wanted = config.conf["keyboard"]["NVDAModifierKeys"]
+			if wanted != nvdaKeys:
+				source.setConsumed(wanted, numpadReview=True)
+				nvdaKeys = wanted
+			manager = inputCore.manager
+			hold = (
+				bool(manager and manager.isInputHelpActive) or any(taker() for taker in keyboardTakers)
+			) and not watchdog.isAttemptingRecovery
+			if hold != held:
+				source.holdKeyboard(hold)
+				held = hold
+			focus = api.getFocusObject()
+			capture = "off" if watchdog.isAttemptingRecovery else captureModeFor(focus)
+			if capture != "off":
+				try:
+					interceptor = focus.treeInterceptor
+					signature = _gestureSignature(interceptor)
+					if gestures is None or gestures[0] != signature:
+						gestures = (signature, *_gesturesFor(interceptor))
+						source.setCaptureGestures(gestures[1], gestures[2])
+				# This thread must go on whatever a focus going away or an add-on's gesture map raises: it
+				# lets the keyboard go during recovery. The keys captured anyway are browse mode's own.
+				except Exception:  # noqa: BLE001
+					log.debugWarning("Finding the keys bound in browse mode", exc_info=True)
+			# Asked again while capturing, as the source lets its grabs go when the focus leaves the window
+			# they are on, and takes them again only once asked.
+			if capture != captured or capture != "off":
+				source.setCapture(capture, _processOf(focus) if capture != "off" else None)
+				captured = capture
+		# Nothing else holds the keyboard for input help or lets it go during recovery: a look that
+		# failed, as every look does while a reset leaves NVDA without a configuration, is taken again
+		# at the next. Logged below ERROR, which would read that configuration for the error sound.
+		except Exception:  # noqa: BLE001
+			log.debugWarning("Looking at what to do with the keyboard", exc_info=True)
 		changed = _changed.wait(interval)
 		_changed.clear()
 		if _stopWatching.is_set():

@@ -449,6 +449,32 @@ def test_keysTypedDuringAResetLeaveTheCommandsWorking(
 	assert "Exception in thread X11KeySource decider" not in launch.text("nvda.log")
 
 
+@pytest.mark.parametrize("layoutName", LAYOUTS)
+def test_inputHelpHoldsTheKeyboardAfterAReset(
+	desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path, layoutName: str
+):
+	# The thread that holds the keyboard for input help reads the configuration as often as it looks.
+	# Typed on the keyboard, whose releases NVDA handles without its configuration, unlike xdotool's.
+	keys = KeySession(desktop, tmp_path, layoutName, env=blockHooks(tmp_path, RESET_PLUGIN))
+	launch = desktop.nvda
+	keyboard.press(keys.chord("control+r"))
+	launch.waitForLog("The configuration is back", 5)
+	time.sleep(0.5)
+	keyboard.press(keys.chord("shift+F11"))
+	launch.waitForLog("Key threads: ['X11KeySource decider', 'keyboardWatch']", 5)
+	mark = desktop.mark()
+	keyboard.press(keys.chord("1"))
+	on = "input help on\N{HORIZONTAL ELLIPSIS}"
+	desktop.expect(on, since=mark)
+	keyboard.press("b")
+	desktop.expect(on, "b\N{HORIZONTAL ELLIPSIS}", since=mark)
+	keyboard.press(keys.chord("1"))
+	desktop.expect(on, "b\N{HORIZONTAL ELLIPSIS}", "input help off", since=mark)
+	time.sleep(0.3)
+	assert entryState()[0] == ENTRY_TEXT
+	keys.quit().assertClean(logNames=("nvda.log",))
+
+
 @pytest.mark.parametrize("chord", (False, True), ids=("nvdaKey", "chordAfterAPassedKey"))
 def test_stoppedNVDALetsTheKeyboardGo(
 	desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path, chord: bool
