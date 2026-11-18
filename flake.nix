@@ -34,6 +34,8 @@
       # read at all.
       python = pythonInterpreter.withPackages (ps: with ps; [
         bleak
+        # The BRLTTY driver's client; BRLTTY itself is the system's.
+        brlapi
         configobj
         cryptography
         dbus-fast
@@ -167,6 +169,7 @@
         default = linda;
         inherit linda;
         inherit (pythonInterpreter.pkgs)
+          brlapi
           configobj
           fast-diff-match-patch
           fuzzysearch
@@ -256,6 +259,9 @@
         # PipeWire sets LINDA_AUDIO_SINK itself.
         LINDA_PWSINK_LIB = "${libraries}/lib/linda/libpwsink.so";
         LINDA_PWMON = "${libraries.pwmon}/bin/pwmon";
+        # The daemon tests/linux/test_brltty.py drives a stand-in display with, from the build
+        # the brlapi module comes from.
+        LINDA_BRLTTY = "${pythonInterpreter.pkgs.brlapi.brltty}/bin/brltty";
 
         # setup.sh would put $out/lib first in every RUNPATH the linker
         # writes, and in a shell $out is outputs/out under the working

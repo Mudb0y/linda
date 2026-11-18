@@ -101,10 +101,6 @@ tests.unit.test_textUtils.test_backendComparison.TestMixedSpacesAndTabs.test_spa
 
 # Until: dependencies the dev shell does not provide.
 
-tests.unit.test_braille.test_brailleDisplayDrivers.TestBRLTTY.test_brlapi
-  Until the dev shell has BRLTTY's brlapi binding for Python 3.13: nixpkgs builds it only for
-  Python 3.14, inside brltty. BRLTTY is the main route to braille displays on Linux.
-  Raises: AssertionError: Couldn't import the brlapi module
 tests.unit.test_mathPres.test_mathCatNavNodeMapping
   Until libmathcat_py, MathCAT's Python extension, is packaged in the dev shell, and
   mathPres/MathCAT/MathCAT.py can be imported on Linux: the class body of MathCATInteraction calls

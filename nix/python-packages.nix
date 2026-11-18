@@ -2,6 +2,7 @@
 # different version, applied as packageOverrides so that every package in the
 # set sees the same configobj.
 self: super: {
+  brlapi = self.callPackage ./brlapi.nix { };
   configobj = self.callPackage ./configobj.nix { inherit (super) configobj; };
   fast-diff-match-patch = self.callPackage ./fast-diff-match-patch.nix { };
   fuzzysearch = self.callPackage ./fuzzysearch.nix { };
