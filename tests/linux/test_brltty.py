@@ -13,6 +13,7 @@ nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_brltty.py
 
 import os
 import select
+import shutil
 import signal
 import subprocess
 import threading
@@ -245,12 +246,21 @@ def sessionConfig(directory: Path, display: str) -> Path:
 
 @pytest.fixture
 def socketDirectory() -> Iterator[Path]:
+	"""BrlAPI's sockets directory in the rig's own root, removed afterwards with every folder above it
+	that this made, /var among them: test_rig.py holds that the rig has no /var."""
 	harness.requireRig()
-	SOCKET_DIRECTORY.mkdir(parents=True, exist_ok=True)
-	SOCKET_DIRECTORY.chmod(0o1777)
-	SOCKET.unlink(missing_ok=True)
-	yield SOCKET_DIRECTORY
-	SOCKET.unlink(missing_ok=True)
+	made = next((path for path in reversed(SOCKET_DIRECTORY.parents) if not path.exists()), None)
+	if made is None and not SOCKET_DIRECTORY.exists():
+		made = SOCKET_DIRECTORY
+	try:
+		SOCKET_DIRECTORY.mkdir(parents=True, exist_ok=True)
+		SOCKET_DIRECTORY.chmod(0o1777)
+		SOCKET.unlink(missing_ok=True)
+		yield SOCKET_DIRECTORY
+	finally:
+		SOCKET.unlink(missing_ok=True)
+		if made is not None:
+			shutil.rmtree(made, ignore_errors=True)
 
 
 @pytest.fixture
