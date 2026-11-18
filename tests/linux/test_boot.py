@@ -1275,6 +1275,22 @@ def test_startsWithoutARuntimeDirectoryOnceTheCacheDirectoryExists(launches, tmp
 	assert (cacheHome / "linda" / "addonStore").is_dir()
 
 
+def test_addOnStateOfTheWrongShapeIsSetAside(start: Start, tmp_path: Path):
+	# JSON that parses, with values that are not lists, as a hand edit or another tool may leave it.
+	configDir = tmp_path / "config"
+	configDir.mkdir()
+	(configDir / "nvda.ini").write_text(CONFIG_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+	(configDir / "addonsState.json").write_text(
+		'{"pendingRemovesSet": 5, "disabledAddons": "abc", "blocked": null}', encoding="utf-8"
+	)
+	nvda = start("wrongShape", "exit", configDir=configDir)
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	# The error is logged, as for a state file that is not JSON at all.
+	nvda.assertClean(ignoring={"logErrors"}, logNames=("nvda.log",))
+	assert "Failed to deserialize add-ons state" in nvda.text("nvda.log")
+
+
 def test_chosenConfigurationKeepsItsAddOnStoreCache(start: Start, tmp_path: Path):
 	cacheHome = tmp_path / "xdgCache"
 	defaultConfig = tmp_path / "xdgConfig" / "linda"

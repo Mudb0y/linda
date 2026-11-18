@@ -236,7 +236,12 @@ class AddonsState(collections.UserDict[AddonStateCategory, CaseInsensitiveSet[st
 					f"Expected parsed state dictionary to be a mapping type; got {type(stateDict)} instead.",
 				)
 				return
-			self.fromDict(stateDict)
+			try:
+				self.fromDict(stateDict)
+			except Exception:
+				# A category that is not a list of names, as a hand edit or another tool may leave it.
+				log.error("Failed to deserialize add-ons state", exc_info=True)  # noqa: G201
+				self.setDefaultStateValues()
 
 	def _loadWithFallback(self) -> None:
 		if os.path.isfile(self.statePath):

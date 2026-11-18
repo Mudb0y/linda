@@ -225,6 +225,9 @@ source/addonHandler/__init__.py
   platforms records each add-on then running without support for the
   platform as overridden, so that an update does not turn off add-ons in
   use, and AddonsState keeps platformsRecorded so that it does this once
+  every platform: a state file whose categories are not lists of names,
+  which JSON parses, is logged and set aside as one that does not parse
+  is, instead of ending the start with a TypeError
 source/addonHandler/addonVersionCheck.py
   every platform: the platform names an add-on's manifest uses, the one
   NVDA runs on, and supportsPlatform, which says whether an add-on lists it
