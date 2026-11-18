@@ -149,8 +149,7 @@ impl Engine {
                 pool_size: AtomicUsize::new(0),
                 pool_max: AtomicUsize::new(POOL_MAX),
                 pool_idle_ns: AtomicU64::new(POOL_IDLE_NS),
-                test_hooks: std::env::var_os("LINDA_PWSINK_TEST_HOOKS")
-                    .is_some_and(|v| v == "1"),
+                test_hooks: std::env::var_os("LINDA_PWSINK_TEST_HOOKS").is_some_and(|v| v == "1"),
                 block_ms: AtomicU64::new(0),
                 state: UnsafeCell::new(LoopState {
                     context: ptr::null_mut(),
