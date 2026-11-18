@@ -633,6 +633,34 @@ def test_inputHelpHoldsTheKeyboard(desktop: DesktopSession, tmp_path: Path, layo
 
 
 @pytest.mark.parametrize("layoutName", LAYOUTS)
+def test_chordAfterInputHelpOffInTheSameHoldIsNVDAs(
+	desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path, layoutName: str
+):
+	keys = KeySession(desktop, tmp_path, layoutName)
+	mark = desktop.mark()
+	keyboard.press(keys.chord("1"))
+	on = "input help on\N{HORIZONTAL ELLIPSIS}"
+	desktop.expect(on, since=mark)
+	# The NVDA key goes down while input help holds the keyboard, so no grab of its own is active
+	# once input help lets the keyboard go.
+	keyboard.down(keys.nvda)
+	keyboard.press("1")
+	desktop.expect(on, "input help off", since=mark)
+	time.sleep(0.3)
+	# NVDA has no command on z, which the field gets as on Windows; it has one on t.
+	keyboard.press("z")
+	waitForEntry("z" if layoutName == "desktop" else "Z")
+	mark = desktop.mark()
+	keyboard.press("t")
+	keyboard.up(keys.nvda)
+	desktop.expect("Fixture window", since=mark)
+	time.sleep(0.3)
+	assert entryState()[0].lower() == "z"
+	assert not desktopSession.capsLockIsOn()
+	keys.quit().assertClean(logNames=("nvda.log",))
+
+
+@pytest.mark.parametrize("layoutName", LAYOUTS)
 def test_controlCancelsReading(desktop: DesktopSession, tmp_path: Path, layoutName: str):
 	keys = KeySession(
 		desktop,

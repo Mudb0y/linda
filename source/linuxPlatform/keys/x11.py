@@ -1152,15 +1152,19 @@ class X11KeySource:
 		with it is held for NVDA in its turn, as on Windows, where the NVDA key goes on modifying keys
 		through one the hook passed. The replayed press itself goes past it, as a grab on the window a
 		replay comes from."""
-		window = self._keysWindow
 		if (
 			held.kind != NVDA_GRAB
 			or held.grab == held.keycode
 			or held.grab not in NVDA_MODIFIER_KEYCODES
 			or held.grab not in self._keycodesDown
-			or self._chordKey is not None
-			or window is None
 		):
+			return
+		self._holdChord(held.grab)
+
+	def _holdChord(self, nvdaKey: int) -> None:
+		"""Grab every key on the window the NVDA keys are grabbed on for as long as nvdaKey is held."""
+		window = self._keysWindow
+		if self._chordKey is not None or window is None:
 			return
 		catcher = error.CatchError(error.BadAccess, error.BadWindow)
 		window.grab_key(X.AnyKey, X.AnyModifier, False, X.GrabModeAsync, X.GrabModeSync, onerror=catcher)
@@ -1168,7 +1172,7 @@ class X11KeySource:
 		if catcher.get_error():
 			log.debugWarning("Another program holds a key on the focused window, so NVDA's chord ends here")
 			return
-		self._chordKey = held.grab
+		self._chordKey = nvdaKey
 
 	def _releaseChord(self) -> None:
 		"""Let go of every key grabbed for an NVDA key's chord, and grab again what was grabbed before."""
@@ -1674,6 +1678,19 @@ class X11KeySource:
 				# It takes the place of any grab of this source that was active.
 				self._grabKey = self._serverGrab = None
 		else:
+			# An NVDA key held as the hold ends went down under it, where no grab of its own became
+			# active: the keys after it in the same hold are made NVDA's as those after a key NVDA passed
+			# are, or they would reach the application as well, as after turning input help off.
+			nvdaKey = next(
+				(
+					code
+					for code in sorted(self._keyboardDown)
+					if code in NVDA_MODIFIER_KEYCODES and code in self._grabbed
+				),
+				None,
+			)
+			if nvdaKey is not None:
+				self._holdChord(nvdaKey)
 			d.ungrab_keyboard(X.CurrentTime)
 			d.sync()
 			self._held = False
