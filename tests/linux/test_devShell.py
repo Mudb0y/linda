@@ -196,6 +196,19 @@ def _speechd(value: str) -> None:
 	assert (path.parent.parent / "etc/speech-dispatcher/speechd.conf").is_file(), value
 
 
+def _mutter(value: str) -> None:
+	path = _elfFile(value)
+	assert path.name == "mutter" and os.access(path, os.X_OK), value
+
+
+def _mutterSchemas(value: str) -> None:
+	_holds(_directory(value), "glib-2.0/schemas/org.gnome.mutter.gschema.xml")
+
+
+def _mesa(value: str) -> None:
+	_holds(_directory(value), "share/glvnd/egl_vendor.d/50_mesa.json")
+
+
 def _storePath(path: Path) -> Path:
 	"""The store path a file is in."""
 	return Path(STORE) / path.relative_to(STORE).parts[0]
@@ -268,6 +281,9 @@ SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
 	"LINDA_BASH": _bash,
 	"LINDA_BRLTTY": _brltty,
 	"LINDA_SPEECHD": _speechd,
+	"LINDA_MUTTER": _mutter,
+	"LINDA_MUTTER_SCHEMAS": _mutterSchemas,
+	"LINDA_MESA": _mesa,
 	"LINDA_RIG_PATH": _searchPath,
 	"LINDA_RIG_XDG_DATA_DIRS": _searchPath,
 }
