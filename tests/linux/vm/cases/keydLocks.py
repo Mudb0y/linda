@@ -1,7 +1,9 @@
 """The lock lights and lock state: with Num Lock on in the X server before the helper starts, what the
 helper tells the client at the start, what the X server sets on the new virtual keyboard, and what the
 real keyboards show; then Caps Lock pressed through the helper, which the X server locks and lights on
-the virtual keyboard, and which the helper copies to every keyboard it holds and tells the client.
+the virtual keyboard, and which the helper copies to every keyboard it holds and tells the client;
+what the lights show once the helper lets go; and a helper started afresh while the lights are stale,
+which must take the locks from the X server.
 
 Each light is a bit of its LED code: Num Lock 1, Caps Lock 2.
 """
@@ -82,14 +84,35 @@ def run(ground: "Ground") -> None:
 		app = ground.waitForKeys("app", [("KEY_A", 1), ("KEY_A", 0)], mark)
 		assert app[0]["keyval"] == "A", app
 
-	with ground.subtest("after STOP the keyboards keep the lights the desktop set"):
+	with ground.subtest("letting go leaves the keyboards with the console's lights"):
 		mark = ground.mark()
 		client.stop()
 		client.waitFor("RELEASED", mark)
+		ground.settle(0.5)
+		after = {name: lights(ground, name) for name in (VIRTIO_KEYBOARD, AT_KEYBOARD, UHID)}
+		ground.machine.log(f"after STOP: lights {after}; X {xLocks(ground)!r}")
+		# The kernel's console handler puts its own locks on a keyboard let go of, and the X server
+		# writes the lights again only when a lock changes.
+		assert set(after.values()) == {0}, after
+
+	with ground.subtest("a new helper takes the locks from the X server, not from stale lights"):
+		mark = ground.mark()
+		ground.shell("systemctl restart linda-keyd")
+		client.waitFor("CLOSED", mark)
+		client.capture(UHID, VIRTIO_KEYBOARD, AT_KEYBOARD, since=mark)
+		ground.settle(0.5)
+		locks = [r["leds"] for r in client.records(mark, "LOCKS")]
 		ground.machine.log(
-			f"after STOP: lights: virtio {lights(ground, VIRTIO_KEYBOARD)}, AT {lights(ground, AT_KEYBOARD)}, "
-			f"uhid {lights(ground, UHID)}; X {xLocks(ground)!r}"
+			f"a new helper told the client {locks}; the virtual keyboard's lights {lights(ground, VIRTUAL_KEYBOARD)}"
 		)
+		assert locks and locks[-1] == NUM | CAPS, locks
+		for name in (UHID, VIRTIO_KEYBOARD, AT_KEYBOARD):
+			assert lights(ground, name) == NUM | CAPS, name
+
+	with ground.subtest("let go again, the X server lights the keyboards itself at the next change"):
+		mark = ground.mark()
+		client.stop()
+		client.waitFor("RELEASED", mark)
 		mark = ground.mark()
 		keyboard.tap("KEY_CAPSLOCK")
 		ground.waitForKeys("x", [("KEY_CAPSLOCK", 1), ("KEY_CAPSLOCK", 0)], mark, device=UHID)
