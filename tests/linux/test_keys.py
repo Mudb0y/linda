@@ -1135,6 +1135,57 @@ def test_keyReleasedDuringAStallIsReleased(tmp_path: Path):
 	assert done.value == {"heldBefore": True, "keyState": 0, "keyboardDown": [], "released": True}
 
 
+#: A captured key and the NVDA key typed while another program holds the keyboard, as a menu or a
+#: password prompt does, then again once it lets go: how long each press took to reach NVDA, and
+#: whether it was taken from the application.
+OTHER_GRAB_CHILD = r"""
+first = makeWindow()
+source.setCapture("browse")
+time.sleep(0.5)
+arrived = []
+
+def note(event):
+	if not event.isUp:
+		arrived.append((event.vkCode, time.monotonic(), event.captured))
+	return True
+
+source._deliver = note
+
+def timed(name, vk):
+	pressed = time.monotonic()
+	kb.press(name)
+	time.sleep(0.6)
+	return [(t - pressed < 0.1, captured) for code, t, captured in arrived if code == vk][-1]
+
+popup = root.create_window(0, 0, 50, 50, 0, app.screen().root_depth, override_redirect=True)
+popup.map()
+app.sync()
+time.sleep(0.2)
+popup.grab_keyboard(False, X.GrabModeAsync, X.GrabModeAsync, X.CurrentTime)
+app.sync()
+time.sleep(0.3)
+result = {"held": {"Down": timed("Down", 0x28), "Insert": timed("Insert", 0x2D)}}
+app.ungrab_keyboard(X.CurrentTime)
+app.sync()
+time.sleep(0.3)
+result["free"] = {"Down": timed("Down", 0x28), "Insert": timed("Insert", 0x2D)}
+source.stop()
+"""
+
+
+def test_keysReachNVDAAtOnceWhileAnotherProgramHoldsTheKeyboard(tmp_path: Path):
+	# No grab of NVDA's takes a key from the program that holds the keyboard, and a press waited for
+	# as one held for NVDA kept every key after it waiting too, each cutting off what NVDA had begun
+	# to say of the menu item it moved to.
+	with DesktopSession(tmp_path / "desktop", windowManager=False):
+		done = harness.runChild(tmp_path, SOURCE_CHILD + OTHER_GRAB_CHILD, timeout=60)
+	assert done.error is None, done.error
+	assert done.value == {
+		"held": {"Down": [True, False], "Insert": [True, False]},
+		"free": {"Down": [True, True], "Insert": [True, True]},
+	}
+
+
 @pytest.mark.parametrize("gone", ("destroyed", "unmapped", "parentUnmapped"))
 def test_keyboardGoesFreeAfterTheWindowOfAHeldKeyGoes(tmp_path: Path, gone: str):
 	# The X server ends a grab whose window goes, and the release of the key that made it active

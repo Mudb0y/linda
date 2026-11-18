@@ -442,6 +442,9 @@ class X11KeySource:
 		#: The key whose press made a grab of this source active, as the X server's own events under
 		#: the grab tell it; None while there is none.
 		self._serverGrab: int | None = None
+		#: The window another program's grab took the focus from, as the X server said; None while no
+		#: other program is known to hold the keyboard. No grab of this source can take a key then.
+		self._otherGrab: int | None = None
 		#: The NVDA key held through a key NVDA passed, for whose hold every key is grabbed on the window
 		#: the NVDA keys are; None while none is.
 		self._chordKey: int | None = None
@@ -660,6 +663,7 @@ class X11KeySource:
 		self._dormantMode = None
 		self._grabKey = None
 		self._serverGrab = None
+		self._otherGrab = None
 		self._chordKey = None
 		self._documentPending = None
 		self._held = False
@@ -879,7 +883,14 @@ class X11KeySource:
 				# The X server says so only while no grab holds the keyboard: one of this source's has ended
 				# without the release of its key, as when its window was unmapped or destroyed under it,
 				# and that release, should it come under another grab, holds the keyboard like any other.
-				self._serverGrab = None
+				self._serverGrab = self._otherGrab = None
+			elif event.type != X.DestroyNotify and event.mode == X.NotifyGrab and not self._held:
+				# A grab takes the focus to its window: one of this source's own to the window it already
+				# has, any other away from it, as an open menu's or a password prompt's does.
+				if event.type == X.FocusOut:
+					self._otherGrab = event.window.id
+				elif event.window.id == self._otherGrab:
+					self._otherGrab = None
 			# The keys are captured on the window with the focus, which this one may no longer be; a
 			# grab moves the focus only for as long as it lasts.
 			moved = event.type == X.DestroyNotify or event.mode in (X.NotifyNormal, X.NotifyWhileGrabbed)
@@ -926,6 +937,7 @@ class X11KeySource:
 		if self._held:
 			# Input help's grab of the whole keyboard holds nothing.
 			return
+		self._otherGrab = None
 		if self._serverGrab is None:
 			self._serverGrab = keycode
 		for ticket in self._tickets:
@@ -1051,6 +1063,9 @@ class X11KeySource:
 			ticket is None
 			and not self._held
 			and not isUp
+			# The X server holds nothing for a grab of this source while another program's is active:
+			# waited for, the press would reach NVDA CAPTURE_EXPIRY late, and every key after it.
+			and self._otherGrab is None
 			and (
 				underGrab or self._grabMatches(keycode, effective) or self._captureMatches(keycode, effective)
 			)
@@ -1401,6 +1416,8 @@ class X11KeySource:
 			return
 		old, oldGrabbed = self._keysWindow, self._grabbed
 		self._grabbed = {}
+		# Whatever grab took the focus from the old window, a press on the new one is waited for again.
+		self._otherGrab = None
 		# Taken on the new window before they are let go of on the old, which may hold the new one.
 		self._grabKeys(window)
 		self._ungrabKeys(old, oldGrabbed)
