@@ -768,7 +768,7 @@ def test_unbuiltServicesFailLoudly(tmp_path):
 		import easeOfAccess
 
 		try:
-			easeOfAccess.setAutoStart(easeOfAccess.AutoStartContext.AFTER_LOGON, True)
+			easeOfAccess.setAutoStart(easeOfAccess.AutoStartContext.ON_LOGON_SCREEN, True)
 			result = "returned"
 		except NotImplementedError as e:
 			result = type(e).__name__
@@ -776,7 +776,7 @@ def test_unbuiltServicesFailLoudly(tmp_path):
 	)
 	done.assertClean(ignoring={"noLinuxImplementation"})
 	assert done.value == "NoLinuxImplementation"
-	assert done.noLinuxImplementation == ["easeOfAccess.setAutoStart(AFTER_LOGON)"]
+	assert done.noLinuxImplementation == ["easeOfAccess.setAutoStart(ON_LOGON_SCREEN)"]
 
 
 def test_sayAllStartsReadingFromTheCaret(tmp_path):
@@ -1721,3 +1721,167 @@ def test_cachesLeftInTheConfigurationMoveOnlyWhereTheCacheHasNone(tmp_path):
 	# The cache already had its own, so nothing is moved over it and nothing of the user's is deleted.
 	assert (cache / "updateCheckState.pickle").read_bytes() == b"new state"
 	assert (config / "updateCheckState.pickle").read_bytes() == b"old state"
+
+
+#: Loads a copy of linuxPlatform.launcher installed under the prefix given as the first argument, as
+#: an installed copy's is, PREFIX/share/linda/source/linuxPlatform/launcher.py, with the launcher at
+#: PREFIX/bin/linda unless the second argument is False. Leaves the module in the name launcher.
+INSTALLED_LAUNCHER = """
+import importlib.util
+import shutil
+import stat
+
+
+def installedLauncher(prefix, withLauncher=True):
+	package = os.path.join(prefix, "share", "linda", "source", "linuxPlatform")
+	os.makedirs(package)
+	shutil.copy(os.path.join(harness.SOURCE, "linuxPlatform", "launcher.py"), package)
+	if withLauncher:
+		os.makedirs(os.path.join(prefix, "bin"))
+		path = os.path.join(prefix, "bin", "linda")
+		with open(path, "w") as f:
+			f.write("#!/bin/sh\\n")
+		os.chmod(path, stat.S_IRWXU)
+	spec = importlib.util.spec_from_file_location("installedLauncher", os.path.join(package, "launcher.py"))
+	module = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(module)
+	return module
+
+
+def lastingOrWhy(launcher):
+	try:
+		return launcher.lastingCommand()
+	except launcher.NoLastingCommand as e:
+		return f"refused: {e}"
+"""
+
+
+def test_lastingCommandIsTheLauncherOnPathOrAnInstalledOneOutsideTheStore(tmp_path):
+	done = run(
+		tmp_path,
+		INSTALLED_LAUNCHER
+		+ textwrap.dedent(f"""
+		root = {str(tmp_path)!r}
+		from linuxPlatform import launcher as treeLauncher
+
+		result = {{"sourceTree": lastingOrWhy(treeLauncher)}}
+		usr = installedLauncher(os.path.join(root, "usr"))
+		os.environ["PATH"] = "/nonexistent"
+		result["notOnPath"] = lastingOrWhy(usr)
+		# A profile's bin directory links to the store path that its current generation installed.
+		profileBin = os.path.join(root, "profile", "bin")
+		os.makedirs(profileBin)
+		os.symlink(os.path.join(root, "usr", "bin", "linda"), os.path.join(profileBin, "linda"))
+		os.environ["PATH"] = "/nonexistent:" + profileBin
+		result["onPath"] = lastingOrWhy(usr)
+		# Run from the store as nix run runs it, while the profile holds another copy.
+		store = installedLauncher(os.path.join(root, "store", "abc-linda"))
+		store._NIX_STORE = os.path.join(root, "store") + "/"
+		result["storeWithAnotherOnPath"] = lastingOrWhy(store)
+		os.symlink(os.path.join(root, "store", "abc-linda", "bin", "linda"), os.path.join(root, "linda"))
+		os.environ["PATH"] = root
+		result["storeOnPath"] = lastingOrWhy(store)
+		"""),
+	)
+	done.assertClean()
+	assert done.value == {
+		"sourceTree": "refused: this copy runs from a source tree rather than from an installed launcher,"
+		" so there is no command that would start it again",
+		"notOnPath": str(tmp_path / "usr" / "bin" / "linda"),
+		"onPath": str(tmp_path / "profile" / "bin" / "linda"),
+		"storeWithAnotherOnPath": "refused: this copy was started straight from the Nix store, as nix run"
+		" starts it, and its path there stops working once it is updated;"
+		" install it with nix profile install first",
+		"storeOnPath": str(tmp_path / "linda"),
+	}
+
+
+def test_startAfterSignInWritesTheUsersAutostartEntry(tmp_path):
+	user = tmp_path / "xdgConfig" / "autostart"
+	system = tmp_path / "xdgSystem" / "autostart"
+	system.mkdir(parents=True)
+	(system / "linda.desktop").write_text(
+		"[Desktop Entry]\nType=Application\nName=Linda\nExec=linda\n", encoding="utf-8"
+	)
+	done = run(
+		tmp_path,
+		INSTALLED_LAUNCHER
+		+ textwrap.dedent(f"""
+		import builtins
+
+		builtins._ = lambda text: text
+		startCore()
+		import easeOfAccess
+		from gui.message import MessageDialog
+		from linuxPlatform import launcher
+
+		told = []
+		MessageDialog.alert = lambda message, caption: told.append([message, caption])
+		installed = installedLauncher(os.path.join({str(tmp_path)!r}, "with space"))
+		os.environ["PATH"] = "/nonexistent"
+		launcher.lastingCommand = installed.lastingCommand
+		context = easeOfAccess.AutoStartContext.AFTER_LOGON
+		path = os.path.join({str(user)!r}, "linda.desktop")
+
+
+		def entry():
+			with open(path, encoding="utf-8") as f:
+				return f.read()
+
+
+		result = {{"before": easeOfAccess.willAutoStart(context)}}
+		easeOfAccess.setAutoStart(context, False)
+		result["off"] = [easeOfAccess.willAutoStart(context), entry()]
+		easeOfAccess.setAutoStart(context, True)
+		result["on"] = [easeOfAccess.willAutoStart(context), entry()]
+		import config
+
+		config.setStartAfterLogon(False)
+		result["offAgain"] = easeOfAccess.willAutoStart(context)
+
+
+		def noLastingCommand():
+			raise launcher.NoLastingCommand("it cannot")
+
+
+		launcher.lastingCommand = noLastingCommand
+		config.setStartAfterLogon(True)
+		result["refused"] = [easeOfAccess.willAutoStart(context), told]
+		"""),
+		env=xdgEnv(tmp_path),
+	)
+	done.assertClean()
+	quotedExec = '"' + str(tmp_path / "with space" / "bin" / "linda") + '"'
+	assert done.value == {
+		"before": True,
+		# Hidden, which also overrides the system directory's entry.
+		"off": [False, "[Desktop Entry]\nType=Application\nName=Linda\nExec=linda\nHidden=true\n"],
+		"on": [True, f"[Desktop Entry]\nType=Application\nName=Linda\nExec={quotedExec}\n"],
+		"offAgain": False,
+		"refused": [
+			False,
+			[["Linda cannot start after you sign in, because it cannot.", "Start after sign-in"]],
+		],
+	}
+	assert sorted(os.listdir(user)) == ["linda.desktop"]
+
+
+def test_desktopEntryExecQuotesAsTheSpecificationSays(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		from linuxPlatform import xdg
+
+		result = [
+			xdg.desktopEntryExec(argument)
+			for argument in ("/usr/bin/linda", "/opt/my linda/bin/linda", '/a"b$c`d\\\\e', "/100%/linda")
+		]
+		""",
+	)
+	done.assertClean()
+	assert done.value == [
+		"/usr/bin/linda",
+		'"/opt/my linda/bin/linda"',
+		'"/a\\\\"b\\\\$c\\\\`d\\\\\\\\e"',
+		"/100%%/linda",
+	]

@@ -184,6 +184,52 @@ def isAutostartEnabled(entryName: str) -> bool:
 	return False
 
 
+#: Characters that the Desktop Entry Specification reserves in an Exec argument, which then has to be
+#: quoted.
+_EXEC_RESERVED = frozenset(" \t\n\"'\\><~|&;$*?#()`")
+
+
+def desktopEntryExec(argument: str) -> str:
+	"""argument as one argument of an Exec key, quoted and escaped as the Desktop Entry Specification
+	says, which escapes it twice: once inside the quotes and again as a string value."""
+	argument = argument.replace("%", "%%")
+	if any(c in _EXEC_RESERVED for c in argument):
+		quoted = "".join("\\" + c if c in '"`$\\' else c for c in argument)
+		argument = f'"{quoted}"'
+	return argument.replace("\\", "\\\\")
+
+
+def autostartEntryPath(entryName: str) -> str:
+	"""The user's own autostart entry of that name, which overrides the system directories' entry."""
+	return os.path.join(configHome(), "autostart", entryName)
+
+
+def writeAutostartEntry(entryName: str, name: str, command: str, enable: bool) -> None:
+	"""Write the user's autostart entry so that the session starts command at login, or does not.
+
+	Not starting is an entry marked Hidden, which the Desktop Application Autostart Specification
+	reads as deleted, so that it also overrides an entry of the same name in a system directory.
+	The entry is replaced whole, so that nothing left in an older one, such as a desktop's own key that
+	disables it, keeps it from doing what was asked.
+
+	:raise OSError: When the entry cannot be written.
+	"""
+	path = autostartEntryPath(entryName)
+	lines = [
+		"[Desktop Entry]",
+		"Type=Application",
+		f"Name={name}",
+		f"Exec={desktopEntryExec(command)}",
+	]
+	if not enable:
+		lines.append("Hidden=true")
+	os.makedirs(os.path.dirname(path), exist_ok=True)
+	temporary = f"{path}.new"
+	with open(temporary, "w", encoding="utf-8") as f:
+		f.write("".join(f"{line}\n" for line in lines))
+	os.replace(temporary, path)
+
+
 def openWithDefaultApplication(path: str) -> None:
 	"""Open a file or directory as the desktop would on a double click, without waiting for it."""
 	subprocess.Popen(

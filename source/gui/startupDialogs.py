@@ -4,6 +4,7 @@
 # For more details see: https://www.gnu.org/licenses/gpl-2.0.html
 
 import weakref  # noqa: I001
+import sys
 import wx
 
 import config
@@ -86,7 +87,12 @@ class WelcomeDialog(
 		startAfterLogonText = _("St&art NVDA after I sign in")
 		self.startAfterLogonCheckBox = sHelper.addItem(wx.CheckBox(optionsBox, label=startAfterLogonText))
 		self.startAfterLogonCheckBox.Value = config.getStartAfterLogon()
-		if globalVars.appArgs.secure or config.isAppX or not config.isInstalledCopy():
+		if sys.platform != "win32":
+			# An XDG autostart entry starts any copy, installed or not, and easeOfAccess says why when it
+			# cannot start this one.
+			if globalVars.appArgs.secure:
+				self.startAfterLogonCheckBox.Disable()
+		elif globalVars.appArgs.secure or config.isAppX or not config.isInstalledCopy():
 			self.startAfterLogonCheckBox.Disable()
 		# Translators: The label of a checkbox in the Welcome dialog.
 		showWelcomeDialogAtStartupText = _("&Show this dialog when NVDA starts")

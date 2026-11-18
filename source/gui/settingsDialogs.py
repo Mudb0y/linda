@@ -14,6 +14,7 @@ import copy  # noqa: I001
 import logging
 import math
 import re
+import sys
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable, Container
 from enum import IntEnum
@@ -868,7 +869,12 @@ class GeneralSettingsPanel(SettingsPanel):
 		# start NVDA by pressing the shortcut key (CTRL+Alt+N by default).
 		self.startAfterLogonCheckBox = wx.CheckBox(self, label=_("St&art NVDA after I sign in"))
 		self.startAfterLogonCheckBox.SetValue(config.getStartAfterLogon())
-		if globalVars.appArgs.secure or not config.isInstalledCopy():
+		if sys.platform != "win32":
+			# An XDG autostart entry starts any copy, installed or not, and easeOfAccess says why when it
+			# cannot start this one.
+			if globalVars.appArgs.secure:
+				self.startAfterLogonCheckBox.Disable()
+		elif globalVars.appArgs.secure or not config.isInstalledCopy():
 			self.startAfterLogonCheckBox.Disable()
 		settingsSizerHelper.addItem(self.startAfterLogonCheckBox)
 		self.bindHelpEvent("GeneralSettingsStartAfterLogOn", self.startAfterLogonCheckBox)

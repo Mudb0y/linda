@@ -270,6 +270,46 @@ def test_welcomeDialogOfAFirstStartSetsUpTheKeyboard(desktop: DesktopSession, tm
 	assertExitedCleanly(nvda)
 
 
+def test_startAfterSignInIsOfferedAndSaysWhyThisCopyCannot(desktop: DesktopSession, tmp_path: Path):
+	# The rig runs Linda from its source tree, which has no launcher a desktop entry could name.
+	config = sessionConfig(tmp_path / "config", drop=("showWelcomeDialogAtStartup",))
+	autostart = tmp_path / "xdgConfig" / "autostart"
+	nvda = start(desktop, config, env={"XDG_CONFIG_HOME": str(tmp_path / "xdgConfig")})
+	desktop.expect("Welcome to Linda dialog…", "Keyboard layout: combo box…", since=0, timeout=STARTUP_BOUND)
+	step(desktop, "Tab", "Use Caps Lock as a Linda modifier key check box…")
+	step(desktop, "Tab", "Start Linda after I sign in check box not checked Alt plus A")
+	step(desktop, "space", "checked")
+	step(
+		desktop,
+		"Return",
+		"Start after sign-in dialog Linda cannot start after you sign in, because this copy…",
+		"OK button Alt plus O",
+	)
+	(said,) = [text for text in desktop.spokenSince(0) if text.startswith("Start after sign-in dialog")]
+	# The dialog wraps its message, and speech reads each line break as a space.
+	reason = " ".join(said.split())
+	assert reason.endswith(
+		"because this copy runs from a source tree rather than from an installed launcher,"
+		" so there is no command that would start it again."
+	), reason
+	step(desktop, "Return", *AT_START)
+	assert not autostart.exists()
+
+	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
+	step(desktop, "Return", "Settings... S 1 of 4")
+	step(desktop, "Return", "Categories: list General")
+	for _press in range(12):
+		mark = desktop.mark()
+		desktop.press("Tab")
+		time.sleep(SETTLE)
+		if any(text.startswith("Start Linda after I sign in") for text in desktop.spokenSince(mark)):
+			break
+	desktop.expect("Start Linda after I sign in check box not checked Alt plus A", since=mark)
+	step(desktop, "Escape", *AT_START)
+	desktop.close()
+	assertExitedCleanly(nvda)
+
+
 def openInputGestures(desktop: DesktopSession, *expected: str) -> None:
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
 	step(desktop, "p", "Settings... S 1 of 4")

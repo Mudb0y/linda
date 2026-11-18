@@ -8,7 +8,8 @@ XDG autostart entries, and a display manager's login screen starts what its own 
 from enum import IntEnum
 from typing import NoReturn
 
-from linuxPlatform import NoLinuxImplementation, missingAttribute, xdg
+from linuxPlatform import NoLinuxImplementation, branding, launcher, missingAttribute, xdg
+from logHandler import log
 
 
 class AutoStartContext(IntEnum):
@@ -33,14 +34,40 @@ def willAutoStart(autoStartContext: AutoStartContext) -> bool:
 	if autoStartContext == AutoStartContext.AFTER_LOGON:
 		return xdg.isAutostartEnabled(xdg.autostartEntryName)
 	# Each display manager keeps its own configuration of what runs on its login screen, and nothing
-	# here reads or writes any of them. The settings that ask this are disabled on Linux, which has no
-	# installed copy.
+	# here reads or writes any of them. The settings that ask this are disabled on Linux, as they are
+	# for a copy of NVDA that is not installed.
 	return False
 
 
 def setAutoStart(autoStartContext: AutoStartContext, enable: bool) -> None:
-	# Writing an autostart entry needs the command that starts NVDA, which only an installed copy has.
-	raise NoLinuxImplementation(f"easeOfAccess.setAutoStart({autoStartContext.name})")
+	"""Start NVDA after login, through the user's XDG autostart entry, or stop it starting there.
+
+	When that cannot be done, the user is told why in a message box, as the settings that call this
+	expect it to return.
+	"""
+	if autoStartContext != AutoStartContext.AFTER_LOGON:
+		raise NoLinuxImplementation(f"easeOfAccess.setAutoStart({autoStartContext.name})")
+	try:
+		# A hidden entry starts nothing, so the command it names matters only when it is not.
+		command = launcher.lastingCommand() if enable else launcher.LAUNCHER_NAME
+	except launcher.NoLastingCommand as e:
+		_tellCannotStartAfterLogon(f"{branding.NAME} cannot start after you sign in, because {e}.")
+		return
+	try:
+		xdg.writeAutostartEntry(xdg.autostartEntryName, branding.NAME, command, enable)
+	except OSError as e:
+		_tellCannotStartAfterLogon(
+			f"{branding.NAME} could not change whether it starts after you sign in,"
+			f" because {xdg.autostartEntryPath(xdg.autostartEntryName)} could not be written: {e}",
+		)
+
+
+def _tellCannotStartAfterLogon(message: str) -> None:
+	log.warning(message)
+	from gui.message import MessageDialog
+
+	# Translators: The title of a message box saying why NVDA cannot be made to start after sign-in.
+	MessageDialog.alert(message, _("Start after sign-in"))
 
 
 def __getattr__(name: str) -> NoReturn:

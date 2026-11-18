@@ -424,7 +424,15 @@ source/gui/settingsDialogs.py
   every platform: the scratchpad directory opens through startfile from
   linuxPlatform.windowsOnly, which is os.startfile on Windows and on Linux
   opens it through xdg-open, where os.startfile is absent; os, which
-  nothing else in the module uses, is no longer imported
+  nothing else in the module uses, is no longer imported.
+  Linux runtime: "Start NVDA after I sign in" is enabled outside secure mode,
+  installed copy or not, as an XDG autostart entry can start any copy;
+  easeOfAccess tells the user when this copy has no command that would last
+source/gui/startupDialogs.py
+  Linux runtime: the welcome dialog's "Start NVDA after I sign in" is
+  enabled outside secure mode, installed copy or not, as an XDG autostart
+  entry can start any copy; easeOfAccess tells the user when this copy has
+  no command that would last
 source/hwIo/__init__.py
   Linux runtime: the background I/O thread is linuxPlatform.ioThread's
   subclass of upstream's, which waits on a condition rather than in an
