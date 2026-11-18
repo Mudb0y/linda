@@ -1005,13 +1005,19 @@ class AtSpi(NVDAObject):
 			return 0
 
 	def _get_TextInfo(self):
-		if "Text" in self.atspiInterfaces and self.role in (
-			Role.EDITABLETEXT,
-			Role.STATICTEXT,
-			Role.TERMINAL,
-			Role.DOCUMENT,
-			Role.SPINBUTTON,
-			Role.PASSWORDEDIT,
+		# Whatever its role, an object that is edited has its caret in its text: a page's text area
+		# made a combobox, or an editable element without a role.
+		if "Text" in self.atspiInterfaces and (
+			"editable" in self.atspiStates
+			or self.role
+			in (
+				Role.EDITABLETEXT,
+				Role.STATICTEXT,
+				Role.TERMINAL,
+				Role.DOCUMENT,
+				Role.SPINBUTTON,
+				Role.PASSWORDEDIT,
+			)
 		):
 			return AtspiTextInfo
 		return super().TextInfo
