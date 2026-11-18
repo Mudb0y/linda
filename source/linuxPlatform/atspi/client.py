@@ -93,6 +93,8 @@ _hungSince: dict[str, float] = {}
 _refused: set[str] = set()
 #: When each application last answered slowly, and how long it took, over the budget's window.
 _slowAnswers: dict[str, collections.deque[tuple[float, float]]] = {}
+#: When each application last answered slowly or not at all, kept when it is marked hung.
+_lastSlowAnswerAt: dict[str, float] = {}
 _mainThreadId = threading.main_thread().ident
 #: Whether libatspi could not connect to the accessibility bus. It then ends the whole process with
 #: abort() on the first call that needs the bus, so no call is made.
@@ -144,6 +146,8 @@ def call[T](node: Node, func: Callable[..., T], *args) -> T:
 		error = None
 	elapsed = time.monotonic() - start
 	callSeconds += elapsed
+	if elapsed >= SLOW_ANSWER_SECONDS:
+		_lastSlowAnswerAt[busName] = start + elapsed
 	if elapsed >= TIMED_OUT_AFTER_SECONDS:
 		_markHung(busName, f"did not answer within {TIMEOUT_MS} ms")
 		raise AppHung(busName) from None
@@ -179,6 +183,13 @@ def _noteSlowAnswer(busName: str, elapsed: float, funcName: str) -> None:
 		_markHung(busName, f"kept NVDA waiting {waited * 1000:.0f} ms in {BUDGET_WINDOW_SECONDS:g} s")
 
 
+def answeredSlowlyWithin(busName: str, seconds: float) -> bool:
+	"""Whether busName took SLOW_ANSWER_SECONDS or more over a call in the last seconds, or did not
+	answer one."""
+	at = _lastSlowAnswerAt.get(busName)
+	return at is not None and time.monotonic() - at < seconds
+
+
 def heardFrom(busName: str) -> None:
 	"""An event came from busName, so it answers again."""
 	_hungSince.pop(busName, None)
@@ -192,6 +203,7 @@ def refuse(busName: str) -> None:
 def forgetApplications() -> None:
 	_hungSince.clear()
 	_slowAnswers.clear()
+	_lastSlowAnswerAt.clear()
 	_toolkits.clear()
 
 

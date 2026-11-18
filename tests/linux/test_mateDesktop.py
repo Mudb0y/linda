@@ -9,6 +9,7 @@ The transcript holds what the synthesizer is given after symbols are spoken as w
 """
 
 import os
+import signal
 import subprocess
 import time
 from collections.abc import Iterator
@@ -67,6 +68,48 @@ def waitForWindow(title: str, timeout: float = WINDOW_TIMEOUT) -> None:
 		assert time.monotonic() < deadline, f"no window {title!r}: {desktopSession.topLevelNames()}"
 		time.sleep(0.1)
 	desktopSession.activate(title)
+
+
+def waitForFocusedRows(title: str, rows: int, timeout: float = WINDOW_TIMEOUT) -> None:
+	"""Wait until the table that has the focus in the window named title holds rows rows."""
+	Atspi = desktopSession._atspi()
+	from gi.repository import GLib
+
+	focused = Atspi.StateSet.new([Atspi.StateType.FOCUSED])
+	rule = Atspi.MatchRule.new(
+		focused,
+		Atspi.CollectionMatchType.ALL,
+		None,
+		Atspi.CollectionMatchType.NONE,
+		None,
+		Atspi.CollectionMatchType.NONE,
+		None,
+		Atspi.CollectionMatchType.NONE,
+		False,
+	)
+	deadline = time.monotonic() + timeout
+	count = None
+	while True:
+		desktop = Atspi.get_desktop(0)
+		try:
+			for appIndex in range(desktop.get_child_count()):
+				app = desktop.get_child_at_index(appIndex)
+				for index in range(app.get_child_count() if app else 0):
+					window = app.get_child_at_index(index)
+					if window is None or window.get_name() != title:
+						continue
+					for match in window.get_collection_iface().get_matches(
+						rule, Atspi.CollectionSortOrder.CANONICAL, 1, True
+					):
+						table = match.get_table_iface()
+						if table is not None:
+							count = table.get_n_rows()
+		except GLib.Error:
+			pass
+		if count == rows:
+			return
+		assert time.monotonic() < deadline, f"the focused table of {title!r} holds {count} rows, not {rows}"
+		time.sleep(0.1)
 
 
 def startNVDA(desktop: DesktopSession, *expected: str) -> harness.Launch:
@@ -144,6 +187,30 @@ def test_cajaFolderWindow(desktop: DesktopSession, tmp_path: Path):
 	assertQuitCleanly(desktop, nvda)
 
 
+def test_cajaSelectsTheFolderLeftAfterASlowAnswer(desktop: DesktopSession, tmp_path: Path):
+	"""Caja answers one call late, as any program does now and then, and then goes up a folder: the
+	folder it selects in its view, whose focus stays on the view, is still spoken."""
+	folder = makeFolder(tmp_path / "docs", "sub/", "alpha.txt")
+	(folder / "sub" / "inner.txt").write_text("x")
+	caja = desktop.startApp(
+		["caja", "--no-desktop", str(folder / "sub")], title="sub", timeout=WINDOW_TIMEOUT
+	)
+	desktopSession.activate("sub")
+	nvda = startNVDA(desktop, "sub", "Icon View list")
+	step(desktop, "Down", "inner dot txt 1 of 1")
+	before = len(nvda.text("nvda.log"))
+	caja.send_signal(signal.SIGSTOP)
+	try:
+		mark = desktop.mark()
+		desktop.press("Insert+t", gap=0.15)
+	finally:
+		caja.send_signal(signal.SIGCONT)
+	desktop.expect("sub", since=mark)
+	assert "slow answer" in nvda.text("nvda.log")[before:], "Caja answered nothing late"
+	step(desktop, "alt+Up", "docs", "sub 1 of 2")
+	assertQuitCleanly(desktop, nvda)
+
+
 def test_cajaBigFolder(desktop: DesktopSession, tmp_path: Path):
 	folder = tmp_path / "big"
 	folder.mkdir()
@@ -155,8 +222,10 @@ def test_cajaBigFolder(desktop: DesktopSession, tmp_path: Path):
 	step(desktop, "Down", "file 0000 dot txt 1 of 3000")
 	step(desktop, "End", "file 2999 dot txt 3000 of 3000")
 	step(desktop, "Home", "file 0000 dot txt 1 of 3000")
-	# Caja is busy for a second building its list view, and the keys pressed meanwhile reach it late.
 	step(desktop, "control+2", "List View list", timeout=10)
+	# Caja is busy for a second building its list view, which it says has the focus before it holds
+	# the folder; End pressed meanwhile scrolls it with no word of the row it reaches.
+	waitForFocusedRows("big", BIG_FOLDER_FILES)
 	step(desktop, "End", "file 2999 dot txt; Size: 1 byte; …", timeout=10)
 	step(desktop, "Up", "file 2998 dot txt; Size: 1 byte; …")
 	step(desktop, "Insert+t", "big")

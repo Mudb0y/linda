@@ -501,6 +501,14 @@ def _onEvent(eventType: str, source: Node | None, detail1: int, detail2: int, an
 		if len(_names) > MAX_QUEUED:
 			_names.clear()
 		_names[source.key] = anyData
+	elif eventType == "object:active-descendant-changed":
+		if len(_descendantChanges) > MAX_QUEUED:
+			_descendantChanges.clear()
+		previous = _descendantChanges.get(source.key)
+		gap = now - previous[0] if previous else DESCENDANT_FLOOD_SECONDS
+		_descendantChanges[source.key] = (now, gap)
+		if gap < DESCENDANT_FLOOD_SECONDS:
+			_floodingUntil[source.busName] = now + FLOOD_SECONDS
 	elif eventType in WINDOW_ACTIVATION_EVENTS:
 		global _lastWindowEventAt, _settleStartedAt
 		_lastWindowEventAt = now
@@ -582,6 +590,10 @@ def terminate() -> None:
 	_firstSeen.clear()
 	_retries.clear()
 	_rescans.clear()
+	_descendantChanges.clear()
+	_floodingUntil.clear()
+	_heldDescendantChanges.clear()
+	_holdingSince.clear()
 	_processIDs.clear()
 	_roles.clear()
 	_names.clear()
@@ -978,13 +990,14 @@ def _reportTextChange(obj, event) -> None:
 
 def _coalesced(events: list) -> list:
 	"""The newest of each (event, object) only, in the position of the newest, as the win event limiter
-	does; focus, window and text change events are all kept."""
+	does; focus, window and text change events are all kept, apart from a container's active descendant
+	changes, of which only the newest says where its focus went."""
 	seen: set = set()
 	kept = []
 	for event in reversed(events):
 		eventType = event[0]
 		if (
-			_isFocusEvent(event)
+			(_isFocusEvent(event) and eventType != "object:active-descendant-changed")
 			or eventType in WINDOW_ACTIVATION_EVENTS
 			or eventType.startswith("object:text-changed:")
 			or eventType == ANNOUNCEMENT_EVENT
@@ -1004,6 +1017,12 @@ def _coalesced(events: list) -> list:
 _topLevels: dict[tuple[str, str], bool] = {}
 
 
+def _noteTopLevel(key: tuple[str, str], topLevel: bool) -> None:
+	if len(_topLevels) > MAX_QUEUED:
+		_topLevels.clear()
+	_topLevels[key] = topLevel
+
+
 def _asWindowEvent(event) -> tuple | None:
 	"""event, or for a change of a top-level's active state the window event it stands for, or None for
 	a change of any other object's: Caja's tree view marks its current cell active."""
@@ -1017,13 +1036,106 @@ def _asWindowEvent(event) -> tuple | None:
 		except NodeGone:
 			return None
 		topLevel = parent is not None and parent.path == ROOT_PATH
-		if len(_topLevels) > MAX_QUEUED:
-			_topLevels.clear()
-		_topLevels[source.key] = topLevel
+		_noteTopLevel(source.key, topLevel)
 	if not topLevel:
 		return None
 	# GTK can give a window back the focus, when a dialog over it closes, with only this.
 	return ("window:activate" if detail1 else "window:deactivate", source, detail1, detail2, anyData)
+
+
+#: Seconds after an application last answered slowly during which it counts as busy: a container of it
+#: moved through quickly is not asked about at every step.
+BUSY_SECONDS = 2.0
+#: Seconds after a container last changed its active descendant within DESCENDANT_FLOOD_SECONDS of the
+#: change before, during which its application is taken to be flooding.
+FLOOD_SECONDS = 1.0
+#: Until when each application is taken to be flooding, by bus name.
+_floodingUntil: dict[str, float] = {}
+
+
+def _isFloodBackground(event, now: float) -> bool:
+	"""Whether event is about an object other than the focus or the foreground, from an application one
+	of whose containers is being moved through faster than its items could be spoken. Reading the object
+	an event names takes several round trips: Caja, moved through a large folder, sent events for every
+	item passed while it answered each call a tenth of a second late, and reading them held the keyboard
+	up for seconds."""
+	eventType, node = event[0], event[1]
+	if eventType in ("window:create", "object:state-changed:showing", ANNOUNCEMENT_EVENT):
+		return False
+	if _floodingUntil.get(node.busName, 0.0) <= now:
+		return False
+	import eventHandler
+
+	return node != getattr(eventHandler.lastQueuedFocusObject, "node", None) and node != _foreground
+
+
+def _isUnheldDeselection(event) -> bool:
+	"""Whether event is an object losing its selected state that is not the focus and that NVDA holds no
+	object for, as the item a list's selection moved from: nothing NVDA does with a state change of such
+	an object is heard or shown, and making the object costs several round trips for every item a list
+	is moved through."""
+	if event[0] != "object:state-changed:selected" or event[2]:
+		return False
+	import api
+	import eventHandler
+
+	node = event[1]
+	if node.key in liveObjects:
+		return False
+	held = (eventHandler.lastQueuedFocusObject, api.getFocusObject(), *api.getFocusAncestors())
+	return all(getattr(obj, "node", None) != node for obj in held)
+
+
+#: A container of a busy application whose active descendant changes again within this many seconds of
+#: its last change is moved through faster than its items could be read: its change is acted on once it
+#: has stood this long, or has waited DESCENDANT_HOLD_SECONDS.
+DESCENDANT_FLOOD_SECONDS = 0.05
+DESCENDANT_HOLD_SECONDS = 1.0
+#: When each container last changed its active descendant, and how long after the change before it.
+_descendantChanges: dict[tuple[str, str], tuple[float, float]] = {}
+#: The newest active descendant change of each container moved through quickly, waiting for the
+#: container to stand still, and since when each such container has been waited for.
+_heldDescendantChanges: dict[tuple[str, str], tuple] = {}
+_holdingSince: dict[tuple[str, str], float] = {}
+
+
+def _holdWhileFlooding(event, now: float) -> bool:
+	"""Whether event is an active descendant change to keep until its container stands still. Asking
+	whether each change still holds costs round trips to a program that is busy sending them: Caja sent
+	sixty a second, each found stale a tenth of a second later, and asking held the keyboard up."""
+	if event[0] != "object:active-descendant-changed" or not _clientModule.answeredSlowlyWithin(
+		event[1].busName,
+		BUSY_SECONDS,
+	):
+		return False
+	key = event[1].key
+	at, gap = _descendantChanges.get(key, (0.0, DESCENDANT_FLOOD_SECONDS))
+	since = _holdingSince.setdefault(key, now)
+	if (
+		gap >= DESCENDANT_FLOOD_SECONDS
+		or now - at >= DESCENDANT_FLOOD_SECONDS
+		or now - since >= DESCENDANT_HOLD_SECONDS
+	):
+		del _holdingSince[key]
+		return False
+	_heldDescendantChanges[key] = event
+	return True
+
+
+def _releasedDescendantChanges(now: float) -> list:
+	"""The held active descendant changes whose containers have stood still, or that have waited long
+	enough for one of a stream to be spoken."""
+	released = []
+	for key, event in list(_heldDescendantChanges.items()):
+		at, _gap = _descendantChanges.get(key, (0.0, 0.0))
+		if (
+			now - at >= DESCENDANT_FLOOD_SECONDS
+			or now - _holdingSince.get(key, 0.0) >= DESCENDANT_HOLD_SECONDS
+		):
+			del _heldDescendantChanges[key]
+			_holdingSince.pop(key, None)
+			released.append(event)
+	return released
 
 
 def _isSettling(now: float) -> bool:
@@ -1070,6 +1182,14 @@ def pumpAll() -> None:
 	with _queueLock:
 		events = list(_queue)
 		_queue.clear()
+	for event in events:
+		if event[0] == "object:active-descendant-changed":
+			_heldDescendantChanges.pop(event[1].key, None)
+			if isinstance(event[4], Node):
+				# What a container says has its focus is no window, so its active state need not be asked
+				# about: a list moved through quickly sends it for every item passed.
+				_noteTopLevel(event[4].key, False)
+	released = _releasedDescendantChanges(now)
 	events = [converted for event in events if (converted := _asWindowEvent(event)) is not None]
 	resumed = []
 	for busName, (event, since) in list(_focusWhileHung.items()):
@@ -1081,10 +1201,14 @@ def pumpAll() -> None:
 			resumed.append((event, since))
 	if _retries or _rescans or _focusWhileHung:
 		core.requestPump()
-	if not events and not due and not resumed:
+	if not events and not due and not resumed and not released:
+		if _heldDescendantChanges:
+			core.requestPump()
 		return
 	for event in due:
 		_processFocus(event, mayRetry=False)
+	for event in released:
+		_processFocus(event)
 	for event, since in resumed:
 		if not _processFocus(event, mayRetry=False):
 			_resumeFocusIn(event, since)
@@ -1097,7 +1221,9 @@ def pumpAll() -> None:
 			_activeDescendants[source.key] = anyData
 		elif eventType == "object:property-change:accessible-role":
 			liveObjects.pop(source.key, None)
-	kept = _coalesced(events)
+	kept = [event for event in _coalesced(events) if not _holdWhileFlooding(event, now)]
+	if _heldDescendantChanges:
+		core.requestPump()
 	# A focus event followed in the same batch by that object's loss of focus is stale.
 	blurredAfter: set[int] = set()
 	lostFocus: set = set()
@@ -1159,7 +1285,7 @@ def pumpAll() -> None:
 		withheld = _isWithheldWhileLocked(event[1])
 		if not withheld and liveRegions.handle(event):
 			continue
-		if index in overLimit:
+		if index in overLimit or _isFloodBackground(event, now) or _isUnheldDeselection(event):
 			continue
 		if eventType == ANNOUNCEMENT_EVENT:
 			if not withheld:

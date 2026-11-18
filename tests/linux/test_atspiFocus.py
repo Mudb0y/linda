@@ -29,6 +29,13 @@ QT_TITLE = "Qt fixture window"
 #: shortcut is spoken depends on the toolkit.
 PRESS_ME = "Press me button Does nothing Alt plus P"
 PRESS_ME_ANY = "Press me button Does nothing\N{HORIZONTAL ELLIPSIS}"
+BUSY_TITLE = "Busy list"
+#: Seconds the busy list moves its cursor for.
+FLOOD_SECONDS = 6
+#: Seconds within which a key that asks no application is answered while a list floods, and within
+#: which the row the flood ended on is spoken, read from a list that answers each call some 0.1 s late.
+KEY_BOUND = 0.5
+LANDING_BOUND = 1.5
 
 #: A global plugin that runs key gestures sent to it through a FIFO as if their keys had been pressed,
 #: so that what a command says is timed apart from how its keys are captured.
@@ -360,5 +367,57 @@ def test_stoppedApplicationsDoNotStallSpeech(desktop: DesktopSession, tmp_path: 
 	finally:
 		qt.send_signal(signal.SIGCONT)
 		gtk.send_signal(signal.SIGCONT)
+	probe.close()
+	_closeClean(desktop, nvda)
+
+
+def _recordAfter(nvda: harness.Launch, mark: int, matches, timeout: float) -> dict:
+	"""The first speak record after mark whose text matches, a function of the text."""
+	deadline = time.monotonic() + timeout
+	while True:
+		for record in nvda.spoken()[mark:]:
+			if matches(harness.transcriptRecords().spokenText(record)):
+				return record
+		assert time.monotonic() < deadline, f"nothing matching spoken within {timeout} s\n{nvda.describe()}"
+		time.sleep(0.01)
+
+
+def test_aFloodOfFocusChangesLeavesKeysPrompt(desktop: DesktopSession, tmp_path: Path):
+	"""A list too busy to answer quickly moves its cursor tens of times a second, as Caja's views did with
+	a large folder: a key pressed meanwhile is still answered at once, nothing freezes, and the row the
+	list ends on is spoken once, after every row it passed. The key reports the time, which asks no
+	application, so that how long it takes is Linda's alone."""
+	app = desktop.startApp(desktop.fixture("busyList"), title=BUSY_TITLE)
+	assert app.stdout.readline() == "ready\n"
+	_waitUntilActive(BUSY_TITLE)
+	nvda, probe = _startNVDA(desktop, tmp_path)
+	desktop.expect(BUSY_TITLE, "list", since=0, timeout=STARTUP_BOUND)
+	_waitForQuiet(desktop)
+	logBefore = len(nvda.text("nvda.log"))
+	app.stdin.write(f"flood {FLOOD_SECONDS}\n")
+	app.stdin.flush()
+	time.sleep(1)
+	waits = []
+	for _ in range(3):
+		mark = desktop.mark()
+		pressed = time.monotonic()
+		subprocess.run(["xdotool", "key", "Insert+F12"], check=True)
+		record = _recordAfter(nvda, mark, lambda text: not text.startswith("Row "), timeout=15)
+		waits.append(record["t"] - pressed)
+		time.sleep(0.5)
+	mark = desktop.mark()
+	line = app.stdout.readline()
+	assert line.startswith("flooded "), line
+	stopped = time.monotonic()
+	final = line.removeprefix("flooded ").strip()
+	landing = f"{final} {int(final.split()[1]) + 1} of 3000"
+	arrived = _recordAfter(nvda, mark, lambda text: text == landing, timeout=15)["t"] - stopped
+	_waitForQuiet(desktop)
+	rows = [text for text in desktop.spokenSince(mark) if text.startswith("Row ")]
+	log = nvda.text("nvda.log")[logBefore:]
+	assert max(waits) < KEY_BOUND, (waits, arrived, log[-6000:])
+	assert arrived < LANDING_BOUND, (arrived, rows)
+	assert rows[-1].startswith(final + " ") and sum(r.startswith(final + " ") for r in rows) == 1, rows
+	assert "Potential freeze" not in log, log[-6000:]
 	probe.close()
 	_closeClean(desktop, nvda)
