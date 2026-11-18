@@ -484,23 +484,17 @@ CATEGORIES = [
 
 
 def openVisionSettings(desktop: DesktopSession) -> None:
-	"""Open the settings dialog and arrow to the Vision category from whichever it opened on."""
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
 	step(desktop, "Return", "Settings... S 1 of 4")
-	mark = step(desktop, "Return", "Linda Settings: …", "Categories: list…")
-	time.sleep(SETTLE)
-	names = [category.rsplit(" ", 3)[0] for category in CATEGORIES]
-	spoken = desktop.spokenSince(mark)
-	# Opened scrolled away from the item it has selected, the list says the item with itself.
-	opened = [text for text in spoken if text in CATEGORIES] or [
-		CATEGORIES[names.index(text.removeprefix("Categories: list "))]
-		for text in spoken
-		if text.removeprefix("Categories: list ") in names
-	]
-	index, vision = CATEGORIES.index(opened[-1]), names.index("Vision")
-	key = "Down" if index < vision else "Up"
-	for category in CATEGORIES[index + 1 : vision + 1] if index < vision else CATEGORIES[vision:index][::-1]:
-		step(desktop, key, category)
+	step(
+		desktop,
+		"Return",
+		"Linda Settings: General (normal configuration) dialog",
+		"Categories: list",
+		CATEGORIES[0],
+	)
+	for category in CATEGORIES[1:6]:
+		step(desktop, "Down", category)
 
 
 def test_switchedOnAndOffFromTheVisionSettings(desktop: DesktopSession, screen: Screen, tmp_path: Path):
@@ -679,9 +673,25 @@ def test_notStartableWithoutAnXDisplay(tmp_path: Path):
 		import NVDAHelper  # noqa: F401
 		from visionEnhancementProviders.NVDAHighlighter import NVDAHighlighter
 
-		result = NVDAHighlighter.canStart()
+		from linuxPlatform import visualHighlight
+
+		overlay = visualHighlight.Overlay(lambda: [], 0.1)
+		try:
+			overlay.start()
+			started = True
+		except RuntimeError:
+			started = False
+		overlay._thread.join(5)
+		result = {
+			"canStart": NVDAHighlighter.canStart(),
+			"started": started,
+			"pipe": [overlay._wakeRead, overlay._wakeWrite],
+		}
 		""",
 		env={"DISPLAY": None},
 	)
-	done.assertClean()
-	assert done.value is False
+	done.assertClean(ignoring={"logErrors"})
+	assert done.value == {"canStart": False, "started": False, "pipe": [-1, -1]}
+	assert [record.splitlines()[0] for record in done.logErrors] == [
+		"ERROR: Visual Highlight could not connect to the X display"
+	]

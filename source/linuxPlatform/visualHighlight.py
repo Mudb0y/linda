@@ -183,6 +183,11 @@ class Overlay:
 		self._started = False
 		self._wakeRead, self._wakeWrite = os.pipe()
 		os.set_blocking(self._wakeWrite, False)
+		#: Whether start gave the thread up, and whether the thread has ended: whichever comes second
+		#: closes the pipe, the two decided under the lock.
+		self._abandoned = False
+		self._ended = False
+		self._endLock = threading.Lock()
 		self._thread = threading.Thread(target=self._run, name=f"{__name__}.Overlay", daemon=True)
 		self._display = None
 		self._root = None
@@ -207,6 +212,10 @@ class Overlay:
 		if not self._ready.wait(START_TIMEOUT) or not self._started:
 			self._stopping = True
 			self._wake()
+			with self._endLock:
+				self._abandoned = True
+				if self._ended:
+					self._closePipe()
 			raise RuntimeError("Highlighter thread wasn't able to initialize correctly")
 
 	def refresh(self) -> None:
@@ -222,6 +231,9 @@ class Overlay:
 			if self._thread.is_alive():
 				log.warning(f"The X server held Visual Highlight's windows for more than {STOP_TIMEOUT} s")
 				return
+		self._closePipe()
+
+	def _closePipe(self) -> None:
 		os.close(self._wakeRead)
 		os.close(self._wakeWrite)
 		# Their numbers may soon be another file's.
@@ -237,6 +249,15 @@ class Overlay:
 			pass
 
 	def _run(self) -> None:
+		try:
+			self._drawUntilStopped()
+		finally:
+			with self._endLock:
+				self._ended = True
+				if self._abandoned:
+					self._closePipe()
+
+	def _drawUntilStopped(self) -> None:
 		from Xlib import error
 
 		try:
