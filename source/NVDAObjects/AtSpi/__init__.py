@@ -555,7 +555,10 @@ class AtSpi(NVDAObject):
 
 	def _get__comboBoxNamedByChoice(self) -> bool:
 		"""GTK 3 and Qt name a combo box by its current choice, which NVDA calls its value; GTK 4 names
-		it by its label and gives the choice in valuetext."""
+		it by its label and gives the choice in valuetext. One the user types into, such as Firefox's
+		address bar, holds its choice in its text, which NVDA reads, and its name is its own."""
+		if "editable" in self.atspiStates and "Text" in self.atspiInterfaces:
+			return False
 		return "valuetext" not in self.atspiAttributes
 
 	def _get_name(self) -> str:
