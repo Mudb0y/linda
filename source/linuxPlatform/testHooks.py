@@ -1,4 +1,5 @@
-"""Lets a launcher or test add drivers and plugins that exist only for testing.
+"""Lets a launcher or test add drivers and plugins that exist only for testing, and give NVDA a
+stand-in for linda-keyd.
 
 NVDA finds synth drivers and global plugins by searching the __path__ of the synthDrivers and
 globalPlugins packages. Add-ons and the scratchpad directory are the upstream ways in, but
@@ -20,6 +21,8 @@ from types import ModuleType
 
 #: Names a directory that may hold synthDrivers/ and globalPlugins/ subdirectories.
 ENVIRONMENT_VARIABLE = "LINDA_TEST_HOOKS_DIR"
+#: Names the socket of a test's stand-in for linda-keyd, honoured as ENVIRONMENT_VARIABLE is.
+KEYD_SOCKET_VARIABLE = "LINDA_TEST_KEYD_SOCKET"
 
 #: The packages whose search paths get the subdirectory of the same name.
 packageNames = ("synthDrivers", "globalPlugins")
@@ -62,6 +65,23 @@ class _HookFinder(importlib.abc.MetaPathFinder):
 		if spec is not None and spec.submodule_search_locations is not None:
 			_addDirectory(spec.submodule_search_locations, self.root, fullname)
 		return spec
+
+
+def keydSocketPath() -> str | None:
+	"""The socket of a test's stand-in for linda-keyd, named by KEYD_SOCKET_VARIABLE, which takes the
+	place of the helper's own; None outside a test.
+
+	Only where test drivers would be added, so that an installed copy never gives its keys to whatever
+	the environment names.
+	"""
+	path = os.environ.get(KEYD_SOCKET_VARIABLE)
+	if not path or not os.environ.get(ENVIRONMENT_VARIABLE):
+		return None
+	import globalVars
+
+	if globalVars.appArgs.secure or not _isRunningFromCheckout():
+		return None
+	return path
 
 
 def install() -> list[str]:

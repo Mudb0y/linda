@@ -86,7 +86,7 @@ def isRunning() -> bool:
 def _startSource() -> None:
 	global _source, _watcher
 	_installLogMask()
-	source = keys.createSource()
+	source = keys.createSource(_configuredRoute(), _announce)
 	if source is None:
 		return
 	from logHandler import log
@@ -115,6 +115,36 @@ def _stopSource() -> None:
 	source.stop()
 
 
+def _configuredRoute() -> str:
+	"""Where the configuration has keys come from: linuxPlatform.keys.route.ROUTES."""
+	import config
+
+	try:
+		return config.conf["keyboard"]["keyRoute"]
+	# Any configuration NVDA could not read leaves the choice to the source, as by default.
+	except Exception:  # noqa: BLE001
+		return "auto"
+
+
+def _announce(message: str) -> None:
+	"""Say message from any thread, as the key source does when the way keys come changes."""
+	import queueHandler
+	import ui
+
+	queueHandler.queueFunction(queueHandler.eventQueue, ui.message, message)
+
+
+def takeKeyboardBack() -> None:
+	"""Take keys from the kernel again after the emergency chord let them go, saying how it went."""
+	takeBack = getattr(_source, "takeBack", None)
+	if takeBack is None:
+		# Translators: Said on Linux when the user asks NVDA to take the keyboard back, and NVDA reads no
+		# keys at all, as when there is no X display.
+		_announce(_("NVDA reads no keyboard here"))
+		return
+	takeBack()
+
+
 def _watch(source: KeySource) -> None:
 	"""Keep the keys the source takes in step with the configuration, which the settings dialog, the
 	welcome dialog and profile switches all change, hold the keyboard while input help is on, so
@@ -134,6 +164,7 @@ def _watch(source: KeySource) -> None:
 	held = False
 	captured: CaptureMode = "off"
 	gestures = None
+	route = _configuredRoute()
 	interval = WATCH_INTERVAL
 	while True:
 		try:
@@ -141,6 +172,10 @@ def _watch(source: KeySource) -> None:
 			if wanted != nvdaKeys:
 				source.setConsumed(wanted, numpadReview=True)
 				nvdaKeys = wanted
+			if (wantedRoute := config.conf["keyboard"]["keyRoute"]) != route:
+				if (setRoute := getattr(source, "setRoute", None)) is not None:
+					setRoute(wantedRoute)
+				route = wantedRoute
 			manager = inputCore.manager
 			hold = (
 				bool(manager and manager.isInputHelpActive) or any(taker() for taker in keyboardTakers)

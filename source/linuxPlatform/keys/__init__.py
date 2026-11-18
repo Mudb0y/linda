@@ -134,10 +134,24 @@ def isEnabled() -> bool:
 	return os.environ.get(SWITCH_VARIABLE, "") != "off"
 
 
-def createSource() -> KeySource | None:
-	"""The key source for this session, or None when there is none to watch."""
+def helperSocketPath() -> str:
+	"""Where linda-keyd listens, or where a test's stand-in for it does."""
+	from linuxPlatform import testHooks
+
+	from . import keydClient
+
+	return testHooks.keydSocketPath() or keydClient.SOCKET_PATH
+
+
+def createSource(route: str = "auto", notify: Callable[[str], None] | None = None) -> KeySource | None:
+	"""The key source for this session, or None when there is none to watch.
+
+	:param route: Where keys come from, as route.ROUTES names it: the first release takes them from the
+		kernel only in an X session, whose layout it follows.
+	:param notify: Says a message to the user, as when the helper has let go of the keyboard.
+	"""
 	if not isEnabled() or not os.environ.get("DISPLAY"):
 		return None
-	from . import x11
+	from . import route as keyRoute
 
-	return x11.X11KeySource()
+	return keyRoute.RoutedKeySource(route, helperSocketPath(), notify)

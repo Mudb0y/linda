@@ -399,7 +399,9 @@ source/config/__init__.py
 source/config/configSpec.py
   Linux runtime: addonStore has an enabled key, false by default, which
   turns NVDA's add-on store on; Windows has no such key and its store is
-  always on
+  always on. keyboard has a keyRoute key, auto by default, which says
+  whether keys come from linda-keyd, the helper that takes the keyboard
+  in the kernel, or from the X display; see linuxPlatform.keys.route
 source/config/registry.py
   every platform: winreg comes from linuxPlatform.windowsOnly, so
   _deleteKeyAndSubkeys raises NoLinuxImplementation on Linux

@@ -340,6 +340,43 @@ while True:
 """
 
 
+def captureSet(
+	translator: keyMap.Translator, mode: CaptureMode, gestureKeys: frozenset[GestureKey]
+) -> dict[int, set[int]]:
+	"""Key code: the modifier masks, without the locks, it is captured with in mode, browse or focus,
+	in the layout translator has: the mode's own keys, and gestureKeys, those bound in it."""
+	masks = {"": 0, "shift": X.ShiftMask, "control": X.ControlMask, "alt": X.Mod1Mask}
+	levelThree = translator.levelThreeMask()
+	if levelThree:
+		masks["altgr"] = levelThree
+
+	def combinations(names: tuple[str, ...]) -> set[int]:
+		found = set()
+		for name in names:
+			parts = name.split("+") if name else [""]
+			if all(part in masks for part in parts):
+				found.add(sum(masks[part] for part in parts))
+		return found
+
+	wanted: dict[int, set[int]] = {}
+	keys = dict(FOCUS_KEYS) if mode == "focus" else dict(BROWSE_KEYS)
+	if mode == "browse":
+		for evdev in (*keyMap.LAYOUT, SPACE_KEY):
+			keys[evdev] = tuple(dict.fromkeys(keys.get(evdev, ()) + CHARACTER_COMBINATIONS))
+	for evdev, names in keys.items():
+		wanted.setdefault(evdev + 8, set()).update(combinations(names))
+	if mode == "browse":
+		for letter in BROWSE_CONTROL_LETTERS:
+			keycode = translator.keycodeFor(ord(letter), False)
+			if keycode is not None:
+				wanted.setdefault(keycode, set()).add(X.ControlMask)
+	for names, vk, extended in gestureKeys:
+		keycode = translator.keycodeFor(vk, extended)
+		if keycode is not None and names <= GESTURE_MASKS.keys():
+			wanted.setdefault(keycode, set()).add(sum(GESTURE_MASKS[name] for name in names))
+	return wanted
+
+
 def _logError(message: str) -> None:
 	"""log.exception, for a thread that must outlive it: logging an error reads NVDA's configuration,
 	for whether to play the error sound, and raises while a reset of the configuration leaves none."""
@@ -1428,35 +1465,7 @@ class X11KeySource:
 			return {}
 		if mode in self._modeSets:
 			return self._modeSets[mode]
-		masks = {"": 0, "shift": X.ShiftMask, "control": X.ControlMask, "alt": X.Mod1Mask}
-		levelThree = self._translator.levelThreeMask()
-		if levelThree:
-			masks["altgr"] = levelThree
-
-		def combinations(names: tuple[str, ...]) -> set[int]:
-			found = set()
-			for name in names:
-				parts = name.split("+") if name else [""]
-				if all(part in masks for part in parts):
-					found.add(sum(masks[part] for part in parts))
-			return found
-
-		wanted: dict[int, set[int]] = {}
-		keys = dict(FOCUS_KEYS) if mode == "focus" else dict(BROWSE_KEYS)
-		if mode == "browse":
-			for evdev in (*keyMap.LAYOUT, SPACE_KEY):
-				keys[evdev] = tuple(dict.fromkeys(keys.get(evdev, ()) + CHARACTER_COMBINATIONS))
-		for evdev, names in keys.items():
-			wanted.setdefault(evdev + 8, set()).update(combinations(names))
-		if mode == "browse":
-			for letter in BROWSE_CONTROL_LETTERS:
-				keycode = self._translator.keycodeFor(ord(letter), False)
-				if keycode is not None:
-					wanted.setdefault(keycode, set()).add(X.ControlMask)
-		for names, vk, extended in self._gestureKeys[mode]:
-			keycode = self._translator.keycodeFor(vk, extended)
-			if keycode is not None and names <= GESTURE_MASKS.keys():
-				wanted.setdefault(keycode, set()).add(sum(GESTURE_MASKS[name] for name in names))
+		wanted = captureSet(self._translator, mode, self._gestureKeys[mode])
 		for keycode in self._grabbed:
 			# The NVDA keys' own grabs, on the same window, would be taken over.
 			wanted.pop(keycode, None)
