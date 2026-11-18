@@ -298,6 +298,12 @@
         # rig env to give Qt its X platform plugin. PyQt6's own Qt.
         LINDA_QT6_PLUGIN_PATH = "${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}";
 
+        # The X servers tests/linux/test_screenCurtain.py starts inside the rig,
+        # off PATH: Xorg with the dummy driver, which has a CRTC's gamma ramps
+        # as a graphics card's driver does, and Xephyr, which has none.
+        LINDA_XORG_BIN = "${pkgs.xorg-server}/bin";
+        LINDA_XORG_MODULE_PATH = "${pkgs.xf86-video-dummy}/lib/xorg/modules,${pkgs.xorg-server}/lib/xorg/modules";
+
         # The terminal fixture's shell. The bash on PATH is stdenv's, built
         # without readline, so arrows and Control with them would type escape
         # sequences instead of editing the line.

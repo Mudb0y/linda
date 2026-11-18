@@ -160,6 +160,18 @@ def _qt6PluginPath(value: str) -> None:
 	_holds(_directory(value), "platforms/libqxcb.so")
 
 
+def _xorgBin(value: str) -> None:
+	_program(_directory(value), "Xorg")
+	_program(_directory(value), "Xephyr")
+
+
+def _xorgModulePath(value: str) -> None:
+	dummy, server = value.split(",")
+	# The dummy video driver, and the server's own modules that it builds on.
+	_holds(_directory(dummy), "drivers/dummy_drv.so")
+	_holds(_directory(server), "libshadow.so")
+
+
 def _bash(value: str) -> None:
 	path = _elfFile(value)
 	assert path.name == "bash" and os.access(path, os.X_OK), value
@@ -234,6 +246,8 @@ SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
 	"LINDA_CARGO_VENDOR_DIR": _cargoVendorDir,
 	"LINDA_PKG_CONFIG_PATH": _pkgConfigPath,
 	"LINDA_QT6_PLUGIN_PATH": _qt6PluginPath,
+	"LINDA_XORG_BIN": _xorgBin,
+	"LINDA_XORG_MODULE_PATH": _xorgModulePath,
 	"LINDA_BASH": _bash,
 	"LINDA_RIG_PATH": _searchPath,
 	"LINDA_RIG_XDG_DATA_DIRS": _searchPath,
