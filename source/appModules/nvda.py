@@ -148,15 +148,73 @@ if sys.platform != "win32":
 		def _get_value(self):
 			return ownGui.focusedListItemText()
 
+		#: Milliseconds between looks for the item scrolled into view, and how many looks it gets before the
+		#: list itself is read as the focus.
+		REVEAL_RETRY_MS = 30
+		REVEAL_TRIES = 10
+
+		def event_gainFocus(self):
+			# wxGTK has no object for an item out of view, and gives no focus to the one it makes for an item
+			# scrolled into view. Given it here, with the list read as entered, both are read as on Windows.
+			if ownGui.revealFocusedListItem():
+				self._focusRevealedItem(self.REVEAL_TRIES)
+				return
+			super().event_gainFocus()
+
+		def _focusRevealedItem(self, tries: int) -> None:
+			if api.getFocusObject() is not self:
+				return
+			item = self._focusedItem()
+			if item is not None:
+				# The list has become the focus already, so the item's focus would not read it as entered.
+				eventHandler.executeEvent("focusEntered", self)
+				eventHandler.queueEvent("gainFocus", item)
+			elif tries > 0:
+				core.callLater(self.REVEAL_RETRY_MS, self._focusRevealedItem, tries - 1)
+			else:
+				super().event_gainFocus()
+
+		def _focusedItem(self):
+			"""The object of the row the list's focused item is in, once it is in one."""
+			listCtrl = ownGui.focusedListCtrl()
+			if listCtrl is None:
+				return None
+			index = ownGui.focusedListRow(listCtrl)
+			if index < 0:
+				return None
+			item = self.getChild(index - listCtrl.GetTopItem())
+			return item if item is not None and _wxListRowOf(item) == index else None
+
+	def _wxListRowOf(item: NVDAObject) -> int:
+		"""Which item of its wx list control the row object item now holds, as wxGTK says; -1 when it
+		does not say."""
+		position = getattr(item, "atspiAttributes", {}).get("posinset", "")
+		return int(position) - 1 if position.isdigit() else -1
+
 	class NvdaGtkWxListItem(NVDAObject):
 		"""An item of a wx list control, which wxGTK reports focused a moment before it reports it
-		selected, so that it would be read as not selected. NVDA's own lists select the item they focus."""
+		selected, so that it would be read as not selected. NVDA's own lists select the item they focus.
+
+		wxGTK gives GTK an object for each row in view, not for each item: as the list scrolls, the
+		items move through those objects, so the focus stays on the object it was on while the item in
+		it changes, and only its name says so.
+		"""
 
 		def _get_states(self):
 			states = super().states
 			if controlTypes.State.FOCUSED in states:
 				states = states | {controlTypes.State.SELECTED}
 			return states
+
+		def event_nameChange(self):
+			if self != api.getFocusObject():
+				super().event_nameChange()
+				return
+			listCtrl = ownGui.focusedListCtrl()
+			# The focused item scrolled into this row: the focus moved to it. Any other item in it is one the
+			# list scrolled past, and the row now holding the focused item is focused in its turn.
+			if listCtrl is not None and _wxListRowOf(self) == ownGui.focusedListRow(listCtrl) >= 0:
+				eventHandler.queueEvent("gainFocus", self)
 
 	class NvdaGtkGroupingLabel(NVDAObject):
 		"""The label GTK keeps inside a group box, which Windows does not have as an object of its own and

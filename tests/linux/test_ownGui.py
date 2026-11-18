@@ -297,7 +297,7 @@ def test_startAfterSignInIsOfferedAndSaysWhyThisCopyCannot(desktop: DesktopSessi
 
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
 	step(desktop, "Return", "Settings... S 1 of 4")
-	step(desktop, "Return", "Categories: list…")
+	step(desktop, "Return", "Categories: list", "General 1 of 16")
 	for _press in range(12):
 		mark = desktop.mark()
 		desktop.press("Tab")
@@ -423,6 +423,90 @@ def test_brailleViewerOpensAndClosesFromTheToolsMenu(desktop: DesktopSession):
 	assertExitedCleanly(nvda)
 
 
+#: The settings dialog's categories, sixteen, of which its list shows fifteen at a time.
+CATEGORY_NAMES = (
+	"General",
+	"Speech",
+	"Braille",
+	"Audio",
+	"Privacy and Security",
+	"Vision",
+	"Keyboard",
+	"Mouse",
+	"Review Cursor",
+	"Object Presentation",
+	"Browse Mode",
+	"Document Formatting",
+	"Document Navigation",
+	"Remote Access",
+	"NVDA Add-on Store",
+	"Advanced",
+)
+
+
+def test_categoriesOutOfViewAreReadWithTheirPlaceInTheWholeList(desktop: DesktopSession, tmp_path: Path):
+	nvda = start(desktop, sessionConfig(tmp_path / "config"))
+	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
+	count = len(CATEGORY_NAMES)
+	# Opened again, the dialog's list used to open scrolled a row past the category it selects.
+	for _opening in range(2):
+		step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
+		step(desktop, "Return", "Settings... S 1 of 4")
+		step(
+			desktop,
+			"Return",
+			"Linda Settings: General (normal configuration) dialog",
+			"Categories: list",
+			f"General 1 of {count}",
+		)
+		# The last category is out of view until the list scrolls to it, and General after that.
+		for index, name in enumerate(CATEGORY_NAMES[1:], 2):
+			step(desktop, "Down", f"{name} {index} of {count}")
+		for index in range(count - 1, 0, -1):
+			step(desktop, "Up", f"{CATEGORY_NAMES[index - 1]} {index} of {count}")
+		step(desktop, "Escape", *AT_START)
+	desktop.close()
+	assertExitedCleanly(nvda)
+
+
+#: Symbols read past the few the symbol pronunciation dialog's list shows at once.
+SYMBOLS_READ = 20
+
+
+def test_symbolsScrolledIntoViewAreReadWithTheirPlaceInTheWholeList(desktop: DesktopSession, tmp_path: Path):
+	nvda = start(desktop, sessionConfig(tmp_path / "config"))
+	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
+	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
+	step(desktop, "Return", "Settings... S 1 of 4")
+	step(desktop, "Down", "Speech dictionaries sub Menu D 2 of 4")
+	step(desktop, "Down", "Punctuation slash symbol pronunciation... P 3 of 4")
+	mark = step(desktop, "Return", "Symbol Pronunciation (English) dialog", "Symbols list", timeout=15)
+	desktop.expect("Symbols list", "…", since=mark)
+	first = desktop.spokenSince(mark)[-1]
+	count = int(first.rsplit(" of ", 1)[1])
+	assert first.endswith(f" 1 of {count}"), first
+
+	def arrow(key: str, position: int) -> None:
+		mark = desktop.mark()
+		desktop.press(key)
+		deadline = time.monotonic() + 5
+		while not any(text.endswith(f" {position} of {count}") for text in desktop.spokenSince(mark)):
+			assert time.monotonic() < deadline, (key, position, desktop.spokenSince(mark))
+			time.sleep(0.05)
+		time.sleep(0.2)
+		assert len(desktop.spokenSince(mark)) == 1, desktop.spokenSince(mark)
+
+	for position in range(2, SYMBOLS_READ + 1):
+		arrow("Down", position)
+	for position in range(SYMBOLS_READ - 1, 0, -1):
+		arrow("Up", position)
+	arrow("End", count)
+	arrow("Home", 1)
+	step(desktop, "Escape", *AT_START)
+	desktop.close()
+	assertExitedCleanly(nvda)
+
+
 def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSession, tmp_path: Path):
 	# Insert and numpad Insert only, upstream's default.
 	config = sessionConfig(tmp_path / "config", drop=("NVDAModifierKeys",))
@@ -442,9 +526,9 @@ def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSe
 		desktop,
 		"Return",
 		"Linda Settings: General (normal configuration) dialog",
-		# The list holds more categories than it shows: opened scrolled away from the item it has
-		# selected, it says the item with itself, and otherwise the item after itself.
-		"Categories: list…",
+		# The list is spoken before the item it has selected, as on Windows.
+		"Categories: list",
+		"General 1 of 16",
 	)
 	time.sleep(SETTLE)
 	assert not [text for text in desktop.spokenSince(mark) if text.startswith("OK button")]
@@ -457,7 +541,7 @@ def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSe
 
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
 	step(desktop, "Return", "Settings... S 1 of 4")
-	step(desktop, "Return", "Categories: list…")
+	step(desktop, "Return", "Categories: list", "General 1 of 16")
 	downToKeyboard(desktop)
 	# Applied, and kept although the dialog was then cancelled.
 	step(desktop, "Tab", "Keyboard layout: combo box laptop collapsed Alt plus K")

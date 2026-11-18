@@ -359,15 +359,46 @@ def _focusAndItsParent() -> tuple[wx.Window | None, wx.Window | None]:
 	return focus, focus.GetParent() if focus else None
 
 
-def focusedListItemText() -> str:
-	"""The text of the focused item of the wx list control that has the focus, if one has it."""
+def focusedListCtrl() -> wx.ListCtrl | None:
+	"""The wx list control that has the focus, if one has it."""
 	for window in _focusAndItsParent():
 		if isinstance(window, wx.ListCtrl):
-			index = window.GetFocusedItem()
-			if index < 0:
-				index = window.GetFirstSelected()
-			return window.GetItemText(index) if index >= 0 else ""
-	return ""
+			return window
+	return None
+
+
+def focusedListRow(listCtrl: wx.ListCtrl) -> int:
+	"""The index of listCtrl's focused item, or of its first selected one; -1 when it has neither."""
+	index = listCtrl.GetFocusedItem()
+	return index if index >= 0 else listCtrl.GetFirstSelected()
+
+
+def focusedListItemText() -> str:
+	"""The text of the focused item of the wx list control that has the focus, if one has it."""
+	listCtrl = focusedListCtrl()
+	if listCtrl is None:
+		return ""
+	index = focusedListRow(listCtrl)
+	return listCtrl.GetItemText(index) if index >= 0 else ""
+
+
+def revealFocusedListItem() -> bool:
+	"""Scroll the wx list control that has the focus to its focused item when that is out of view, and
+	say whether it was.
+
+	wxGTK gives GTK an object for each row in view and for no other, so an item out of view cannot
+	have the focus there. The settings dialog's categories, which hold more rows than they show, open
+	scrolled a row past the first category, which they have selected.
+	"""
+	listCtrl = focusedListCtrl()
+	if listCtrl is None:
+		return False
+	index = focusedListRow(listCtrl)
+	top = listCtrl.GetTopItem()
+	if index < 0 or top <= index < top + max(listCtrl.GetCountPerPage(), 1):
+		return False
+	listCtrl.EnsureVisible(index)
+	return True
 
 
 def focusedTree() -> wx.TreeCtrl | None:

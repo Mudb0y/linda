@@ -173,9 +173,7 @@ CATEGORIES = [
 	"Document Navigation 13 of 16",
 	"Remote Access 14 of 16",
 	"NVDA Add-on Store 15 of 16",
-	# The list holds more categories than it shows, and the last, reached as it scrolls, is said
-	# without its position.
-	"Advanced…",
+	"Advanced 16 of 16",
 ]
 
 #: What Linda+B reads in each panel or group that a feature Linux lacks was taken out of, and would
@@ -212,14 +210,14 @@ def openSettings(desktop: DesktopSession) -> None:
 		desktop,
 		"Return",
 		"Linda Settings: General (normal configuration) dialog",
-		# Opened scrolled away from the item it has selected, the list says the item with itself.
-		"Categories: list…",
+		"Categories: list",
+		"General 1 of 16",
 	)
 
 
 def toCategory(desktop: DesktopSession, current: str, name: str) -> None:
 	"""Arrow down the categories from current to name, hearing each."""
-	names = [category.rstrip("…").rsplit(" ", 3)[0] for category in CATEGORIES]
+	names = [category.rsplit(" ", 3)[0] for category in CATEGORIES]
 	for category in CATEGORIES[names.index(current) + 1 : names.index(name) + 1]:
 		step(desktop, "Down", category)
 

@@ -313,7 +313,11 @@ source/appModules/nvda.py
   the caret, as on Windows, so that the log viewer is read by line; a check list's check box cell is a check box named by its row's
   text; a wx list is named by its scroll pane when it has no name and
   gives its focused item as its value, and its focused item is selected,
-  as GTK says only a moment later; and the label GTK keeps inside a group box is
+  as GTK says only a moment later. wxGTK gives GTK an object for each row of
+  a wx list in view, not for each item, so a list that gets the focus with
+  its focused item out of view scrolls it into view and gives the focus to
+  its row, read after the list as entered, and an item scrolled into the
+  focused row, which only renames it, is read as the new focus; and the label GTK keeps inside a group box is
   invisible, so that a dialog's text leaves it out. A wx tree control, such
   as the Input Gestures dialog's, which wxGTK draws itself and shows GTK as
   an empty panel, is a tree view whose focus goes to its selected item, an
