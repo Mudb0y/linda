@@ -79,6 +79,8 @@ import speechViewer
 import winUser
 import api
 import NVDAState
+import platformFeatures
+from platformFeatures import Feature
 
 import sys
 from linuxPlatform.windowsOnly import startfile
@@ -904,12 +906,19 @@ class SysTrayIcon(wx.adv.TaskBarIcon):
 			# Translators: The label for the menu item to view the NVDA website
 			item = self.helpMenu.Append(wx.ID_ANY, _("NV Access &web site"))
 			self.Bind(wx.EVT_MENU, lambda evt: startfile(buildVersion.url), item)
-			# Translators: The label for the menu item to view the NVDA website's get help section
-			item = self.helpMenu.Append(wx.ID_ANY, _("&Help, training and support"))
-			self.Bind(wx.EVT_MENU, lambda evt: startfile(f"{buildVersion.url}/get-help/"), item)
-			# Translators: The label for the menu item to view the NVDA website's get help section
-			item = self.helpMenu.Append(wx.ID_ANY, _("NV Access &shop"))
-			self.Bind(wx.EVT_MENU, lambda evt: startfile(f"{buildVersion.url}/shop/"), item)
+			if platformFeatures.isSupported(Feature.NV_ACCESS_SUPPORT):
+				# Translators: The label for the menu item to view the NVDA website's get help section
+				item = self.helpMenu.Append(wx.ID_ANY, _("&Help, training and support"))
+				self.Bind(wx.EVT_MENU, lambda evt: startfile(f"{buildVersion.url}/get-help/"), item)
+				# Translators: The label for the menu item to view the NVDA website's get help section
+				item = self.helpMenu.Append(wx.ID_ANY, _("NV Access &shop"))
+				self.Bind(wx.EVT_MENU, lambda evt: startfile(f"{buildVersion.url}/shop/"), item)
+			else:
+				from linuxPlatform import branding
+
+				# NV Access do not support this build; its own project does.
+				item = self.helpMenu.Append(wx.ID_ANY, f"&Report a problem with {branding.NAME}")
+				self.Bind(wx.EVT_MENU, lambda evt: startfile(branding.ISSUES_URL), item)
 
 			self.helpMenu.AppendSeparator()
 

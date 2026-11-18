@@ -16,6 +16,8 @@ import buildVersion
 #: Linda's short name, which buildVersion gives on Linux.
 NAME = buildVersion.name
 LONG_NAME = "Linda Is Non-visual Desktop Access"
+#: Where a problem with Linda is reported, which NV Access do not support.
+ISSUES_URL = "https://github.com/Mudb0y/linda/issues"
 UPSTREAM_NAME = "NVDA"
 #: A message holding any of these speaks of NV Access, its site or its repositories.
 _UPSTREAM_MARKS = ("NV Access", "nvaccess")

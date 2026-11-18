@@ -439,7 +439,12 @@ source/gui/__init__.py
   every platform: the help menu's web pages, the donation page and the
   documentation open through startfile from linuxPlatform.windowsOnly,
   which is os.startfile on Windows and on Linux opens them with the
-  desktop's default application through xdg-open
+  desktop's default application through xdg-open. The help menu asks
+  platformFeatures whether to offer NV Access's help, training and
+  support and its shop, which on Linux it does not, since NV Access do not
+  support Linda: it offers Report a problem with Linda in their place,
+  which opens Linda's issues on GitHub. Windows supports every feature, so
+  it shows what it showed
 source/gui/addonStoreGui/controls/details.py
   every platform: the details say whether an add-on supports the platform
   NVDA runs on, or which it was made for

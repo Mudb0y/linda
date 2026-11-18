@@ -95,9 +95,9 @@ def answerFetchFailure(desktop: DesktopSession, since: int) -> None:
 
 def openWelcomeDialog(desktop: DesktopSession) -> None:
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
-	step(desktop, "h", "User Guide U 1 of 9")
-	step(desktop, "Up", "About... A 9 of 9")
-	step(desktop, "Up", "Welcome dialog... L 8 of 9")
+	step(desktop, "h", "User Guide U 1 of 8")
+	step(desktop, "Up", "About... A 8 of 8")
+	step(desktop, "Up", "Welcome dialog... L 7 of 8")
 	step(desktop, "Return", WELCOME, DESKTOP_LAYOUT)
 
 
