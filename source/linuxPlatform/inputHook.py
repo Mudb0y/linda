@@ -315,6 +315,13 @@ def _onKey(event: KeyEvent) -> bool:
 		passed = deliverKey(event.vkCode, event.scanCode, event.extended, event.injected, event.isUp)
 	finally:
 		_delivering.event = None
+	if not event.isUp and not passed:
+		import queueHandler
+
+		# Its command, queued there before this, may change what the keyboard is held for, as input
+		# help's and Remote Access's toggles do; looked at only at the watcher's next turn, the keys
+		# typed until then would reach the application, or no one.
+		queueHandler.queueFunction(queueHandler.eventQueue, _changed.set)
 	if event.vkCode == VK_CAPITAL and _source is not None and not event.repeat:
 		if not event.isUp and not passed:
 			# On Windows a key the hook blocks toggles nothing. The X server locks Caps Lock as the key goes

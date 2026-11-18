@@ -403,6 +403,20 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 """
 
 
+#: A global plugin for these tests only: the keyboard watcher's own turns stretched to half a
+#: minute, which would otherwise hide whether it looks again as soon as a command has run.
+SLOW_WATCH_PLUGIN = """
+import globalPluginHandler
+from linuxPlatform import inputHook
+
+
+class GlobalPlugin(globalPluginHandler.GlobalPlugin):
+	def __init__(self):
+		super().__init__()
+		inputHook.WATCH_INTERVAL = 30
+"""
+
+
 def blockHooks(directory: Path, plugin: str = BLOCK_PLUGIN) -> dict[str, str]:
 	hooks = directory / "hooks"
 	(hooks / "globalPlugins").mkdir(parents=True)
@@ -703,6 +717,23 @@ def test_inputHelpTurnedOnInAnOpenMenuHoldsTheKeyboardOnceItCloses(
 	assert entryState()[0] == ENTRY_TEXT, "the keyboard was not held once the menu let it go"
 	keyboard.press(keys.chord("1"))
 	desktop.expect("q", "input help off", since=mark)
+	keys.quit().assertClean(logNames=("nvda.log",))
+
+
+def test_inputHelpHoldsTheKeyboardFromTheNextKey(desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path):
+	keys = KeySession(desktop, tmp_path, "desktop", env=blockHooks(tmp_path, SLOW_WATCH_PLUGIN))
+	mark = desktop.mark()
+	keyboard.press(keys.chord("1"))
+	on = "input help on\N{HORIZONTAL ELLIPSIS}"
+	desktop.expect(on, since=mark)
+	keyboard.press("b")
+	desktop.expect(on, "b", since=mark)
+	time.sleep(0.3)
+	assert entryState()[0] == ENTRY_TEXT, "a key typed after input help was turned on reached the field"
+	keyboard.press(keys.chord("1"))
+	desktop.expect(on, "b", "input help off", since=mark)
+	keyboard.press("c")
+	waitForEntry("c")
 	keys.quit().assertClean(logNames=("nvda.log",))
 
 
