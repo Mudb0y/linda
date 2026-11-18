@@ -356,8 +356,11 @@ class LocalMachine:
 		:param pressed: True for key press, False for key release
 		"""
 		if sys.platform != "win32":
-			# The scan code tells the left Control Windows reports with AltGr from a real one.
-			wx.CallAfter(input.sendKey, vk_code, scan_code, extended, pressed)
+			# The transport already calls this on the main thread. A second hop there would put the key
+			# behind a leader's leaving that came after it, which releases what the leader held, and it
+			# would then stay down. The scan code tells the left Control Windows reports with AltGr from
+			# a real one.
+			input.sendKey(vk_code, scan_code, extended, pressed)
 			return
 		wx.CallAfter(input.sendKey, vk_code, None, extended, pressed)
 

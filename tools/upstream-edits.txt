@@ -183,7 +183,9 @@ source/_remoteClient/localMachine.py
   attention sequence, so a remote control+alt+delete is refused with
   upstream's own message for a SAS it cannot send. sendKey passes the scan
   code on, which tells the left Control Windows reports with AltGr from a
-  real one. playWave plays a sound the follower names by a path this
+  real one, and types the key at once rather than through a second
+  wx.CallAfter, which let a leader's leaving overtake its last key and
+  leave that key held down on the X display. playWave plays a sound the follower names by a path this
   computer does not have, as a Windows follower always does, from this
   copy's waves directory when it has one of that name
 source/_remoteClient/server.py

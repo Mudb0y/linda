@@ -52,6 +52,7 @@ GAP = 0.03
 
 PROBE_PLUGIN = """
 import os
+import time
 
 import globalPluginHandler
 import globalVars
@@ -85,6 +86,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	@script(gesture="kb:NVDA+shift+f11")
 	def script_push(self, gesture):
 		_remoteClient._remoteClient.pushClipboard()
+
+	@script(gesture="kb:NVDA+shift+f12")
+	def script_busy(self, gesture):
+		log.info("remote probe: busy")
+		time.sleep(1.5)
+		log.info("remote probe: idle")
 """
 
 
@@ -329,6 +336,25 @@ def test_leaderGoingAwayLeavesNoKeyDown(desktop: DesktopSession, tmp_path: Path)
 	assert launch.waitForExit(20) == 0, launch.describe()
 	waitForNoKeysDown()
 	controlled.peer.close()
+	launch.assertClean(logNames=("nvda.log",))
+
+
+def test_keyPressedAsTheLeaderLeavesIsNotLeftDown(desktop: DesktopSession, tmp_path: Path):
+	controlled = Controlled(desktop, tmp_path)
+	# With NVDA's main thread busy, the leader's last key and its leaving wait there together.
+	subprocess.run(["xdotool", "key", "Insert+shift+F12"], check=True)
+	controlled.nvda.waitForLog("remote probe: busy", 5)
+	controlled.peer.key(VK_LCONTROL, True)
+	controlled.peer.close()
+	controlled.nvda.waitForLog("remote probe: idle", 5)
+	controlled.nvda.waitForLog("Leader client disconnected", 5)
+	time.sleep(1)
+	assert not keysDown(), "a key the leader pressed before leaving is held down on the display"
+	subprocess.run(["xdotool", "key", "q"], check=True)
+	waitForEntry("q")
+	launch = controlled.nvda
+	launch.process.send_signal(signal.SIGTERM)
+	assert launch.waitForExit(20) == 0, launch.describe()
 	launch.assertClean(logNames=("nvda.log",))
 
 
