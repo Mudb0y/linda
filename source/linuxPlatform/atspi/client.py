@@ -46,6 +46,10 @@ PROBE_AFTER_SECONDS = 2.0
 CHILDREN_LIMIT = 200
 #: Accessibles visited at most when walking for one that has a state, where Collection is missing.
 WALK_LIMIT = 500
+#: What Atspi.init returns when it cannot connect to the accessibility bus.
+_INIT_NO_BUS = 2
+#: The desktop's bus name, which libatspi gives the desktop it returns.
+REGISTRY_BUS_NAME = "org.a11y.atspi.Registry"
 
 
 class NodeGone(LookupError):
@@ -90,6 +94,9 @@ _refused: set[str] = set()
 #: When each application last answered slowly, and how long it took, over the budget's window.
 _slowAnswers: dict[str, collections.deque[tuple[float, float]]] = {}
 _mainThreadId = threading.main_thread().ident
+#: Whether libatspi could not connect to the accessibility bus. It then ends the whole process with
+#: abort() on the first call that needs the bus, so no call is made.
+_hasNoBus = False
 
 
 def _isPlainCallable(func: Callable) -> bool:
@@ -112,6 +119,8 @@ def call[T](node: Node, func: Callable[..., T], *args) -> T:
 	global callCount, callSeconds
 	if threading.get_ident() != _mainThreadId:
 		raise NodeGone("AT-SPI is only read on the main thread")
+	if _hasNoBus:
+		raise NodeGone("there is no accessibility bus")
 	busName = node.busName
 	if busName in _refused:
 		raise NodeGone(busName)
@@ -193,9 +202,21 @@ class Client:
 	"""Questions about nodes, each one round trip to the application in this implementation."""
 
 	def __init__(self) -> None:
-		Atspi.init()
-		Atspi.set_timeout(TIMEOUT_MS, TIMEOUT_MS)
+		global _hasNoBus
 		self._listener = None
+		if Atspi.init() == _INIT_NO_BUS:
+			from logHandler import log
+
+			log.warning("AT-SPI: cannot connect to the accessibility bus; no program can be read")
+			_hasNoBus = True
+			return
+		Atspi.set_timeout(TIMEOUT_MS, TIMEOUT_MS)
+
+	@property
+	def hasBus(self) -> bool:
+		"""Whether libatspi is connected to the accessibility bus. Without it every call on a node raises
+		NodeGone, and the desktop has no children."""
+		return not _hasNoBus
 
 	def node(self, acc) -> Node | None:
 		if acc is None:
@@ -206,6 +227,8 @@ class Client:
 			return None
 
 	def desktop(self) -> Node:
+		if _hasNoBus:
+			return Node(REGISTRY_BUS_NAME, ROOT_PATH, None)
 		return self.node(Atspi.get_desktop(0))
 
 	def applications(self) -> list[Node]:
@@ -490,6 +513,8 @@ class Client:
 				anyData = self.node(anyData)
 			callback(event.type, self.node(event.source), event.detail1, event.detail2, anyData)
 
+		if _hasNoBus:
+			return
 		self._listener = Atspi.EventListener.new(onEvent)
 		for eventType in eventTypes:
 			self._listener.register(eventType)

@@ -522,6 +522,17 @@ def test_progressDialogEnds(start: Start):
 	nvda.assertClean(logNames=("nvda.log",))
 
 
+def test_startsAndSaysSoWithoutAnAccessibilityBus(start: Start):
+	# libatspi aborts the process on the first call that needs a bus it could not reach. A launcher
+	# that crashed leaves its address behind just as dead.
+	nvda = start("noBus", "exit", welcome=False, env={"AT_SPI_BUS_ADDRESS": "unix:path=/nonexistent/a11y"})
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	assert any("cannot reach the accessibility bus" in text for text in nvda.spokenTexts()), nvda.describe()
+	# GTK says on standard error that it found no bus either.
+	nvda.assertClean(ignoring={"stderr"}, logNames=("nvda.log",))
+
+
 def test_checkRunningAndQuit(start: Start):
 	before = start("checkBefore", None, "--check-running")
 	assert before.waitForExit(SHUTDOWN_BOUND) == 1, before.describe()

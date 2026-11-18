@@ -533,13 +533,30 @@ def _onPostNvdaStartup() -> None:
 	core.callLater(INITIAL_FOCUS_RETRY_MS, _lookForInitialFocus)
 
 
+def _sayThereIsNoBus() -> None:
+	import ui
+
+	ui.message(
+		# Translators: Said as NVDA starts on Linux when it cannot connect to the accessibility bus,
+		# through which it reads every program and its own windows; it can still speak and run its
+		# commands. at-spi2-core is the package that provides the bus.
+		_(
+			"NVDA cannot reach the accessibility bus, so it cannot read any program or its own windows. "
+			"Check that at-spi2-core is installed and its bus launcher is running, then restart NVDA.",
+		),
+	)
+
+
 def initialize() -> None:
 	global _listening, _exiting
 	_exiting = False
-	client().listen(EVENT_TYPES, _onEvent)
-	_listening = True
 	import core
 
+	if not client().hasBus:
+		core.postNvdaStartup.register(_sayThereIsNoBus)
+		return
+	client().listen(EVENT_TYPES, _onEvent)
+	_listening = True
 	core.postNvdaStartup.register(_onPostNvdaStartup)
 
 
@@ -548,6 +565,7 @@ def terminate() -> None:
 	import core
 
 	core.postNvdaStartup.unregister(_onPostNvdaStartup)
+	core.postNvdaStartup.unregister(_sayThereIsNoBus)
 	if _listening:
 		client().stopListening(EVENT_TYPES)
 	_listening = False
