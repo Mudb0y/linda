@@ -875,6 +875,42 @@ def test_keySentBackKeepsItsModifiers(tmp_path: Path):
 	assert done.value == {"Shift_L first": [True], "Tab first": [True]}
 
 
+#: numpad Insert as the NVDA key, pressed after a modifier and with f, each key kept by NVDA: the
+#: key codes of the presses the window gets for each modifier, which should be that modifier's alone.
+NUMPAD_INSERT_CHILD = r"""
+from Xlib import XK
+source.setConsumed(x11.NUMPAD_INSERT, False)
+first = makeWindow()
+time.sleep(0.5)
+source._deliver = lambda event: not event.captured
+result = {}
+for modifier in ("Control_L", "Alt_L", "Super_L"):
+	while app.pending_events():
+		app.next_event()
+	kb.down(modifier)
+	kb.down("KP_Insert")
+	kb.press("f")
+	kb.up("KP_Insert")
+	kb.up(modifier)
+	time.sleep(0.3)
+	got = []
+	while app.pending_events():
+		event = app.next_event()
+		if event.type == X.KeyPress:
+			got.append(event.detail)
+	result[modifier] = got == [app.keysym_to_keycode(XK.string_to_keysym(modifier))] or got
+source.stop()
+"""
+
+
+def test_numpadInsertAfterAModifierIsNVDAs(tmp_path: Path):
+	# Num Lock is off on the rig's display, so the key is numpad Insert rather than 0.
+	with DesktopSession(tmp_path / "desktop", windowManager=False):
+		done = harness.runChild(tmp_path, SOURCE_CHILD + NUMPAD_INSERT_CHILD, timeout=60)
+	assert done.error is None, done.error
+	assert done.value == {"Control_L": True, "Alt_L": True, "Super_L": True}
+
+
 #: Space kept by NVDA in browse mode, its window going while the key is still down, then NVDA+Space
 #: in the window after it.
 WINDOW_GONE_CHILD = r"""

@@ -155,6 +155,10 @@ NUM_LOCK_MASK = X.Mod2Mask
 #: Modifiers a numpad review grab is made with every combination of: Shift, which NVDA's review
 #: commands use, and the locks and AltGr, which would otherwise make the grab miss.
 NUMPAD_GRAB_MODS = (X.ShiftMask, X.LockMask, X.Mod3Mask, X.Mod5Mask)
+#: Those numpad Insert is grabbed with every combination of as an NVDA key: the NVDA key's chords are
+#: begun with Control, Alt or Super held as often as with the NVDA key. Num Lock is left out, with
+#: which the key types 0.
+NUMPAD_INSERT_GRAB_MODS = (*NUMPAD_GRAB_MODS, X.ControlMask, X.Mod1Mask, X.Mod4Mask)
 #: evdev codes of the numpad review keys: 1 to 9, plus, divide and multiply.
 NUMPAD_REVIEW_KEYS = (71, 72, 73, 75, 76, 77, 79, 80, 81, 78, 98, 55)
 INSERT_KEY = 110
@@ -1301,20 +1305,24 @@ class X11KeySource:
 		if self._consumedWanted is None:
 			return []
 		nvdaModifierKeys, numpadReview = self._consumedWanted
-		numpadMods = sorted(
-			{
-				sum(combination)
-				for count in range(len(NUMPAD_GRAB_MODS) + 1)
-				for combination in itertools.combinations(NUMPAD_GRAB_MODS, count)
-			},
-		)
+
+		def combinations(masks: tuple[int, ...]) -> list[int]:
+			return sorted(
+				{
+					sum(combination)
+					for count in range(len(masks) + 1)
+					for combination in itertools.combinations(masks, count)
+				},
+			)
+
+		numpadMods = combinations(NUMPAD_GRAB_MODS)
 		wanted: list[tuple[int, list[int] | None, str]] = []
 		if nvdaModifierKeys & EXTENDED_INSERT:
 			wanted.append((INSERT_KEY + 8, None, "Insert key"))
 		if nvdaModifierKeys & CAPS_LOCK:
 			wanted.append((CAPS_LOCK_KEY + 8, None, "Caps Lock key"))
 		if nvdaModifierKeys & NUMPAD_INSERT:
-			wanted.append((NUMPAD_INSERT_KEY + 8, numpadMods, "numpad Insert key"))
+			wanted.append((NUMPAD_INSERT_KEY + 8, combinations(NUMPAD_INSERT_GRAB_MODS), "numpad Insert key"))
 		if numpadReview:
 			wanted.extend((evdev + 8, numpadMods, "numpad review keys") for evdev in NUMPAD_REVIEW_KEYS)
 		return wanted
