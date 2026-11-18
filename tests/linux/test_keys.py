@@ -600,3 +600,90 @@ def test_keyNamesMatchTheRecordedOnes(tmp_path: Path):
 	for layout in layouts:
 		expected = (KEY_NAMES / f"names-{layout}.txt").read_text().splitlines()
 		assert done.value[layout] == expected
+
+
+#: The key source alone, in a child, with a window of the child's own to grab keys on and the rig's
+#: keyboard to type on. Its NVDA keeps a captured Space and the NVDA key, as browse mode's activation
+#: and NVDA+Space do, and passes every other key.
+SOURCE_CHILD = r"""
+import sys, time
+sys.path.insert(0, str(harness.HERE))
+from Xlib import X, Xatom, display
+from linuxPlatform.keys import x11
+from test_keys import Keyboard
+
+delivered = []
+
+def deliver(event):
+	delivered.append((event.vkCode, event.isUp))
+	return not event.captured or event.vkCode not in (0x20, 0x2D)
+
+source = x11.X11KeySource()
+source.start(deliver, lambda: "browse")
+app = display.Display()
+root = app.screen().root
+pidAtom = app.intern_atom("_NET_WM_PID")
+kb = Keyboard()
+source.setConsumed(x11.EXTENDED_INSERT, True)
+
+def makeWindow(parent=None):
+	window = (parent or root).create_window(
+		0, 0, 200, 200, 0, app.screen().root_depth, event_mask=X.KeyPressMask
+	)
+	window.change_property(pidAtom, Xatom.CARDINAL, 32, [1])
+	window.map()
+	app.sync()
+	time.sleep(0.3)
+	window.set_input_focus(X.RevertToParent, X.CurrentTime)
+	app.sync()
+	time.sleep(0.2)
+	return window
+
+def reaches(key, timeout=3.0):
+	while app.pending_events():
+		app.next_event()
+	kb.press(key)
+	deadline = time.monotonic() + timeout
+	while time.monotonic() < deadline:
+		while app.pending_events():
+			if app.next_event().type == X.KeyPress:
+				return True
+		time.sleep(0.05)
+	return False
+"""
+
+#: Space kept by NVDA in browse mode, its window going while the key is still down, then NVDA+Space
+#: in the window after it.
+WINDOW_GONE_CHILD = r"""
+outer = makeWindow() if GONE == "parentUnmapped" else None
+first = makeWindow(outer)
+source.setCapture("browse")
+time.sleep(0.5)
+kb.down("space")
+time.sleep(0.3)
+{"destroyed": first.destroy, "unmapped": first.unmap, "parentUnmapped": lambda: outer.unmap()}[GONE]()
+app.sync()
+time.sleep(0.2)
+kb.up("space")
+time.sleep(0.3)
+second = makeWindow()
+source.setCapture("browse")
+time.sleep(0.5)
+kb.down("Insert")
+kb.press("space")
+kb.up("Insert")
+time.sleep(0.3)
+result = {"reached": reaches("F6")}
+source.stop()
+"""
+
+
+@pytest.mark.parametrize("gone", ("destroyed", "unmapped", "parentUnmapped"))
+def test_keyboardGoesFreeAfterTheWindowOfAHeldKeyGoes(tmp_path: Path, gone: str):
+	# The X server ends a grab whose window goes, and the release of the key that made it active
+	# never comes through it. Taken for still active, that grab would leave the release of Space under
+	# the NVDA key's own grab unanswered, and the keyboard held until NVDA let go of it.
+	with DesktopSession(tmp_path / "desktop", windowManager=False):
+		done = harness.runChild(tmp_path, f"GONE = {gone!r}\n" + SOURCE_CHILD + WINDOW_GONE_CHILD, timeout=60)
+	assert done.error is None, done.error
+	assert done.value == {"reached": True}, "the keyboard stayed held after NVDA+Space"

@@ -826,6 +826,11 @@ class X11KeySource:
 		elif event.type == X.KeyRelease:
 			self._onHeldRelease(event)
 		elif event.type in (X.FocusOut, X.FocusIn, X.DestroyNotify):
+			if event.type != X.DestroyNotify and event.mode in (X.NotifyNormal, X.NotifyUngrab):
+				# The X server says so only while no grab holds the keyboard: one of this source's has ended
+				# without the release of its key, as when its window was unmapped or destroyed under it,
+				# and that release, should it come under another grab, holds the keyboard like any other.
+				self._serverGrab = None
 			# The keys are captured on the window with the focus, which this one may no longer be; a
 			# grab moves the focus only for as long as it lasts.
 			moved = event.type == X.DestroyNotify or event.mode in (X.NotifyNormal, X.NotifyWhileGrabbed)
