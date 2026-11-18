@@ -61,3 +61,18 @@ def run(ground: "Ground") -> None:
 		typed = [(r["key"], r["value"]) for r in written]
 		app = ground.waitForKeys("app", typed, mark)
 		ground.machine.log(f"fake keyboard to the program: {ground.delays(written, app)}")
+
+	with ground.subtest("a keyboard that vanishes with Shift held has it released by the kernel"):
+		vanishing = ground.keyboard("Ground vanishing keyboard")
+		mark = ground.mark()
+		vanishing.run({"press": "KEY_LEFTSHIFT"}, {"sleep": 0.1}, {"vanish": True})
+		ground.waitForDevice("evdev", "Ground vanishing keyboard", change="removed")
+		ground.waitForDevice("x", "Ground vanishing keyboard", change="removed")
+		shift = [("KEY_LEFTSHIFT", 1), ("KEY_LEFTSHIFT", 0)]
+		ground.waitForKeys("evdev", shift, mark, device="Ground vanishing keyboard")
+		ground.waitForKeys("x", shift, mark)
+		# Typing afterwards is lower case: nothing still holds Shift down.
+		mark = ground.mark()
+		keyboard.tap("KEY_F")
+		app = ground.waitForKeys("app", [("KEY_F", 1), ("KEY_F", 0)], mark)
+		assert app[0]["keyval"] == "f", app
