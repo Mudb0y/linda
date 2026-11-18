@@ -269,6 +269,9 @@ source/appModuleHandler.py
   teardown, which Linux has none of. The status bar is found by its AT-SPI
   role under the foreground window, where upstream raises NotImplementedError
   and NVDA then looks at whatever lies at the window's bottom corner
+source/appModules/__init__.py
+  every platform: maps the program mate-screensaver-dialog, whose name holds
+  hyphens, to its app module; no Windows program has this name
 source/appModules/caja.py
   Linux runtime: added. The app module for MATE's file manager, which speaks
   the folder Caja opens in the same view and makes the file it selects
@@ -286,6 +289,11 @@ source/appModules/electron.py
   Linux runtime: added. A program on a shared Electron that cannot be named
   goes by Electron's name and gets Chromium's app module; on Windows, where
   electron.exe would load it, it is the default
+source/appModules/mate_screensaver_dialog.py
+  Linux runtime: added. The app module for MATE's unlock prompt, which names
+  its password field with the label beside it and speaks the label that
+  says "Checking..." and "Incorrect password.", as NVDA's lockapp module
+  presents the Windows lock screen; no Windows program has this name
 source/appModules/marco.py
   Linux runtime: added. The app module for MATE's window manager, which
   speaks the window or workspace its switcher names while Alt+Tab is held,

@@ -11,9 +11,11 @@ import logging
 import textwrap
 
 import harness
+from desktopSession import DesktopSession
 
 SERVICES = harness.HERE / "fixtures" / "lockServices.py"
 SESSION_PATH = "/org/freedesktop/login1/session/_31"
+SESSION_CONFIG = harness.HERE / "fixtures" / "sessionConfig" / "nvda.ini"
 
 #: Starts the stand-ins and defines the helpers the tests share.
 PRELUDE = f"""
@@ -444,3 +446,21 @@ def test_withoutEitherSourceTheLockCannotBeTold(tmp_path):
 	assert [r for r in done.logRecords if "cannot tell whether this Linux session is locked" in r], (
 		done.logRecords
 	)
+
+
+def test_unlockPromptNamesItsFieldAndSpeaksItsMessages(tmp_path):
+	with DesktopSession(tmp_path / "desktop") as desktop:
+		prompt = desktop.startApp(desktop.fixture("mate-screensaver-dialog"), title="Unlock prompt")
+		assert prompt.stdout.readline() == "ready\n"
+		desktop.startNVDA(SESSION_CONFIG).waitForLog("NVDA initialized", 60)
+		desktop.expect("Password: edit protected blank", since=0, timeout=15)
+		# Two seconds apart, as the real prompt renames its label.
+		for message in ("Checking...", "Incorrect password."):
+			mark = desktop.mark()
+			prompt.stdin.write(message + "\n")
+			prompt.stdin.flush()
+			assert prompt.stdout.readline() == "done\n"
+			desktop.expect(message, since=mark, timeout=5)
+		# The clock above, renamed every second, is not read.
+		spoken = desktop.spokenSince(0)
+		assert not [text for text in spoken if text.count(":") == 2 and text[:2].isdigit()], spoken

@@ -27,6 +27,8 @@ EXECUTABLE_NAMES_TO_APP_MODS: dict[str, str] = {
 	"hxoutlook": "hxmail",
 	# 64-bit versions of Miranda IM should use module for the 32-bit executable.
 	"miranda64": "miranda32",
+	# MATE's unlock prompt, whose name holds hyphens.
+	"mate-screensaver-dialog": "mate_screensaver_dialog",
 	# Various incarnations of Media Player Classic.
 	"mpc-hc": "mplayerc",
 	"mpc-hc64": "mplayerc",
