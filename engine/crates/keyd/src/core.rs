@@ -158,8 +158,9 @@ pub struct Core<D: Devices> {
     client: Option<Client>,
     callers: BTreeMap<ConnId, Caller>,
     front: Front,
-    /// When the first of the presses that have gone unanswered one after another was read.
-    unanswered_since: Option<Instant>,
+    /// The run of unanswered presses, by when its first and its last press were read, as
+    /// UNANSWERED_SPAN in the protocol defines it.
+    unanswered: Option<(Instant, Instant)>,
     drop_pending: Option<Refusal>,
     virtual_broken: bool,
     out: Vec<Output>,
@@ -183,7 +184,7 @@ impl<D: Devices> Core<D> {
             client: None,
             callers: BTreeMap::new(),
             front: Front::Unknown,
-            unanswered_since: None,
+            unanswered: None,
             drop_pending: None,
             virtual_broken: false,
             out: Vec::new(),
@@ -1086,11 +1087,15 @@ impl<D: Devices> Core<D> {
                     // order the keys were read: its answer may well have come before an earlier
                     // press's bound ran out.
                     Some(keep) => {
-                        self.unanswered_since = None;
+                        self.unanswered = None;
                         keep
                     }
                     None if now >= e.arrival + VERDICT_TIMEOUT => {
-                        let first = *self.unanswered_since.get_or_insert(e.arrival);
+                        let first = match self.unanswered {
+                            Some((first, last)) if e.arrival <= last + UNANSWERED_GAP => first,
+                            _ => e.arrival,
+                        };
+                        self.unanswered = Some((first, e.arrival));
                         self.send_client(ToClient::Expired { seq: e.seq });
                         if e.arrival + VERDICT_TIMEOUT >= first + UNANSWERED_SPAN {
                             give_up = true;
@@ -1187,7 +1192,7 @@ impl<D: Devices> Core<D> {
             }
         }
         self.rescan_at = None;
-        self.unanswered_since = None;
+        self.unanswered = None;
         log!(
             "let go of every keyboard: {}",
             why.map_or("the client went".to_owned(), |w| format!("{w:?}"))

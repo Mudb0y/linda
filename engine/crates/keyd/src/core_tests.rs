@@ -618,6 +618,36 @@ fn a_press_answered_between_two_unanswered_ones_ends_the_run() {
     assert!(t.w.grabbed(k));
 }
 
+/// One unanswered press, and another read `apart` after it, also left unanswered.
+fn two_unanswered(apart: Duration) -> T {
+    let (mut t, k) = T::capturing();
+    t.press(k, KEY_A);
+    t.release(k, KEY_A);
+    t.pass(apart);
+    t.press(k, KEY_T);
+    t.release(k, KEY_T);
+    t.pass(VERDICT_TIMEOUT + ms(10));
+    t
+}
+
+#[test]
+fn unanswered_presses_within_the_gap_of_each_other_make_one_run() {
+    // The second is read inside the gap, and its bound ends a run spanning more than a second.
+    let mut t = two_unanswered(UNANSWERED_GAP - ms(50));
+    assert_eq!(goodbye_reason(&t.sent()), Some(Goodbye::Unanswered));
+    t.assert_let_go();
+}
+
+#[test]
+fn unanswered_presses_further_apart_than_the_gap_start_a_run_afresh() {
+    let mut t = two_unanswered(UNANSWERED_GAP + ms(50));
+    assert!(!t.closed(CLIENT), "{:?}", t.sent());
+    // However long ago the last one was.
+    let mut t = two_unanswered(Duration::from_secs(300));
+    assert!(!t.closed(CLIENT), "{:?}", t.sent());
+    assert!(t.core.holding());
+}
+
 // The heartbeat, and clients that go quiet or go away.
 
 #[test]

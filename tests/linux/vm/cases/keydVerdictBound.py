@@ -1,6 +1,7 @@
 """The bound on each key's verdict: a press the client does not answer is passed on a tenth of a second
 after it was read, the keys behind it wait for it and keep their order, a verdict that comes later
-changes nothing, and a client that leaves presses unanswered for a second is dropped.
+changes nothing, and a client that leaves presses unanswered through a second of typing is dropped,
+while one that misses two presses more than a second apart is not.
 """
 
 from typing import TYPE_CHECKING
@@ -66,13 +67,19 @@ def run(ground: "Ground") -> None:
 		assert client.call("state")["connected"], "a late verdict dropped the client"
 		ground.machine.log(f"C went to the program; its verdict to keep it came at {late['t']:.3f}, too late")
 
-	with ground.subtest("presses left unanswered for a second drop the client and let go"):
-		# A press answered in time ends the run C began, however long ago that was.
-		client.verdicts("pass")
-		mark = ground.mark()
-		keyboard.tap("KEY_N")
-		ground.waitForKeys("x", [("KEY_N", 1), ("KEY_N", 0)], mark, device=VIRTUAL_KEYBOARD)
+	with ground.subtest("unanswered presses more than a second apart are separate, and keep the client"):
+		# C went unanswered above; F, read well over a second later, starts a run of its own.
 		client.verdicts("never")
+		ground.settle(1.2)
+		mark = ground.mark()
+		keyboard.tap("KEY_F")
+		client.waitFor("EXPIRED", mark)
+		ground.waitForKeys("x", [("KEY_F", 1), ("KEY_F", 0)], mark, device=VIRTUAL_KEYBOARD)
+		ground.settle(0.3)
+		assert client.call("state")["connected"], client.records(mark)
+
+	with ground.subtest("presses left unanswered for a second of typing drop the client and let go"):
+		ground.settle(1.2)
 		mark = ground.mark()
 		steps: list[dict] = []
 		for key in ("KEY_D", "KEY_E", "KEY_F", "KEY_G", "KEY_H", "KEY_J", "KEY_K", "KEY_L"):

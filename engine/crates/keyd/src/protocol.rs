@@ -43,8 +43,9 @@
 //!    on its virtual keyboard only once every key read before it has been decided, so the client
 //!    may be sent several presses before it has answered the first, and answers them in any order.
 //!    A press not answered within [`VERDICT_TIMEOUT`] of its reading is passed on, and EXPIRED
-//!    says so; a verdict that comes later is ignored. When presses have gone unanswered one after
-//!    another for [`UNANSWERED_SPAN`], the helper lets go and sends GOODBYE UNANSWERED.
+//!    says so; a verdict that comes later is ignored. When the client fails to answer a run of
+//!    presses spanning [`UNANSWERED_SPAN`], the helper lets go and sends GOODBYE UNANSWERED; what
+//!    makes a run is given with that bound.
 //! 6. STOP asks the helper to let go, which it confirms with RELEASED STOPPED.
 //! 7. RELEASED, for whatever reason, means the helper holds no keyboard any more and has released
 //!    every key it held down on its virtual keyboard; the client should take every key it was told
@@ -113,14 +114,27 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
 /// that a hung reader leaves keys delayed rather than lost for no more than two seconds, since
 /// meanwhile each key is passed on after VERDICT_TIMEOUT anyway.
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(2);
-/// When presses have gone unanswered one after another, with no verdict in time between them, for
-/// this long from the reading of the first to the expiry of the last, the helper lets go and drops
-/// the client. This catches a client whose heartbeat goes on while the part that answers keys has
-/// hung or is always late, which would otherwise leave every key a tenth of a second late and every
-/// one of the client's commands run twice, by the client and by the application. A second is long
-/// enough for a pause of a working client, such as a garbage collection over a burst of fast
-/// typing, not to be taken for that.
+/// The rule that drops a client which is alive but keeps failing to answer, which would otherwise
+/// leave every key a tenth of a second late and every one of its commands run twice, by the client
+/// and by the application. Taking presses in the order they were read:
+/// - a press passed on at its bound, unanswered, joins the run of the press before it when there is
+///   one and it was read no more than [`UNANSWERED_GAP`] before this one; otherwise it starts a new
+///   run;
+/// - a press answered in time ends the run, as does letting go;
+/// - when a press joins a run so that the run spans this long, from the reading of its first press
+///   to the bound of this one, the helper lets go and drops the client.
+///
+/// A second is long enough for a pause of a working client, such as a garbage collection over a
+/// burst of fast typing, not to be taken for a hang.
 pub const UNANSWERED_SPAN: Duration = Duration::from_secs(1);
+/// The longest time between the readings of two unanswered presses that keeps them in one run. One
+/// second, as the span: while someone types, keys come far closer together than that, so a client
+/// that fails every key is dropped after a second of typing, while two failures further apart are
+/// two separate slow moments of a working client, which cost those two keys their tenth of a second
+/// and nothing more. A client that has hung outright is dropped by the heartbeat; one that fails
+/// only an occasional key between pauses of more than a second keeps its place, with each such key
+/// passed on late.
+pub const UNANSWERED_GAP: Duration = Duration::from_secs(1);
 /// How long a new connection has to send HELLO. One client at a time is served, so a connection
 /// that says nothing would otherwise keep the place of the client that should have it.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
