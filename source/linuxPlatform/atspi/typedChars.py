@@ -15,6 +15,7 @@ import time
 from difflib import SequenceMatcher
 from typing import Literal
 
+import inputCore
 import textUtils
 
 from .textSource import toolkitOf, unitFor
@@ -50,6 +51,26 @@ _kept: tuple[object, bytearray] | None = None
 #: When the key went down whose character a terminal last echoed, so that it is echoed once whether
 #: VTE's report or the terminal's own reading of its screen finds it first.
 echoedKeyTime: float | None = None
+#: The last key that went down typing text. Typing fast, Shift or an arrow goes down before NVDA gets
+#: to the insert the key before it made, and that insert is still this key's character.
+_lastTypingKey = None
+#: The last key whose character was echoed, which a later insert is not.
+_echoedKey = None
+
+
+def _noteTypingKey(pressed: bool) -> bool:
+	"""Note a key going down that types text, on the key source's thread, where it is being delivered."""
+	global _lastTypingKey
+	if pressed:
+		from linuxPlatform import inputHook
+
+		event = inputHook.deliveringKey()
+		if event is not None and event.typing and event.text >= " ":
+			_lastTypingKey = event
+	return True
+
+
+inputCore.decide_handleRawKey.register(_noteTypingKey)
 
 
 def claimEcho(keyTime: float | None) -> bool:
@@ -219,7 +240,7 @@ def handleTextChange(
 	objNode = getattr(obj, "node", None)
 	if node is None or objNode is None:
 		return
-	global _lastRemoved
+	global _lastRemoved, _echoedKey
 	key = _lastKeyDown()
 	isRecent = key is not None and time.monotonic() - key.time <= TYPING_WINDOW
 	inside = objNode != node
@@ -268,8 +289,12 @@ def handleTextChange(
 	if kind != "insert":
 		return
 	# Without a key source there is nothing to tell typing from an application's own inserts by.
+	afterTyping = False
 	if key is not None and not (isRecent and key.typing and key.text >= " "):
-		return
+		key = _lastTypingKey
+		if key is None or key is _echoedKey or time.monotonic() - key.time > TYPING_WINDOW:
+			return
+		afterTyping = True
 	if text is None or focus.isProtected:
 		toolkit = getattr(focus, "toolkit", None) or toolkitOf(node)
 		# An emoji is two UTF-16 units.
@@ -282,10 +307,11 @@ def handleTextChange(
 			return
 	else:
 		text = _typedPart(text, key)
-		if text in NOT_ECHOED or not isOneCharacter(text):
+		if text in NOT_ECHOED or not isOneCharacter(text) or (afterTyping and text != key.text):
 			return
 		character = text
 	# An editor whose paragraph and the run of text in it both report one change echoes it once.
 	if inside and not claimEcho(key.time):
 		return
+	_echoedKey = key
 	eventHandler.queueEvent("typedCharacter", focus, ch=character)
