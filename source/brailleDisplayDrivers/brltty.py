@@ -4,6 +4,8 @@
 # Copyright (C) 2008-2023 NV Access Limited, Babbage B.V, Bram Duvigneau
 
 import os  # noqa: I001
+import sys
+import threading
 import time
 import wx
 import braille
@@ -11,6 +13,11 @@ import braille.display.driver
 import braille.display.gesture
 from logHandler import log
 import inputCore
+
+if sys.platform != "win32":
+	import config
+	from braille.constants import AUTO_DISPLAY_NAME, NO_BRAILLE_DISPLAY_NAME
+	from linuxPlatform import brlapiClient
 
 try:
 	import brlapi
@@ -35,6 +42,13 @@ class BrailleDisplayDriver(braille.display.driver.BrailleDisplayDriver):
 	name = "brltty"
 	description = "brltty"
 	isThreadSafe = True
+	if sys.platform != "win32":
+		# A BrlAPI server comes and goes with BRLTTY, which on Linux is the only way to a display.
+		supportsAutomaticDetection = True
+
+		@classmethod
+		def registerAutomaticDetection(cls, driverRegistrar):
+			driverRegistrar.addDeviceScanner(brlapiClient.scan, moveToStart=True)
 
 	# Type info for auto property: _get_brlapi_pipes
 	brlapi_pipes: list[str]
@@ -55,12 +69,17 @@ class BrailleDisplayDriver(braille.display.driver.BrailleDisplayDriver):
 	def check(cls):
 		if not bool(brlapi):
 			return False
+		if sys.platform != "win32":
+			return brlapiClient.isReachable()
 		# Since this driver only supports local connections for now,
 		# we can mark it as unavailable if there are no BrlAPI named pipes present
 		return bool(cls.brlapi_pipes)
 
 	def __init__(self):
 		super().__init__()
+		if sys.platform != "win32":
+			self._initLinux()
+			return
 		self._con = brlapi.Connection()
 		self._con.enterTtyModeWithPath()
 		self._keyCheckTimer = wx.PyTimer(self._handleKeyPresses)
@@ -69,8 +88,66 @@ class BrailleDisplayDriver(braille.display.driver.BrailleDisplayDriver):
 		# NVDA may eventually implement this itself, but there's no reason to deny BRLTTY users this functionality in the meantime.
 		self._con.ignoreKeys(brlapi.rangeType_type, (brlapi.KEY_TYPE_SYM,))
 
+	if sys.platform != "win32":
+
+		def _initLinux(self):
+			self._lost = False
+			self._closed = False
+			self._keyCheckTimer = None
+			# Held while the timer is made, so that a terminate on another thread cannot miss it.
+			self._timerLock = threading.Lock()
+			try:
+				# What Windows asks of the server each time it is needed is asked once here, where waiting
+				# for the answer is bounded.
+				self._link = brlapiClient.connect(
+					# As on Windows: typing keys are BRLTTY's.
+					lambda con: con.ignoreKeys(brlapi.rangeType_type, (brlapi.KEY_TYPE_SYM,)),
+					onLost=self._connectionLost,
+				)
+			except Exception:
+				if config.conf["braille"]["display"] == self.name:
+					brlapiClient.watch()
+				raise
+			self._con = self._link.connection
+			if wx.IsMainThread():
+				self._startKeyCheckTimer()
+			else:
+				# Automatic detection makes the driver on its own thread, and wx starts timers on the main one.
+				wx.CallAfter(self._startKeyCheckTimer)
+
+		def _startKeyCheckTimer(self):
+			with self._timerLock:
+				if self._closed:
+					return
+				self._keyCheckTimer = wx.PyTimer(self._handleKeyPresses)
+				self._keyCheckTimer.Start(KEY_CHECK_INTERVAL)
+
+		def _connectionLost(self):
+			"""Give up the connection once, from any thread, as handleDisplayUnavailable does but with a
+			warning: BRLTTY restarting is no fault of NVDA's, and an error on every key check would fill
+			the log."""
+			if self._lost:
+				return
+			self._lost = True
+			log.warning("Lost the connection to BRLTTY", exc_info=True)  # noqa: LOG014
+			wx.CallAfter(self._replaceAfterLoss)
+
+		def _replaceAfterLoss(self):
+			if braille.handler is None or braille.handler.display is not self:
+				return
+			fallback = (
+				AUTO_DISPLAY_NAME
+				if config.conf["braille"]["display"] == AUTO_DISPLAY_NAME
+				else NO_BRAILLE_DISPLAY_NAME
+			)
+			braille.handler.setDisplayByName(fallback, isFallback=True)
+			brlapiClient.watch()
+
 	def terminate(self):
 		super().terminate()
+		if sys.platform != "win32":
+			with self._timerLock:
+				self._closed = True
 		# Exceptions might be raised if initialisation failed. Just ignore them.
 		try:
 			self._keyCheckTimer.Stop()
@@ -80,24 +157,38 @@ class BrailleDisplayDriver(braille.display.driver.BrailleDisplayDriver):
 		try:
 			# Give BRLTTY a chance to write the last piece of data to the display.
 			time.sleep(0.05)
-			self._con.leaveTtyMode()
+			if sys.platform != "win32":
+				self._link.close()
+			else:
+				self._con.leaveTtyMode()
 		except:  # noqa: E722, S110
 			pass
 
 	def _get_numCols(self) -> int:
+		if sys.platform != "win32":
+			return self._link.displaySize[0]
 		return self._con.displaySize[0]
 
 	def _get_numRows(self) -> int:
+		if sys.platform != "win32":
+			return self._link.displaySize[1]
 		return self._con.displaySize[1]
 
 	def display(self, cells: list[int]):
 		cells = bytes(cells)
+		if sys.platform != "win32" and (self._closed or self._lost):
+			return
 		# HACK: Temporarily work around a bug which causes brltty to freeze if data is written while there are key presses waiting.
 		# Simply consume and act upon any waiting key presses.
 		self._handleKeyPresses()
+		if sys.platform != "win32":
+			self._link.write(cells)
+			return
 		self._con.writeDots(cells)
 
 	def _get_driverName(self):
+		if sys.platform != "win32":
+			return self._link.driverName
 		return self._con.driverName.decode()
 
 	def _handleKeyPresses(self):
@@ -105,6 +196,9 @@ class BrailleDisplayDriver(braille.display.driver.BrailleDisplayDriver):
 			try:
 				key = self._con.readKey(False)
 			except:  # noqa: E722
+				if sys.platform != "win32":
+					self._connectionLost()
+					return
 				log.error("Error reading key press from brlapi", exc_info=True)  # noqa: G201
 				return
 			if not key:
