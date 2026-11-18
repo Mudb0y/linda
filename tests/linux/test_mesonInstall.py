@@ -3,9 +3,9 @@ DESTDIR, and the installed copy started from there.
 
 The build takes what the dev shell names as its options: the CLDR data, NVDA's pinned eSpeak NG, ICU's
 library directory and openevv's driver. Nothing is compiled in the rig, which has no compilers'
-environment, so the three native libraries are the dev shell's, which the same build made with
-program=false, installed through prebuilt_libraries; the rest of the build, the catalogues, the CLDR
-dictionaries and the braille tables, runs here. The start unsets every LINDA_ variable
+environment, so the three native libraries and the key capture helper are the dev shell's, which the
+same build made with program=false, installed through prebuilt_libraries; the rest of the build, the
+catalogues, the CLDR dictionaries and the braille tables, runs here. The start unsets every LINDA_ variable
 an installation fixes, so that the installed copy finds its pieces through linuxPlatform.installPaths,
 and names only the three libraries, which an installation keeps under /usr, where the rig has none of
 them. It speaks through eSpeak NG on the PipeWire fixture.
@@ -42,6 +42,8 @@ LIBRARIES = {
 	"libpwsink.so": "LINDA_PWSINK_LIB",
 	"libbre_vbuf.so": "LINDA_VBUF_ENGINE",
 }
+#: The key capture helper, which the same build makes and installs beside the PipeWire sink.
+HELPERS = ("linda-keyd",)
 #: Seconds for a whole build; it takes about twenty.
 BUILD_BOUND = 600
 STARTUP_BOUND = 60.0
@@ -61,13 +63,20 @@ def meson(
 	)
 
 
+def builtFiles() -> dict[str, Path]:
+	"""What the build with program=false made, as the dev shell has it, by name."""
+	files = {name: Path(os.environ[variable]) for name, variable in LIBRARIES.items()}
+	files.update({name: files["libpwsink.so"].parent / name for name in HELPERS})
+	return files
+
+
 def options(work: Path, *leftOut: str) -> list[str]:
 	"""The build's options as the dev shell gives them, but those named in leftOut."""
 	libraries = work / "libraries"
 	if not libraries.is_dir():
 		libraries.mkdir()
-		for name, variable in LIBRARIES.items():
-			(libraries / name).symlink_to(os.environ[variable])
+		for name, path in builtFiles().items():
+			(libraries / name).symlink_to(path)
 	given = [f"-D{name}={os.environ[variable]}" for name, variable in OPTIONS.items() if name not in leftOut]
 	return [f"-Dprebuilt_libraries={libraries}", *given]
 
@@ -124,7 +133,7 @@ def test_installsTheLayoutAndNothingElse(installed: Installed):
 		f"{PREFIX}/share/metainfo/io.github.mudb0y.linda.metainfo.xml",
 		f"{PREFIX}/share/man/man1/linda.1",
 		f"{PREFIX}/share/man/man1/linda-say.1",
-		*(f"{installed.libDir}/linda/{name}" for name in LIBRARIES),
+		*(f"{installed.libDir}/linda/{name}" for name in builtFiles()),
 	}
 	found = set()
 	appDir = installed.appDir
@@ -136,9 +145,11 @@ def test_installsTheLayoutAndNothingElse(installed: Installed):
 	assert found == expected
 	for name in ("linda", "linda-say"):
 		assert os.access(installed.path(f"{PREFIX}/bin/{name}"), os.X_OK), name
-	for name, variable in LIBRARIES.items():
+	for name, built in builtFiles().items():
 		path = installed.path(f"{installed.libDir}/linda/{name}")
-		assert not path.is_symlink() and path.read_bytes() == Path(os.environ[variable]).read_bytes(), name
+		assert not path.is_symlink() and path.read_bytes() == built.read_bytes(), name
+	for name in HELPERS:
+		assert os.access(installed.path(f"{installed.libDir}/linda/{name}"), os.X_OK), name
 	for relative in (
 		"linda.py",
 		"linuxPlatform/installPaths.py",

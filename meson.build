@@ -17,6 +17,9 @@ prefix = get_option('prefix')
 pkglibdir = prefix / get_option('libdir') / 'linda'
 appdir = prefix / get_option('datadir') / 'linda' / 'source'
 libraries = ['libnvdaVbuf.so', 'libpwsink.so', 'libbre_vbuf.so']
+# The key capture helper, a system service of its own that nothing in this build starts. It is
+# private to Linda, as the libraries are, and goes beside them.
+helpers = ['linda-keyd']
 
 if get_option('program')
   # NVDA pins 3.13, and the code and the add-ons written against it are tested on that alone.
@@ -29,10 +32,10 @@ else
 endif
 
 # The native libraries: NVDA's virtual buffer storage, and the engine's PipeWire sink and document
-# renderer.
+# renderer; and the engine's key capture helper.
 prebuilt = get_option('prebuilt_libraries')
 if prebuilt != ''
-  foreach name : libraries
+  foreach name : libraries + helpers
     if not fs.is_file(prebuilt / name)
       error('-Dprebuilt_libraries names @0@, which holds no @1@'.format(prebuilt, name))
     endif
@@ -67,7 +70,7 @@ else
   vendor_args = vendor == '' ? [] : ['--vendor-dir', vendor]
   cargo_target = meson.current_build_dir() / 'cargo-target'
   custom_target('engine',
-    output: ['libpwsink.so', 'libbre_vbuf.so'],
+    output: ['libpwsink.so', 'libbre_vbuf.so'] + helpers,
     command: [python, src / 'tools' / 'cargo-libraries', vendor_args, cargo, cargo_target, '@OUTDIR@'],
     console: true,
     build_always_stale: true,

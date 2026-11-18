@@ -114,8 +114,9 @@
       };
 
       # The Meson build's two shapes. The libraries, browse mode's storage and renderer and the
-      # PipeWire sink, are a package of their own, which the dev shell names as well; the program
-      # installs them from it, so that a change to the Python tree rebuilds neither them nor the shell.
+      # PipeWire sink, with the key capture helper, are a package of their own, which the dev shell
+      # names as well; the program installs them from it, so that a change to the Python tree
+      # rebuilds neither them nor the shell.
       libraries = pkgs.callPackage ./nix/linda.nix {
         inherit python cargoVendorDir;
         librariesOnly = true;

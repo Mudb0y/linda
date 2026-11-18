@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Builds the engine's two libraries for the Meson build and copies them where Meson expects them, or
-with --test runs the tests of the crates that need no D-Bus and no PipeWire.
+"""Builds the engine's two libraries and the key capture helper for the Meson build and copies them
+where Meson expects them, or with --test runs the tests of the crates that need no D-Bus and no
+PipeWire.
 
 cargo-libraries [--test] [--vendor-dir DIR] CARGO TARGET_DIR [OUT_DIR]
 
@@ -19,11 +20,12 @@ import sys
 from pathlib import Path
 
 ENGINE = Path(__file__).resolve().parent.parent / "engine"
-#: Each package built, with the library it makes.
-LIBRARIES = {"linda-pwsink": "libpwsink.so", "linda-vbufengine": "libbre_vbuf.so"}
-#: The ring, the position and the clock of the PipeWire sink; the other crates' tests speak D-Bus or
-#: PipeWire and run only in the rig.
-TESTED = ("linda-pwsink-core",)
+#: Each package built, with the file it makes.
+BUILT = {"linda-pwsink": "libpwsink.so", "linda-vbufengine": "libbre_vbuf.so", "linda-keyd": "linda-keyd"}
+#: The ring, the position and the clock of the PipeWire sink, and the key capture helper's logic,
+#: socket and watchdog against its mocked devices; the other crates' tests speak D-Bus or PipeWire
+#: and run only in the rig.
+TESTED = ("linda-pwsink-core", "linda-keyd")
 
 
 def vendorFlags(vendorDir: str | None) -> list[str]:
@@ -51,7 +53,7 @@ def main() -> None:
 	command = [args.cargo, "test" if args.test else "build", "--release", "--locked"]
 	command += ["--manifest-path", str(ENGINE / "Cargo.toml"), "--target-dir", args.targetDir]
 	command += vendorFlags(args.vendor_dir)
-	for package in TESTED if args.test else LIBRARIES:
+	for package in TESTED if args.test else BUILT:
 		command += ["--package", package]
 	environment = dict(os.environ)
 	# Where cargo keeps what it downloads, when the caller has not said: in the build directory rather
@@ -62,11 +64,11 @@ def main() -> None:
 		sys.exit(f"cargo-libraries: error: cargo exited with status {result.returncode}")
 	if args.test:
 		return
-	for library in LIBRARIES.values():
-		built = Path(args.targetDir) / "release" / library
-		temp = Path(args.outDir) / (library + ".tmp")
+	for name in BUILT.values():
+		built = Path(args.targetDir) / "release" / name
+		temp = Path(args.outDir) / (name + ".tmp")
 		shutil.copy2(built, temp)
-		temp.replace(Path(args.outDir) / library)
+		temp.replace(Path(args.outDir) / name)
 
 
 main()

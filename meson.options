@@ -1,7 +1,7 @@
 option('program', type: 'boolean', value: true,
-  description: 'Install the program; false builds and installs only the three native libraries')
+  description: 'Install the program; false builds and installs only the three native libraries and the key capture helper')
 option('prebuilt_libraries', type: 'string', value: '',
-  description: 'A directory holding libnvdaVbuf.so, libpwsink.so and libbre_vbuf.so from an earlier build with program=false, installed instead of building them')
+  description: 'A directory holding libnvdaVbuf.so, libpwsink.so, libbre_vbuf.so and linda-keyd from an earlier build with program=false, installed instead of building them')
 option('cargo_vendor_dir', type: 'string', value: '',
   description: 'The crates engine/Cargo.lock names, as cargo vendor writes them; given, cargo builds offline')
 option('cldr_data', type: 'string', value: '',

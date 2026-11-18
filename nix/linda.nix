@@ -1,6 +1,6 @@
 # Linda built by its Meson build, with prefix $out, in one of two shapes. With librariesOnly, the
-# three native libraries alone, which the dev shell names too, so that a change to the Python tree
-# rebuilds neither them nor the shell. Otherwise the program, which installs those libraries from
+# three native libraries and the key capture helper alone, which the dev shell names too, so that a
+# change to the Python tree rebuilds neither them nor the shell. Otherwise the program, which installs those libraries from
 # `libraries` when given and builds them itself when not, with the eSpeak NG fork NVDA pins, the CLDR
 # data, the louis tables and openevv's driver handed to Meson, and each launcher wrapped for GTK and
 # GObject introspection.
@@ -185,8 +185,8 @@ stdenv.mkDerivation {
   dontWrapGApps = true;
 
   # Meson's tests here are the engine's, of the ring, the position and the clock of the PipeWire
-  # sink, and the validation of the desktop entry and the metadata. The lint needs the git history,
-  # which a Nix build has not got.
+  # sink and of the key capture helper against its mocked devices, and the validation of the
+  # desktop entry and the metadata. The lint needs the git history, which a Nix build has not got.
   doCheck = true;
   mesonCheckFlags =
     lib.optionals buildsLibraries [
@@ -237,6 +237,11 @@ stdenv.mkDerivation {
         exit 1
       fi
     done
+    # The key capture helper, which a system service of its own runs, beside the libraries.
+    if [ ! -x $out/lib/linda/linda-keyd ]; then
+      echo "error: lib/linda holds no linda-keyd"
+      exit 1
+    fi
     # Where documentationUtils looks for the Help menu's pages when NVDA runs from source.
     for page in userGuide keyCommands changes; do
       if [ ! -f "${appDir}/../user_docs/en/$page.html" ]; then
@@ -271,7 +276,7 @@ stdenv.mkDerivation {
   meta = {
     description =
       if librariesOnly then
-        "Linda's native libraries: NVDA's virtual buffer storage, the PipeWire sink and the web document renderer"
+        "Linda's native libraries: NVDA's virtual buffer storage, the PipeWire sink and the web document renderer; and its key capture helper"
       else
         "NVDA, the screen reader, on Linux";
     license = lib.licenses.gpl2Plus;
