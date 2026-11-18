@@ -210,8 +210,6 @@ mathPres.MathCAT.speech
 
 l10nUtil
   translators' tool: needs crowdin_api, which is not a run-time dependency
-md2html
-  documentation build tool: needs l2m4m, which is not a run-time dependency
 oleTypes
   asserts sizeof(tagDVTARGETDEVICE) == 16, which is 24 on every 64-bit
   build, Windows included; nothing in source/ imports it
