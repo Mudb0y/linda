@@ -36,6 +36,10 @@ if TYPE_CHECKING:
 
 
 def _isScreenCurtainActive() -> bool:
+	if sys.platform != "win32":
+		# Whether a curtain is in the way of capture, which is what every caller here asks. Linux's
+		# blacks out what the monitors are sent, not what X gives a program that reads the screen.
+		return False
 	from screenCurtain import screenCurtain
 
 	return screenCurtain is not None and screenCurtain.enabled
@@ -48,14 +52,12 @@ def _isMagnifierActive() -> bool:
 
 
 def _shouldUseWgcCapture() -> bool:
-	if sys.platform != "win32":
-		# The screen curtain blacks out what the monitors show, not what X gives a program that reads
-		# the screen, and Linux has no Windows Graphics Capture.
-		return False
 	return _isScreenCurtainActive() or (_isMagnifierActive() and _isWgcCaptureSupported())
 
 
 def _isWgcCaptureSupported() -> bool:
+	if sys.platform != "win32":
+		return False
 	from . import _wgcCapture
 
 	return _wgcCapture.isSupported()
@@ -80,6 +82,7 @@ def _captureWithWgc(imageInfo: RecogImageInfo) -> ctypes.Array:
 def _shouldBlockScreenCurtainEnable(focusObj: NVDAObjects.NVDAObject) -> bool:
 	"""Return whether enabling Screen Curtain should be blocked for an active recognition result."""
 	if sys.platform != "win32":
+		# Capture reads the screen as X has it with the curtain on.
 		return False
 	return (
 		isinstance(focusObj, RefreshableRecogResultNVDAObject)

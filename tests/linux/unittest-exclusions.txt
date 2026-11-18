@@ -47,6 +47,12 @@ tests.unit.contentRecog.test_uwpOcr
   For good: Windows.Media.Ocr through nvdaHelperLocalWin10.dll. NVDAHelper is replaced on Linux
   and does not provide NVDAHelper.localWin10.
   Import raises: ModuleNotFoundError: NVDAHelper.localWin10
+tests.unit.contentRecog.test_recogUi.TestScreenCurtainEnableBlock.test_autoRefreshRecognitionBlocksScreenCurtainOnlyWhenWgcUnsupported
+  For good: on Windows the screen curtain blacks out what GDI captures, so it is refused over a
+  recognition result that refreshes itself unless Windows Graphics Capture can see past it. Linux's
+  curtain blacks out only what the monitors are sent and capture reads the screen as X has it, so
+  the curtain is never refused, whatever the test says Windows Graphics Capture supports.
+  Raises: AssertionError: False is not true
 tests.unit.test_remote.test_localMachine
   For good: sending the secure attention sequence, control+alt+delete, through Windows' SAS
   policy. The test imports winreg, which Linux never provides.

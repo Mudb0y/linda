@@ -404,11 +404,12 @@ source/config/registry.py
   every platform: winreg comes from linuxPlatform.windowsOnly, so
   _deleteKeyAndSubkeys raises NoLinuxImplementation on Linux
 source/contentRecog/recogUi.py
-  Linux runtime: recognition captures the screen as X has it whether or
-  not the screen curtain is on, as the curtain blacks out what the monitors
-  show rather than what a program reads, and never asks for Windows
-  Graphics Capture; nor does a recognition result keep the curtain from
-  being enabled
+  Linux runtime: no screen curtain is ever in the way of capture, as
+  Linux's blacks out what the monitors are sent rather than what X gives a
+  program that reads the screen, so recognition captures as it does without
+  one, is never refused under the curtain, and never asks for Windows
+  Graphics Capture, which Linux lacks; nor does a recognition result keep
+  the curtain from being enabled
 source/core.py
   Linux runtime: the desktop object is linuxPlatform.desktop's, which
   belongs to no process and finds no object with focus, in the foreground
