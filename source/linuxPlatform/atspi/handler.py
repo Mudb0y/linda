@@ -254,11 +254,6 @@ def _scanForActiveWindow() -> Node | None:
 	lets one call through, which is how one that was busy as NVDA started is found again."""
 	c = client()
 	for app in applications():
-		# marco's switcher says it is active while Alt is held, though it never has the keyboard, and
-		# goes without saying it no longer is: the focus would stay on it after a switch to an empty
-		# workspace, where the desktop has it.
-		if _applicationName(app.busName) in _SWITCHER_APPLICATIONS:
-			continue
 		try:
 			for window in c.children(app):
 				if "active" in c.states(window):
@@ -266,6 +261,12 @@ def _scanForActiveWindow() -> Node | None:
 		except NodeGone:
 			continue
 	return None
+
+
+def _isSwitcher(window: Node) -> bool:
+	"""Whether window is marco's switcher, which says it is active while Alt is held though it never has
+	the keyboard: a switch is under way, and the window it ends in will say so."""
+	return _applicationName(window.busName) in _SWITCHER_APPLICATIONS
 
 
 def _setForeground(window: Node | None, active: bool = True) -> None:
@@ -1054,12 +1055,18 @@ def pumpAll() -> None:
 	_retries[:] = [(at, event) for at, event in _retries if at > now]
 	if _rescans and _rescans[0] <= now:
 		del _rescans[0]
-		if not _foregroundActive and (window := _scanForActiveWindow()) is not None:
-			_rescans.clear()
-			_setForeground(window)
-			due.append(("window:activate", window, 0, 0, None))
-		elif not _foregroundActive and not _rescans:
-			_focusDesktop()
+		if not _foregroundActive:
+			left = _foreground
+			window = _scanForActiveWindow()
+			if window is not None and _isSwitcher(window):
+				_rescans[:] = [now + delay for delay in RESCAN_DELAYS_SECONDS]
+			elif window is not None:
+				_rescans.clear()
+				_setForeground(window)
+				if window != left:
+					due.append(("window:activate", window, 0, 0, None))
+			elif not _rescans:
+				_focusDesktop()
 	with _queueLock:
 		events = list(_queue)
 		_queue.clear()
@@ -1190,10 +1197,15 @@ def pumpAll() -> None:
 	if windowsChanged and not _foregroundActive:
 		# A window deactivated and none activated after it: marco can give the focus back to a window
 		# without that window saying so, as when a dialog closes.
+		left = _foreground
 		window = _scanForActiveWindow()
-		if window is not None:
+		if window is not None and not _isSwitcher(window):
 			_setForeground(window)
-			focusEvents.insert(0, ("window:activate", window, 0, 0, None))
+			# The window left can say it is active again for a moment as another program's grab of the
+			# keyboard ends, as marco's does on Alt+Tab before it activates the window chosen; the focus
+			# never left it.
+			if window != left:
+				focusEvents.insert(0, ("window:activate", window, 0, 0, None))
 		else:
 			# Nor does it always say so at once.
 			_rescans[:] = [now + delay for delay in RESCAN_DELAYS_SECONDS]

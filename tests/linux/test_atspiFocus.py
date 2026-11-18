@@ -269,6 +269,32 @@ def test_altTabSpeaksTitleAndFocusOnce(desktop: DesktopSession, tmp_path: Path):
 	_closeClean(desktop, nvda)
 
 
+def test_altTabHeldWhileListeningSpeaksOnlyTheWindows(desktop: DesktopSession, tmp_path: Path):
+	"""Alt held through the switcher for longer than NVDA looks for a window to take over before it gives
+	the desktop the focus: nothing comes between the window the switcher names and the one arrived at."""
+	desktop.startApp(desktop.fixture("qtFixture"), title=QT_TITLE)
+	gtk = desktop.startApp(desktop.fixture("gtkFixture"), title=GTK_TITLE)
+	assert gtk.stdout.readline() == "ready\n"
+	_waitUntilActive(GTK_TITLE)
+	nvda, probe = _startNVDA(desktop, tmp_path)
+	desktop.expect(GTK_TITLE, PRESS_ME, since=0, timeout=STARTUP_BOUND)
+	_waitForQuiet(desktop)
+	mark = desktop.mark()
+	subprocess.run(["xdotool", "keydown", "alt"], check=True)
+	try:
+		desktop.press("Tab")
+		desktop.expect(QT_TITLE, since=mark)
+		time.sleep(1.5)
+	finally:
+		subprocess.run(["xdotool", "keyup", "alt"], check=True)
+	desktop.expect(QT_TITLE, QT_TITLE, PRESS_ME_ANY, since=mark)
+	_waitForQuiet(desktop)
+	spoken = desktop.spokenSince(mark)
+	assert len(spoken) == 3 and spoken[:2] == [QT_TITLE, QT_TITLE], spoken
+	probe.close()
+	_closeClean(desktop, nvda)
+
+
 def test_closingADialogReturnsToTheWindowsFocus(desktop: DesktopSession, tmp_path: Path):
 	app = desktop.startApp(desktop.fixture("twoWindows"), title="Second window")
 	assert app.stdout.readline() == "ready\n"
