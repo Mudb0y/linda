@@ -1,8 +1,9 @@
 """NVDA's virtual buffer storage, compiled for Linux, behind the VBuf_* names NVDAHelper.localLib has.
 
 The library is upstream's nvdaHelper/vbufBase/storage.cpp with a C entry point per VBuf_* function and
-two for filling it from render streams, which the engine's renderer writes (linuxPlatform.vbufEngine):
-one builds a buffer, the other applies an update batch to it.
+four for filling it from render streams, which the engine's renderer writes (linuxPlatform.vbufEngine):
+one builds a buffer, one applies an update batch to it, and two let a batch that replaces the whole
+document be built off the main thread and taken there whole.
 It is found through LINDA_VBUF_LIB or the path an installation fixed for it (linuxPlatform.installSettings),
 never on the library path. Text crosses its interface as
 UTF-16 code units, so buffer offsets are the code units NVDA counts on Windows.
@@ -60,6 +61,8 @@ def _bind(dll: ctypes.CDLL) -> None:
 		"VBufLinux_destroy": (None, (c_void_p,)),
 		"VBufLinux_build": (c_int, (c_void_p, c_void_p, c_size_t)),
 		"VBufLinux_update": (c_int, (c_void_p, c_void_p, c_size_t)),
+		"VBufLinux_buildReplacement": (c_int, (c_void_p, c_void_p, c_size_t, pInt, pInt)),
+		"VBufLinux_adopt": (c_int, (c_void_p, c_void_p, c_int, c_int)),
 		"VBufLinux_free": (None, (c_void_p,)),
 		"VBuf_getFieldNodeOffsets": (c_int, (c_void_p, c_uint64, pInt, pInt)),
 		"VBuf_isFieldNodeAtOffset": (c_int, (c_void_p, c_uint64, c_int)),
@@ -118,10 +121,35 @@ def update(handle: int, stream: "Stream") -> bool:
 	Every field a batch replaces goes in one step, and the caret stays where it was relative to the
 	deepest of its fields that is still there.
 
+	A stream whose replacement buildReplacement built, and which replaces the buffer's root, is taken
+	whole: the buffer swaps its fields for the replacement's without building anything, and the
+	replacement holds the old ones until the stream is freed.
+
 	:return: Whether everything was applied. A malformed batch changes nothing; a batch that names a
 		field the buffer no longer has applies the rest.
 	"""
+	replacement = getattr(stream, "replacement", None)
+	if replacement is not None and lib().VBufLinux_adopt(handle, *replacement):
+		return True
 	return bool(lib().VBufLinux_update(handle, stream.pointer, stream.length))
+
+
+def buildReplacement(stream: "Stream") -> tuple[int, int, int] | None:
+	"""Off the main thread: build the one field an update batch replaces another with, so that update
+	takes it whole when that other is the root, instead of building a whole document on the main
+	thread.
+
+	:return: The new buffer's handle, which destroy frees, and the docHandle and ID of the field the
+		batch replaces; None for a batch of more than one replacement, or one that keeps fields.
+	"""
+	handle = create()
+	docHandle, ID = c_int(), c_int()
+	if lib().VBufLinux_buildReplacement(
+		handle, stream.pointer, stream.length, ctypes.byref(docHandle), ctypes.byref(ID)
+	):
+		return handle, docHandle.value, ID.value
+	destroy(handle)
+	return None
 
 
 def anchor(handle: int, offset: int) -> tuple[int, int, int] | None:

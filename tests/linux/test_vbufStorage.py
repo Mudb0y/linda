@@ -858,3 +858,128 @@ def test_updateThreadAppliesThenTellsTheBuffer(tmp_path: Path, library: Path):
 	assert value["waits"] == [500]
 	assert value["shutdowns"] == 1
 	assert value["stopped"]
+
+
+#: Paragraphs in the large page whose rest replaces the whole document.
+LARGE_PARAGRAPHS = 20_000
+
+
+def largeDocument(paragraphs: int, words: str) -> str:
+	return control(
+		1,
+		*(control(i + 2, text(f"Paragraph {i} {words}. "), block=True) for i in range(paragraphs)),
+		block=True,
+	)
+
+
+def test_theRestOfALargePageIsBuiltOffTheMainThread(tmp_path: Path, library: Path):
+	top = largeDocument(3, "of the top")
+	rest = replace(1, largeDocument(LARGE_PARAGRAPHS, "of the whole page"))
+	caretAt = len("Paragraph 0 of the top. Paragraph 1 of ")
+	done = harness.runChild(
+		tmp_path,
+		f"""
+		import ctypes
+		import queue
+		import threading
+		import time
+		import queueHandler
+		from linuxPlatform import vbufEngine, vbufLib, vbufUpdates
+
+		class FakeStream:
+			def __init__(self, value):
+				data = value.encode("utf-16-le", "surrogatepass")
+				self.array = (ctypes.c_uint16 * (len(data) // 2)).from_buffer_copy(data)
+				self.pointer = ctypes.addressof(self.array)
+				self.length = len(data) // 2
+
+			def free(self):
+				pass
+
+		class Batch:
+			busName = ":1.5"
+			docPath = "/org/a11y/atspi/accessible/7"
+			events = ("complete",)
+			info = {{"complete": True}}
+
+			def __init__(self, stream):
+				self.stream = stream
+
+		calls = []
+		lib = vbufLib.lib()
+		for name in ("VBufLinux_update", "VBufLinux_buildReplacement", "VBufLinux_adopt", "VBufLinux_destroy"):
+			def record(*args, _name=name, _function=getattr(lib, name)):
+				calls.append((_name, threading.current_thread() is threading.main_thread()))
+				return _function(*args)
+			setattr(lib, name, record)
+
+		def state(handle):
+			start, end = ctypes.c_int(), ctypes.c_int()
+			lib.VBuf_getSelectionOffsets(handle, ctypes.byref(start), ctypes.byref(end))
+			length = lib.VBuf_getTextLength(handle)
+			return vbufLib.VBuf_getTextInRange(handle, 0, length, False), start.value
+
+		class FakeBuffer:
+			busName = Batch.busName
+			docPath = Batch.docPath
+
+			def __init__(self):
+				self.VBufHandle = ctypes.c_void_p(vbufLib.create())
+				vbufLib.build(self.VBufHandle.value, FakeStream({top!r}))
+				lib.VBuf_setSelectionOffsets(self.VBufHandle, {caretAt}, {caretAt})
+				self.done = False
+
+			def onEngineEvents(self, events, info):
+				self.done = True
+
+		# The same batch applied on this thread, as it was before, for what the buffer should hold.
+		reference = FakeBuffer()
+		vbufLib.update(reference.VBufHandle.value, FakeStream({rest!r}))
+		expected = state(reference.VBufHandle)
+		vbufLib.destroy(reference.VBufHandle.value)
+
+		buffer = FakeBuffer()
+		batches = [Batch(FakeStream({rest!r}))]
+
+		def fakeNext(timeoutMs):
+			if batches:
+				return batches.pop(0)
+			time.sleep(0.01)
+			return None
+
+		vbufEngine.next = fakeNext
+		vbufEngine.shutdown = lambda: None
+		del calls[:]
+		vbufUpdates.register(buffer)
+		deadline = time.monotonic() + 30
+		while not buffer.done and time.monotonic() < deadline:
+			try:
+				function, args, kwargs = queueHandler.eventQueue.get(timeout=0.1)
+			except queue.Empty:
+				continue
+			function(*args, **kwargs)
+		# The old fields are freed on the update thread once it next wakes.
+		while not any(name == "VBufLinux_destroy" for name, _main in calls) and time.monotonic() < deadline:
+			time.sleep(0.05)
+		vbufUpdates.terminate()
+		vbufUpdates.unregister(buffer)
+		result = {{"calls": calls[:], "state": state(buffer.VBufHandle), "expected": expected}}
+		vbufLib.destroy(buffer.VBufHandle.value)
+		""",
+		env={"LINDA_VBUF_LIB": str(library)},
+	)
+	done.assertClean()
+	value = done.value
+	# Built on the update thread, swapped in on the main thread, and the old fields freed on the update
+	# thread: the main thread neither builds nor frees a document.
+	assert value["calls"] == [
+		["VBufLinux_buildReplacement", False],
+		["VBufLinux_adopt", True],
+		["VBufLinux_destroy", False],
+	]
+	assert value["state"] == value["expected"]
+	text, caret = value["state"]
+	assert text.startswith("Paragraph 0 of the whole page. Paragraph 1 of the whole page.")
+	assert len(text) > LARGE_PARAGRAPHS * 20
+	# The caret stays as far into its paragraph as it was.
+	assert caret == len("Paragraph 0 of the whole page. Paragraph 1 of ")

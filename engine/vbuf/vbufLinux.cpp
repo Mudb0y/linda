@@ -56,6 +56,42 @@ class LinuxBuffer final: public VBufStorage_buffer_t {
 
 	VBufStorage_controlFieldNode_t* root() { return dynamic_cast<VBufStorage_controlFieldNode_t*>(rootNode); }
 
+	// Takes other's fields in place of this buffer's, and gives it this buffer's, when this buffer's root
+	// has the identifier docHandle, ID: as replaceSubtrees replaces the root, with the caret kept the
+	// same way, but without touching a node, so that NVDA's main thread is not held while a whole
+	// document is built or freed.
+	bool adopt(LinuxBuffer& other, int docHandle, int ID) {
+		auto old = root();
+		int oldDocHandle, oldID;
+		if(!old || !other.hasContent() || !old->getIdentifier(&oldDocHandle, &oldID) || oldDocHandle != docHandle || oldID != ID) return false;
+		// replaceSubtrees: the caret's offset into each of its fields, from the root down.
+		VBufStorage_relativeSelection_t identifierList;
+		if(getTextLength() > 0) {
+			int start, end, fieldDocHandle, fieldID;
+			auto field = locateControlFieldNodeAtOffset(selectionStart, &start, &end, &fieldDocHandle, &fieldID);
+			int relative = selectionStart - start;
+			for(; field; field = field->getParent()) {
+				identifierList.emplace_front(field->identifier, relative);
+				for(auto previous = field->getPrevious(); previous; previous = previous->getPrevious()) relative += previous->getLength();
+			}
+		}
+		std::swap(rootNode, other.rootNode);
+		std::swap(nodes, other.nodes);
+		std::swap(controlFieldNodesByIdentifier, other.controlFieldNodesByIdentifier);
+		std::swap(referenceNodes, other.referenceNodes);
+		VBufStorage_controlFieldNode_t* deepest = nullptr;
+		int relative = 0;
+		for(auto& [identifier, offset]: identifierList) {
+			auto field = getControlFieldNodeWithIdentifier(identifier.docHandle, identifier.ID);
+			if(!field || field->getParent() != deepest) break;
+			deepest = field;
+			relative = offset;
+		}
+		int start, end;
+		if(deepest && getFieldNodeOffsets(deepest, &start, &end)) selectionStart = start + std::min(relative, std::max(deepest->getLength() - 1, 0));
+		return true;
+	}
+
 	// backend.cpp VBufBackend_t::reuseExistingNodeInRender, unchanged.
 	VBufStorage_controlFieldNode_t* reuseExistingNodeInRender(VBufStorage_controlFieldNode_t* parent, VBufStorage_fieldNode_t* previous, int docHandle, int ID) {
 		if(!parent) return nullptr;
@@ -114,6 +150,8 @@ R withBuffer(void* handle, R fallback, F f) {
 class StreamReader {
 	public:
 	StreamReader(const uint16_t* data, size_t length): data(data), end(data ? data + length : data) {}
+
+	bool atEnd() const { return data >= end; }
 
 	bool op(uint16_t* out) {
 		if(data >= end) return false;
@@ -202,8 +240,10 @@ size_t depthOf(VBufStorage_fieldNode_t* node) {
 }
 
 // Reads C, T and E ops into storage. With reuse, reads exactly one top-level field, which may hold R
-// ops, and stops after it; without, reads to the end of the stream, where R and S are malformed.
-bool readFields(StreamReader& reader, VBufStorage_buffer_t& storage, Reuse* reuse) {
+// ops, and stops after it; without, reads to the end of the stream, where R and S are malformed, or
+// with oneField only one top-level field and stops after it.
+bool readFields(StreamReader& reader, VBufStorage_buffer_t& storage, Reuse* reuse, bool oneField = false) {
+	oneField = oneField || reuse;
 	std::vector<VBufStorage_controlFieldNode_t*> parents;
 	std::vector<VBufStorage_fieldNode_t*> previous;
 	parents.push_back(nullptr);
@@ -213,7 +253,7 @@ bool readFields(StreamReader& reader, VBufStorage_buffer_t& storage, Reuse* reus
 	uint16_t op;
 	std::wstring text;
 	while(reader.op(&op)) {
-		if(reuse && parents.size() == 1 && op != u'C') return false;
+		if(oneField && parents.size() == 1 && op != u'C') return false;
 		switch(op) {
 			case u'C': {
 				long long docHandle, ID, flags;
@@ -253,14 +293,14 @@ bool readFields(StreamReader& reader, VBufStorage_buffer_t& storage, Reuse* reus
 				if(parents.size() <= 1) return false;
 				parents.pop_back();
 				previous.pop_back();
-				if(reuse && parents.size() == 1) return true;
+				if(oneField && parents.size() == 1) return true;
 				break;
 			}
 			default:
 				return false;
 		}
 	}
-	return !reuse && parents.size() == 1;
+	return !oneField && parents.size() == 1;
 }
 
 void clampSelection(VBufStorage_buffer_t& storage) {
@@ -379,6 +419,44 @@ int VBufLinux_build(void* buffer, const uint16_t* stream, size_t length) {
 
 int VBufLinux_update(void* buffer, const uint16_t* stream, size_t length) {
 	return withBuffer(buffer, 0, [&](LinuxBuffer& b) { return applyUpdate(b, stream, length); });
+}
+
+// Builds into the empty buffer the field an update batch of a single S and no R replaces with, and
+// gives that S's identifier, so that a batch replacing a whole document is built off NVDA's main
+// thread and VBufLinux_adopt only takes it there. Returns 1 when built; otherwise the buffer is left
+// empty.
+int VBufLinux_buildReplacement(void* buffer, const uint16_t* stream, size_t length, int* docHandle, int* ID) {
+	if(!docHandle || !ID) return 0;
+	return withBuffer(buffer, 0, [&](LinuxBuffer& b) {
+		if(b.hasContent()) return 0;
+		StreamReader reader(stream, length);
+		uint16_t op;
+		long long targetDocHandle, targetID;
+		if(!reader.op(&op) || op != u'S' || !reader.integer(&targetDocHandle, u',') || !reader.integer(&targetID, u';')) return 0;
+		if(!readFields(reader, b, nullptr, true) || !reader.atEnd() || !b.hasContent()) {
+			b.clearBuffer();
+			return 0;
+		}
+		*docHandle = (int)targetDocHandle;
+		*ID = (int)targetID;
+		return 1;
+	});
+}
+
+// Applies the batch VBufLinux_buildReplacement built into replacement, which replaces the field docHandle,
+// ID, when that is the buffer's root: the buffer takes replacement's fields and replacement the
+// buffer's old ones, for the caller to destroy off the main thread. Returns 0, changing nothing, when
+// the batch replaces anything else, which VBufLinux_update then applies.
+int VBufLinux_adopt(void* buffer, void* replacement, int docHandle, int ID) {
+	return withBuffer(buffer, 0, [&](LinuxBuffer& b) {
+		if(replacement == buffer || !liveBuffers.count(replacement)) return 0;
+		auto& other = *static_cast<LinuxBuffer*>(replacement);
+		std::lock_guard<std::mutex> guard(other.lock);
+		if(!b.adopt(other, docHandle, ID)) return 0;
+		b.workingInvalidSubtreesList.clear();
+		clampSelection(b);
+		return 1;
+	});
 }
 
 void VBufLinux_free(void* p) {

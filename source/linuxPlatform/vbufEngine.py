@@ -81,6 +81,10 @@ def _load() -> ctypes.CDLL:
 class Stream:
 	"""A render stream in the engine's memory: pointer to length UTF-16 code units, until free."""
 
+	#: The storage linuxPlatform.vbufLib.buildReplacement built from this update batch off the main
+	#: thread, for vbufLib.update to take whole: its handle, and the docHandle and ID it replaces.
+	replacement: tuple[int, int, int] | None = None
+
 	def __init__(self, pointer: int, length: int) -> None:
 		self.pointer = pointer
 		self.length = length

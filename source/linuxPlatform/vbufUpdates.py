@@ -4,8 +4,10 @@ The engine watches every document it rendered and hands out a batch whenever one
 (linuxPlatform.vbufEngine.next). One thread waits for those batches and queues each on NVDA's event
 queue, where the main thread applies it to its buffer's storage, through the buffer's applyUpdate or
 linuxPlatform.vbufLib.update, and then calls the buffer's onEngineEvents, which so reads the storage
-as already changed. Nothing waits on the browser there: the batch is already rendered. On Windows the
-backend applied updates inside the browser and told NVDA through vbufChangeNotify.
+as already changed. Nothing waits on the browser there: the batch is already rendered. The rest of a
+large page replaces the whole document, which costs as much as building it, so this thread builds it
+first and the main thread only swaps it in, leaving the old fields to this thread to free. On
+Windows the backend applied updates inside the browser and told NVDA through vbufChangeNotify.
 """
 
 import atexit
@@ -38,6 +40,8 @@ _buffers: dict[tuple[str, str], "AtSpiBuffer"] = {}
 _held: dict[tuple[str, str], list[tuple[float, object]]] = {}
 #: Batches whose buffer registered after they came, for the thread to apply before it waits again.
 _ready: list[object] = []
+#: Storage handles holding a document's old fields, swapped out on the main thread, to free here.
+_spent: list[int] = []
 #: Held while a batch is applied, so that once unregister returns no update touches that buffer.
 _lock = threading.Lock()
 _thread: threading.Thread | None = None
@@ -73,7 +77,7 @@ def unregister(buffer: "AtSpiBuffer") -> None:
 			del _buffers[key]
 		for _came, batch in _held.pop(key, ()):
 			if batch.stream is not None:
-				batch.stream.free()
+				_release(batch.stream)
 
 
 def _start() -> None:
@@ -113,10 +117,37 @@ def terminate() -> None:
 		if thread.is_alive():
 			log.debugWarning("The update thread is still waiting on the engine")
 	_thread = None
+	_freeSpent()
+
+
+def _release(stream, *, onMainThread: bool = False) -> None:
+	"""Free stream and the storage built from it, which holds the old fields once update took the
+	new. On the main thread that storage is left to the update thread, as freeing a whole document
+	takes as long as building one."""
+	replacement = getattr(stream, "replacement", None)
+	stream.replacement = None
+	stream.free()
+	if replacement is None:
+		return
+	if onMainThread:
+		with _lock:
+			if _thread is not None and _thread.is_alive():
+				_spent.append(replacement[0])
+				return
+	vbufLib.destroy(replacement[0])
+
+
+def _freeSpent() -> None:
+	with _lock:
+		spent = _spent[:]
+		_spent.clear()
+	for handle in spent:
+		vbufLib.destroy(handle)
 
 
 def _run(nextBatch) -> None:
 	while not _stop.is_set():
+		_freeSpent()
 		with _lock:
 			ready = _ready[:]
 			_ready.clear()
@@ -146,7 +177,7 @@ def _dropExpiredHeld(now: float) -> None:
 			if now - came <= HOLD_SECONDS:
 				kept.append((came, batch))
 			elif batch.stream is not None:
-				batch.stream.free()
+				_release(batch.stream)
 		if kept:
 			_held[key] = kept
 		else:
@@ -166,12 +197,15 @@ def _apply(batch, *, hold: bool = True) -> None:
 					_held.setdefault(key, []).append((now, batch))
 					kept = True
 				return
+		if batch.stream is not None and "complete" in batch.events:
+			# The rest of a large page, which replaces the whole document: built here, not on the main thread.
+			batch.stream.replacement = vbufLib.buildReplacement(batch.stream)
 		log.debug(f"Update for {batch.busName} {batch.docPath}: {batch.events} {batch.info}")
 		queueHandler.queueFunction(queueHandler.eventQueue, _applyToBuffer, buffer, batch)
 		kept = True
 	finally:
 		if batch.stream is not None and not kept:
-			batch.stream.free()
+			_release(batch.stream)
 
 
 def _applyToBuffer(buffer: "AtSpiBuffer", batch) -> None:
@@ -197,7 +231,7 @@ def _applyToBuffer(buffer: "AtSpiBuffer", batch) -> None:
 				)
 	finally:
 		if batch.stream is not None:
-			batch.stream.free()
+			_release(batch.stream, onMainThread=True)
 	onEngineEvents = getattr(buffer, "onEngineEvents", None)
 	if onEngineEvents is not None:
 		onEngineEvents(batch.events, batch.info)
