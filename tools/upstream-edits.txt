@@ -809,6 +809,14 @@ source/utils/security.py
   below the locker. Upstream's Win32 z-order checks would raise there, and
   objectBelowLockScreenAndWindowsIsLocked takes any exception to mean the
   object is safe to present
+source/visionEnhancementProviders/NVDAHighlighter.py
+  Linux runtime: NVDAHighlighter is a subclass that puts
+  linuxPlatform.visualHighlight's XHighlighter before upstream's class,
+  which draws the outlines with override-redirect X windows, shaped to
+  the line and letting every click through, in place of GDI+ and a
+  layered Windows window, and can start only where an X display with
+  input shapes answers. The settings, the events followed and the
+  rectangles of each context stay upstream's
 source/winAPI/dpiAwareness.py
   Linux runtime: setDPIAwareness() returns at once, as GTK scales for the
   display by itself and a process has no DPI awareness to declare; core.main

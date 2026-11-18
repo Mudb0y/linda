@@ -276,7 +276,7 @@ def openStoreCategory(desktop: DesktopSession) -> None:
 	"""Open the settings dialog and arrow down its categories to the store's."""
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
 	step(desktop, "Return", "Settings... S 1 of 4")
-	step(desktop, "Return", "Categories: list", "General 1 of 15")
+	step(desktop, "Return", "Categories: list…")
 	for _ in range(30):
 		mark = step(desktop, "Down", "…")
 		if any(text.startswith(STORE_NAME) for text in desktop.spokenSince(mark)):

@@ -135,7 +135,7 @@ def step(desktop: DesktopSession, chord: str, *expected: str, timeout: float = 5
 def downToKeyboard(desktop: DesktopSession) -> None:
 	"""Arrow down the settings dialog's categories from General to Keyboard, each spoken."""
 	for index, category in enumerate(
-		("Speech", "Braille", "Audio", "Privacy and Security", "Keyboard"),
+		("Speech", "Braille", "Audio", "Privacy and Security", "Vision", "Keyboard"),
 		start=2,
 	):
 		step(desktop, "Down", f"{category} {index} of …")
@@ -297,7 +297,7 @@ def test_startAfterSignInIsOfferedAndSaysWhyThisCopyCannot(desktop: DesktopSessi
 
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
 	step(desktop, "Return", "Settings... S 1 of 4")
-	step(desktop, "Return", "Categories: list", "General 1 of 15")
+	step(desktop, "Return", "Categories: list…")
 	for _press in range(12):
 		mark = desktop.mark()
 		desktop.press("Tab")
@@ -442,9 +442,9 @@ def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSe
 		desktop,
 		"Return",
 		"Linda Settings: General (normal configuration) dialog",
-		# With the fifteen categories Linux has, the list is spoken before the item it has selected.
-		"Categories: list",
-		"General 1 of 15",
+		# The list holds more categories than it shows: opened scrolled away from the item it has
+		# selected, it says the item with itself, and otherwise the item after itself.
+		"Categories: list…",
 	)
 	time.sleep(SETTLE)
 	assert not [text for text in desktop.spokenSince(mark) if text.startswith("OK button")]
@@ -457,7 +457,7 @@ def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSe
 
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
 	step(desktop, "Return", "Settings... S 1 of 4")
-	step(desktop, "Return", "Categories: list", "General 1 of 15")
+	step(desktop, "Return", "Categories: list…")
 	downToKeyboard(desktop)
 	# Applied, and kept although the dialog was then cancelled.
 	step(desktop, "Tab", "Keyboard layout: combo box laptop collapsed Alt plus K")

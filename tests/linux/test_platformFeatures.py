@@ -158,21 +158,24 @@ def readWindow(desktop: DesktopSession, last: str) -> list[str]:
 BUTTONS = ["Apply button Alt plus A", "Cancel button Alt plus C", "OK button Alt plus O"]
 
 CATEGORIES = [
-	"General 1 of 15",
-	"Speech 2 of 15",
-	"Braille 3 of 15",
-	"Audio 4 of 15",
-	"Privacy and Security 5 of 15",
-	"Keyboard 6 of 15",
-	"Mouse 7 of 15",
-	"Review Cursor 8 of 15",
-	"Object Presentation 9 of 15",
-	"Browse Mode 10 of 15",
-	"Document Formatting 11 of 15",
-	"Document Navigation 12 of 15",
-	"Remote Access 13 of 15",
-	"NVDA Add-on Store 14 of 15",
-	"Advanced 15 of 15",
+	"General 1 of 16",
+	"Speech 2 of 16",
+	"Braille 3 of 16",
+	"Audio 4 of 16",
+	"Privacy and Security 5 of 16",
+	"Vision 6 of 16",
+	"Keyboard 7 of 16",
+	"Mouse 8 of 16",
+	"Review Cursor 9 of 16",
+	"Object Presentation 10 of 16",
+	"Browse Mode 11 of 16",
+	"Document Formatting 12 of 16",
+	"Document Navigation 13 of 16",
+	"Remote Access 14 of 16",
+	"NVDA Add-on Store 15 of 16",
+	# The list holds more categories than it shows, and the last, reached as it scrolls, is said
+	# without its position.
+	"Advanced…",
 ]
 
 #: What Linda+B reads in each panel or group that a feature Linux lacks was taken out of, and would
@@ -209,14 +212,14 @@ def openSettings(desktop: DesktopSession) -> None:
 		desktop,
 		"Return",
 		"Linda Settings: General (normal configuration) dialog",
-		"Categories: list",
-		"General 1 of 15",
+		# Opened scrolled away from the item it has selected, the list says the item with itself.
+		"Categories: list…",
 	)
 
 
 def toCategory(desktop: DesktopSession, current: str, name: str) -> None:
 	"""Arrow down the categories from current to name, hearing each."""
-	names = [category.rsplit(" ", 3)[0] for category in CATEGORIES]
+	names = [category.rstrip("…").rsplit(" ", 3)[0] for category in CATEGORIES]
 	for category in CATEGORIES[names.index(current) + 1 : names.index(name) + 1]:
 		step(desktop, "Down", category)
 
@@ -225,7 +228,7 @@ def test_settingsLeaveOutWhatLinuxLacks(desktop: DesktopSession):
 	nvda = start(desktop)
 	openSettings(desktop)
 	walk(desktop, "Down", CATEGORIES, wraps=False)
-	step(desktop, "Home", "General 1 of 15")
+	step(desktop, "Home", "General 1 of 16")
 
 	assert tabAround(desktop) == [
 		"Linda Language (requires restart): combo box English, en collapsed Alt plus L",
@@ -234,7 +237,7 @@ def test_settingsLeaveOutWhatLinuxLacks(desktop: DesktopSession):
 		"Play sounds when starting or exiting Linda check box not checked Alt plus P",
 		"Start Linda after I sign in check box not checked Alt plus A",
 		*BUTTONS,
-		"Categories: list | General 1 of 15",
+		"Categories: list | General 1 of 16",
 	]
 	general = readWindow(desktop, "separator")
 	assert "Start Linda after I sign in check box not checked Alt plus A" in general
@@ -247,7 +250,7 @@ def test_settingsLeaveOutWhatLinuxLacks(desktop: DesktopSession):
 		"Volume of Linda sounds slider 100",
 		"Time to keep audio device awake after speech (seconds) spin button 30 Alt plus K",
 		*BUTTONS,
-		"Categories: list | Audio 4 of 15",
+		"Categories: list | Audio 4 of 16",
 	]
 	assertNoneRead(readWindow(desktop, "separator"))
 
@@ -277,7 +280,7 @@ def test_settingsLeaveOutWhatLinuxLacks(desktop: DesktopSession):
 	assert browseMode[-5:] == [
 		"Native selection mode combo box Default (Disabled) collapsed Alt plus V",
 		*BUTTONS,
-		"Categories: list | Browse Mode 10 of 15",
+		"Categories: list | Browse Mode 11 of 16",
 	], browseMode
 	assertNoneRead(browseMode)
 	assertNoneRead(readWindow(desktop, "separator"))
@@ -325,7 +328,6 @@ HIDDEN_COMMANDS = sorted(
 	[
 		"activateInputCompositionDialog",
 		"activateMagnifierSettingsDialog",
-		"activateVisionSettingsDialog",
 		"activateWindowsOCRSettings",
 		"cycleAudioDuckingMode",
 		"cycleFilters",

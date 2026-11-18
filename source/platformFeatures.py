@@ -57,7 +57,6 @@ else:
 	_UNSUPPORTED = frozenset(
 		{
 			Feature.MAGNIFIER,
-			Feature.VISUAL_HIGHLIGHT,
 			Feature.AUDIO_DUCKING,
 			Feature.SOUND_SPLIT,
 			Feature.KEEP_DISPLAY_ON,

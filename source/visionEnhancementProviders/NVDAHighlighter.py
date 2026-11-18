@@ -5,6 +5,7 @@
 
 """Default highlighter based on GDI Plus."""
 
+import sys
 import threading
 import weakref
 from ctypes import WinError, byref
@@ -622,6 +623,13 @@ class NVDAHighlighter(providerBase.VisionEnhancementProvider):
 			for context in _supportedContexts
 			if getattr(self.getSettings(), "highlight%s" % (context[0].upper() + context[1:]))
 		)
+
+
+if sys.platform != "win32":
+	from linuxPlatform.visualHighlight import XHighlighter
+
+	class NVDAHighlighter(XHighlighter, NVDAHighlighter):
+		"""Draws its outlines on the X display, where there is no GDI+."""
 
 
 VisionEnhancementProvider = NVDAHighlighter
