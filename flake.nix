@@ -343,6 +343,14 @@
         # own wrapper; Linda's code under test is given it here.
         LINDA_MATE_DESKTOP_SCHEMAS = pkgs.glib.getSchemaPath pkgs.mate-desktop;
 
+        # The compositor of the rig's Wayland mode, LINDA_RIG_SESSION=wayland, off PATH so that
+        # the X mode's sandbox stays as it was: Mutter headless on a virtual monitor, with its
+        # own schemas, and Mesa's software renderer, which libglvnd finds on a NixOS host only
+        # under /run, empty in the rig.
+        LINDA_MUTTER = "${pkgs.mutter}/bin/mutter";
+        LINDA_MUTTER_SCHEMAS = "${pkgs.mutter}/share/gsettings-schemas/${pkgs.mutter.name}";
+        LINDA_MESA = "${pkgs.mesa}";
+
         # The terminal fixture's shell. The bash on PATH is stdenv's, built
         # without readline, so arrows and Control with them would type escape
         # sequences instead of editing the line.

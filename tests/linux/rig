@@ -22,6 +22,13 @@
 # the host's own addresses shut off, and names resolved through a nameserver
 # address that pasta passes to the host's resolver and nowhere else.
 #
+# LINDA_RIG_SESSION=wayland gives the sandbox a Wayland session instead of
+# the X display: Mutter, headless on a virtual monitor of the same size, with
+# its accessibility manager on the sandbox's session bus, and a virtual
+# keyboard that tests press keys on through tests/linux/waylandKeyboard.py.
+# LINDA_RIG_XWAYLAND=1 lets Mutter start Xwayland beside it. Nothing about
+# the X mode changes when the variable is unset.
+#
 # The exit status is the command's, or 125 when the rig itself failed.
 set -euo pipefail
 
@@ -54,23 +61,30 @@ if [ "${1:-}" = --inside ]; then
 		fail "--inside is the rig's own second half and runs only in its sandbox"
 	fi
 	shift
-	# -noreset, because the server otherwise resets when its first client
-	# leaves and drops the root window property the accessibility bus is
-	# advertised on, which is how clients find that bus on a real desktop.
-	# A number the live display never has, so that a DISPLAY that somehow
-	# got out of the sandbox would name nothing.
-	Xvfb :99 -displayfd 3 -screen 0 1280x1024x24 -nolisten tcp -noreset \
-		3>"$XDG_RUNTIME_DIR/display" 2>"$XDG_RUNTIME_DIR/xvfb.log" &
-	# The server writes its display number once it accepts connections.
-	for _ in $(seq 200); do
-		[ -s "$XDG_RUNTIME_DIR/display" ] && break
-		sleep 0.05
-	done
-	if [ ! -s "$XDG_RUNTIME_DIR/display" ]; then
-		cat "$XDG_RUNTIME_DIR/xvfb.log" >&2
-		fail "the X server did not start"
+	session=${LINDA_RIG_SESSION:-x11}
+	case $session in
+	x11 | wayland) ;;
+	*) fail "LINDA_RIG_SESSION is x11 or wayland, not $session" ;;
+	esac
+	if [ "$session" = x11 ]; then
+		# -noreset, because the server otherwise resets when its first client
+		# leaves and drops the root window property the accessibility bus is
+		# advertised on, which is how clients find that bus on a real desktop.
+		# A number the live display never has, so that a DISPLAY that somehow
+		# got out of the sandbox would name nothing.
+		Xvfb :99 -displayfd 3 -screen 0 1280x1024x24 -nolisten tcp -noreset \
+			3>"$XDG_RUNTIME_DIR/display" 2>"$XDG_RUNTIME_DIR/xvfb.log" &
+		# The server writes its display number once it accepts connections.
+		for _ in $(seq 200); do
+			[ -s "$XDG_RUNTIME_DIR/display" ] && break
+			sleep 0.05
+		done
+		if [ ! -s "$XDG_RUNTIME_DIR/display" ]; then
+			cat "$XDG_RUNTIME_DIR/xvfb.log" >&2
+			fail "the X server did not start"
+		fi
+		export DISPLAY=:99
 	fi
-	export DISPLAY=:99
 
 	"$AT_SPI_BUS_LAUNCHER" --launch-immediately &
 	up=
@@ -97,6 +111,51 @@ if [ "${1:-}" = --inside ]; then
 	set_status IsEnabled || fail "could not switch accessibility on"
 	# Only some at-spi2-core builds have this one.
 	set_status ScreenReaderEnabled 2>/dev/null || true
+	if [ "$session" = wayland ]; then
+		[ -z "${LINDA_RIG_WM:-}" ] || fail "LINDA_RIG_WM is for the X session; Mutter is the window manager here"
+		[ -n "${LINDA_MUTTER:-}" ] || fail "LINDA_MUTTER is not set; run inside the dev shell"
+		# Headless, so that it opens no device and reads no input of its own:
+		# its only keyboard is the virtual one below. Xwayland only on request,
+		# so that a client which falls back to X fails instead of passing
+		# quietly through it.
+		xwayland=(--no-x11)
+		[ "${LINDA_RIG_XWAYLAND:-}" = 1 ] && xwayland=()
+		env XDG_DATA_DIRS="$LINDA_MUTTER_SCHEMAS:$XDG_DATA_DIRS" \
+			__EGL_VENDOR_LIBRARY_FILENAMES="$LINDA_MESA/share/glvnd/egl_vendor.d/50_mesa.json" \
+			LIBGL_DRIVERS_PATH="$LINDA_MESA/lib/dri" GBM_BACKENDS_PATH="$LINDA_MESA/lib/gbm" \
+			"$LINDA_MUTTER" --headless --wayland "${xwayland[@]}" --wayland-display=wayland-rig \
+			--virtual-monitor 1280x1024 >"$XDG_RUNTIME_DIR/mutter.log" 2>&1 &
+		for _ in $(seq 200); do
+			[ -S "$XDG_RUNTIME_DIR/wayland-rig" ] && break
+			sleep 0.05
+		done
+		if [ ! -S "$XDG_RUNTIME_DIR/wayland-rig" ]; then
+			cat "$XDG_RUNTIME_DIR/mutter.log" >&2
+			fail "Mutter did not start"
+		fi
+		export WAYLAND_DISPLAY=wayland-rig XDG_SESSION_TYPE=wayland
+		if [ "${LINDA_RIG_XWAYLAND:-}" = 1 ]; then
+			# Mutter gives the display and its cookie only to programs it starts.
+			display=$(grep -o 'Using public X11 display :[0-9]*' "$XDG_RUNTIME_DIR/mutter.log" |
+				grep -o ':[0-9]*$') || fail "Mutter named no X display"
+			cookie=$(ls "$XDG_RUNTIME_DIR"/.mutter-Xwaylandauth.* 2>/dev/null) ||
+				fail "Mutter wrote no X cookie"
+			export DISPLAY=$display XAUTHORITY=$cookie
+		fi
+		# The seat has a keyboard only while a virtual one exists, and a
+		# window without the keyboard never becomes active; this one also
+		# presses the tests' keys.
+		python3 -I "$(dirname "$self")/waylandKeyboard.py" serve "$XDG_RUNTIME_DIR/keyboard" \
+			2>"$XDG_RUNTIME_DIR/keyboard.log" &
+		for _ in $(seq 200); do
+			[ -S "$XDG_RUNTIME_DIR/keyboard" ] && break
+			sleep 0.05
+		done
+		if [ ! -S "$XDG_RUNTIME_DIR/keyboard" ]; then
+			cat "$XDG_RUNTIME_DIR/keyboard.log" >&2
+			fail "the virtual keyboard did not start"
+		fi
+	fi
 	# A window manager on request, so that a test can have an active window,
 	# focus that moves between windows when they open and close, and the
 	# root window properties a real desktop has.
