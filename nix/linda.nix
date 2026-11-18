@@ -1,10 +1,19 @@
-# Linda as an installed program: NVDA's tree with what
-# tools/build-artifacts generates from it, read-only in the store, and a
-# wrapper for each program that runs the launcher with the flake's Python and
-# names the native pieces the code loads by absolute path.
+# Linda built by its Meson build, with prefix $out, in one of two shapes. With librariesOnly, the
+# three native libraries alone, which the dev shell names too, so that a change to the Python tree
+# rebuilds neither them nor the shell. Otherwise the program, which installs those libraries from
+# `libraries` when given and builds them itself when not, with the eSpeak NG fork NVDA pins, the CLDR
+# data, the louis tables and openevv's driver handed to Meson, and each launcher wrapped for GTK and
+# GObject introspection.
 {
   lib,
-  stdenvNoCC,
+  stdenv,
+  meson,
+  ninja,
+  pkg-config,
+  cargo,
+  rustc,
+  rustPlatform,
+  pipewire,
   gettext,
   makeWrapper,
   wrapGAppsHook3,
@@ -12,23 +21,26 @@
   at-spi2-core,
   gtk3,
   librsvg,
+  icu,
+  liblouis,
   strace,
   python,
-  louisTables,
-  nvdaCldr,
-  # LINDA_ variables the program reads, as the dev shell sets them.
-  runtimeEnv,
-  # The PipeWire sink's library. Without it linuxPlatform.audioOutput keeps
-  # its own choice of sink.
-  pwsink ? null,
-  # Browse mode's storage and renderer. Without both, NVDA reads web documents without a virtual
-  # buffer.
-  vbuf ? null,
-  vbufengine ? null,
+  cargoVendorDir,
+  louisTables ? null,
+  nvdaCldr ? null,
+  espeak ? null,
+  openevvDriver ? null,
+  # The LINDA_ variables the dev shell sets, which Meson must have fixed to the same values.
+  runtimeEnv ? { },
+  librariesOnly ? false,
+  # A build with librariesOnly, whose libraries the program installs instead of building its own.
+  libraries ? null,
 }:
 
 let
-  # Each program installed, with the arguments it puts before the caller's.
+  buildsLibraries = librariesOnly || libraries == null;
+
+  # Each program installed, with the arguments its launcher puts before the caller's.
   programs = {
     linda = [ ];
     linda-say = [ "say" ];
@@ -52,22 +64,15 @@ let
     "GTK3_MODULES"
   ];
 
-  wrapperEnv =
-    runtimeEnv
-    // lib.optionalAttrs (pwsink != null) {
-      LINDA_AUDIO_SINK = "pipewire";
-      LINDA_PWSINK_LIB = "${pwsink}/lib/libpwsink.so";
-    }
-    // lib.optionalAttrs (vbuf != null && vbufengine != null) {
-      LINDA_VBUF_LIB = "${vbuf}/lib/libnvdaVbuf.so";
-      LINDA_VBUF_ENGINE = "${vbufengine}/lib/libbre_vbuf.so";
-    };
-
-  # The libraries the wrappers name. One that is not there is not loaded, and NVDA carries on
-  # without what it gives, so the install check fails instead.
-  wrapperLibraries = lib.attrValues (
-    lib.filterAttrs (name: _: lib.hasSuffix "_LIB" name || lib.hasSuffix "_ENGINE" name) wrapperEnv
-  );
+  # What the Meson build must have written into linuxPlatform/installPaths.py: the dev shell's
+  # values, and the libraries where this package installed them.
+  libDir = "${placeholder "out"}/lib/linda";
+  installedPaths = runtimeEnv // {
+    LINDA_VBUF_LIB = "${libDir}/libnvdaVbuf.so";
+    LINDA_VBUF_ENGINE = "${libDir}/libbre_vbuf.so";
+    LINDA_PWSINK_LIB = "${libDir}/libpwsink.so";
+    LINDA_AUDIO_SINK = "pipewire";
+  };
 
   # NVDA's release, from the lines source/buildVersion.py sets it with.
   versionLines = lib.splitString "\n" (builtins.readFile ../source/buildVersion.py);
@@ -81,104 +86,159 @@ let
     );
 
   appDir = "$out/share/linda/source";
+
+  # Only what each shape builds from, so that a change elsewhere does not rebuild it. Built from a
+  # git flake, the flake's source holds only tracked files, so nothing generated in the checkout comes
+  # in.
+  librarySources = [
+    ../engine/Cargo.toml
+    ../engine/Cargo.lock
+    ../engine/crates
+    ../engine/vbuf
+    ../nvdaHelper/vbufBase/storage.cpp
+    ../nvdaHelper/vbufBase/storage.h
+    ../nvdaHelper/vbufBase/utils.cpp
+    ../nvdaHelper/vbufBase/utils.h
+    ../nvdaHelper/common
+    ../tools/cargo-libraries
+  ];
+  programSources = [
+    ../copying.txt
+    ../source
+    ../linux
+    ../tools/build-artifacts
+    ../tools/install-tree
+  ];
 in
-stdenvNoCC.mkDerivation {
-  pname = "linda";
+stdenv.mkDerivation {
+  pname = if librariesOnly then "linda-libraries" else "linda";
   version = lib.concatMapStringsSep "." versionField [
     "year"
     "major"
     "minor"
   ];
 
-  # Built from a git flake, the flake's source holds only tracked files, so
-  # nothing generated in the checkout comes in.
   src = lib.fileset.toSource {
     root = ../.;
-    fileset = lib.fileset.unions [
-      ../source
-      ../tools/build-artifacts
-    ];
+    fileset = lib.fileset.unions (
+      [
+        ../meson.build
+        ../meson.options
+      ]
+      ++ lib.optionals buildsLibraries librarySources
+      ++ lib.optionals (!librariesOnly) programSources
+    );
   };
 
-  nativeBuildInputs = [
-    python
-    gettext
-    makeWrapper
-    gobject-introspection
-    wrapGAppsHook3
-  ];
-  # As the dev shell has them: the typelibs gi loads, GTK's SVG loader and
-  # GTK's GSettings schemas, which wrapGAppsHook3 gathers for the wrappers.
-  buildInputs = [
-    at-spi2-core
-    gtk3
-    librsvg
-  ];
+  # pwmon records a sink's monitor for the tests. It goes to an output of its own, so that the
+  # program's package, which takes only the libraries, never holds a program that records sound.
+  outputs = [ "out" ] ++ lib.optional librariesOnly "pwmon";
+
+  mesonBuildType = "release";
+  mesonFlags =
+    [ (lib.mesonBool "program" (!librariesOnly)) ]
+    ++ lib.optional buildsLibraries (lib.mesonOption "cargo_vendor_dir" "${cargoVendorDir}")
+    ++ lib.optional (!buildsLibraries) (lib.mesonOption "prebuilt_libraries" "${libraries}/lib/linda")
+    ++ lib.optionals (!librariesOnly) [
+      (lib.mesonOption "cldr_data" "${nvdaCldr}")
+      (lib.mesonOption "louis_tables" "${louisTables}")
+      (lib.mesonOption "espeak_library" "${espeak}/lib/libespeak-ng.so.1")
+      (lib.mesonOption "espeak_data" "${espeak}/share/espeak-ng-data")
+      (lib.mesonOption "openevv_driver" "${openevvDriver}")
+      # icu-uc's pkg-config file names the dev output, which holds no library.
+      (lib.mesonOption "icu_lib_dir" "${lib.getLib icu}/lib")
+    ];
+
+  nativeBuildInputs =
+    [
+      meson
+      ninja
+      pkg-config
+      python
+    ]
+    ++ lib.optionals buildsLibraries [
+      cargo
+      rustc
+      # libclang, for the bindings pipewire-sys and libspa-sys generate.
+      rustPlatform.bindgenHook
+    ]
+    ++ lib.optionals (!librariesOnly) [
+      gettext
+      makeWrapper
+      gobject-introspection
+      wrapGAppsHook3
+    ];
+  # As the dev shell has them: the typelibs gi loads, GTK's SVG loader and GTK's GSettings schemas,
+  # which wrapGAppsHook3 gathers for the wrappers, and what Meson asks pkg-config for.
+  buildInputs =
+    lib.optionals buildsLibraries [ pipewire ]
+    ++ lib.optionals (!librariesOnly) [
+      at-spi2-core
+      gtk3
+      librsvg
+      icu
+      liblouis
+    ];
   dontWrapGApps = true;
 
-  env = {
-    LINDA_LOUIS_TABLES_DIR = "${louisTables}";
-    LINDA_NVDA_CLDR_DIR = "${nvdaCldr}";
-  };
+  # Meson's tests here are the engine's: the ring, the position and the clock of the PipeWire sink.
+  # The lint needs the git history, which a Nix build has not got.
+  doCheck = buildsLibraries;
+  mesonCheckFlags = [
+    "--suite"
+    "engine"
+  ];
 
-  buildPhase = ''
-    runHook preBuild
-    python3 tools/build-artifacts
-    runHook postBuild
+  postInstall = lib.optionalString librariesOnly ''
+    install -Dm755 cargo-target/release/pwmon "$pwmon/bin/pwmon"
   '';
 
-  installPhase = ''
-    runHook preInstall
-    mkdir -p $out/share/linda
-    cp -r source ${appDir}
-    # The program runs with -B and the store is read-only, so modules are
-    # compiled here or on every start.
-    python3 -m compileall -q -j0 --invalidation-mode unchecked-hash ${appDir}
-    runHook postInstall
-  '';
-
-  # After wrapGAppsHook3 has gathered its arguments.
-  postFixup = lib.concatStrings (
-    lib.mapAttrsToList (name: arguments: ''
-      makeWrapper ${python}/bin/python3 $out/bin/${name} \
+  # After wrapGAppsHook3 has gathered its arguments, and after the launchers' interpreter line has
+  # been pointed at the store.
+  postFixup = lib.optionalString (!librariesOnly) (
+    lib.concatMapStrings (name: ''
+      wrapProgram $out/bin/${name} \
         "''${gappsWrapperArgs[@]}" \
-        ${lib.concatStringsSep " " (lib.mapAttrsToList (n: v: "--set-default ${n} ${lib.escapeShellArg v}") wrapperEnv)} \
-        ${lib.concatMapStringsSep " " (n: "--unset ${n}") callerVariablesCleared} \
-        --add-flags "-I -B ${appDir}/linda.py" \
-        ${lib.concatMapStrings (a: "--add-flags ${lib.escapeShellArg a} ") arguments}
-    '') programs
+        ${lib.concatMapStringsSep " " (n: "--unset ${n}") callerVariablesCleared}
+    '') (lib.attrNames programs)
   );
 
-  # Each wrapper, started with every cleared variable set, has its exec of
-  # Python failed by strace, which records the environment it was handed: so
-  # the check sees what the program would get without running it.
-  doInstallCheck = true;
+  # Each wrapper, started with every cleared variable set, runs its launcher, which has its exec
+  # of Python failed by strace, which records the environment it was handed: so the check sees what
+  # the program would get without running it. The paths Meson fixed are checked against the dev
+  # shell's, and each library must be there, as one that is not is not loaded, and NVDA carries on
+  # without what it gives.
+  doInstallCheck = !librariesOnly;
   nativeInstallCheckInputs = [ strace ];
   installCheckPhase = ''
     runHook preInstallCheck
-    for library in ${lib.escapeShellArgs wrapperLibraries}; do
+    for setting in ${lib.escapeShellArgs (lib.mapAttrsToList (n: v: ''"${n}": "${v}",'') installedPaths)}; do
+      if ! grep -qF "$setting" ${appDir}/linuxPlatform/installPaths.py; then
+        echo "error: linuxPlatform/installPaths.py does not hold $setting"
+        exit 1
+      fi
+    done
+    for library in ${lib.escapeShellArgs (lib.attrValues (lib.filterAttrs (n: _: lib.hasSuffix "_LIB" n || lib.hasSuffix "_ENGINE" n) installedPaths))}; do
       if [ ! -f "$library" ]; then
-        echo "error: the wrappers name $library, which is not a file"
+        echo "error: linuxPlatform/installPaths.py names $library, which is not a file"
         exit 1
       fi
     done
     for program in ${lib.escapeShellArgs (lib.attrNames programs)}; do
       env ${lib.concatMapStringsSep " " (n: "${n}=/caller") callerVariablesCleared} \
-        strace -f -v -s 65536 -e trace=execve -e inject=execve:error=ENOENT:when=2 -o execve.log \
+        strace -f -v -s 65536 -e trace=execve -e inject=execve:error=ENOENT:when=3 -o execve.log \
         $out/bin/$program 2>/dev/null || true
-      if ! grep -F 'execve("${python}/bin/python3"' execve.log >python.log; then
+      if ! grep -F 'execve("${python}/bin/python3' execve.log >python.log; then
         echo "error: $program does not run ${python}/bin/python3"
+        exit 1
+      fi
+      if ! grep -qF "\"-I\", \"-B\", \"${appDir}/linda.py\"" python.log; then
+        echo "error: $program does not start ${appDir}/linda.py with -I -B"
         exit 1
       fi
       for name in ${lib.escapeShellArgs callerVariablesCleared}; do
         if grep -qF "\"$name=" python.log; then
           echo "error: $program hands Python the caller's $name"
-          exit 1
-        fi
-      done
-      for setting in ${lib.escapeShellArgs (lib.mapAttrsToList (n: v: ''"${n}=${v}"'') wrapperEnv)}; do
-        if ! grep -qF "$setting" python.log; then
-          echo "error: $program does not hand Python $setting"
           exit 1
         fi
       done
@@ -189,9 +249,12 @@ stdenvNoCC.mkDerivation {
   passthru = { inherit programs; };
 
   meta = {
-    description = "NVDA, the screen reader, on Linux";
+    description =
+      if librariesOnly then
+        "Linda's native libraries: NVDA's virtual buffer storage, the PipeWire sink and the web document renderer"
+      else
+        "NVDA, the screen reader, on Linux";
     license = lib.licenses.gpl2Plus;
     platforms = lib.platforms.linux;
-    mainProgram = "linda";
-  };
+  } // lib.optionalAttrs (!librariesOnly) { mainProgram = "linda"; };
 }

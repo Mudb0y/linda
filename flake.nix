@@ -90,9 +90,11 @@
       };
 
       # The LINDA_ variables naming the native libraries and data Linux
-      # code loads, the same in the dev shell and in the package's wrappers.
-      # The code finds them through these rather than through the loader's
-      # search path, so that what it loads is exactly what the flake pins.
+      # code loads, which the dev shell sets and the package's Meson build
+      # fixes in linuxPlatform/installPaths.py, where its install check
+      # holds them to these. The code finds them through these rather than
+      # through the loader's search path, so that what it loads is exactly
+      # what the flake pins.
       runtimeEnv = {
         LINDA_ICU_LIB_DIR = "${lib.getLib pkgs.icu}/lib";
         # ICU exports every C symbol with this suffix, as in ubrk_open_78.
@@ -103,13 +105,24 @@
         LINDA_OPENEVV_DRIVER_DIR = "${openevvDriver}";
       };
 
-      pwsink = pkgs.callPackage ./nix/pwsink.nix { };
-      # Browse mode's two libraries: the virtual buffer's storage and the renderer that fills it.
-      vbuf = pkgs.callPackage ./nix/vbuf.nix { };
-      vbufengine = pkgs.callPackage ./nix/vbufengine.nix { };
-
+      # The Meson build's two shapes. The libraries, browse mode's storage and renderer and the
+      # PipeWire sink, are a package of their own, which the dev shell names as well; the program
+      # installs them from it, so that a change to the Python tree rebuilds neither them nor the shell.
+      libraries = pkgs.callPackage ./nix/linda.nix {
+        inherit python cargoVendorDir;
+        librariesOnly = true;
+      };
       linda = pkgs.callPackage ./nix/linda.nix {
-        inherit python runtimeEnv louisTables nvdaCldr pwsink vbuf vbufengine;
+        inherit
+          python
+          cargoVendorDir
+          runtimeEnv
+          louisTables
+          nvdaCldr
+          espeak
+          libraries
+          ;
+        inherit openevvDriver;
       };
       app = name: description: {
         type = "app";
@@ -159,7 +172,7 @@
         espeak-ng = espeak;
         openevv-libeci = openevvLibeci;
         openevv-driver = openevvDriver;
-        inherit pwsink vbuf vbufengine;
+        linda-libraries = libraries;
       };
 
       devShells.${system}.default = pkgs.mkShell (runtimeEnv // {
@@ -229,8 +242,8 @@
         # The library the PipeWire sink loads, the same file the package's wrappers name, and the
         # recorder its tests listen with. The shell does not choose the sink: a run that wants
         # PipeWire sets LINDA_AUDIO_SINK itself.
-        LINDA_PWSINK_LIB = "${pwsink}/lib/libpwsink.so";
-        LINDA_PWMON = "${pwsink.pwmon}/bin/pwmon";
+        LINDA_PWSINK_LIB = "${libraries}/lib/linda/libpwsink.so";
+        LINDA_PWMON = "${libraries.pwmon}/bin/pwmon";
 
         # setup.sh would put $out/lib first in every RUNPATH the linker
         # writes, and in a shell $out is outputs/out under the working
@@ -302,8 +315,8 @@
           # Browse mode's libraries, as the package's wrappers name them. Set here rather than as
           # attributes, which nix develop would put over the caller's own: a run that names a
           # library built in the checkout keeps it.
-          export LINDA_VBUF_LIB=''${LINDA_VBUF_LIB:-${vbuf}/lib/libnvdaVbuf.so}
-          export LINDA_VBUF_ENGINE=''${LINDA_VBUF_ENGINE:-${vbufengine}/lib/libbre_vbuf.so}
+          export LINDA_VBUF_LIB=''${LINDA_VBUF_LIB:-${libraries}/lib/linda/libnvdaVbuf.so}
+          export LINDA_VBUF_ENGINE=''${LINDA_VBUF_ENGINE:-${libraries}/lib/linda/libbre_vbuf.so}
           # The search path the build inputs' hooks made, for tests/linux/test_mesonInstall.py, which
           # configures the Meson build inside the rig, where only LINDA_ variables get in.
           export LINDA_PKG_CONFIG_PATH=$PKG_CONFIG_PATH
