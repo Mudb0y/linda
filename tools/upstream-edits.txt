@@ -499,6 +499,12 @@ source/gui/contextHelp.py
   file:/// before an absolute POSIX path gives four slashes. The redirect
   stays, because xdg-open hands a file URL to GIO, which refuses one with a
   fragment
+source/gui/logViewer.py
+  Linux runtime: refresh goes through linuxPlatform.logView, so that the
+  viewer holds at most the last megabyte of the log, in whole lines, as
+  filling GTK's text view takes about half a second a megabyte on the main
+  thread, during which NVDA says nothing; while it holds only the end,
+  Save As copies the whole log file
 source/gui/message.py
   Linux runtime: MessageDialog._playSound plays nothing, as the sounds are
   Windows' system sounds through winsound.MessageBeep, which have no Linux

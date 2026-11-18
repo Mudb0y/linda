@@ -387,6 +387,25 @@ def test_logViewerIsReadByLine(desktop: DesktopSession):
 	assertExitedCleanly(nvda)
 
 
+def test_logViewerOpensAtOnceOnABigLog(desktop: DesktopSession):
+	# A day of debug logging; GTK's text view took about half a second a megabyte to fill.
+	nvda = start(desktop, SESSION_CONFIG, env={"LINDA_BIG_LOG": "16"})
+	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
+	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
+	step(desktop, "t", "View log L 1 of …")
+	started = time.monotonic()
+	step(desktop, "l", "Linda Log Viewer", timeout=60)
+	elapsed = time.monotonic() - started
+	assert elapsed < 3, f"the log viewer took {elapsed:.1f} s to open"
+	# It holds the end of the log, from the start of a line.
+	mark = step(desktop, "control+Home", "0…")
+	assert int(desktop.spokenSince(mark)[-1].split()[0]) > 0
+	assert "did not answer within" not in nvda.text("nvda.log")
+	step(desktop, "Escape", *AT_START)
+	desktop.close()
+	assertExitedCleanly(nvda)
+
+
 def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSession, tmp_path: Path):
 	# Insert and numpad Insert only, upstream's default.
 	config = sessionConfig(tmp_path / "config", drop=("NVDAModifierKeys",))

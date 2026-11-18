@@ -10,6 +10,7 @@ import globalVars
 import gui
 import gui.contextHelp
 from gui import blockAction
+import sys
 
 
 #: The singleton instance of the log viewer UI.
@@ -70,6 +71,11 @@ class LogViewer(
 		# Ignore if log is not initialized
 		if globalVars.appArgs.logFileName is None:
 			return
+		if sys.platform != "win32":
+			from linuxPlatform import logView
+
+			logView.refresh(self)
+			return
 		pos = self.outputCtrl.GetInsertionPoint()
 		# Append new text to the output control which has been written to the log file since the last refresh.
 		try:
@@ -101,6 +107,11 @@ class LogViewer(
 		if not filename:
 			return
 		try:
+			if sys.platform != "win32":
+				from linuxPlatform import logView
+
+				if logView.saveWholeLog(self, filename):
+					return
 			# #9038: work with UTF-8 from the start.
 			with open(filename, "w", encoding="UTF-8") as f:
 				f.write(self.outputCtrl.GetValue())
