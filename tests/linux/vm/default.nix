@@ -4,6 +4,9 @@
   pkgs,
   lib,
   linda,
+  # The flake's NixOS module for linda-keyd, in every guest; a case turns the helper on in its own
+  # module, through keyd.nix.
+  keydModule ? { },
   # Packages of the flake a case's module installs in its guest, by name.
   guestPackages ? { },
 }:
@@ -54,7 +57,11 @@ let
       # A case that needs more in its guest, such as a service, says so in cases/NAME.nix, a NixOS
       # module that is given guestPackages.
       nodes.machine = {
-        imports = [ (import ./guest.nix { inherit tools; }) ] ++ lib.optional (caseModules ? ${name}) caseModules.${name};
+        imports = [
+          (import ./guest.nix { inherit tools; })
+          keydModule
+        ]
+        ++ lib.optional (caseModules ? ${name}) caseModules.${name};
         _module.args.guestPackages = guestPackages // {
           linda = lindaWithHooks;
         };

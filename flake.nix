@@ -120,6 +120,7 @@
       libraries = pkgs.callPackage ./nix/linda.nix {
         inherit python cargoVendorDir;
         librariesOnly = true;
+        keydService = true;
       };
       linda = pkgs.callPackage ./nix/linda.nix {
         inherit
@@ -188,8 +189,20 @@
         linda-libraries = libraries;
       };
 
+      # linda-keyd as a service, turned on with services.linda-keyd.enable.
+      nixosModules = {
+        linda-keyd = {
+          imports = [ ./nix/keyd-module.nix ];
+          services.linda-keyd.package = lib.mkDefault libraries;
+        };
+        default = self.nixosModules.linda-keyd;
+      };
+
       # The key capture tests in virtual machines: nix build .#checks.x86_64-linux.vm
-      checks.${system} = import ./tests/linux/vm { inherit pkgs lib linda; };
+      checks.${system} = import ./tests/linux/vm {
+        inherit pkgs lib linda;
+        keydModule = self.nixosModules.linda-keyd;
+      };
 
       devShells.${system}.default = pkgs.mkShell (runtimeEnv // {
         nativeBuildInputs = with pkgs; [
