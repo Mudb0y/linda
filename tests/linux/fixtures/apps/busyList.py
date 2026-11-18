@@ -3,7 +3,8 @@ second while it is too busy to answer quickly, as Caja's views do with a large f
 
 Prints "ready" once shown. Reads commands on stdin: "flood SECONDS" moves the list's cursor down a
 row at a time for that long, MOVES_PER_STEP rows at once and then busy for BUSY_SECONDS, and prints
-"flooded NAME" with the name of the row it stopped on.
+"flooded NAME" with the name of the row it stopped on. "busy SECONDS EACH" keeps the main loop to
+itself EACH seconds at a time for SECONDS, moving nothing.
 """
 
 import sys
@@ -60,6 +61,16 @@ def flood(seconds: float) -> None:
 	GLib.timeout_add(1, step)
 
 
+def busy(seconds: float, each: float) -> None:
+	end = time.monotonic() + seconds
+
+	def step() -> bool:
+		time.sleep(each)
+		return time.monotonic() < end
+
+	GLib.timeout_add(1, step)
+
+
 def onCommand(channel, _condition) -> bool:
 	line = channel.readline().strip()
 	if not line:
@@ -68,6 +79,8 @@ def onCommand(channel, _condition) -> bool:
 	command, _, argument = line.partition(" ")
 	if command == "flood":
 		flood(float(argument))
+	elif command == "busy":
+		busy(*map(float, argument.split()))
 	return True
 
 

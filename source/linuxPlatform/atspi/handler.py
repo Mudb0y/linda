@@ -251,9 +251,12 @@ def _scanForActiveWindow() -> Node | None:
 	"""The top-level that says it is active, asking every application that answers.
 
 	An application marked hung is not skipped here: the client refuses it at once for a while and then
-	lets one call through, which is how one that was busy as NVDA started is found again."""
+	lets one call through, which is how one that was busy as NVDA started is found again. One that has
+	just answered slowly is asked last: marco's switcher is found active after it."""
 	c = client()
-	for app in applications():
+	apps = applications()
+	apps.sort(key=lambda app: _clientModule.answeredSlowlyWithin(app.busName, BUSY_SECONDS))
+	for app in apps:
 		try:
 			for window in c.children(app):
 				if "active" in c.states(window):
@@ -1044,7 +1047,7 @@ def _asWindowEvent(event) -> tuple | None:
 
 
 #: Seconds after an application last answered slowly during which it counts as busy: a container of it
-#: moved through quickly is not asked about at every step.
+#: moved through quickly is not asked about at every step, and it is looked in last for the active window.
 BUSY_SECONDS = 2.0
 #: Seconds after a container last changed its active descendant within DESCENDANT_FLOOD_SECONDS of the
 #: change before, during which its application is taken to be flooding.
@@ -1175,6 +1178,9 @@ def pumpAll() -> None:
 			elif window is not None:
 				_rescans.clear()
 				_setForeground(window)
+				# The window left can say it is active again for a moment as another program's grab of
+				# the keyboard ends, as marco's does on Alt+Tab before it activates the window chosen; the
+				# focus never left it.
 				if window != left:
 					due.append(("window:activate", window, 0, 0, None))
 			elif not _rescans:
@@ -1320,21 +1326,12 @@ def pumpAll() -> None:
 			eventHandler.queueEvent(nvdaEvent, obj)
 		if eventType.startswith("object:text-changed:"):
 			_reportTextChange(obj, event)
+	flushFocus()
 	if windowsChanged and not _foregroundActive:
 		# A window deactivated and none activated after it: marco can give the focus back to a window
-		# without that window saying so, as when a dialog closes.
-		left = _foreground
-		window = _scanForActiveWindow()
-		if window is not None and not _isSwitcher(window):
-			_setForeground(window)
-			# The window left can say it is active again for a moment as another program's grab of the
-			# keyboard ends, as marco's does on Alt+Tab before it activates the window chosen; the focus
-			# never left it.
-			if window != left:
-				focusEvents.insert(0, ("window:activate", window, 0, 0, None))
-		else:
-			# Nor does it always say so at once.
-			_rescans[:] = [now + delay for delay in RESCAN_DELAYS_SECONDS]
-			core.requestPump()
-	flushFocus()
+		# without that window saying so, as when a dialog closes, nor does it always say so at once. The
+		# look asks every application, one of which may be busy, so it waits until what came with the
+		# deactivation has been spoken: marco's switcher names the window Alt+Tab chose just after.
+		_rescans[:] = [now + delay for delay in (SETTLE_QUIET_SECONDS, *RESCAN_DELAYS_SECONDS)]
+		core.requestPump()
 	log.debug(f"AT-SPI pump: {len(events)} raw events, {len(kept)} after coalescing")

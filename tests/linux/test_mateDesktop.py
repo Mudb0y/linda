@@ -11,6 +11,7 @@ The transcript holds what the synthesizer is given after symbols are spoken as w
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -27,6 +28,9 @@ STARTUP_BOUND = 60.0
 WINDOW_TIMEOUT = 30.0
 #: Files in the folder that must not slow NVDA down.
 BIG_FOLDER_FILES = 3000
+TERMINAL = "Terminal fixture"
+#: Seconds from Tab, Alt held, to the window marco's switcher chose being named; about 0.05 s.
+SWITCHER_BOUND = 0.3
 
 
 @pytest.fixture
@@ -427,3 +431,43 @@ def test_windowsComingAndGoing(desktop: DesktopSession):
 	# The last window closes, and the desktop has the focus.
 	step(desktop, "control+w", "Desktop desktop pane")
 	assertQuitCleanly(desktop, nvda)
+
+
+def test_altTabNamesTheChoiceWithoutWaitingOnABusyProgram(tmp_path: Path):
+	"""Alt held, Tab names the window marco's switcher chose at once, though a program on the bus before
+	marco answers each call 0.1 to 0.2 s late. Linda looks for the active window, asking every program,
+	when the window left says it is inactive, which must not hold up the name."""
+	busy = subprocess.Popen(
+		[sys.executable, str(desktopSession.APPS / "busyList.py")],
+		stdin=subprocess.PIPE,
+		stdout=subprocess.PIPE,
+		text=True,
+	)
+	try:
+		assert busy.stdout.readline() == "ready\n"
+		with DesktopSession(tmp_path / "desktop") as desktop:
+			desktop.startApp(desktop.fixture("gtkFixture"), title="Fixture window")
+			desktop.startApp(desktop.fixture("terminal"), title=TERMINAL, timeout=WINDOW_TIMEOUT)
+			desktopSession.activate(TERMINAL)
+			nvda = startNVDA(desktop, TERMINAL)
+			busy.stdin.write("busy 300 0.1\n")
+			busy.stdin.flush()
+			waits = []
+			for chosen in ("Fixture window", TERMINAL) * 3:
+				mark = desktop.mark()
+				subprocess.run(["xdotool", "keydown", "alt"], check=True)
+				try:
+					pressed = time.monotonic()
+					subprocess.run(["xdotool", "key", "Tab"], check=True)
+					desktop.expect(chosen, since=mark)
+					waits.append(nvda.spoken()[mark]["t"] - pressed)
+					time.sleep(0.5)
+				finally:
+					subprocess.run(["xdotool", "keyup", "alt"], check=True)
+				desktop.expect(chosen, chosen, since=mark)
+				time.sleep(1)
+			assert max(waits) < SWITCHER_BOUND, waits
+			assertQuitCleanly(desktop, nvda)
+	finally:
+		busy.kill()
+		busy.wait()
