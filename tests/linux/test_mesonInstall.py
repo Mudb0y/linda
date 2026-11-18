@@ -385,6 +385,62 @@ def test_configureNamesWhatIsMissing(tmp_path: Path, option: str, value: str, me
 	assert message in done.stdout, done.stdout[-3000:]
 
 
+def test_keydServiceInstallsTheHelpersUnitUserRuleAndAction(tmp_path: Path):
+	"""With keyd_service, the libraries' build installs what runs the key capture helper as a system
+	service, where systemd, udev and polkit look under the prefix, naming the helper where it is
+	installed and the setfacl the option gives; without it, as the default, none of it."""
+	build, destDir = tmp_path / "build", tmp_path / "dest"
+	setfacl = "/usr/bin/setfacl"
+	steps = [
+		(
+			"setup",
+			str(build),
+			str(ROOT),
+			f"--prefix={PREFIX}",
+			"-Dprogram=false",
+			"-Dkeyd_service=true",
+			f"-Dsetfacl={setfacl}",
+			*options(tmp_path)[:1],
+		),
+		("install", "-C", str(build), "--destdir", str(destDir)),
+	]
+	for step in steps:
+		done = meson(*step, timeout=300)
+		assert done.returncode == 0, f"meson {step[0]} failed:\n{done.stdout[-6000:]}\n{done.stderr[-6000:]}"
+	introspected = json.loads(meson("introspect", "--buildoptions", str(build)).stdout)
+	libDir = next(option["value"] for option in introspected if option["name"] == "libdir")
+	service = {
+		f"{PREFIX}/lib/systemd/system/linda-keyd.service",
+		f"{PREFIX}/lib/udev/rules.d/70-linda-keyd.rules",
+		f"{PREFIX}/lib/sysusers.d/linda-keyd.conf",
+		f"{PREFIX}/lib/modules-load.d/linda-keyd.conf",
+		f"{PREFIX}/share/polkit-1/actions/io.github.mudb0y.linda.keyd.policy",
+	}
+	found = {"/" + str(p.relative_to(destDir)) for p in destDir.rglob("*") if p.is_file()}
+	assert found == service | {f"{PREFIX}/{libDir}/linda/{name}" for name in builtFiles()}, found
+
+	def read(path: str) -> str:
+		return (destDir / path.lstrip("/")).read_text(encoding="utf-8")
+
+	unit = read(f"{PREFIX}/lib/systemd/system/linda-keyd.service").splitlines()
+	assert f"ExecStart={PREFIX}/{libDir}/linda/linda-keyd" in unit
+	for line in (
+		"Type=notify",
+		"User=linda-keyd",
+		"SupplementaryGroups=input",
+		"WatchdogSec=2",
+		"Restart=always",
+	):
+		assert line in unit, line
+	rule = read(f"{PREFIX}/lib/udev/rules.d/70-linda-keyd.rules")
+	assert f'RUN+="{setfacl} -m u:linda-keyd:rw /dev/uinput"' in rule, rule
+	assert read(f"{PREFIX}/lib/sysusers.d/linda-keyd.conf").splitlines()[-1].startswith("u linda-keyd ")
+	assert read(f"{PREFIX}/lib/modules-load.d/linda-keyd.conf").splitlines()[-1] == "uinput"
+	policy = read(f"{PREFIX}/share/polkit-1/actions/io.github.mudb0y.linda.keyd.policy")
+	assert '<action id="io.github.mudb0y.linda.keyd.capture">' in policy
+	assert "<allow_active>yes</allow_active>" in policy and "<allow_any>no</allow_any>" in policy
+
+
 def test_desktopEntryAndMetadataSayWhatLindaIs(installed: Installed):
 	"""Both validate, the entry starts linda with no icon of NVDA's, and the metadata says what the
 	readme says of NVDA and NV Access."""

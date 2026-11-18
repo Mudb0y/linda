@@ -26,6 +26,7 @@
   strace,
   desktop-file-utils,
   appstream,
+  acl,
   python,
   cargoVendorDir,
   louisTables ? null,
@@ -35,6 +36,9 @@
   # The LINDA_ variables the dev shell sets, which Meson must have fixed to the same values.
   runtimeEnv ? { },
   librariesOnly ? false,
+  # Whether to install the system service that runs the key capture helper, which the NixOS module
+  # in keyd-module.nix turns on.
+  keydService ? false,
   # A build with librariesOnly, whose libraries the program installs instead of building its own.
   libraries ? null,
 }:
@@ -130,6 +134,7 @@ stdenv.mkDerivation {
       ]
       ++ lib.optionals buildsLibraries librarySources
       ++ lib.optionals (!librariesOnly) programSources
+      ++ lib.optional keydService ../linux/keyd
     );
   };
 
@@ -139,7 +144,11 @@ stdenv.mkDerivation {
 
   mesonBuildType = "release";
   mesonFlags =
-    [ (lib.mesonBool "program" (!librariesOnly)) ]
+    [
+      (lib.mesonBool "program" (!librariesOnly))
+      (lib.mesonBool "keyd_service" keydService)
+    ]
+    ++ lib.optional keydService (lib.mesonOption "setfacl" (lib.getExe' acl "setfacl"))
     ++ lib.optional buildsLibraries (lib.mesonOption "cargo_vendor_dir" "${cargoVendorDir}")
     ++ lib.optional (!buildsLibraries) (lib.mesonOption "prebuilt_libraries" "${libraries}/lib/linda")
     ++ lib.optionals (!librariesOnly) [

@@ -1,0 +1,4 @@
+# linda-keyd makes its virtual keyboard through /dev/uinput, which is root's alone unless something
+# says otherwise. An ACL gives its user that one node and leaves the node's group and mode to whatever
+# else sets them, such as the uinput group of NixOS, ydotool or Steam's rules.
+SUBSYSTEM=="misc", KERNEL=="uinput", ACTION!="remove", OPTIONS+="static_node=uinput", RUN+="@SETFACL@ -m u:linda-keyd:rw /dev/uinput"

@@ -86,6 +86,40 @@ else
   )
 endif
 
+if get_option('keyd_service')
+  # Where systemd and udev look whatever the library directory, as their own packages install.
+  systemd_lib = prefix / 'lib'
+  setfacl = get_option('setfacl')
+  if setfacl == ''
+    setfacl = find_program('setfacl').full_path()
+  endif
+  configure_file(
+    input: 'linux/keyd/linda-keyd.service.in',
+    output: 'linda-keyd.service',
+    configuration: {'KEYD': pkglibdir / 'linda-keyd'},
+    install: true,
+    install_dir: systemd_lib / 'systemd' / 'system',
+  )
+  configure_file(
+    input: 'linux/keyd/70-linda-keyd.rules.in',
+    output: '70-linda-keyd.rules',
+    configuration: {'SETFACL': setfacl},
+    install: true,
+    install_dir: systemd_lib / 'udev' / 'rules.d',
+  )
+  install_data('linux/keyd/linda-keyd.sysusers',
+    rename: 'linda-keyd.conf',
+    install_dir: systemd_lib / 'sysusers.d',
+  )
+  install_data('linux/keyd/linda-keyd.modules-load',
+    rename: 'linda-keyd.conf',
+    install_dir: systemd_lib / 'modules-load.d',
+  )
+  install_data('linux/keyd/io.github.mudb0y.linda.keyd.policy',
+    install_dir: get_option('datadir') / 'polkit-1' / 'actions',
+  )
+endif
+
 if get_option('program')
   # What the Linux side imports beyond the standard library, and the GObject typelibs it asks for.
   # The last five are the Markdown extensions md2html builds the user guide with.

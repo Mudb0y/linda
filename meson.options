@@ -2,6 +2,10 @@ option('program', type: 'boolean', value: true,
   description: 'Install the program; false builds and installs only the three native libraries and the key capture helper')
 option('prebuilt_libraries', type: 'string', value: '',
   description: 'A directory holding libnvdaVbuf.so, libpwsink.so, libbre_vbuf.so and linda-keyd from an earlier build with program=false, installed instead of building them')
+option('keyd_service', type: 'boolean', value: false,
+  description: 'Install the system service that runs the key capture helper: its systemd unit, its system user, the udev rule that gives it /dev/uinput, the module load of uinput and its polkit action')
+option('setfacl', type: 'string', value: '',
+  description: 'The setfacl the udev rule of keyd_service runs, by path; empty looks for it on PATH')
 option('cargo_vendor_dir', type: 'string', value: '',
   description: 'The crates engine/Cargo.lock names, as cargo vendor writes them; given, cargo builds offline')
 option('cldr_data', type: 'string', value: '',

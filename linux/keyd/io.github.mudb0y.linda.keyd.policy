@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Linda</vendor>
+  <vendor_url>https://github.com/Mudb0y/linda</vendor_url>
+
+  <!-- Asked by linda-keyd of each process that would be its client, never with a password: a
+       process it is not allowed keeps taking keys through X. -->
+  <action id="io.github.mudb0y.linda.keyd.capture">
+    <description>Take the keyboards for the screen reader</description>
+    <message>A screen reader wants to read every key before the programs do</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <!-- polkit answers a check of another user's process only to root and to the action's owner. -->
+    <annotate key="org.freedesktop.policykit.owner">unix-user:linda-keyd</annotate>
+  </action>
+</policyconfig>

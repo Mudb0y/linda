@@ -1,0 +1,70 @@
+# linda-keyd takes the keyboards in the kernel for Linda while Linda, in the session in front, asks
+# it to. A keyboard it holds cannot be used by anything else, so this unit is about ending it when it
+# stops making progress as much as about confining it: the kernel lets go of whatever a dead process
+# held, and Linda goes back to taking keys through X.
+[Unit]
+Description=Linda's key capture helper
+# It follows logind and asks polkit on the system bus; it waits for the bus by itself when the bus is
+# not there yet, holding nothing meanwhile.
+After=dbus.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=@KEYD@
+User=linda-keyd
+Group=linda-keyd
+# The keyboards' event nodes; /dev/uinput it reaches through the ACL its udev rule gives it.
+SupplementaryGroups=input
+RuntimeDirectory=linda-keyd
+# Every local user may connect: who becomes the client is decided by logind and polkit.
+RuntimeDirectoryMode=0755
+
+# Its loop feeds the watchdog every second, holding a keyboard or not. Its own watchdog thread lets
+# go and ends it after one second without progress; this is for when that thread cannot run either,
+# as when the process is stopped, which SIGABRT ends as it would a running one. SIGKILL follows a
+# second later for a process that SIGABRT did not end.
+WatchdogSec=2
+TimeoutAbortSec=1
+Restart=always
+RestartSec=1
+# Losing it to the out-of-memory killer loses Linda's keys until it is back.
+OOMScoreAdjust=-900
+# A dump would hold keys typed, passwords among them.
+LimitCORE=0
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+DevicePolicy=closed
+DeviceAllow=char-input rw
+DeviceAllow=/dev/uinput rw
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# Not ProtectProc=invisible: admission reads the start time of a client of another user from
+# /proc/PID/stat, as polkit identifies the process by it.
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+PrivateIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
