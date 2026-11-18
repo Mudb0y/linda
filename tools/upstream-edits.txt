@@ -212,12 +212,38 @@ source/addonHandler/__init__.py
   Linux runtime: completeRemove deletes the empty file it reserved before
   moving the add-on's directory to that name, as Linux puts a directory in
   the place of an empty directory only; no add-on could be removed
+  every platform: a manifest may list the platforms its add-on supports, as
+  platforms = windows, linux; AddonManifest.platforms and AddonBase.platforms
+  give them, and Windows alone when the list is missing or empty, which
+  unmodified NVDA reads and ignores. An add-on that does not list the
+  platform NVDA runs on is incompatible, as one not tested is, and is
+  blocked at start unless the user has overridden that: the start asks the
+  add-on's isCompatible rather than isAddonCompatible, and
+  getIncompatibleAddons counts the platform too. The first start that reads
+  platforms records each add-on then running without support for the
+  platform as overridden, so that an update does not turn off add-ons in
+  use, and AddonsState keeps platformsRecorded so that it does this once
+source/addonHandler/addonVersionCheck.py
+  every platform: the platform names an add-on's manifest uses, the one
+  NVDA runs on, and supportsPlatform, which says whether an add-on lists it
 source/addonStore/dataManager.py
   Linux runtime: while the add-on store is off, which is its default on
   Linux (linuxPlatform.nvdaAddonStore), the data manager starts no fetch
   at start-up and getLatestCompatibleAddons and getLatestAddons return an
   empty listing without asking the server, so that nothing is sent to
   NV Access's server until the user turns the store on
+source/addonStore/models/addon.py
+  every platform: the store's models give platforms, from the manifest for
+  installed add-ons and bundles; the store's listing says nothing of them,
+  so an add-on listed there counts as written for Windows until its
+  manifest is read
+source/addonStore/models/version.py
+  every platform: SupportsVersionCheck has platforms and
+  supportsCurrentPlatform, an add-on is compatible only when it supports the
+  platform NVDA runs on, the user can override that as for an add-on not
+  tested, and getIncompatibleReason says so through getPlatformWarning,
+  which fills in NVDA's name rather than writing it, so that Linda's
+  renaming of NVDA leaves it
 source/api.py
   Linux runtime: copyToClip and getClipData use the desktop's clipboard
   through linuxPlatform.clipboard, which goes through GTK on the main
@@ -410,10 +436,16 @@ source/gui/__init__.py
   which is os.startfile on Windows and on Linux opens them with the
   desktop's default application through xdg-open
 source/gui/addonStoreGui/controls/details.py
+  every platform: the details say whether an add-on supports the platform
+  NVDA runs on, or which it was made for
   Linux runtime: _refresh fills the details without freezing the panel, as
   GTK's text view crashed NVDA in SetInsertionPoint after a thaw while the
   window was being shown, the first time the store listed an add-on
 source/gui/addonStoreGui/controls/messageDialogs.py
+  every platform: installing or enabling an add-on that does not support
+  the platform NVDA runs on asks with a warning of its own, which says so
+  and how to start without add-ons, instead of the one about an add-on not
+  tested
   Linux runtime: the daily check for updates asks nothing while the add-on
   store is off
 source/gui/addonStoreGui/controls/storeDialog.py

@@ -47,7 +47,9 @@ from utils.caseInsensitiveCollections import CaseInsensitiveSet
 from utils.tempFile import _createEmptyTempFileForDeletingFile
 
 from .addonVersionCheck import (
+	getPlatformsFromManifestValue,
 	isAddonCompatible,
+	supportsPlatform,
 )
 from .packaging import (
 	initializeModulePackagePaths,
@@ -132,6 +134,9 @@ class AddonsState(collections.UserDict[AddonStateCategory, CaseInsensitiveSet[st
 
 	data: AddonStateDictT
 	manualOverridesAPIVersion: MajorMinorPatch
+	platformsRecorded: bool
+	"""Whether NVDA has read the platforms the installed add-ons support, and recorded those it
+	found running without support for this one as acknowledged, which it does once."""
 
 	@property
 	def statePath(self) -> os.PathLike:
@@ -145,6 +150,7 @@ class AddonsState(collections.UserDict[AddonStateCategory, CaseInsensitiveSet[st
 		# The ability to override add-ons only appeared in 2023.2,
 		# where the BACK_COMPAT_TO API version was 2023.1.0.
 		self.manualOverridesAPIVersion = MajorMinorPatch(2023, 1, 0)
+		self.platformsRecorded = False
 
 	def fromDict(
 		self,
@@ -157,6 +163,7 @@ class AddonsState(collections.UserDict[AddonStateCategory, CaseInsensitiveSet[st
 				)
 			except Exception:
 				log.error("Unable to deserialise backward compatibility version.", exc_info=True)  # noqa: G201
+		self.platformsRecorded = stateDict.get("platformsRecorded") is True
 		for category in AddonStateCategory:
 			# Make the list of strings unique and case insensitive.
 			self[AddonStateCategory(category)] = CaseInsensitiveSet(stateDict.get(category, []))
@@ -176,6 +183,9 @@ class AddonsState(collections.UserDict[AddonStateCategory, CaseInsensitiveSet[st
 		for category, addonIds in self.data.items():
 			serializeableState[category.value] = list(addonIds)
 		serializeableState["backCompatToAPIVersion"] = tuple(self.manualOverridesAPIVersion)
+		if self.platformsRecorded:
+			# Absent, as from a copy of NVDA that did not read platforms, it is False.
+			serializeableState["platformsRecorded"] = True
 		return serializeableState
 
 	def load(self) -> None:
@@ -347,10 +357,13 @@ def getIncompatibleAddons(
 	"""Returns a generator of the add-ons that are not compatible."""
 	return getAvailableAddons(
 		filterFunc=lambda addon: (
-			not isAddonCompatible(
-				addon,
-				currentAPIVersion=currentAPIVersion,
-				backwardsCompatToVersion=backCompatToAPIVersion,
+			not (
+				isAddonCompatible(
+					addon,
+					currentAPIVersion=currentAPIVersion,
+					backwardsCompatToVersion=backCompatToAPIVersion,
+				)
+				and supportsPlatform(addon)
 			)
 			and (
 				# Add-ons that override incompatibility are not considered incompatible.
@@ -398,6 +411,7 @@ def initialize():
 	# #3090: Are there add-ons that are supposed to not run for this session?
 	disableAddonsIfAny()
 	getAvailableAddons(refresh=True, isFirstLoad=True)
+	state.platformsRecorded = True
 	state.cleanupRemovedDisabledAddons()
 	state._cleanupCompatibleAddonsFromDowngrade()
 	if missingPendingInstalls := state[AddonStateCategory.PENDING_INSTALL] - _failedPendingInstalls:
@@ -495,7 +509,18 @@ def _getAvailableAddonsFromPath(
 					)
 					if a.isDisabled:
 						log.debug("Disabling add-on %s", name)
-					if not (isAddonCompatible(a) or a.overrideIncompatibility):
+					if (
+						isFirstLoad
+						and not state.platformsRecorded
+						and not supportsPlatform(a)
+						and a.canOverrideCompatibility
+						and not (a.isBlocked or a.isDisabled)
+					):
+						# Installed before NVDA read the platforms an add-on supports, and running:
+						# the user has been using it, so it counts as acknowledged.
+						log.debug(f"Add-on {name} does not list this platform; recorded as acknowledged")
+						state[AddonStateCategory.OVERRIDE_COMPATIBILITY].add(name)
+					if not (a.isCompatible or a.overrideIncompatibility):
 						log.debugWarning("Add-on %s is considered incompatible", name)
 						state[AddonStateCategory.BLOCKED].add(a.name)
 					yield a
@@ -599,6 +624,11 @@ class AddonBase(SupportsAddonState, SupportsVersionCheck, ABC):
 	@property
 	def lastTestedNVDAVersion(self) -> addonAPIVersion.AddonApiVersionT:
 		return self.manifest.get("lastTestedNVDAVersion")
+
+	@property
+	def platforms(self) -> tuple[str, ...]:
+		"""The platforms the add-on supports, as AddonManifest.platforms gives them."""
+		return self.manifest.platforms
 
 	@property
 	@abstractmethod
@@ -1134,6 +1164,11 @@ minimumNVDAVersion = apiVersion(default="0.0.0")
 # Must be greater than or equal to minimumNVDAVersion
 lastTestedNVDAVersion = apiVersion(default="0.0.0")
 
+# The platforms the add-on supports, such as: windows, linux
+# Compared without regard to case. Names NVDA does not know are kept and ignored.
+# When left out or empty, the add-on supports Windows only.
+platforms = force_list(default=list())
+
 # URL for more information about the add-on, e.g. a homepage.
 # Should begin with https://
 url = string(default=None)
@@ -1215,6 +1250,11 @@ docFileName = string(default=None)
 	@property
 	def errors(self):
 		return self._errors
+
+	@property
+	def platforms(self) -> tuple[str, ...]:
+		"""The platforms the add-on supports, in lower case; Windows alone when the manifest names none."""
+		return getPlatformsFromManifestValue(self.get("platforms"))
 
 	def _validateApiVersionRange(self):
 		lastTested = self.get("lastTestedNVDAVersion")

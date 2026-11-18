@@ -46,6 +46,9 @@ class SupportsVersionCheck(Protocol):
 	minimumNVDAVersion: addonAPIVersion.AddonApiVersionT
 	lastTestedNVDAVersion: addonAPIVersion.AddonApiVersionT
 	name: str
+	platforms: tuple[str, ...]
+	"""The platforms the add-on supports, by the lower-case names of
+	addonHandler.addonVersionCheck.KNOWN_PLATFORMS and any others its manifest gives."""
 
 	@property
 	def _hasOverriddenCompat(self) -> bool:
@@ -83,7 +86,15 @@ class SupportsVersionCheck(Protocol):
 	def canOverrideCompatibility(self) -> bool:
 		from addonHandler.addonVersionCheck import hasAddonGotRequiredSupport, isAddonTested
 
-		return hasAddonGotRequiredSupport(self) and not isAddonTested(self)
+		return hasAddonGotRequiredSupport(self) and not (isAddonTested(self) and self.supportsCurrentPlatform)
+
+	@property
+	def supportsCurrentPlatform(self) -> bool:
+		"""True if the add-on says it supports the platform this copy of NVDA runs on.
+		One that does not is incompatible, but the user can override that, as for one not tested."""
+		from addonHandler.addonVersionCheck import supportsPlatform
+
+		return supportsPlatform(self)
 
 	@property
 	def _isTested(self) -> bool:
@@ -99,7 +110,7 @@ class SupportsVersionCheck(Protocol):
 
 	@property
 	def isCompatible(self) -> bool:
-		return self._isTested and self._hasGotRequiredSupport
+		return self._isTested and self._hasGotRequiredSupport and self.supportsCurrentPlatform
 
 	def getIncompatibleReason(
 		self,
@@ -118,6 +129,21 @@ class SupportsVersionCheck(Protocol):
 			).format(
 				nvdaVersion=addonAPIVersion.formatForGUI(self.minimumNVDAVersion),
 			)
+		elif not self.supportsCurrentPlatform:
+			return getPlatformWarning(
+				self,
+				pgettext(
+					"addonStore",
+					# Translators: The reason an add-on is not compatible: its manifest does not list the
+					# platform NVDA runs on. {platform} is that platform, such as Linux; {nvda} is NVDA;
+					# {platforms} the platforms the add-on lists, such as Windows; {program} the name of
+					# the program running; {command} the command that starts it without add-ons.
+					"This add-on does not say that it supports {platform}. "
+					"It was written for {nvda} on {platforms} and may not work. "
+					"You can enable it at your own risk. "
+					"If {program} misbehaves or does not start, start it with {command} and remove this add-on.",
+				),
+			)
 		elif not isAddonTested(self, backwardsCompatToVersion):
 			return pgettext(
 				"addonStore",
@@ -134,6 +160,26 @@ class SupportsVersionCheck(Protocol):
 			)
 		else:
 			return None
+
+
+def getPlatformWarning(addon: SupportsVersionCheck, message: str, **fields: str) -> str:
+	"""Fill in a message about an add-on that does not say it supports this platform.
+
+	:param message: Holds {platform}, {nvda}, {platforms}, {program} and {command}, and any of fields;
+		NVDA's own name is filled in rather than written, so that a program that renames NVDA in its
+		messages keeps it.
+	"""
+	import buildVersion
+	from addonHandler.addonVersionCheck import CURRENT_PLATFORM, getPlatformDisplayName
+
+	return message.format(
+		platform=getPlatformDisplayName(CURRENT_PLATFORM),
+		nvda="NVDA",
+		platforms=", ".join(getPlatformDisplayName(platform) for platform in addon.platforms),
+		program=buildVersion.name,
+		command=f"{buildVersion.name.lower()} --disable-addons",
+		**fields,
+	)
 
 
 def getAddonCompatibilityMessage() -> str:

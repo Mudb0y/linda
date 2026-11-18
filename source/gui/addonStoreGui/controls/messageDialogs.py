@@ -28,6 +28,7 @@ from addonStore.models.addon import (
 from addonStore.dataManager import addonDataManager
 from addonStore.models.manifest import _getAddonManifestsFromPath
 from addonStore.models.status import _StatusFilterKey, AvailableAddonStatus, getStatus
+from addonStore.models.version import getPlatformWarning
 import config
 from config.configFlags import AddonsAutomaticUpdate
 import gui
@@ -197,6 +198,25 @@ def _shouldInstallWhenAddonTooOldDialog(
 		lastTestedNVDAVersion=addonAPIVersion.formatForGUI(addon.lastTestedNVDAVersion),
 		nvdaVersion=addonAPIVersion.formatForGUI(addonAPIVersion.BACK_COMPAT_TO),
 	)
+	if not addon.supportsCurrentPlatform:
+		incompatibleMessage = getPlatformWarning(
+			addon,
+			pgettext(
+				"addonStore",
+				# Translators: The message displayed when installing an add-on whose manifest does not list
+				# the platform NVDA runs on. {name} and {version} are the add-on's; {platform} is the
+				# platform, such as Linux; {nvda} is NVDA; {platforms} the platforms the add-on lists, such
+				# as Windows; {program} the name of the program running; {command} the command that starts
+				# it without add-ons.
+				"Warning: {name} {version} does not say that it supports {platform}. "
+				"It was written for {nvda} on {platforms} and may not work. "
+				"If {program} misbehaves or does not start after you install it, "
+				"start {program} with {command} and remove the add-on.\n"
+				"Proceed with installation anyway? ",
+			),
+			name=addon.displayName,
+			version=addon.addonVersionName,
+		)
 	dlg = ErrorAddonInstallDialogWithYesNoButtons(
 		parent=parent,
 		# Translators: The title of a dialog presented when an error occurs.
@@ -230,6 +250,25 @@ def _shouldEnableWhenAddonTooOldDialog(
 		lastTestedNVDAVersion=addonAPIVersion.formatForGUI(addon.lastTestedNVDAVersion),
 		nvdaVersion=addonAPIVersion.formatForGUI(addonAPIVersion.BACK_COMPAT_TO),
 	)
+	if not addon.supportsCurrentPlatform:
+		incompatibleMessage = getPlatformWarning(
+			addon,
+			pgettext(
+				"addonStore",
+				# Translators: The message displayed when enabling an add-on whose manifest does not list
+				# the platform NVDA runs on. {name} and {version} are the add-on's; {platform} is the
+				# platform, such as Linux; {nvda} is NVDA; {platforms} the platforms the add-on lists, such
+				# as Windows; {program} the name of the program running; {command} the command that starts
+				# it without add-ons.
+				"Warning: {name} {version} does not say that it supports {platform}. "
+				"It was written for {nvda} on {platforms} and may not work. "
+				"If {program} misbehaves or does not start after you enable it, "
+				"start {program} with {command} and remove the add-on.\n"
+				"Proceed with enabling anyway? ",
+			),
+			name=addon.displayName,
+			version=addon.addonVersionName,
+		)
 	dlg = ErrorAddonInstallDialogWithYesNoButtons(
 		parent=parent,
 		# Translators: The title of a dialog presented when an error occurs.

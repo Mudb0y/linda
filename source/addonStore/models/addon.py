@@ -190,6 +190,14 @@ class _AddonStoreModel(_AddonGUIModel):
 		)
 
 	@property
+	def platforms(self) -> tuple[str, ...]:
+		"""The store's listing does not say which platforms an add-on supports, so until its manifest is
+		read, it counts as written for NVDA on Windows, as every add-on was before manifests said."""
+		from addonHandler.addonVersionCheck import WINDOWS
+
+		return (WINDOWS,)
+
+	@property
 	def publicationDate(self) -> str | None:
 		if self.submissionTime is None:
 			return None
@@ -242,6 +250,10 @@ class _AddonManifestModel(_AddonGUIModel):
 	@property
 	def author(self) -> str:
 		return self.manifest["author"]
+
+	@property
+	def platforms(self) -> tuple[str, ...]:
+		return self.manifest.platforms
 
 
 @dataclasses.dataclass(frozen=True)  # once created, it should not be modified.

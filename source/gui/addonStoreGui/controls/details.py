@@ -28,7 +28,27 @@ _fontFaceName = "Segoe UI"
 _fontFaceName_semiBold = "Segoe UI Semibold"
 
 if TYPE_CHECKING:
+	from addonStore.models.addon import _AddonGUIModel
+
 	from .storeDialog import AddonStoreDialog
+
+
+def _platformsText(details: "_AddonGUIModel") -> str:
+	from addonHandler.addonVersionCheck import CURRENT_PLATFORM, getPlatformDisplayName
+
+	if details.supportsCurrentPlatform:
+		return pgettext(
+			"addonStore",
+			# Translators: In the details of an add-on that says it supports the platform NVDA runs on.
+			# {platform} is that platform, such as Linux.
+			"Supports {platform}",
+		).format(platform=getPlatformDisplayName(CURRENT_PLATFORM))
+	return pgettext(
+		"addonStore",
+		# Translators: In the details of an add-on that does not say it supports the platform NVDA runs
+		# on. {platforms} is what it lists, such as Windows.
+		"Made for {platforms}",
+	).format(platforms=", ".join(getPlatformDisplayName(platform) for platform in details.platforms))
 
 
 class AddonDetails(
@@ -343,6 +363,12 @@ class AddonDetails(
 					# Translators: Label for an extra detail field for the selected add-on. In the add-on store dialog.
 					pgettext("addonStore", "Channel:"),
 					details.channel.displayString,
+				)
+
+				self._appendDetailsLabelValue(
+					# Translators: Label for an extra detail field for the selected add-on. In the add-on store dialog.
+					pgettext("addonStore", "Platforms:"),
+					_platformsText(details),
 				)
 
 				incompatibleReason = details.getIncompatibleReason()
