@@ -143,9 +143,13 @@ def main() -> NoReturn:
 			_fail(f"another copy still holds {lock.path}")
 	# Before anything else can fail: a copy killed with the screen curtain on, its guard with it, left
 	# the screen black.
-	from linuxPlatform import gammaCurtain
+	try:
+		from linuxPlatform import gammaCurtain
 
-	staleCurtain = gammaCurtain.liftStale()
+		staleCurtain = gammaCurtain.liftStale()
+	except Exception as e:  # noqa: BLE001
+		# Looking for a curtain must never be what keeps the screen reader from starting.
+		staleCurtain = f"Could not look for a Screen Curtain left by a copy of NVDA that ended: {e!r}"
 	# Only now, as a copy started under the former name could still have written its configuration
 	# as it exited.
 	from linuxPlatform import xdg
