@@ -297,7 +297,7 @@ def test_startAfterSignInIsOfferedAndSaysWhyThisCopyCannot(desktop: DesktopSessi
 
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
 	step(desktop, "Return", "Settings... S 1 of 4")
-	step(desktop, "Return", "Categories: list General")
+	step(desktop, "Return", "Categories: list", "General 1 of 15")
 	for _press in range(12):
 		mark = desktop.mark()
 		desktop.press("Tab")

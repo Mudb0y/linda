@@ -99,7 +99,7 @@ def test_toolsAndHelpMenusOfferOnlyWhatWorksAndHelpWithLinda(desktop: DesktopSes
 			"View log L 1 of 6",
 			"Speech viewer not checked S 2 of 6",
 			"Braille viewer not checked B 3 of 6",
-			"Add-on store... A 4 of 6",
+			"Add-ons... A 4 of 6",
 			"Python console P 5 of 6",
 			"Reload plugins 6 of 6",
 		],
@@ -171,7 +171,7 @@ CATEGORIES = [
 	"Document Formatting 11 of 15",
 	"Document Navigation 12 of 15",
 	"Remote Access 13 of 15",
-	"Add-on Store 14 of 15",
+	"NVDA Add-on Store 14 of 15",
 	"Advanced 15 of 15",
 ]
 
@@ -233,12 +233,12 @@ def test_settingsLeaveOutWhatLinuxLacks(desktop: DesktopSession):
 		"Save configuration when exiting Linda check box checked Alt plus S",
 		"Show exit options when exiting Linda check box checked Alt plus W",
 		"Play sounds when starting or exiting Linda check box not checked Alt plus P",
+		"Start Linda after I sign in check box not checked Alt plus A",
 		*BUTTONS,
 		"Categories: list | General 1 of 15",
 	]
-	# Upstream's: disabled, and so passed over by Tab, until it can start Linda.
 	general = readWindow(desktop, "separator")
-	assert "Start Linda after I sign in check box unavailable not checked Alt plus A" in general
+	assert "Start Linda after I sign in check box not checked Alt plus A" in general
 	assertNoneRead(general)
 
 	toCategory(desktop, "General", "Audio")
