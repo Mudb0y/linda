@@ -1861,7 +1861,10 @@ def test_startAfterSignInWritesTheUsersAutostartEntry(tmp_path):
 		"before": True,
 		# Hidden, which also overrides the system directory's entry.
 		"off": [False, "[Desktop Entry]\nType=Application\nName=Linda\nExec=linda\nHidden=true\n"],
-		"on": [True, f"[Desktop Entry]\nType=Application\nName=Linda\nExec={quotedExec}\n"],
+		"on": [
+			True,
+			f"[Desktop Entry]\nType=Application\nName=Linda\nExec={quotedExec}\nX-MATE-Autostart-Phase=Initialization\n",
+		],
 		"offAgain": False,
 		"refused": [
 			False,

@@ -154,6 +154,8 @@ def readableUserConfigDir() -> str:
 
 #: The desktop entry that would start Linda at login.
 autostartEntryName = f"{appDirName}.desktop"
+#: The phase of MATE's session that entry starts Linda in.
+autostartPhase = "Initialization"
 
 
 def currentDesktops() -> list[str]:
@@ -229,6 +231,10 @@ def writeAutostartEntry(entryName: str, name: str, command: str, enable: bool) -
 	The entry is replaced whole, so that nothing left in an older one, such as a desktop's own key that
 	disables it, keeps it from doing what was asked.
 
+	MATE starts the entry in its Initialization phase, before the window manager and the panel, as a
+	screen reader should be, which costs the sign-in nothing because NVDA registers with the session
+	manager as soon as it is up (linuxPlatform.sessionClient). Other desktops ignore the key.
+
 	:raise OSError: When the entry cannot be written.
 	"""
 	path = autostartEntryPath(entryName)
@@ -238,7 +244,9 @@ def writeAutostartEntry(entryName: str, name: str, command: str, enable: bool) -
 		f"Name={name}",
 		f"Exec={desktopEntryExec(command)}",
 	]
-	if not enable:
+	if enable:
+		lines.append(f"X-MATE-Autostart-Phase={autostartPhase}")
+	else:
 		lines.append("Hidden=true")
 	os.makedirs(os.path.dirname(path), exist_ok=True)
 	temporary = f"{path}.new"

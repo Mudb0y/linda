@@ -111,7 +111,44 @@ def test_entryWithoutAPhaseStartsLindaAmongTheApplications(session: MateSession)
 	assertStartsAmongTheApplications(session)
 
 
-def test_entryLindasSettingWritesStartsLinda(tmp_path: Path):
+def startInitialization(session: MateSession) -> tuple[harness.Launch, float]:
+	"""Start the session with Linda in the Initialization phase; return Linda and when it first spoke."""
+	session.lindaEntry("Initialization")
+	session.start()
+	linda = session.waitForLinda()
+	return linda, linda.started + linda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+
+
+def assertRegistered(linda: harness.Launch) -> str:
+	"""The object path Linda's client was registered as."""
+	linda.waitForLog("Session manager: registered as ", 30)
+	return re.search(r"Session manager: registered as (\S+)", linda.text("nvda.log"))[1]
+
+
+def assertInitializationEndsOnceLindaIsUp(session: MateSession) -> None:
+	session.start()
+	linda = session.waitForLinda()
+	spoke = linda.started + linda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	ended = session.waitForPhase("INITIALIZATION", "ending", PHASE_TIMEOUT + STARTUP_BOUND)
+	assertRegistered(linda)
+	# Linda registers as it says its first words, and the phase ends with that.
+	assert abs(ended - spoke) < 5, f"the phase ended {ended - spoke:.1f} s after Linda spoke\n{session.log()}"
+	assert ended - linda.started < PHASE_TIMEOUT / 2, session.log()
+	assert not managerSaid(session, NOT_REGISTERED), session.log()
+	# Before the window manager, which the rest of the desktop follows.
+	assert linda.started < session.waitForPhase("WINDOW_MANAGER"), session.log()
+	session.waitForPhase("RUNNING")
+	assertKeysWork(session, linda)
+	stopLinda(linda)
+	assert "Session manager: unregistered" in linda.text("nvda.log")
+
+
+def test_initializationPhaseEndsOnceLindaIsUp(session: MateSession):
+	session.lindaEntry("Initialization")
+	assertInitializationEndsOnceLindaIsUp(session)
+
+
+def test_entryLindasSettingWritesStartsLindaFirst(tmp_path: Path):
 	# A space in the launcher's path, which the entry has to quote.
 	with MateSession(tmp_path / "signed in") as session:
 		session.variables["LINDA_BOOT_PROBE"] = "wait"
@@ -134,38 +171,8 @@ def test_entryLindasSettingWritesStartsLinda(tmp_path: Path):
 		)
 		done.assertClean()
 		assert done.value["starts"], done.value
-		assert "X-MATE-Autostart-Phase" not in done.value["entry"], done.value["entry"]
-		assertStartsAmongTheApplications(session)
-
-
-def startInitialization(session: MateSession) -> tuple[harness.Launch, float]:
-	"""Start the session with Linda in the Initialization phase; return Linda and when it first spoke."""
-	session.lindaEntry("Initialization")
-	session.start()
-	linda = session.waitForLinda()
-	return linda, linda.started + linda.waitForSpeech(SENTENCE, STARTUP_BOUND)
-
-
-def assertRegistered(linda: harness.Launch) -> str:
-	"""The object path Linda's client was registered as."""
-	linda.waitForLog("Session manager: registered as ", 30)
-	return re.search(r"Session manager: registered as (\S+)", linda.text("nvda.log"))[1]
-
-
-def test_initializationPhaseEndsOnceLindaIsUp(session: MateSession):
-	linda, spoke = startInitialization(session)
-	ended = session.waitForPhase("INITIALIZATION", "ending", PHASE_TIMEOUT + STARTUP_BOUND)
-	assertRegistered(linda)
-	# Linda registers as it says its first words, and the phase ends with that.
-	assert abs(ended - spoke) < 5, f"the phase ended {ended - spoke:.1f} s after Linda spoke\n{session.log()}"
-	assert ended - linda.started < PHASE_TIMEOUT / 2, session.log()
-	assert not managerSaid(session, NOT_REGISTERED), session.log()
-	# Before the window manager, which the rest of the desktop follows.
-	assert linda.started < session.waitForPhase("WINDOW_MANAGER"), session.log()
-	session.waitForPhase("RUNNING")
-	assertKeysWork(session, linda)
-	stopLinda(linda)
-	assert "Session manager: unregistered" in linda.text("nvda.log")
+		assert "\nX-MATE-Autostart-Phase=Initialization\n" in done.value["entry"], done.value["entry"]
+		assertInitializationEndsOnceLindaIsUp(session)
 
 
 def assertEndsPromptly(session: MateSession, asked: float) -> None:
