@@ -69,6 +69,7 @@
       ]);
 
       louisTables = pkgs.callPackage ./nix/louis-tables.nix { };
+      cargoVendorDir = pkgs.rustPlatform.importCargoLock { lockFile = ./engine/Cargo.lock; };
       nvdaCldr = pkgs.callPackage ./nix/nvda-cldr.nix { };
       espeak = pkgs.callPackage ./nix/espeak-ng.nix { };
 
@@ -172,6 +173,9 @@
           # The pinned ruff: a let binding takes precedence over with.
           ruff
           pkg-config
+          # The Meson build, which installs Linda as a distribution would.
+          meson
+          ninja
           gobject-introspection
           gettext
           dbus
@@ -210,12 +214,14 @@
         ];
 
         # PipeWire's headers and pkg-config file, for crates that link
-        # libpipewire. Named here rather than listed as an input, because
+        # libpipewire, and those of the libraries the Meson build looks for. Named here rather than listed as an input, because
         # stdenv puts every input's bin directory on PATH, and so on the rig's
         # PATH, which is this shell's own. Tests reach PipeWire's programs
         # only through the two variables below, and a host without them gets
         # none from this shell.
-        PKG_CONFIG_PATH = "${lib.getDev pkgs.pipewire}/lib/pkgconfig";
+        PKG_CONFIG_PATH = lib.makeSearchPath "lib/pkgconfig" (
+          map lib.getDev (with pkgs; [ pipewire icu liblouis at-spi2-core ])
+        );
         # For tests that start a private daemon and session manager inside the
         # rig.
         LINDA_PIPEWIRE_BIN = "${lib.getBin pkgs.pipewire}/bin";
@@ -251,6 +257,8 @@
 
         # tools/build-artifacts takes the tables and the CLDR data from these.
         LINDA_LOUIS_TABLES_DIR = "${louisTables}";
+        # The crates engine/Cargo.lock names, for a Meson build that must not fetch them.
+        LINDA_CARGO_VENDOR_DIR = "${cargoVendorDir}";
         LINDA_NVDA_CLDR_DIR = "${nvdaCldr}";
         # tools/check-upstream-edits compares it with the release upstream's
         # include/liblouis submodule pins.
@@ -296,6 +304,9 @@
           # library built in the checkout keeps it.
           export LINDA_VBUF_LIB=''${LINDA_VBUF_LIB:-${vbuf}/lib/libnvdaVbuf.so}
           export LINDA_VBUF_ENGINE=''${LINDA_VBUF_ENGINE:-${vbufengine}/lib/libbre_vbuf.so}
+          # The search path the build inputs' hooks made, for tests/linux/test_mesonInstall.py, which
+          # configures the Meson build inside the rig, where only LINDA_ variables get in.
+          export LINDA_PKG_CONFIG_PATH=$PKG_CONFIG_PATH
         '';
       });
     };

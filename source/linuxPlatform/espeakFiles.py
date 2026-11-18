@@ -1,15 +1,18 @@
 """Where eSpeak NG's library and its data are on Linux.
 
 NVDA's Windows build puts espeak.dll and espeak-ng-data in synthDrivers, beside the driver. On Linux
-both come from a build of the eSpeak NG commit NVDA pins, made without audio output, and the dev
-shell or the launcher's wrapper names them in two environment variables. Neither is looked for
-anywhere else: eSpeak given a data path that does not exist falls back without a word to
-ESPEAK_DATA_PATH, ~/espeak-ng-data or the path compiled into it, and speaks with whatever it finds
-there.
+two variables name them, and an installation fixes both when it is built (linuxPlatform.installSettings):
+the Nix package and the dev shell name a build of the eSpeak NG commit NVDA pins, made without audio
+output, and a plain Meson build names the system's library by its soname and that library's data.
+The data is not looked for anywhere else: eSpeak given a data path that does not exist falls back
+without a word to ESPEAK_DATA_PATH, ~/espeak-ng-data or the path compiled into it, and speaks with
+whatever it finds there.
 """
 
 import errno
 import os
+
+from linuxPlatform import installSettings
 
 #: Names libespeak-ng.so.1.
 libraryVariable = "LINDA_ESPEAK_LIB"
@@ -18,19 +21,19 @@ dataDirVariable = "LINDA_ESPEAK_DATA_DIR"
 
 
 def _named(variable: str) -> str:
-	value = os.environ.get(variable)
+	value = installSettings.get(variable)
 	if not value:
 		raise FileNotFoundError(errno.ENOENT, f"{variable} is not set, so eSpeak NG cannot be found")
 	return value
 
 
 def libraryPath() -> str:
-	"""The path of the eSpeak NG library to load.
+	"""The path of the eSpeak NG library to load, or its soname, which the loader looks for.
 
-	:raises FileNotFoundError: The variable is unset, or names no file.
+	:raises FileNotFoundError: The variable is unset, or names a path that is no file.
 	"""
 	path = _named(libraryVariable)
-	if not os.path.isfile(path):
+	if os.sep in path and not os.path.isfile(path):
 		raise FileNotFoundError(errno.ENOENT, f"{libraryVariable} names no file", path)
 	return path
 

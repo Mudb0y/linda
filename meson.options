@@ -1,0 +1,18 @@
+option('program', type: 'boolean', value: true,
+  description: 'Install the program; false builds and installs only the three native libraries')
+option('prebuilt_libraries', type: 'string', value: '',
+  description: 'A directory holding libnvdaVbuf.so, libpwsink.so and libbre_vbuf.so from an earlier build with program=false, installed instead of building them')
+option('cargo_vendor_dir', type: 'string', value: '',
+  description: 'The crates engine/Cargo.lock names, as cargo vendor writes them; given, cargo builds offline')
+option('cldr_data', type: 'string', value: '',
+  description: 'A checkout of nvaccess/nvda-cldr at the revision NVDA pins, on its main-out branch, which holds locale/LANG/cldr.dic')
+option('louis_tables', type: 'string', value: '',
+  description: 'The liblouis tables directory; empty takes the tables of the liblouis pkg-config finds')
+option('icu_lib_dir', type: 'string', value: '',
+  description: 'The directory holding ICU\'s libicuuc.so.MAJOR; empty takes the library directory pkg-config gives for icu-uc')
+option('espeak_library', type: 'string', value: '',
+  description: 'The eSpeak NG library to load, by path; empty loads the system libespeak-ng.so.1 by its soname, which is unproven')
+option('espeak_data', type: 'string', value: '',
+  description: 'The espeak-ng-data directory of that library; empty looks for the system library\'s own')
+option('openevv_driver', type: 'string', value: '',
+  description: 'openevv\'s NVDA driver directory, as nix/openevv-driver.nix lays it out; empty leaves openevv out')

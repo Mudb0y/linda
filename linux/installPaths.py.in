@@ -1,0 +1,13 @@
+# Written by the Meson build: what this installation found and built, by the LINDA_ variable that
+# can name each instead. linuxPlatform.installSettings reads it.
+values = {
+	"LINDA_VBUF_LIB": "@VBUF_LIB@",
+	"LINDA_VBUF_ENGINE": "@VBUF_ENGINE@",
+	"LINDA_PWSINK_LIB": "@PWSINK_LIB@",
+	"LINDA_AUDIO_SINK": "pipewire",
+	"LINDA_ESPEAK_LIB": "@ESPEAK_LIB@",
+	"LINDA_ESPEAK_DATA_DIR": "@ESPEAK_DATA_DIR@",
+	"LINDA_ICU_LIB_DIR": "@ICU_LIB_DIR@",
+	"LINDA_ICU_VERSION_MAJOR": "@ICU_VERSION_MAJOR@",
+	"LINDA_OPENEVV_DRIVER_DIR": "@OPENEVV_DRIVER_DIR@",
+}

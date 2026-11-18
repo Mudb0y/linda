@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-# Produces what NVDA's Windows build would have produced and Linux needs, from
-# the tree and the directories the dev shell exports. Safe to run repeatedly:
-# a second run changes nothing. Writes only to paths upstream's .gitignore
-# already ignores.
+"""Produces what NVDA's Windows build would have produced and Linux needs: the compiled catalogues,
+the CLDR dictionaries and the liblouis tables arranged as NVDA names them. Safe to run repeatedly:
+a second run changes nothing.
+
+With no arguments, inside the dev shell, it writes them into the tree, where the tests run from,
+taking the CLDR data and the tables from the directories the shell exports, and writes only to paths
+upstream's .gitignore already ignores. With --out, as the Meson build runs it, it writes them under
+that directory instead, laid out as under source/, from the directories the options name.
+"""
+
+import argparse
 import os
 import shutil
 import subprocess
@@ -10,8 +17,7 @@ import sys
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
-localeDir = root / "source" / "locale"
-louisDir = root / "source" / "louis"
+sourceLocaleDir = root / "source" / "locale"
 unitTablesDir = root / "tests" / "unit" / "brailleTables"
 
 # NVDA registers these in mixed case; liblouis ships them in lower case.
@@ -31,10 +37,9 @@ def fail(message: str) -> None:
 	sys.exit(1)
 
 
-def envDir(name: str) -> Path:
-	value = os.environ.get(name)
+def checkedDir(value: str | None, name: str, hint: str) -> Path:
 	if not value:
-		fail(f"{name} is not set; run this inside the dev shell")
+		fail(f"{name} is not set; {hint}")
 	path = Path(value)
 	if not path.is_dir():
 		fail(f"{name} points at {value}, which is not a directory")
@@ -51,17 +56,18 @@ def writeIfDifferent(source: Path, target: Path) -> bool:
 	return True
 
 
-def buildCatalogues() -> tuple[int, int]:
+def buildCatalogues(outLocaleDir: Path) -> tuple[int, int]:
 	# Compiled by hand rather than by glob on LC_MESSAGES because the Albanian
 	# source is NVDA.po, and Linux gettext only finds a lower case nvda.mo.
 	built = total = 0
-	for po in sorted(localeDir.glob("*/LC_MESSAGES/*.po")):
+	for po in sorted(sourceLocaleDir.glob("*/LC_MESSAGES/*.po")):
 		if po.name.lower() != "nvda.po":
 			continue
 		total += 1
-		mo = po.with_name("nvda.mo")
+		mo = outLocaleDir / po.relative_to(sourceLocaleDir).with_name("nvda.mo")
 		if mo.is_file() and mo.stat().st_mtime >= po.stat().st_mtime:
 			continue
+		mo.parent.mkdir(parents=True, exist_ok=True)
 		temp = mo.with_name("nvda.mo.tmp")
 		result = subprocess.run(
 			["msgfmt", "-o", str(temp), str(po)], capture_output=True, text=True, check=False
@@ -74,33 +80,55 @@ def buildCatalogues() -> tuple[int, int]:
 	return built, total
 
 
-def copyCldr(cldrDir: Path) -> tuple[int, int]:
+def copyCldr(cldrDir: Path, outLocaleDir: Path) -> tuple[int, int]:
 	# nvda-cldr spells some locales differently in case (pt_pt) from the
 	# translation directories (pt_PT); Windows merges them, so match the same way.
-	existing = {d.name.lower(): d for d in localeDir.iterdir() if d.is_dir()}
+	existing = {d.name.lower(): d.name for d in sourceLocaleDir.iterdir() if d.is_dir()}
 	copied = total = 0
 	for source in sorted((cldrDir / "locale").glob("*/cldr.dic")):
 		total += 1
-		target = existing.get(source.parent.name.lower(), localeDir / source.parent.name)
-		if writeIfDifferent(source, target / "cldr.dic"):
+		name = existing.get(source.parent.name.lower(), source.parent.name)
+		if writeIfDifferent(source, outLocaleDir / name / "cldr.dic"):
 			copied += 1
 	return copied, total
 
 
-def arrangeTables(tablesDir: Path) -> int:
+def arrangeTables(tablesDir: Path, louisDir: Path) -> int:
+	"""Make louisDir/tables: a link to tablesDir when it already has the mixed-case names, as the Nix
+	tables do, and otherwise a directory of links to its tables with those names added, as a
+	distribution's liblouis needs."""
 	changed = 0
-	missing = [name for name in mixedCaseTables if not (tablesDir / name).is_file()]
-	if missing:
-		fail(f"{tablesDir} lacks the aliases {', '.join(missing)}")
-	louisDir.mkdir(exist_ok=True)
+	louisDir.mkdir(parents=True, exist_ok=True)
 	link = louisDir / "tables"
-	if not link.is_symlink() or Path(os.readlink(link)) != tablesDir:
-		if link.is_symlink() or link.is_file():
-			link.unlink()
-		elif link.exists():
-			fail(f"{link.relative_to(root)} is a real directory; remove it by hand")
+	hasAliases = all((tablesDir / name).is_file() for name in mixedCaseTables)
+	if hasAliases and link.is_symlink() and Path(os.readlink(link)) == tablesDir:
+		return 0
+	if link.is_symlink() or link.is_file():
+		link.unlink()
+	elif link.is_dir():
+		# Only a directory this made, of links alone, is replaced without asking.
+		if any(not entry.is_symlink() for entry in link.iterdir()):
+			fail(f"{link} is a real directory; remove it by hand")
+		shutil.rmtree(link)
+	if hasAliases:
 		link.symlink_to(tablesDir)
+		return 1
+	missing = [name for name in mixedCaseTables if not (tablesDir / name.lower()).is_file()]
+	if missing:
+		fail(f"{tablesDir} has neither {', '.join(missing)} nor their lower case names")
+	link.mkdir()
+	for table in sorted(tablesDir.iterdir()):
+		(link / table.name).symlink_to(table)
 		changed += 1
+	for name in mixedCaseTables:
+		if not (link / name).exists():
+			(link / name).symlink_to(name.lower())
+			changed += 1
+	return changed
+
+
+def copyUnitFixtures(tablesDir: Path) -> int:
+	changed = 0
 	fixtures = (
 		("en-us-comp8-ext.utb", "en-us-comp8-ext.utb"),
 		("latinLetterDef8Dots.uti", "latinLetterDef8Dots.uti"),
@@ -113,17 +141,38 @@ def arrangeTables(tablesDir: Path) -> int:
 
 
 def main() -> None:
+	parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+	parser.add_argument("--out", type=Path, help="write under this directory rather than into the tree")
+	parser.add_argument("--cldr-dir", help="nvda-cldr's tree; the dev shell's LINDA_NVDA_CLDR_DIR by default")
+	parser.add_argument(
+		"--louis-tables-dir",
+		help="liblouis's tables; the dev shell's LINDA_LOUIS_TABLES_DIR by default",
+	)
+	parser.add_argument("--stamp", type=Path, help="a file to touch once everything is written")
+	args = parser.parse_args()
 	print("build-artifacts: start")
-	cldrDir = envDir("LINDA_NVDA_CLDR_DIR")
-	tablesDir = envDir("LINDA_LOUIS_TABLES_DIR")
+	hint = "run this inside the dev shell, or name the directory with the option"
+	cldrDir = checkedDir(
+		args.cldr_dir or os.environ.get("LINDA_NVDA_CLDR_DIR"), "--cldr-dir or LINDA_NVDA_CLDR_DIR", hint
+	)
+	tablesDir = checkedDir(
+		args.louis_tables_dir or os.environ.get("LINDA_LOUIS_TABLES_DIR"),
+		"--louis-tables-dir or LINDA_LOUIS_TABLES_DIR",
+		hint,
+	)
 	if shutil.which("msgfmt") is None:
-		fail("msgfmt is not on PATH; run this inside the dev shell")
-	built, total = buildCatalogues()
+		fail("msgfmt is not on PATH; it comes with gettext")
+	out = args.out.resolve() if args.out else root / "source"
+	built, total = buildCatalogues(out / "locale")
 	print(f"catalogues: {built} compiled, {total - built} already current")
-	copied, total = copyCldr(cldrDir)
+	copied, total = copyCldr(cldrDir, out / "locale")
 	print(f"cldr.dic: {copied} copied, {total - copied} already current")
-	changed = arrangeTables(tablesDir)
+	changed = arrangeTables(tablesDir, out / "louis")
+	if not args.out:
+		changed += copyUnitFixtures(tablesDir)
 	print(f"braille tables: {changed} changes")
+	if args.stamp:
+		args.stamp.touch()
 	print("build-artifacts: done")
 
 

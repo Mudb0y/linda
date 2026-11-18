@@ -3,7 +3,8 @@
 The library is upstream's nvdaHelper/vbufBase/storage.cpp with a C entry point per VBuf_* function and
 two for filling it from render streams, which the engine's renderer writes (linuxPlatform.vbufEngine):
 one builds a buffer, the other applies an update batch to it.
-It is found through LINDA_VBUF_LIB, never on the library path. Text crosses its interface as
+It is found through LINDA_VBUF_LIB or the path an installation fixed for it (linuxPlatform.installSettings),
+never on the library path. Text crosses its interface as
 UTF-16 code units, so buffer offsets are the code units NVDA counts on Windows.
 
 Each function takes Python arguments as upstream's ctypes bindings do, so virtualBuffers/__init__.py
@@ -17,6 +18,13 @@ from collections.abc import Callable
 from ctypes import POINTER, c_int, c_size_t, c_uint64, c_void_p
 from typing import TYPE_CHECKING
 
+try:
+	from linuxPlatform.installSettings import get as _setting
+except ModuleNotFoundError:
+	# Loaded by its file alone, as tests/linux loads it, with nothing of NVDA's on sys.path: there is no
+	# installation then, and the environment is all there is.
+	_setting = os.environ.get
+
 if TYPE_CHECKING:
 	from linuxPlatform.vbufEngine import Stream
 
@@ -27,15 +35,15 @@ _pUnits = POINTER(ctypes.c_uint16)
 
 
 def isAvailable() -> bool:
-	"""Whether LINDA_VBUF_LIB names the library."""
-	path = os.environ.get(LIB_VARIABLE)
+	"""Whether LINDA_VBUF_LIB, or the installation, names the library."""
+	path = _setting(LIB_VARIABLE)
 	return bool(path) and os.path.isfile(path)
 
 
 def lib() -> ctypes.CDLL:
 	global _lib
 	if _lib is None:
-		path = os.environ.get(LIB_VARIABLE)
+		path = _setting(LIB_VARIABLE)
 		if not path:
 			raise FileNotFoundError(f"{LIB_VARIABLE} does not name the virtual buffer library")
 		dll = ctypes.CDLL(path)

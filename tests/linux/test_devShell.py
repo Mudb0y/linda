@@ -17,6 +17,7 @@ import re
 import shutil
 import struct
 import subprocess
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
@@ -192,6 +193,21 @@ def _vbufEngine(value: str) -> None:
 	assert _elfFile(value).name == "libbre_vbuf.so", value
 
 
+def _cargoVendorDir(value: str) -> None:
+	# Every crate the engine's lock file names, as cargo vendor lays them out, for the Meson build.
+	directory = _directory(value)
+	with open(harness.ROOT / "engine" / "Cargo.lock", "rb") as f:
+		packages = tomllib.load(f)["package"]
+	crates = {f"{p['name']}-{p['version']}" for p in packages if p.get("source", "").startswith("registry+")}
+	_holds(directory, *sorted(crates))
+
+
+def _pkgConfigPath(value: str) -> None:
+	_searchPath(value)
+	for name in ("libpipewire-0.3", "atspi-2", "icu-uc", "liblouis"):
+		assert any(os.path.isfile(os.path.join(d, f"{name}.pc")) for d in value.split(":")), name
+
+
 def _benchBin(value: str) -> None:
 	# Named without depending on the bench, so that entering the shell never builds the engine: it
 	# exists once nix build .#linda-bench has built it.
@@ -215,6 +231,8 @@ SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
 	"LINDA_VBUF_LIB": _vbufLib,
 	"LINDA_VBUF_ENGINE": _vbufEngine,
 	"LINDA_BENCH_BIN": _benchBin,
+	"LINDA_CARGO_VENDOR_DIR": _cargoVendorDir,
+	"LINDA_PKG_CONFIG_PATH": _pkgConfigPath,
 	"LINDA_QT6_PLUGIN_PATH": _qt6PluginPath,
 	"LINDA_BASH": _bash,
 	"LINDA_RIG_PATH": _searchPath,

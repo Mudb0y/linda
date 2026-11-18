@@ -1,8 +1,9 @@
 """Linux replacement for winBindings.icu: ICU's break iterators from the dev shell's ICU.
 
 Upstream binds the ICU that Windows ships. On Linux the library is the one LINDA_ICU_LIB_DIR
-names, never one found through the loader's search path, and a Linux ICU build suffixes every C
-symbol with its major version, LINDA_ICU_VERSION_MAJOR. The names here are upstream's, plus the
+names, or the installation fixed (linuxPlatform.installSettings), never one found through the loader's
+search path, and a Linux ICU build suffixes every C symbol with its major version,
+LINDA_ICU_VERSION_MAJOR. The names here are upstream's, plus the
 character break type and the two iteration functions NVDAHelper.localLib needs. Text goes in as
 UTF-16 code units through linuxPlatform.utf16, because c_wchar_p is UTF-32 on Linux.
 
@@ -18,7 +19,7 @@ from ctypes import CDLL, POINTER, c_char_p, c_int32, c_void_p
 from enum import IntEnum
 from typing import Any, NoReturn
 
-from linuxPlatform import missingAttribute
+from linuxPlatform import installSettings, missingAttribute
 from linuxPlatform.utf16 import Utf16Pointer
 
 LIB_DIR_VARIABLE = "LINDA_ICU_LIB_DIR"
@@ -26,8 +27,8 @@ VERSION_MAJOR_VARIABLE = "LINDA_ICU_VERSION_MAJOR"
 
 
 def _load() -> tuple[CDLL | None, str]:
-	libDir = os.environ.get(LIB_DIR_VARIABLE)
-	major = os.environ.get(VERSION_MAJOR_VARIABLE)
+	libDir = installSettings.get(LIB_DIR_VARIABLE)
+	major = installSettings.get(VERSION_MAJOR_VARIABLE)
 	if not libDir or not major:
 		return None, ""
 	try:
@@ -98,7 +99,7 @@ def bindFunction(name: str, restype: type | None, *argtypes: type) -> Callable[.
 
 @functools.cache
 def _formattingLibrary() -> CDLL:
-	return CDLL(os.path.join(os.environ[LIB_DIR_VARIABLE], f"libicui18n.so.{_versionMajor}"))
+	return CDLL(os.path.join(installSettings.get(LIB_DIR_VARIABLE), f"libicui18n.so.{_versionMajor}"))
 
 
 def bindFormattingFunction(name: str, restype: type | None, *argtypes: type) -> Callable[..., Any]:

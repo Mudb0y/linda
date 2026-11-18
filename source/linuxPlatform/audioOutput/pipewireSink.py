@@ -20,6 +20,8 @@ import errno
 import os
 from collections.abc import Callable
 
+from linuxPlatform import installSettings
+
 from . import BUFFER_MS, Sink, SinkStream, StreamFormat, checkGain
 
 #: Names the libpwsink the sink loads.
@@ -46,7 +48,7 @@ class _Silencers:
 
 
 def _load() -> tuple[ctypes.CDLL, _Silencers]:
-	path = os.environ.get(LIBRARY_VARIABLE, "")
+	path = installSettings.get(LIBRARY_VARIABLE)
 	if not path:
 		raise OSError(errno.ENOENT, f"{LIBRARY_VARIABLE} does not name libpwsink")
 	lib = ctypes.CDLL(path)

@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Builds the engine's two libraries for the Meson build and copies them where Meson expects them, or
+with --test runs the tests of the crates that need no D-Bus and no PipeWire.
+
+cargo-libraries [--test] [--vendor-dir DIR] CARGO TARGET_DIR [OUT_DIR]
+
+Cargo keeps its own record of what is current, so Meson runs this on every build. With --vendor-dir,
+the crates come from that directory, as cargo vendor writes it, and nothing is fetched. Run from the
+build directory, so that engine/.cargo, whose runner puts the engine's tests in the test rig, is not
+read.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ENGINE = Path(__file__).resolve().parent.parent / "engine"
+#: Each package built, with the library it makes.
+LIBRARIES = {"linda-pwsink": "libpwsink.so", "linda-vbufengine": "libbre_vbuf.so"}
+#: The ring, the position and the clock of the PipeWire sink; the other crates' tests speak D-Bus or
+#: PipeWire and run only in the rig.
+TESTED = ("linda-pwsink-core",)
+
+
+def vendorFlags(vendorDir: str | None) -> list[str]:
+	if not vendorDir:
+		return []
+	if not Path(vendorDir).is_dir():
+		sys.exit(f"cargo-libraries: error: the vendored crates directory {vendorDir} does not exist")
+	return [
+		"--offline",
+		"--config",
+		'source.crates-io.replace-with="vendored-sources"',
+		"--config",
+		f"source.vendored-sources.directory={json.dumps(vendorDir)}",
+	]
+
+
+def main() -> None:
+	parser = argparse.ArgumentParser()
+	parser.add_argument("--test", action="store_true")
+	parser.add_argument("--vendor-dir")
+	parser.add_argument("cargo")
+	parser.add_argument("targetDir")
+	parser.add_argument("outDir", nargs="?")
+	args = parser.parse_args()
+	command = [args.cargo, "test" if args.test else "build", "--release", "--locked"]
+	command += ["--manifest-path", str(ENGINE / "Cargo.toml"), "--target-dir", args.targetDir]
+	command += vendorFlags(args.vendor_dir)
+	for package in TESTED if args.test else LIBRARIES:
+		command += ["--package", package]
+	environment = dict(os.environ)
+	# Where cargo keeps what it downloads, when the caller has not said: in the build directory rather
+	# than the home directory, which a package builder often cannot write.
+	environment.setdefault("CARGO_HOME", str(Path(args.targetDir).parent / "cargo-home"))
+	result = subprocess.run(command, check=False, env=environment)
+	if result.returncode != 0:
+		sys.exit(f"cargo-libraries: error: cargo exited with status {result.returncode}")
+	if args.test:
+		return
+	for library in LIBRARIES.values():
+		built = Path(args.targetDir) / "release" / library
+		temp = Path(args.outDir) / (library + ".tmp")
+		shutil.copy2(built, temp)
+		temp.replace(Path(args.outDir) / library)
+
+
+main()

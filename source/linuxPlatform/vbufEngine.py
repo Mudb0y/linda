@@ -5,7 +5,8 @@ stream libnvdaVbuf builds, as UTF-16 code units in the engine's memory, which li
 reads without a copy. It then watches the document, and next hands out each change as an update
 batch for the buffer. Its work runs on a thread of its own; ctypes releases the GIL for the whole of
 each call, so render and next block only the thread that calls them. Found through
-LINDA_VBUF_ENGINE, never on the library path.
+LINDA_VBUF_ENGINE or the path an installation fixed for it (linuxPlatform.installSettings), never on
+the library path.
 """
 
 import ctypes
@@ -13,6 +14,13 @@ import json
 import os
 import threading
 from dataclasses import dataclass
+
+try:
+	from linuxPlatform.installSettings import get as _setting
+except ModuleNotFoundError:
+	# Loaded by its file alone, as tests/linux loads it, with nothing of NVDA's on sys.path: there is no
+	# installation then, and the environment is all there is.
+	_setting = os.environ.get
 
 LIB_VARIABLE = "LINDA_VBUF_ENGINE"
 
@@ -26,8 +34,8 @@ _loadLock = threading.Lock()
 
 
 def isAvailable() -> bool:
-	"""Whether LINDA_VBUF_ENGINE names the library."""
-	path = os.environ.get(LIB_VARIABLE)
+	"""Whether LINDA_VBUF_ENGINE, or the installation, names the library."""
+	path = _setting(LIB_VARIABLE)
 	return bool(path) and os.path.isfile(path)
 
 
@@ -35,7 +43,10 @@ def _load() -> ctypes.CDLL:
 	global _lib
 	with _loadLock:
 		if _lib is None:
-			lib = ctypes.CDLL(os.environ[LIB_VARIABLE])
+			path = _setting(LIB_VARIABLE)
+			if not path:
+				raise FileNotFoundError(f"{LIB_VARIABLE} does not name the document renderer")
+			lib = ctypes.CDLL(path)
 			out = (
 				ctypes.POINTER(ctypes.c_void_p),
 				ctypes.POINTER(ctypes.c_size_t),

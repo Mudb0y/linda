@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Installs NVDA's Python tree for the Meson build: source/ without what upstream's .gitignore keeps
+out of it, what build-artifacts wrote under the build directory, and the generated
+linuxPlatform/installPaths.py, then compiles every module, because the program runs with -B from a
+directory it cannot write.
+
+install-tree APP_DIR ARTEFACTS_DIR INSTALL_PATHS_FILE, run by meson install with the interpreter the
+program runs on, which honours DESTDIR as meson does.
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parent.parent
+source = root / "source"
+
+#: What a checkout's source/ may hold that is not part of the program: built files, which come from
+#: the build directory instead, and files upstream's .gitignore keeps out of the tree.
+skippedNames = ("__pycache__", "userConfig", "_buildVersion.py", "nvda_crash_stats.txt")
+skippedSuffixes = (".pyc", ".pyo", ".mo", ".log", ".tmp")
+skippedPaths = (
+	Path("louis"),
+	Path("lib"),
+	Path("lib64"),
+	Path("typelibs"),
+	Path("cppjieba"),
+	Path("synthDrivers/espeak-ng-data"),
+	Path("linuxPlatform/installPaths.py"),
+)
+
+
+def skipped(relative: Path) -> bool:
+	if relative.name in skippedNames or relative.suffix in skippedSuffixes:
+		return True
+	if relative in skippedPaths:
+		return True
+	return relative.name == "cldr.dic" and relative.parts[0] == "locale"
+
+
+def copyTree(fromDir: Path, toDir: Path, skip=lambda relative: False) -> int:
+	count = 0
+	for directory, names, files in os.walk(fromDir):
+		here = Path(directory)
+		names[:] = sorted(name for name in names if not skip((here / name).relative_to(fromDir)))
+		for name in sorted(files) + [name for name in names if (here / name).is_symlink()]:
+			relative = (here / name).relative_to(fromDir)
+			if skip(relative):
+				continue
+			target = toDir / relative
+			target.parent.mkdir(parents=True, exist_ok=True)
+			if target.is_symlink() or target.exists():
+				target.unlink()
+			if (here / name).is_symlink():
+				target.symlink_to(os.readlink(here / name))
+			else:
+				shutil.copy2(here / name, target)
+			count += 1
+		# A link to a directory is copied as a link, not walked.
+		names[:] = [name for name in names if not (here / name).is_symlink()]
+	return count
+
+
+def main() -> None:
+	appDir, artefactsDir, installPaths = sys.argv[1:4]
+	destDir = os.path.abspath(os.environ["DESTDIR"]) if os.environ.get("DESTDIR") else ""
+	target = Path(destDir + appDir) if destDir else Path(appDir)
+	print(f"install-tree: start, into {target}")
+	# A copy from an earlier install is replaced whole, so that no module it had and this one lacks
+	# stays importable. Only a directory that holds the launcher is taken for one.
+	if (target / "linda.py").is_file():
+		shutil.rmtree(target)
+	elif target.exists():
+		sys.exit(f"install-tree: error: {target} exists and is not an installed Linda; remove it by hand")
+	copied = copyTree(source, target, skipped)
+	built = copyTree(Path(artefactsDir), target)
+	shutil.copyfile(installPaths, target / "linuxPlatform" / "installPaths.py")
+	print(f"install-tree: {copied} files from source, {built} built")
+	# Compiled with the paths the files have once installed, and checked by hash alone, as nothing
+	# changes them after this.
+	command = [sys.executable, "-m", "compileall", "-q", "-j0", "--invalidation-mode", "unchecked-hash"]
+	if destDir:
+		command += ["-s", destDir, "-p", "/"]
+	if subprocess.run([*command, str(target)], check=False).returncode != 0:
+		sys.exit("install-tree: error: some modules did not compile")
+	print("install-tree: done")
+
+
+main()

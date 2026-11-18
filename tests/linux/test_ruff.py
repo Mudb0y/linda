@@ -29,7 +29,9 @@ OURS = (
 	"source/linda.py",
 	"tests/linux",
 	"tools/build-artifacts",
+	"tools/cargo-libraries",
 	"tools/check-upstream-edits",
+	"tools/install-tree",
 )
 RUFF = shutil.which("ruff")
 

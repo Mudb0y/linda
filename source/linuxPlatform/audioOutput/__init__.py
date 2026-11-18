@@ -5,8 +5,8 @@ silence) lives in the wasapi replacement and is the same for every sink. A sink 
 consume frames the way a sound device does and say how far it has got, much as WASAPI's
 IAudioClient, IAudioRenderClient and IAudioClock do for upstream's player.
 
-Which sink is used is decided once per process, and only by the environment. LINDA_AUDIO_SINK
-names it: null, capture or pipewire. Unset or empty, the capture sink is used when
+Which sink is used is decided once per process, by the environment or else by what the installation
+fixed (linuxPlatform.installSettings). LINDA_AUDIO_SINK names it: null, capture or pipewire. Unset or empty, the capture sink is used when
 LINDA_AUDIO_CAPTURE_DIR names a directory, and the null sink otherwise. The capture sink writes
 what was played to that directory; neither it nor the null sink opens a sound device or loads a
 sound library. There is no fallback from one sink to another: a sink that cannot be used fails.
@@ -18,6 +18,8 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+
+from linuxPlatform import installSettings
 
 #: Names the sink: null, capture or pipewire.
 SINK_VARIABLE = "LINDA_AUDIO_SINK"
@@ -244,7 +246,7 @@ def getSink() -> Sink:
 
 
 def _selectSink() -> Sink:
-	kind = os.environ.get(SINK_VARIABLE, "")
+	kind = installSettings.get(SINK_VARIABLE) or ""
 	captureDir = os.environ.get(CAPTURE_DIR_VARIABLE, "")
 	if kind == "":
 		kind = "capture" if captureDir else "null"
