@@ -86,6 +86,20 @@ class Fixture:
 def nodeExtents(role: str, name: str) -> tuple[int, int, int, int]:
 	"""The screen extents of the fixture's control with this role and name, read through AT-SPI."""
 	Atspi = desktopSession._atspi()
+	rect = Atspi.Component.get_extents(findNode(role, name), Atspi.CoordType.SCREEN)
+	return rect.x, rect.y, rect.width, rect.height
+
+
+def characterCentre(role: str, name: str, offset: int) -> tuple[int, int]:
+	"""Where on the screen the middle of a character of the fixture's control is."""
+	Atspi = desktopSession._atspi()
+	rect = Atspi.Text.get_character_extents(findNode(role, name), offset, Atspi.CoordType.SCREEN)
+	return rect.x + rect.width // 2, rect.y + rect.height // 2
+
+
+def findNode(role: str, name: str):
+	"""The fixture's control with this role and name, as AT-SPI has it."""
+	Atspi = desktopSession._atspi()
 
 	def find(node):
 		if node.get_role_name() == role and node.get_name() == name:
@@ -102,8 +116,7 @@ def nodeExtents(role: str, name: str) -> tuple[int, int, int, int]:
 		for index in range(app.get_child_count() if app else 0):
 			window = app.get_child_at_index(index)
 			if window is not None and window.get_name() == TITLE and (node := find(window)):
-				rect = Atspi.Component.get_extents(node, Atspi.CoordType.SCREEN)
-				return rect.x, rect.y, rect.width, rect.height
+				return node
 	raise AssertionError(f"no {role} {name!r} in the fixture")
 
 
@@ -249,6 +262,17 @@ def test_trackingReadsUnderThePointer(desktop: DesktopSession, tmp_path: Path):
 	quitClean(desktop)
 
 
+def test_trackingTextUnit(desktop: DesktopSession, tmp_path: Path):
+	startSession(desktop, tmp_path, "desktop", trackingConfig(mouseTextUnit="word"))
+	mark = desktop.mark()
+	movePointer(*characterCentre("label", "Nothing here", 2))
+	desktop.expect("Nothing", since=mark)
+	mark = desktop.mark()
+	movePointer(*characterCentre("label", "Nothing here", 9))
+	desktop.expect("here", since=mark)
+	quitClean(desktop)
+
+
 def test_trackingReportsRoleOnEntering(desktop: DesktopSession, tmp_path: Path):
 	startSession(desktop, tmp_path, "desktop", trackingConfig(reportObjectRoleOnMouseEnter=True))
 	mark = desktop.mark()
@@ -313,16 +337,19 @@ root = connection.screen().root
 root.change_attributes(background_pixel=0xFF8040)
 root.clear_area(0, 0, 0, 0)
 connection.sync()
-pixel = ScreenBitmap(1, 1).captureImage(0, 0, 1, 1)[0][0]
+bitmap = ScreenBitmap(1, 1)
+# One pixel; the blur factor's area, part of it off the screen; and an area wholly off it.
+pixels = [bitmap.captureImage(0, 0, 1, 1)[0][0], bitmap.captureImage(-2, -2, 4, 4)[0][0], bitmap.captureImage(-9, 0, 4, 4)[0][0]]
 root.change_attributes(background_pixel=0)
 root.clear_area(0, 0, 0, 0)
 connection.close()
-result = [pixel.rgbRed, pixel.rgbGreen, pixel.rgbBlue, screenBitmap.rgbPixelBrightness(pixel)]
+result = [[p.rgbRed, p.rgbGreen, p.rgbBlue, screenBitmap.rgbPixelBrightness(p)] for p in pixels]
 """
 	)
 	done = harness.runChild(tmp_path, code)
 	assert done.error is None, done.error
-	assert done.value == [0xFF, 0x80, 0x40, int(0.3 * 0x40 + 0.59 * 0x80 + 0.11 * 0xFF)]
+	painted = [0xFF, 0x80, 0x40, int(0.3 * 0x40 + 0.59 * 0x80 + 0.11 * 0xFF)]
+	assert done.value == [painted, painted, [0, 0, 0, 0]]
 
 
 def test_processAtPoint(desktop: DesktopSession, tmp_path: Path):

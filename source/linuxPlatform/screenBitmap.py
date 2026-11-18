@@ -29,8 +29,9 @@ class ScreenBitmap:
 		self.height = height
 
 	def captureImage(self, x: int, y: int, w: int, h: int) -> list[list[RGBQuad]]:
-		"""The pixels of the screen from (x, y), w wide and h high, scaled to this bitmap's size as GDI's
-		StretchBlt would, nearest pixel taken: rows of pixels, top first."""
+		"""The pixels of the screen from (x, y), w wide and h high, scaled to this bitmap's size: rows of
+		pixels, top first, each the average of the screen's pixels it covers, as audio coordinates' blur
+		factor means the area round the pointer to count."""
 		from Xlib import X
 
 		from linuxPlatform import pointer
@@ -42,18 +43,35 @@ class ScreenBitmap:
 			formats = {f.depth: f.bits_per_pixel for f in connection.display.info.pixmap_formats}
 			if depth not in (24, 32) or formats.get(depth) != 32:
 				raise NoLinuxImplementation("screen capture", f"the X screen's pixels are {depth} bits deep")
+			# X refuses an area reaching past the screen, which GDI reads as black; the area is cut to
+			# the screen, the pointer being on it.
+			right = min(x + w, screen.width_in_pixels)
+			bottom = min(y + h, screen.height_in_pixels)
+			x, y = max(x, 0), max(y, 0)
+			w, h = right - x, bottom - y
+			if w <= 0 or h <= 0:
+				return [[RGBQuad(0, 0, 0)] * self.width for _ in range(self.height)]
 			image = screen.root.get_image(x, y, w, h, X.ZPixmap, 0xFFFFFFFF)
 		data = image.data
 		littleEndian = connection.display.info.image_byte_order == X.LSBFirst
+
+		def pixel(sourceX: int, sourceY: int) -> tuple[int, int, int]:
+			offset = (sourceY * w + sourceX) * 4
+			b0, b1, b2, b3 = data[offset : offset + 4]
+			# Each pixel is 0x00RRGGBB, stored in the server's byte order.
+			return (b2, b1, b0) if littleEndian else (b1, b2, b3)
+
 		rows = []
 		for row in range(self.height):
-			sourceY = row * h // self.height
+			ys = range(row * h // self.height, max(row * h // self.height + 1, (row + 1) * h // self.height))
 			pixels = []
 			for column in range(self.width):
-				offset = (sourceY * w + column * w // self.width) * 4
-				b0, b1, b2, b3 = data[offset : offset + 4]
-				# Each pixel is 0x00RRGGBB, stored in the server's byte order.
-				red, green, blue = (b2, b1, b0) if littleEndian else (b1, b2, b3)
+				xs = range(
+					column * w // self.width,
+					max(column * w // self.width + 1, (column + 1) * w // self.width),
+				)
+				covered = [pixel(sx, sy) for sy in ys for sx in xs]
+				red, green, blue = (sum(channel) // len(covered) for channel in zip(*covered))
 				pixels.append(RGBQuad(blue, green, red))
 			rows.append(pixels)
 		return rows
