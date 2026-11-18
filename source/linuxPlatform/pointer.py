@@ -11,9 +11,12 @@ them by NVDA's flag on its own.
 """
 
 import os
+import select
+import struct
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 
 from linuxPlatform import NoLinuxImplementation
 
@@ -47,6 +50,14 @@ WHEEL_UP, WHEEL_DOWN, WHEEL_LEFT, WHEEL_RIGHT = 4, 5, 6, 7
 BUTTON_VKS = {0x01: 1, 0x02: 3, 0x04: 2, 0x05: 8, 0x06: 9}
 #: Seconds an event sent here is waited for, to know its echo.
 ECHO_WAIT = 2.0
+#: Seconds at least between two moves handed to NVDA, each of which has NVDA find and read the object
+#: under the pointer on its main thread; the moves between are let go, the last of them handed on
+#: once this has passed.
+MOVE_INTERVAL = 0.05
+#: Windows' mouse messages, as mouseHandler names them.
+WM_MOUSEMOVE = 0x0200
+#: X button: the messages for its press and release.
+BUTTON_MESSAGES = {1: (0x0201, 0x0202), 3: (0x0204, 0x0205)}
 
 _lock = threading.Lock()
 _display = None
@@ -169,6 +180,41 @@ def position() -> tuple[int, int]:
 	return reply.root_x, reply.root_y
 
 
+def _clientWindow(connection, window, depth: int = 3):
+	"""The application's own window in window, which a window manager reparents into a frame of its
+	own: the one with WM_STATE, which the window manager puts on the windows it manages."""
+	from Xlib import X
+
+	if window.get_full_property(connection.intern_atom("WM_STATE"), X.AnyPropertyType) is not None:
+		return window
+	if depth == 0:
+		return None
+	# Uppermost first, as the query lists them bottom to top.
+	for child in reversed(window.query_tree().children):
+		found = _clientWindow(connection, child, depth - 1)
+		if found is not None:
+			return found
+	return None
+
+
+def processAt(x: int, y: int) -> int | None:
+	"""The process whose window is uppermost at (x, y) on the screen, as its _NET_WM_PID says; None when
+	no window there says."""
+	from Xlib import X
+
+	with _lock:
+		connection = _connection()
+		root = connection.screen().root
+		child = root.translate_coords(root, x, y).child
+		if not child:
+			return None
+		client = _clientWindow(connection, child)
+		if client is None:
+			return None
+		pid = client.get_full_property(connection.intern_atom("_NET_WM_PID"), X.AnyPropertyType)
+	return int(pid.value[0]) if pid is not None and len(pid.value) else None
+
+
 def _logicalButton(connection, button: int) -> int:
 	mapping = connection.get_pointer_mapping()
 	return mapping[button - 1] if 0 < button <= len(mapping) else button
@@ -184,7 +230,12 @@ def buttonsSwapped() -> bool:
 
 
 def keyState(vkCode: int) -> int:
-	"""The state of a mouse button, as winUser.getKeyState gives it: bit 15 set while it is down."""
+	"""The state of a mouse button, as winUser.getKeyState gives it: bit 15 set while it is down.
+
+	NVDA asks to know whether it locked a button, which it cannot have done before it sent anything,
+	so until then the display is left alone: NVDA asks at exit too."""
+	if _display is None:
+		return 0
 	try:
 		with _lock:
 			connection = _connection()
@@ -220,3 +271,179 @@ def refreshMouseObject() -> None:
 		obj = obj.parent
 	if obj:
 		api.setMouseObject(obj)
+
+
+class Watcher:
+	"""Follows the pointer on a connection and a thread of their own, and hands each move and each
+	press or release of the left or right button to deliver, as the Windows mouse hook does.
+
+	Raw events on the root window report every move and button of every device, whatever window has
+	them; the pointer's place is asked once all the events that came together are read, so that a
+	storm of motion costs one question, and the moves handed on are at least MOVE_INTERVAL apart.
+	Nothing here touches the key source, whose keys never wait for the pointer.
+	"""
+
+	def __init__(self, deliver: Callable[[int, int, int, bool], object]) -> None:
+		self._deliver = deliver
+		self._display = None
+		self._xtestDevices: set[int] = set()
+		self._stopping = False
+		self._wakeRead, self._wakeWrite = os.pipe()
+		self._thread = threading.Thread(target=self._run, name="lindaPointerWatch", daemon=True)
+		#: Whether a move has come that has not been handed on, and whether all such moves were sent
+		#: by a program.
+		self._moved = False
+		self._movedInjected = True
+		self._lastMove = 0.0
+		self._lastPosition: tuple[int, int] | None = None
+
+	def start(self) -> None:
+		from Xlib import display
+		from Xlib.ext import xinput
+
+		self._display = display.Display()
+		if not self._display.has_extension("XInputExtension"):
+			self._display.close()
+			raise NoLinuxImplementation("mouse tracking", "the X server has no XInput extension")
+		self._display.screen().root.xinput_select_events(
+			[
+				(
+					xinput.AllMasterDevices,
+					xinput.RawMotionMask | xinput.RawButtonPressMask | xinput.RawButtonReleaseMask,
+				),
+				(xinput.AllDevices, xinput.HierarchyChangedMask),
+			],
+		)
+		self._findXtestDevices()
+		self._lastPosition = self._position()
+		self._display.sync()
+		self._thread.start()
+
+	def stop(self) -> None:
+		self._stopping = True
+		try:
+			os.write(self._wakeWrite, b"\0")
+		except OSError:
+			pass
+		if self._thread.is_alive():
+			self._thread.join(2)
+		os.close(self._wakeRead)
+		os.close(self._wakeWrite)
+
+	def _findXtestDevices(self) -> None:
+		from Xlib.ext import xinput
+
+		devices = self._display.xinput_query_device(xinput.AllDevices).devices
+		self._xtestDevices = {device.deviceid for device in devices if "XTEST" in str(device.name)}
+
+	def _run(self) -> None:
+		from logHandler import log
+		from Xlib import error
+
+		d = self._display
+		try:
+			while not self._stopping:
+				while d.pending_events():
+					self._handle(d.next_event())
+				timeout = None
+				if self._moved:
+					due = self._lastMove + MOVE_INTERVAL
+					now = time.monotonic()
+					if now >= due:
+						self._handMove(now)
+					else:
+						timeout = due - now
+				readable, _w, _x = select.select([d.fileno(), self._wakeRead], [], [], timeout)
+				if self._wakeRead in readable:
+					os.read(self._wakeRead, 4096)
+		except (error.ConnectionClosedError, OSError):
+			if not self._stopping:
+				log.warning("The X server closed the pointer's connection; the mouse is no longer followed")
+		except Exception:
+			log.exception("The mouse stopped being followed")
+		finally:
+			try:
+				d.close()
+			except (OSError, error.ConnectionClosedError):
+				pass
+
+	def _handle(self, event) -> None:
+		from Xlib.ext import xinput
+
+		evtype = getattr(event, "evtype", None)
+		if evtype not in (xinput.RawMotion, xinput.RawButtonPress, xinput.RawButtonRelease):
+			if evtype == xinput.HierarchyChanged:
+				self._findXtestDevices()
+			return
+		data = event.data
+		if isinstance(data, (bytes, bytearray)):
+			_deviceid, _time, detail, sourceid = struct.unpack_from("=HIIH", data, 0)
+		else:
+			detail, sourceid = data.detail, data.sourceid
+		injected = sourceid in self._xtestDevices
+		if evtype == xinput.RawMotion:
+			if injected and isOwnEcho("motion"):
+				return
+			self._moved = True
+			self._movedInjected = self._movedInjected and injected
+			return
+		if injected and isOwnEcho("button", detail):
+			return
+		messages = BUTTON_MESSAGES.get(detail)
+		if messages is None:
+			return
+		x, y = self._position()
+		self._call(messages[1] if evtype == xinput.RawButtonRelease else messages[0], x, y, injected)
+
+	def _position(self) -> tuple[int, int]:
+		reply = self._display.screen().root.query_pointer()
+		return reply.root_x, reply.root_y
+
+	def _handMove(self, now: float) -> None:
+		injected = self._movedInjected
+		self._moved = False
+		self._movedInjected = True
+		position = self._position()
+		if position == self._lastPosition:
+			return
+		self._lastPosition = position
+		self._lastMove = now
+		self._call(WM_MOUSEMOVE, *position, injected)
+
+	def _call(self, message: int, x: int, y: int, injected: bool) -> None:
+		from logHandler import log
+
+		try:
+			self._deliver(message, x, y, injected)
+		except Exception:
+			log.exception("Handing a mouse event to NVDA")
+
+
+_watcher: Watcher | None = None
+
+
+def startWatching() -> None:
+	"""Start following the pointer, handing its moves and clicks to NVDA as the Windows hook does."""
+	global _watcher
+	from logHandler import log
+
+	from linuxPlatform import inputHook, keys
+
+	# With the keyboard left alone the pointer is too: NVDA is then at rest, touching no device.
+	if _watcher is not None or not isAvailable() or not keys.isEnabled():
+		return
+
+	watcher = Watcher(inputHook.deliverMouse)
+	try:
+		watcher.start()
+	except Exception:
+		log.warning("NVDA cannot follow the mouse on the X display", exc_info=True)
+		return
+	_watcher = watcher
+
+
+def stopWatching() -> None:
+	global _watcher
+	watcher, _watcher = _watcher, None
+	if watcher is not None:
+		watcher.stop()

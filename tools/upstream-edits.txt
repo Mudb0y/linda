@@ -595,11 +595,13 @@ source/monkeyPatches/wxMonkeyPatches.py
   Windows message for every CallAfter once the main frame has a window
 source/mouseHandler.py
   Linux runtime: initialize takes the pointer position from wx, and
-  scrBmpObj is linuxPlatform.screenBitmap's, whose captureImage raises
-  NoLinuxImplementation, since Linux has no GDI screen capture, so audio
-  coordinates that read brightness fail naming what is missing;
-  getLogicalButtonFlags asks linuxPlatform.pointer whether the X pointer
-  mapping swaps the buttons, where Windows asks GetSystemMetrics
+  scrBmpObj is linuxPlatform.screenBitmap's, which reads the screen's
+  pixels from the X server, where Windows reads them through GDI;
+  initialize starts and terminate stops linuxPlatform.pointer's watcher,
+  which hands the pointer's moves and clicks to internal_mouseEvent as the
+  Windows mouse hook does; getLogicalButtonFlags asks linuxPlatform.pointer
+  whether the X pointer mapping swaps the buttons, where Windows asks
+  GetSystemMetrics
 source/nvwave.py
   Linux runtime: playWaveFile stops the previous file's player through a
   copy of fileWavePlayer read once per pass, before upstream's loop, which

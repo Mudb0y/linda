@@ -391,32 +391,56 @@ def nodeForRelation(relation: str | tuple[int, int]) -> Node | None:
 	if isinstance(relation, tuple) and len(relation) == 2:
 		x, y = relation
 		c = client()
-		windows = ([window] if window else []) + [
-			w
-			for app in applications()
-			if not c.isHung(app.busName)
-			for w in _safeChildren(app)
-			if w != window
-		]
-		for top in windows:
+		apps = [app for app in applications() if not c.isHung(app.busName)]
+		# The X server knows whose window is uppermost at the point, which AT-SPI does not: that
+		# application's windows are tried alone first, and every window only when none of them holds
+		# the point, as when the application runs in a sandbox that gives it process IDs of its own.
+		owner = _processAtPoint(x, y)
+		if owner:
+			found = _hitTest(
+				[w for app in apps if processIDOf(app) == owner for w in _safeChildren(app)], window, x, y
+			)
+			if found is not None:
+				return found
+		return _hitTest([w for app in apps for w in _safeChildren(app)], window, x, y)
+	return None
+
+
+def _processAtPoint(x: int, y: int) -> int | None:
+	from linuxPlatform import pointer
+
+	try:
+		return pointer.processAt(x, y)
+	# No display, or a window that went as it was asked about: every window is tried instead.
+	except Exception:  # noqa: BLE001
+		log.debugWarning(f"Finding the window at {x}, {y} on the X display", exc_info=True)
+		return None
+
+
+def _hitTest(windows: list[Node], active: Node | None, x: int, y: int) -> Node | None:
+	"""The deepest node at (x, y) in the first of windows that holds the point, the active one first."""
+	c = client()
+	if active is not None and active in windows:
+		windows = [active] + [w for w in windows if w != active]
+	for top in windows:
+		try:
+			extents = c.extents(top)
+		except NodeGone:
+			continue
+		if not extents or not (
+			extents[0] <= x < extents[0] + extents[2] and extents[1] <= y < extents[1] + extents[3]
+		):
+			continue
+		node = top
+		for _ in range(64):
 			try:
-				extents = c.extents(top)
+				deeper = c.accessibleAtPoint(node, x, y)
 			except NodeGone:
-				continue
-			if not extents or not (
-				extents[0] <= x < extents[0] + extents[2] and extents[1] <= y < extents[1] + extents[3]
-			):
-				continue
-			node = top
-			for _ in range(64):
-				try:
-					deeper = c.accessibleAtPoint(node, x, y)
-				except NodeGone:
-					deeper = None
-				if deeper is None or deeper == node:
-					break
-				node = deeper
-			return node
+				deeper = None
+			if deeper is None or deeper == node:
+				break
+			node = deeper
+		return node
 	return None
 
 

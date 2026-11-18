@@ -694,34 +694,6 @@ def test_mouseInitializesAndTerminates(tmp_path: Path):
 	}
 
 
-def test_audioCoordinatesBrightnessNamesScreenCapture(tmp_path: Path):
-	done, value = run(
-		tmp_path,
-		"""
-		import types
-
-		import wx
-
-		app = wx.App()
-		import mouseHandler
-		from linuxPlatform import NoLinuxImplementation
-
-		mouseHandler.initialize()
-		try:
-			mouseHandler.playAudioCoordinates(10, 20, 100, 100, types.SimpleNamespace(x=0, y=0), detectBrightness=True)
-		except NoLinuxImplementation as e:
-			missing = e.what
-		mouseHandler.terminate()
-		result = missing
-		app.Destroy()
-		""",
-		objects=True,
-	)
-	done.assertClean(ignoring={"noLinuxImplementation"})
-	assert value == "screen capture"
-	assert done.noLinuxImplementation == ["screen capture"]
-
-
 def test_touchIsNotSupported(tmp_path: Path):
 	done, value = run(
 		tmp_path,

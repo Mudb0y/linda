@@ -27,6 +27,7 @@ from winAPI.winUser.constants import SystemMetrics
 from winBindings import user32
 
 if sys.platform != "win32":
+	from linuxPlatform import pointer as _linuxPointer
 	from linuxPlatform.screenBitmap import ScreenBitmap as _LinuxScreenBitmap
 
 
@@ -260,8 +261,8 @@ def initialize():
 		scrBmpObj = screenBitmap.ScreenBitmap(1, 1)
 		(x, y) = winUser.getCursorPos()
 	else:
-		# Linux has no GDI screen capture, which only the brightness of audio coordinates reads; this
-		# one raises naming that. The X server knows where the pointer is.
+		# The X server gives the brightness under the pointer, which audio coordinates read, and knows
+		# where the pointer is.
 		scrBmpObj = _LinuxScreenBitmap(1, 1)
 		(x, y) = wx.GetMousePosition().Get()
 	desktopObject = api.getDesktopObject()
@@ -276,6 +277,9 @@ def initialize():
 	curMousePos = (x, y)
 	winInputHook.initialize()
 	winInputHook.setCallbacks(mouse=internal_mouseEvent)
+	if sys.platform != "win32":
+		# Linux has no mouse hook; the pointer is followed on the X display instead.
+		_linuxPointer.startWatching()
 	_shapeTimer = gui.NonReEntrantTimer(_reportShape)
 
 
@@ -299,6 +303,8 @@ def terminate():
 	if isRightMouseButtonLocked():
 		unlockRightMouseButton()
 	scrBmpObj = None
+	if sys.platform != "win32":
+		_linuxPointer.stopWatching()
 	winInputHook.terminate()
 	_shapeTimer.Stop()
 	_shapeTimer = None
@@ -324,9 +330,7 @@ def getLogicalButtonFlags() -> LogicalButtonFlags:
 	for which button (left or right) is primary and which is secondary.
 	"""
 	if sys.platform != "win32":
-		from linuxPlatform import pointer
-
-		swappedButtons = pointer.buttonsSwapped()
+		swappedButtons = _linuxPointer.buttonsSwapped()
 	else:
 		swappedButtons = user32.GetSystemMetrics(SystemMetrics.SWAP_BUTTON)
 	if not swappedButtons:
