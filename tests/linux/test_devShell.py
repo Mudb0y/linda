@@ -172,6 +172,10 @@ def _xorgModulePath(value: str) -> None:
 	_holds(_directory(server), "libshadow.so")
 
 
+def _mateDesktopSchemas(value: str) -> None:
+	_holds(_directory(value), "org.mate.applications-at-visual.gschema.xml", "gschemas.compiled")
+
+
 def _bash(value: str) -> None:
 	path = _elfFile(value)
 	assert path.name == "bash" and os.access(path, os.X_OK), value
@@ -253,6 +257,7 @@ SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
 	"LINDA_QT6_PLUGIN_PATH": _qt6PluginPath,
 	"LINDA_XORG_BIN": _xorgBin,
 	"LINDA_XORG_MODULE_PATH": _xorgModulePath,
+	"LINDA_MATE_DESKTOP_SCHEMAS": _mateDesktopSchemas,
 	"LINDA_BASH": _bash,
 	"LINDA_BRLTTY": _brltty,
 	"LINDA_RIG_PATH": _searchPath,

@@ -225,6 +225,9 @@
           mate-terminal
           mate-panel
           mate-notification-daemon
+          # MATE's session manager, which tests/linux/test_mateSession.py
+          # starts Linda from as a sign-in does.
+          mate-session-manager
           libnotify
           featherpad
           # Another program's side of the clipboard, for the clipboard tests.
@@ -309,6 +312,12 @@
         # as a graphics card's driver does, and Xephyr, which has none.
         LINDA_XORG_BIN = "${pkgs.xorg-server}/bin";
         LINDA_XORG_MODULE_PATH = "${pkgs.xf86-video-dummy}/lib/xorg/modules,${pkgs.xorg-server}/lib/xorg/modules";
+
+        # The schema of MATE's choice of screen reader, which linda
+        # --register-desktop writes and mate-session reads, for
+        # tests/linux/test_mateSession.py. mate-session finds it through its
+        # own wrapper; Linda's code under test is given it here.
+        LINDA_MATE_DESKTOP_SCHEMAS = pkgs.glib.getSchemaPath pkgs.mate-desktop;
 
         # The terminal fixture's shell. The bash on PATH is stdenv's, built
         # without readline, so arrows and Control with them would type escape
