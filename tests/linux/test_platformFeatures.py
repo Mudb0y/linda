@@ -295,6 +295,7 @@ def test_settingsLeaveOutWhatLinuxLacks(desktop: DesktopSession):
 		"Diff algorithm: combo box Automatic (prefer Diff Match Patch) collapsed Alt plus D",
 		"Trim leading silence in speech audio check box checked",
 		"Editable Text grouping",
+		"Take keys from: combo box linda-keyd when it lets Linda, otherwise the X display collapsed Alt plus K",
 	):
 		assert kept in advanced, advanced
 	step(desktop, "Escape", *AT_START)
