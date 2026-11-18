@@ -1,5 +1,6 @@
 # The programs the test guest runs for the test script: the session runner, the fake keyboard, the
-# key recorder and the test window, each from guest/ under a name of its own, wrapped for GTK.
+# key recorder, the test window, the key capture helper's client and what pokes at the helper from
+# outside, each from guest/ under a name of its own, wrapped for GTK.
 {
   stdenv,
   python3,
@@ -20,6 +21,8 @@ let
     ground-keyboard = "fakeKeyboard.py";
     ground-record = "keyRecorder.py";
     ground-window = "testWindow.py";
+    ground-keyd-client = "keydClient.py";
+    ground-poke = "poke.py";
   };
 in
 stdenv.mkDerivation {

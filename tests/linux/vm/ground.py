@@ -8,7 +8,13 @@ Ground.mark reads, so a test asks for what happened after a mark.
 
 Keys come two ways. Ground.press sends QEMU's own key events, which reach the guest kernel as the
 emulated keyboard's; names are QEMU's sendkey names, as "insert-t", "f10", "ret". Ground.keyboard
-makes a fake keyboard inside the guest through its uinput; names are evdev's, as "KEY_T".
+makes a fake keyboard inside the guest through its uinput, and Ground.uhidKeyboard one through its
+uhid, which the key capture helper takes as it takes a plugged-in keyboard; names are evdev's, as
+"KEY_T".
+
+linda-keyd, the key capture helper, runs in a guest whose cases/NAME.nix imports keyd.nix. Its
+client in a test is guest/keydClient.py, which Ground.keydClient starts as the test needs it, and
+what the helper says in the journal Ground.helperLog reads, stamped with the same clock.
 
 Linda is heard as the tests under tests/linux hear it: through the transcript synth, which the test
 hooks give the package, and whose records synthDrivers/_transcriptRecords.py reads.
@@ -89,16 +95,22 @@ def keyEvents(records: list[dict]) -> list[tuple[str, int]]:
 	return [(r["key"], r["value"]) for r in records if r["kind"] == "key" and r["value"] != 2]
 
 
-class FakeKeyboard:
-	"""A keyboard made in the guest through uinput, by guest/fakeKeyboard.py running as root."""
+def unitName(prefix: str, name: str) -> str:
+	return prefix + "".join(c if c.isalnum() else "-" for c in name)
 
-	def __init__(self, ground: "Ground", name: str) -> None:
+
+class FakeKeyboard:
+	"""A keyboard made in the guest through uinput or uhid, by guest/fakeKeyboard.py running as root."""
+
+	def __init__(self, ground: "Ground", name: str, kind: str = "uinput", *, started: bool = False) -> None:
+		"""started says the keyboard is made and served already, by guest/poke.py race."""
 		self.ground = ground
 		self.name = name
-		self.unit = "ground-keyboard-" + "".join(c if c.isalnum() else "-" for c in name)
-		ground.machine.succeed(
-			f"systemd-run --collect --unit={self.unit} ground-keyboard serve {shlex.quote(name)}"
-		)
+		self.unit = unitName("ground-keyboard-", name)
+		if not started:
+			ground.machine.succeed(
+				f"systemd-run --collect --unit={self.unit} ground-keyboard serve {shlex.quote(name)} {kind}"
+			)
 		ready = shlex.quote(f"{GROUND}/keyboards/{name}.ready")
 		ground.waitFor(lambda: ground.machine.execute(f"test -e {ready}")[0] == 0, f"the keyboard {name}")
 		# A key sent before the X server has the device is lost (Documentation/input/uinput.rst).
@@ -127,6 +139,127 @@ class FakeKeyboard:
 		"""Destroy the keyboard at once, with whatever keys it holds down."""
 		self.run({"vanish": True})
 		self.ground.waitForDevice("x", self.name, change="removed")
+
+	def records(self, since: "Mark | None" = None) -> list[dict]:
+		"""What the keyboard wrote, and for a uhid one what the kernel set its lights to."""
+		path = shlex.quote(f"{GROUND}/keyboards/{self.name}.jsonl")
+		text = self.ground.shell(f"cat {path} 2>/dev/null || true")
+		records = [json.loads(line) for line in text.splitlines() if line.strip()]
+		return [r for r in records if since is None or r["t"] >= since.t]
+
+
+#: The keyboards' names, as the kernel and the X server give them: the helper's own, the guest's two
+#: and the USB keyboard QEMU's monitor plugs in.
+VIRTUAL_KEYBOARD = "Linda virtual keyboard"
+VIRTIO_KEYBOARD = "QEMU Virtio Keyboard"
+AT_KEYBOARD = "AT Translated Set 2 keyboard"
+USB_KEYBOARD = "QEMU QEMU USB Keyboard"
+#: The client's program, by the path every user's processes can run it from.
+KEYD_CLIENT = "/run/current-system/sw/bin/ground-keyd-client"
+KEYD_DIRECTORY = f"{GROUND}/keyd"
+KEYD_UNIT = "linda-keyd.service"
+
+
+class KeydClient:
+	"""A client of linda-keyd, guest/keydClient.py, driven one step at a time.
+
+	It runs as how says: "session", started by the X session's runner as a program of the session in
+	front, as Linda is; "userManager", by the session user's systemd user manager, outside any
+	session; or the name of a user, as a system service of that user's, outside any session.
+	"""
+
+	def __init__(self, ground: "Ground", name: str, how: str = "session") -> None:
+		self.ground = ground
+		self.name = name
+		self.how = how
+		self.unit = unitName("ground-keyd-", name)
+		quoted = shlex.quote(name)
+		if how == "session":
+			ground.start(f"keyd-{name}", [KEYD_CLIENT, "serve", name])
+		elif how == "userManager":
+			ground.shell(
+				f"systemd-run --machine={USER}@.host --user --collect --unit={self.unit} "
+				f"{KEYD_CLIENT} serve {quoted}"
+			)
+		else:
+			ground.shell(f"systemd-run --uid={how} --collect --unit={self.unit} {KEYD_CLIENT} serve {quoted}")
+		socketPath = shlex.quote(f"{KEYD_DIRECTORY}/{name}.sock")
+		ground.waitFor(lambda: ground.machine.execute(f"test -S {socketPath}")[0] == 0, f"the client {name}")
+
+	def call(self, op: str, **fields: object) -> dict:
+		request = json.dumps({"op": op, **fields})
+		output = self.ground.shell(f"ground-keyd-client call {shlex.quote(self.name)} {shlex.quote(request)}")
+		return json.loads(output)
+
+	def connect(self, **fields: object) -> dict:
+		"""Connect and say HELLO; answers {"welcome": ..., "goodbye": ...}, whichever came."""
+		return self.call("connect", **fields)
+
+	def start(self) -> None:
+		self.call("start")
+
+	def stop(self) -> None:
+		self.call("stop")
+
+	def verdicts(self, default: object = "pass", **keys: object) -> None:
+		"""How the client answers each press: "pass", "keep", "never", or {"after": S, "keep": B}."""
+		self.call("verdicts", default=default, keys=keys)
+
+	def heartbeats(self, on: bool) -> None:
+		self.call("heartbeats", on=on)
+
+	@property
+	def pid(self) -> int:
+		return self.call("state")["pid"]
+
+	def records(self, since: "Mark | None" = None, type: str | None = None) -> list[dict]:
+		"""What the client got from the helper and sent it, as guest/keydClient.py records it."""
+		path = shlex.quote(f"{KEYD_DIRECTORY}/{self.name}.jsonl")
+		text = self.ground.shell(f"cat {path} 2>/dev/null || true")
+		records = [json.loads(line) for line in text.splitlines() if line.strip()]
+		return [
+			r for r in records if (since is None or r["t"] >= since.t) and (type is None or r["type"] == type)
+		]
+
+	def waitFor(
+		self,
+		type: str,
+		since: "Mark | None" = None,
+		where: Callable[[dict], bool] = lambda _r: True,
+		timeout: float = 10,
+	) -> dict:
+		"""The first record of type after since for which where holds, once there is one."""
+		found: list[dict] = []
+
+		def arrived() -> bool:
+			nonlocal found
+			found = [r for r in self.records(since, type) if where(r)]
+			return bool(found)
+
+		try:
+			self.ground.waitFor(arrived, f"{type} at the client {self.name}", timeout)
+		except AssertionError as e:
+			raise AssertionError(f"{e}; it recorded {self.records(since)[-30:]}") from None
+		return found[0]
+
+	def waitForDevice(
+		self, device: str, status: str, since: "Mark | None" = None, timeout: float = 10
+	) -> dict:
+		return self.waitFor(
+			"DEVICE", since, lambda r: r["name"] == device and r["status"] == status, timeout=timeout
+		)
+
+	def keys(self, since: "Mark | None" = None) -> list[dict]:
+		return self.records(since, "KEY")
+
+	def capture(self, *devices: str, since: "Mark | None" = None) -> None:
+		"""Connect if need be, START, and wait until the helper holds every keyboard named."""
+		if not self.call("state")["connected"]:
+			answer = self.connect()
+			assert answer["welcome"], f"the client {self.name} was not welcomed: {answer}"
+		self.start()
+		for device in devices:
+			self.waitForDevice(device, "HELD", since)
 
 
 class Ground:
@@ -308,11 +441,85 @@ class Ground:
 		"""Type text on the emulated keyboard, one key at a time."""
 		self.machine.send_chars(text)
 
-	def keyboard(self, name: str) -> FakeKeyboard:
+	def keyboard(self, name: str, kind: str = "uinput") -> FakeKeyboard:
 		"""Make a fake keyboard in the guest, ready once the kernel and the X server both have it."""
-		keyboard = FakeKeyboard(self, name)
+		keyboard = FakeKeyboard(self, name, kind)
 		self.keyboards.append(keyboard)
 		return keyboard
+
+	def qemuKey(self, key: str, down: bool) -> None:
+		"""Press or release one key on QEMU's own keyboard, by its QKeyCode name, as "shift": unlike
+		press, which always releases, a key can be left down."""
+		event = {"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": key}}}
+		result = self.machine.qmp_client.send("input-send-event", {"events": [event]})
+		assert "error" not in result, result
+
+	def plugUsbKeyboard(self, id: str = "usbkbd") -> None:
+		"""Plug a USB keyboard into the guest, which then has QEMU's keys, until it is unplugged."""
+		self.machine.send_monitor_command(f"device_add usb-kbd,id={id},bus=usb-bus.0")
+		self.waitForDevice("x", USB_KEYBOARD)
+
+	def unplugUsbKeyboard(self, id: str = "usbkbd") -> None:
+		self.machine.send_monitor_command(f"device_del {id}")
+		self.waitForDevice("x", USB_KEYBOARD, change="removed")
+
+	def uhidKeyboard(self, name: str) -> FakeKeyboard:
+		"""Make a keyboard through the guest's uhid, which the key capture helper takes."""
+		return self.keyboard(name, "uhid")
+
+	# The key capture helper.
+
+	def keydClient(self, name: str, how: str = "session") -> KeydClient:
+		return KeydClient(self, name, how)
+
+	def helperPid(self) -> int:
+		return int(self.shell(f"systemctl show -P MainPID {KEYD_UNIT}").strip())
+
+	def helperRestarts(self) -> int:
+		return int(self.shell(f"systemctl show -P NRestarts {KEYD_UNIT}").strip())
+
+	def waitForHelper(self, timeout: float = 30) -> int:
+		"""Wait until the helper runs; answers its pid."""
+		self.waitFor(
+			lambda: self.shell(f"systemctl is-active {KEYD_UNIT} || true").strip() == "active",
+			"linda-keyd to run",
+			timeout,
+		)
+		return self.helperPid()
+
+	def helperLog(self, since: Mark | None = None) -> list[tuple[float, str]]:
+		"""What the helper's unit put in the journal, each line with its time on the guest's clock."""
+		text = self.shell(f"journalctl -o json --no-pager -u {KEYD_UNIT} 2>/dev/null || true")
+		lines = []
+		for line in text.splitlines():
+			if not line.strip():
+				continue
+			entry = json.loads(line)
+			t = int(entry["__MONOTONIC_TIMESTAMP"]) / 1e6
+			message = entry.get("MESSAGE")
+			if isinstance(message, list):
+				message = bytes(message).decode(errors="replace")
+			if since is None or t >= since.t:
+				lines.append((t, message or ""))
+		return lines
+
+	def waitForHelperLog(
+		self, text: str, since: Mark | None = None, timeout: float = 10
+	) -> tuple[float, str]:
+		"""The first line of the helper's after since that holds text, once there is one."""
+		found: list[tuple[float, str]] = []
+
+		def arrived() -> bool:
+			nonlocal found
+			found = [line for line in self.helperLog(since) if text in line[1]]
+			return bool(found)
+
+		try:
+			self.waitFor(arrived, f"the helper to say {text!r}", timeout)
+		except AssertionError as e:
+			said = "\n".join(message for _t, message in self.helperLog(since)[-30:])
+			raise AssertionError(f"{e}; it said:\n{said}") from None
+		return found[0]
 
 	# The recorders.
 
@@ -382,11 +589,14 @@ class Ground:
 	# The end.
 
 	def diagnostics(self) -> str:
-		"""What is worth reading when a test fails: the session's jobs, Linda's log, the recorders."""
+		"""What is worth reading when a test fails: the session's jobs, Linda's log, the recorders, and
+		the helper's journal and its clients' records."""
 		return self.machine.execute(
 			f'for f in {GROUND}/session.log {GROUND}/jobs/*; do echo "== $f"; tail -c 3000 "$f"; done; '
 			f"echo '== nvda.log'; tail -c 8000 {LINDA_DIRECTORY}/nvda.log; "
-			f'for f in {" ".join(LOGS.values())}; do echo "== $f"; tail -n 40 "$f"; done',
+			f'for f in {" ".join(LOGS.values())}; do echo "== $f"; tail -n 40 "$f"; done; '
+			f'for f in {KEYD_DIRECTORY}/*.jsonl; do echo "== $f"; tail -n 40 "$f"; done; '
+			f"echo '== {KEYD_UNIT}'; journalctl -o short-monotonic --no-pager -u {KEYD_UNIT} | tail -n 80",
 		)[1]
 
 
