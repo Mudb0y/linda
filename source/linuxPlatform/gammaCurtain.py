@@ -491,6 +491,12 @@ def enable() -> None:
 	with _lock:
 		if _curtain is not None and _curtain.active:
 			return
+		if os.environ.get("XDG_SESSION_TYPE") == "wayland" or os.environ.get("WAYLAND_DISPLAY"):
+			# The X server of a Wayland session is not what drives the monitors: its ramps could read
+			# back black while the screen still shows.
+			raise CurtainUnavailable(
+				"this is a Wayland session, where the X server's gamma ramps are not the screen's",
+			)
 		displayName = os.environ.get("DISPLAY")
 		if not displayName:
 			raise CurtainUnavailable("there is no X display, and the screen is made black through X")

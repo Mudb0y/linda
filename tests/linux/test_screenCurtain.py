@@ -575,6 +575,32 @@ def test_aServerWithoutGammaRampsSaysSoAtAStartWithTheCurtainOn(noGamma: str, tm
 	nvda.assertClean(ignoring=("logErrors",), logNames=("nvda.log",))
 
 
+def test_inAWaylandSessionTheCurtainRefusesAndLeavesTheRampsAlone(dummy: str, tmp_path: Path):
+	before = userRamps(dummy)
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import os
+		from linuxPlatform import gammaCurtain
+
+		result = []
+		for name, value in (("WAYLAND_DISPLAY", "wayland-0"), ("XDG_SESSION_TYPE", "wayland")):
+			os.environ[name] = value
+			try:
+				gammaCurtain.enable()
+				result.append("enabled")
+			except gammaCurtain.CurtainUnavailable as e:
+				result.append(str(e))
+			result.append(gammaCurtain.isActive())
+			del os.environ[name]
+		""",
+	)
+	done.assertClean()
+	refusal = "this is a Wayland session, where the X server's gamma ramps are not the screen's"
+	assert done.value == [refusal, False, refusal, False]
+	assert readRamps(dummy) == before
+
+
 def test_withoutRandrOrWithoutXTheCurtainRefusesAndSaysWhy(tmp_path: Path):
 	server = startServer(
 		["Xvfb", NO_RANDR_DISPLAY, "-extension", "RANDR", "-nolisten", "tcp"], tmp_path, NO_RANDR_DISPLAY
