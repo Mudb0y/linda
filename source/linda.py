@@ -83,7 +83,11 @@ def main() -> NoReturn:
 
 	import config
 	import logHandler
+	from linuxPlatform import sessionClient
 	from logHandler import log
+
+	# Before anything here can start a program, which must not register in this copy's name.
+	sessionClient.takeStartupId()
 
 	# Windows Store packages exist only on Windows.
 	config.isAppX = False
@@ -204,6 +208,8 @@ def main() -> NoReturn:
 		# From then on this copy acts on SIGTERM at once, so a copy replacing it need wait no longer.
 		for lock in instanceLocks:
 			core.postNvdaStartup.register(lock.markReady)
+		# Once NVDA can speak, so that a session manager waiting for it goes on as soon as it is up.
+		core.postNvdaStartup.register(sessionClient.start)
 		core.main()
 	except BaseException as e:
 		# As nvda.pyw does, SystemExit included: wx raises it when there is no display to open.
@@ -213,6 +219,7 @@ def main() -> NoReturn:
 		# The lock is never released by hand: the kernel drops it as the process ends, so a new copy waits
 		# for this one to be entirely gone, as it waits on the mutex on Windows.
 		log.info("NVDA exit")
+	sessionClient.stop()
 	# The copy a restart started sends SIGTERM as it takes over, and as the interpreter finalises it puts
 	# the handler's signals back to their default action, so that a copy slower to finalise than the new
 	# one to start was ended by the signal instead of exiting cleanly. It is leaving anyway, and the new

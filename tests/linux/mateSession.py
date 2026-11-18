@@ -232,7 +232,9 @@ class MateSession:
 			f"run=$(mktemp -d {shlex.quote(str(runs))}/run.XXXXXX)\n"
 			'echo $$ >"$run/pid"\n'
 			'env >"$run/environment"\n'
+			# Where NVDA logs by default, and where a copy it restarts as moves the log aside.
 			f'ln -s {shlex.quote(str(self.stateHome / "linda" / "nvda.log"))} "$run/nvda.log"\n'
+			f'ln -s {shlex.quote(str(self.stateHome / "linda" / "nvda-old.log"))} "$run/nvda-old.log"\n'
 			f"export LINDA_TEST_HOOKS_DIR={shlex.quote(str(self._hooks))}\n"
 			'export LINDA_TRANSCRIPT_FILE="$run/transcript.jsonl" LINDA_TRANSCRIPT_MODE=immediate\n'
 			'exec >"$run/stdout.txt" 2>"$run/stderr.txt"\n'

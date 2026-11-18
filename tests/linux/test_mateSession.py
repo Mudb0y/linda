@@ -13,13 +13,15 @@ probe plugin, which says one sentence once Linda has started.
 import os
 import re
 import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
 
 import configobj
 import harness
 import pytest
-from mateSession import MateSession
+from mateSession import MateSession, lindaConfig
 
 #: What fixtures/globalPlugins/bootProbe.py says once Linda has started.
 SENTENCE = "the boot probe has started"
@@ -36,6 +38,9 @@ COMMAND_SPEECH = "Speak typed characters "
 COMMAND_SETTING = ("keyboard", "speakTypedCharacters")
 #: What mate-session warns of a program that held an early phase open until its timeout.
 NOT_REGISTERED = "Application 'linda.desktop' failed to register before timeout"
+#: Seconds Linda gives a session manager to answer its registration, as
+#: linuxPlatform.sessionClient.REGISTER_TIMEOUT_MS has it.
+REGISTER_TIMEOUT = 10.0
 
 
 @pytest.fixture
@@ -133,55 +138,261 @@ def test_entryLindasSettingWritesStartsLinda(tmp_path: Path):
 		assertStartsAmongTheApplications(session)
 
 
-def test_initializationPhaseWaitsForLinda(session: MateSession):
+def startInitialization(session: MateSession) -> tuple[harness.Launch, float]:
+	"""Start the session with Linda in the Initialization phase; return Linda and when it first spoke."""
 	session.lindaEntry("Initialization")
 	session.start()
 	linda = session.waitForLinda()
-	spoke = linda.started + linda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	return linda, linda.started + linda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+
+
+def assertRegistered(linda: harness.Launch) -> str:
+	"""The object path Linda's client was registered as."""
+	linda.waitForLog("Session manager: registered as ", 30)
+	return re.search(r"Session manager: registered as (\S+)", linda.text("nvda.log"))[1]
+
+
+def test_initializationPhaseEndsOnceLindaIsUp(session: MateSession):
+	linda, spoke = startInitialization(session)
 	ended = session.waitForPhase("INITIALIZATION", "ending", PHASE_TIMEOUT + STARTUP_BOUND)
-	waited = ended - session.phaseTime("INITIALIZATION")
-	# Linda spoke long before the phase ended, so the session waited on its timeout, not on Linda.
-	assert spoke < ended - 10, session.log()
-	assert PHASE_TIMEOUT - 1 <= waited <= PHASE_TIMEOUT + 15, (
-		f"the phase took {waited:.1f} s\n{session.log()}"
-	)
-	assert managerSaid(session, NOT_REGISTERED), session.log()
+	assertRegistered(linda)
+	# Linda registers as it says its first words, and the phase ends with that.
+	assert abs(ended - spoke) < 5, f"the phase ended {ended - spoke:.1f} s after Linda spoke\n{session.log()}"
+	assert ended - linda.started < PHASE_TIMEOUT / 2, session.log()
+	assert not managerSaid(session, NOT_REGISTERED), session.log()
+	# Before the window manager, which the rest of the desktop follows.
+	assert linda.started < session.waitForPhase("WINDOW_MANAGER"), session.log()
 	session.waitForPhase("RUNNING")
 	assertKeysWork(session, linda)
 	stopLinda(linda)
+	assert "Session manager: unregistered" in linda.text("nvda.log")
 
 
-def test_logoutLeavesLindaRunningUntilTheDisplayCloses(session: MateSession):
-	session.lindaEntry()
-	session.start()
-	linda = session.waitForLinda()
-	linda.waitForSpeech(SENTENCE, STARTUP_BOUND)
-	assertKeysWork(session, linda)
-	asked = time.monotonic()
-	session.logout()
+def assertEndsPromptly(session: MateSession, asked: float) -> None:
+	"""mate-session ends the session within a few seconds of the logout, and no client held it up."""
 	assert session.manager.wait(PHASE_TIMEOUT) == 0, session.log()
 	ended = session.phaseTime("EXIT", "ending")
 	assert ended is not None and ended - asked < 5, session.log()
-	# Nothing told Linda, which speaks on for as long as the X server lasts.
-	time.sleep(5)
-	assert linda.process.poll() is None, linda.describe()
-	mark = len(linda.spoken())
+	assert not managerSaid(session, "failed to reply before timeout"), session.log()
+
+
+def test_logoutEndsLindaWithItsSettingsSaved(session: MateSession):
+	linda, _spoke = startInitialization(session)
+	assertRegistered(linda)
+	session.waitForPhase("RUNNING")
 	assertKeysWork(session, linda)
-	assert len(linda.spoken()) > mark
-	# A display manager closes the X server once the session has ended; that is how Linda ends, in an
-	# instant, and without saving the setting the key changed, logging nothing of its end.
-	closed = time.monotonic()
-	session.closeDisplay()
-	status = linda.waitForExit(EXIT_BOUND)
-	assert status == 1, linda.describe()
-	assert time.monotonic() - closed < 5, linda.describe()
-	assert savedSetting(session) is None
+	changed = savedSetting(session)
+	asked = time.monotonic()
+	session.logout()
+	assert linda.waitForExit(EXIT_BOUND) == 0, linda.describe()
+	exited = time.monotonic()
+	assertEndsPromptly(session, asked)
+	assert exited - asked < 10, f"Linda took {exited - asked:.1f} s to exit\n{linda.describe()}"
+	assert changed is None and savedSetting(session) is not None, "the setting the key changed was not saved"
 	log = linda.text("nvda.log")
-	assert "NVDA exit" not in log and not harness.nvdaLogErrorRecords(log), log[-6000:]
+	for said in ("asked whether the session may end", "the session is ending", "NVDA exit"):
+		assert said in log, log[-6000:]
+	linda.assertClean(logNames=("nvda.log",))
+	# All that is left is what a display manager stops once the session has ended.
+	left = sorted([session.bus.pid, session.xserver.pid])
 	deadline = time.monotonic() + 5
-	while session.marked() != [session.bus.pid] and time.monotonic() < deadline:
+	while sorted(session.marked()) != left and time.monotonic() < deadline:
 		time.sleep(0.1)
-	assert session.marked() == [session.bus.pid], session.marked()
+	assert sorted(session.marked()) == left
+
+
+def test_cancelledLogoutLeavesLindaRunning(session: MateSession):
+	from gi.repository import Gio, GLib
+
+	linda, _spoke = startInitialization(session)
+	assertRegistered(linda)
+	session.waitForPhase("RUNNING")
+	# A program that holds the logout up, so that mate-session asks whether to log out regardless.
+	inhibitor = Gio.DBusConnection.new_for_address_sync(
+		session.busAddress,
+		Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+		None,
+		None,
+	)
+	try:
+		inhibitor.call_sync(
+			"org.gnome.SessionManager",
+			"/org/gnome/SessionManager",
+			"org.gnome.SessionManager",
+			"Inhibit",
+			GLib.Variant("(susu)", ("holder", 0, "a test holds the logout", 1)),
+			None,
+			Gio.DBusCallFlags.NONE,
+			5000,
+			None,
+		)
+		mark = len(linda.spoken())
+		session.logout()
+		waitForSpokenStart(linda, "dialog A program is still running", mark, 20)
+		session.press("Escape")
+		linda.waitForLog("Session manager: the session goes on", 20)
+		assert managerSaid(session, "Cancelling the end of session"), session.log()
+		assertKeysWork(session, linda)
+		assert linda.process.poll() is None and session.manager.poll() is None
+		# The logout that follows, with nothing holding it up, ends Linda as if none had been cancelled.
+		inhibitor.close_sync(None)
+		asked = time.monotonic()
+		session.logout()
+		assert linda.waitForExit(EXIT_BOUND) == 0, linda.describe()
+		assertEndsPromptly(session, asked)
+		linda.assertClean(logNames=("nvda.log",))
+	finally:
+		if not inhibitor.is_closed():
+			inhibitor.close_sync(None)
+
+
+def test_restartedCopyIsNotTheSessionsClient(session: MateSession):
+	"""A copy NVDA starts in its own place gets no startup ID, so it runs as one started by hand."""
+	session.variables["LINDA_BOOT_PROBE"] = "restart"
+	session.lindaEntry()
+	session.start()
+	first = session.waitForLinda()
+	first.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	assert first.waitForExit(EXIT_BOUND) == 0, first.describe()
+	# The new copy, which says the sentence too and exits, moved the first copy's log aside, which
+	# ended with the same last words. It is not the first copy's process, whose exit waitForLog stops at.
+	deadline = time.monotonic() + STARTUP_BOUND
+	while not re.search(f"{re.escape(NOT_STARTED_BY_ONE)}.*NVDA exit", first.text("nvda.log"), re.DOTALL):
+		assert time.monotonic() < deadline, f"the new copy did not start and exit\n{first.describe()}"
+		time.sleep(0.1)
+	old = first.text("nvda-old.log")
+	assert "Session manager: started NVDA with the startup ID " in old, old[-6000:]
+	# The probe restarts NVDA as it starts, which can be before the registration is answered.
+	if "Session manager: registered as " in old:
+		assert "Session manager: unregistered" in old, old[-6000:]
+	assert sessionManagerRecords(first) == [NOT_STARTED_BY_ONE], first.text("nvda.log")[-6000:]
+	first.assertClean(logNames=("nvda-old.log", "nvda.log"))
+
+
+#: What Linda logs when no session manager started it.
+NOT_STARTED_BY_ONE = "Session manager: none started NVDA, as DESKTOP_AUTOSTART_ID was not set"
+#: A stand-in for a session manager that takes registrations and never answers one, on the rig's bus.
+SILENT_MANAGER = """
+from gi.repository import Gio, GLib
+
+INTERFACE = '''<node><interface name="org.gnome.SessionManager"><method name="RegisterClient">
+<arg direction="in" type="s"/><arg direction="in" type="s"/><arg direction="out" type="o"/>
+</method></interface></node>'''
+held = []
+
+
+def onCall(connection, sender, path, interface, method, parameters, invocation):
+	held.append(invocation)
+	print("asked", method, *parameters.unpack(), flush=True)
+
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+bus.register_object(
+	"/org/gnome/SessionManager", Gio.DBusNodeInfo.new_for_xml(INTERFACE).interfaces[0], onCall, None, None
+)
+bus.call_sync(
+	"org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName",
+	GLib.Variant("(su)", ("org.gnome.SessionManager", 4)), None, Gio.DBusCallFlags.NONE, -1, None,
+)
+print("ready", flush=True)
+loop = GLib.MainLoop()
+GLib.io_add_watch(GLib.IOChannel.unix_new(0), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, lambda *a: loop.quit())
+loop.run()
+"""
+
+
+def startOutsideASession(launches, tmp_path: Path, name: str, env: dict[str, str | None]) -> harness.Launch:
+	"""Linda on the rig's display and bus, as a start by hand starts it, with env over the rig's."""
+	config = lindaConfig(tmp_path / "configs" / name)
+	return launches(
+		name,
+		"-c",
+		str(config.parent),
+		"-f",
+		str(launches.directory / name / "nvda.log"),
+		env={"LINDA_BOOT_PROBE": "wait", **env},
+	)
+
+
+def assertRunsAsAlways(linda: harness.Launch) -> None:
+	"""Linda speaks, takes a command key and exits on SIGTERM, each in its usual time."""
+	assert linda.waitForSpeech(SENTENCE, STARTUP_BOUND) < STARTUP_BOUND / 4, linda.describe()
+	mark = len(linda.spoken())
+	subprocess.run(["xdotool", "key", COMMAND_KEY], check=True)
+	waitForSpokenStart(linda, COMMAND_SPEECH, mark, 10)
+	asked = time.monotonic()
+	linda.process.send_signal(signal.SIGTERM)
+	assert linda.waitForExit(EXIT_BOUND) == 0, linda.describe()
+	assert time.monotonic() - asked < 5, linda.describe()
+	linda.assertClean(logNames=("nvda.log",))
+
+
+def sessionManagerRecords(linda: harness.Launch) -> list[str]:
+	return re.findall(r"^Session manager: .*$", linda.text("nvda.log"), re.MULTILINE)
+
+
+def test_sessionManagerThatNeverAnswersCostsNothing(launches, tmp_path: Path):
+	# A bus of its own, as the rig's accessibility bus launcher would try to register with it too.
+	with open(tmp_path / "bus.log", "w") as busLog:
+		bus = subprocess.Popen(
+			[
+				"dbus-daemon",
+				f"--config-file={harness.HERE / 'rig-session.conf'}",
+				"--nofork",
+				"--print-address=1",
+			],
+			stdout=subprocess.PIPE,
+			stderr=busLog,
+			text=True,
+		)
+	try:
+		address = bus.stdout.readline().strip()
+		with subprocess.Popen(
+			[sys.executable, "-I", "-c", SILENT_MANAGER],
+			stdin=subprocess.PIPE,
+			stdout=subprocess.PIPE,
+			text=True,
+			env={**os.environ, "DBUS_SESSION_BUS_ADDRESS": address},
+		) as manager:
+			try:
+				assert manager.stdout.readline() == "ready\n"
+				linda = startOutsideASession(
+					launches,
+					tmp_path,
+					"silent",
+					{"DESKTOP_AUTOSTART_ID": "an-id", "DBUS_SESSION_BUS_ADDRESS": address},
+				)
+				linda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+				assert manager.stdout.readline() == "asked RegisterClient linda.desktop an-id\n"
+				# The registration gives up in its own time, and says so once.
+				linda.waitForLog("could not register", REGISTER_TIMEOUT + 20)
+				assertRunsAsAlways(linda)
+				assert sessionManagerRecords(linda) == [
+					"Session manager: started NVDA with the startup ID an-id",
+					(
+						"Session manager: could not register with org.gnome.SessionManager, so NVDA runs"
+						" unregistered: Timeout was reached"
+					),
+				], linda.text("nvda.log")[-6000:]
+			finally:
+				manager.stdin.close()
+				manager.wait(10)
+	finally:
+		bus.terminate()
+		bus.wait(10)
+
+
+def test_startupIdWithNoSessionManagerIsLoggedOnce(launches, tmp_path: Path):
+	linda = startOutsideASession(launches, tmp_path, "noManager", {"DESKTOP_AUTOSTART_ID": "an-id"})
+	assertRunsAsAlways(linda)
+	records = sessionManagerRecords(linda)
+	assert len(records) == 2 and records[1].startswith("Session manager: could not register with"), records
+
+
+def test_startOutsideASessionManagerIsUnchanged(launches, tmp_path: Path):
+	linda = startOutsideASession(launches, tmp_path, "byHand", {"DESKTOP_AUTOSTART_ID": None})
+	assertRunsAsAlways(linda)
+	assert sessionManagerRecords(linda) == [NOT_STARTED_BY_ONE]
 
 
 def test_registeredScreenReaderIsNotStarted(session: MateSession, tmp_path: Path):
