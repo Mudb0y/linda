@@ -277,6 +277,11 @@ def _createNVDAArgParser() -> NoConsoleOptionParser:
 		default=False,
 		help="Started by Windows Ease of Access",
 	)
+	if sys.platform != "win32":
+		# linda.py acts on these before this parser sees the command line; they are here for the help.
+		from linuxPlatform import desktopRegistration
+
+		desktopRegistration.addOptions(parser)
 	return parser
 
 

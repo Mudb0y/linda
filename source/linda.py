@@ -18,6 +18,8 @@ if appDir not in sys.path:
 
 #: As the first argument, runs linuxPlatform.say instead of the screen reader.
 SAY_COMMAND = "say"
+#: As the only argument, each runs linuxPlatform.desktopRegistration instead of the screen reader.
+DESKTOP_OPTIONS = ("--register-desktop", "--unregister-desktop")
 
 
 def _tell(message: str) -> None:
@@ -40,6 +42,15 @@ def _handOverToSay(arguments: list[str]) -> NoReturn:
 	say.main(arguments)
 
 
+def _handOverToDesktopRegistration(option: str) -> NoReturn:
+	from linuxPlatform import bootstrap
+
+	bootstrap.install()
+	from linuxPlatform import desktopRegistration
+
+	desktopRegistration.main(option)
+
+
 def main() -> NoReturn:
 	# Before NVDA's parser, which takes any argument it does not know and starts the screen reader anyway.
 	if sys.argv[1:2] == [SAY_COMMAND]:
@@ -49,6 +60,12 @@ def main() -> NoReturn:
 			f"the word {SAY_COMMAND} starts the say mode only as the first argument, so nothing was started"
 		)
 		sys.exit(2)
+	# NVDA's parser lists these in its help, and would otherwise start the screen reader with them.
+	if desktopOptions := [argument for argument in sys.argv[1:] if argument in DESKTOP_OPTIONS]:
+		if len(sys.argv) != 2:
+			_tell(f"{desktopOptions[0]} takes no other argument, so nothing was changed")
+			sys.exit(2)
+		_handOverToDesktopRegistration(sys.argv[1])
 	from linuxPlatform import bootstrap
 
 	bootstrap.install()

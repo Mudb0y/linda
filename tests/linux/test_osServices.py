@@ -6,6 +6,7 @@ nix develop . -c tests/linux/rig python -m pytest tests/linux/test_osServices.py
 import logging
 import os
 import stat
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -1864,6 +1865,150 @@ def test_startAfterSignInWritesTheUsersAutostartEntry(tmp_path):
 		],
 	}
 	assert sorted(os.listdir(user)) == ["linda.desktop"]
+
+
+#: MATE's schema for its choice of screen reader, as mate-desktop 1.28 installs it.
+MATE_AT_VISUAL_SCHEMA = """\
+<schemalist>
+  <schema id="org.mate.applications-at-visual" path="/org/mate/desktop/applications/at/visual/">
+    <key name="exec" type="s">
+      <default>'orca'</default>
+    </key>
+    <key name="startup" type="b">
+      <default>false</default>
+    </key>
+  </schema>
+</schemalist>
+"""
+
+
+def gsettingsEnv(tmpPath: Path, withMateSchema: bool = True) -> dict[str, str]:
+	"""A GSettings of the test's own, kept in a key file under tmpPath, whose only schema is a stand-in
+	for MATE's, or none."""
+	data = tmpPath / "xdgData"
+	schemas = data / "glib-2.0" / "schemas"
+	schemas.mkdir(parents=True)
+	if withMateSchema:
+		(schemas / "org.mate.applications-at-visual.gschema.xml").write_text(
+			MATE_AT_VISUAL_SCHEMA, encoding="utf-8"
+		)
+		subprocess.run(["glib-compile-schemas", str(schemas)], check=True)
+	return {
+		**xdgEnv(tmpPath),
+		"XDG_DATA_DIRS": str(data),
+		"GSETTINGS_SCHEMA_DIR": None,
+		"GSETTINGS_BACKEND": "keyfile",
+		"XDG_CURRENT_DESKTOP": "MATE",
+	}
+
+
+def savedMateSettings(tmpPath: Path) -> str:
+	path = tmpPath / "xdgConfig" / "glib-2.0" / "settings" / "keyfile"
+	return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def test_registeringWithTheDesktopSetsAndResetsMatesScreenReader(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		import sys
+
+		from gi.repository import Gio
+		from linuxPlatform import desktopRegistration, launcher
+
+		launcher.lastingCommand = lambda: "/opt/my linda/bin/linda"
+		settings = Gio.Settings.new(desktopRegistration.SCHEMA)
+
+
+		def keys():
+			return [settings.get_string("exec"), settings.get_boolean("startup")]
+
+
+		result = {"before": keys(), "register": desktopRegistration.register(), "registered": keys()}
+		try:
+			desktopRegistration.register()
+		except desktopRegistration._Unchanged as e:
+			result["again"] = str(e)
+		result["unregister"] = desktopRegistration.unregister()
+		result["unregistered"] = keys()
+		""",
+		env=gsettingsEnv(tmp_path),
+	)
+	done.assertClean()
+	assert done.value == {
+		"before": ["orca", False],
+		"register": "MATE's screen reader is now '/opt/my linda/bin/linda' in place of orca,"
+		" and MATE starts it when you sign in.",
+		"registered": ["'/opt/my linda/bin/linda'", True],
+		"again": "MATE's screen reader is already '/opt/my linda/bin/linda', which it starts when you sign in",
+		"unregister": "MATE's screen reader is back to its default, orca, and MATE does not start it when you"
+		" sign in.",
+		"unregistered": ["orca", False],
+	}
+	# Reset, not written over with the defaults, so a later change of default reaches the user.
+	assert "exec" not in savedMateSettings(tmp_path) and "startup" not in savedMateSettings(tmp_path)
+
+
+def registration(launches, name: str, *arguments: str, env: dict[str, str | None]) -> harness.Launch:
+	launch = launches(name, *arguments, env=env)
+	launch.waitForExit(60)
+	return launch
+
+
+def test_registrationOptionsSayWhyTheyChangedNothing(launches, tmp_path):
+	mate = gsettingsEnv(tmp_path)
+	sourceTree = registration(launches, "sourceTree", "--register-desktop", env=mate)
+	gnome = registration(
+		launches, "gnome", "--register-desktop", env={**mate, "XDG_CURRENT_DESKTOP": "GNOME"}
+	)
+	noSchema = gsettingsEnv(tmp_path / "noSchema", withMateSchema=False)
+	missing = registration(launches, "missing", "--unregister-desktop", env=noSchema)
+	withOthers = registration(launches, "withOthers", "--register-desktop", "-c", str(tmp_path), env=mate)
+	for launch in (sourceTree, gnome, missing):
+		assert launch.process.returncode == 1, launch.describe()
+		launch.assertClean(ignoring={"returnCode"})
+	assert sourceTree.text("stdout.txt") == (
+		"Nothing was changed, because this copy runs from a source tree rather than from an installed"
+		" launcher, so there is no command that would start it again.\n"
+	)
+	assert gnome.text("stdout.txt") == (
+		"Nothing was changed, because the running desktop is GNOME, not MATE, the only one whose choice"
+		" of screen reader Linda knows how to set.\n"
+	)
+	assert missing.text("stdout.txt") == (
+		"Nothing was changed, because MATE's setting for its screen reader, the GSettings schema"
+		" org.mate.applications-at-visual, is not installed.\n"
+	)
+	assert withOthers.process.returncode == 2, withOthers.describe()
+	assert withOthers.text("stderr.txt") == (
+		"linda: --register-desktop takes no other argument, so nothing was changed\n"
+	)
+	withOthers.assertClean(ignoring={"returnCode", "stderr"})
+	assert savedMateSettings(tmp_path) == ""
+	unregister = registration(launches, "unregister", "--unregister-desktop", env=mate)
+	assert unregister.process.returncode == 0, unregister.describe()
+	unregister.assertClean()
+	assert unregister.text("stdout.txt") == (
+		"MATE's screen reader is back to its default, orca, and MATE does not start it when you sign in.\n"
+	)
+
+
+def test_helpListsTheRegistrationOptions(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		import argsParsing
+
+		try:
+			argsParsing.getParser().parse_known_args(["--help"])
+		except SystemExit as e:
+			result = e.code
+		""",
+	)
+	done.assertClean()
+	assert "--register-desktop" in done.stdout
+	assert "Make Linda the screen reader that MATE starts when you sign in" in done.stdout
+	assert "--unregister-desktop" in done.stdout
 
 
 def test_desktopEntryExecQuotesAsTheSpecificationSays(tmp_path):
