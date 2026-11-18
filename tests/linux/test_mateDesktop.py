@@ -42,6 +42,23 @@ def step(desktop: DesktopSession, chord: str, *expected: str, timeout: float = 5
 	return mark
 
 
+def switchWorkspace(desktop: DesktopSession, arrow: str, workspace: str, *expected: str) -> None:
+	"""Press Control+Alt+arrow holding Control and Alt until NVDA names workspace, then wait for
+	expected.
+
+	marco shows the popup that names the workspace only if Alt is still down when it handles the
+	arrow, as it is for a person. xdotool's chord lets go of Alt some 12 ms after the arrow, which a
+	busy marco misses, and then switches with nothing named."""
+	mark = desktop.mark()
+	subprocess.run(["xdotool", "keydown", "control+alt"], check=True)
+	try:
+		desktop.press(arrow)
+		desktop.expect(workspace, since=mark)
+	finally:
+		subprocess.run(["xdotool", "keyup", "control+alt"], check=True)
+	desktop.expect(workspace, *expected, since=mark)
+
+
 def waitForWindow(title: str, timeout: float = WINDOW_TIMEOUT) -> None:
 	"""Wait for a top-level window named title, from a program that may hand its work to a copy of
 	itself already running, and give it the keyboard."""
@@ -318,13 +335,9 @@ def test_windowsComingAndGoing(desktop: DesktopSession):
 
 	# Switching workspaces, which marco names in a popup gone before its name can be read back; an
 	# empty workspace leaves the desktop with the focus.
-	step(desktop, "control+alt+Right", "Workspace 2", "Desktop desktop pane")
-	step(
-		desktop,
-		"control+alt+Left",
-		"Workspace 1",
-		"a dot txt (  slash windows) - Pluma",
-		"edit multi line hello",
+	switchWorkspace(desktop, "Right", "Workspace 2", "Desktop desktop pane")
+	switchWorkspace(
+		desktop, "Left", "Workspace 1", "a dot txt (  slash windows) - Pluma", "edit multi line hello"
 	)
 
 	# The focused application quits, and the window marco gives the keyboard to is read.

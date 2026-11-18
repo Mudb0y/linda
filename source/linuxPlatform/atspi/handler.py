@@ -254,6 +254,11 @@ def _scanForActiveWindow() -> Node | None:
 	lets one call through, which is how one that was busy as NVDA started is found again."""
 	c = client()
 	for app in applications():
+		# marco's switcher says it is active while Alt is held, though it never has the keyboard, and
+		# goes without saying it no longer is: the focus would stay on it after a switch to an empty
+		# workspace, where the desktop has it.
+		if _applicationName(app.busName) in _SWITCHER_APPLICATIONS:
+			continue
 		try:
 			for window in c.children(app):
 				if "active" in c.states(window):
