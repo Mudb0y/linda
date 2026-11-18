@@ -126,15 +126,25 @@ def _childrenOf(processID: int) -> list[int]:
 			with open(f"/proc/{processID}/task/{thread}/children", "rb") as f:
 				children.extend(int(c) for c in f.read().split())
 		except OSError:
-			# A kernel without CONFIG_PROC_CHILDREN: every process is asked for its parent instead.
-			return [
-				int(entry)
-				for entry in os.listdir("/proc")
-				if entry.isdigit() and _parentOf(int(entry)) == processID
-			]
+			return _childrenByParent(processID)
 		except ValueError:
 			continue
 	return children
+
+
+#: Each process's parent as _childrenByParent last found it.
+_parents: dict[int, int | None] = {}
+
+
+def _childrenByParent(processID: int) -> list[int]:
+	"""A kernel without CONFIG_PROC_CHILDREN has every process asked for its parent instead, which for
+	some 800 processes takes 20 ms; so only those new since the last look are asked."""
+	present = {int(entry) for entry in os.listdir("/proc") if entry.isdigit()}
+	for gone in _parents.keys() - present:
+		del _parents[gone]
+	for new in present - _parents.keys():
+		_parents[new] = _parentOf(new)
+	return [child for child, parent in _parents.items() if parent == processID]
 
 
 def _environmentOf(processID: int) -> dict[str, str] | None:
