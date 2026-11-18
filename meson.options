@@ -16,3 +16,5 @@ option('espeak_data', type: 'string', value: '',
   description: 'The espeak-ng-data directory of that library; empty looks for the system library\'s own')
 option('openevv_driver', type: 'string', value: '',
   description: 'openevv\'s NVDA driver directory, as nix/openevv-driver.nix lays it out; empty leaves openevv out')
+option('doc_languages', type: 'string', value: 'all',
+  description: 'The languages to build the user guide, commands quick reference and change log in, separated by commas, or all; the interface falls back to English, which is always worth keeping')

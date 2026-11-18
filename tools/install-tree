@@ -2,10 +2,11 @@
 """Installs NVDA's Python tree for the Meson build: source/ without what upstream's .gitignore keeps
 out of it, what build-artifacts wrote under the build directory, and the generated
 linuxPlatform/installPaths.py, then compiles every module, because the program runs with -B from a
-directory it cannot write.
+directory it cannot write. The documentation build-artifacts wrote goes to user_docs beside APP_DIR,
+where NVDA looks for it when it runs from source.
 
-install-tree APP_DIR ARTEFACTS_DIR INSTALL_PATHS_FILE, run by meson install with the interpreter the
-program runs on, which honours DESTDIR as meson does.
+install-tree APP_DIR ARTEFACTS_DIR INSTALL_PATHS_FILE DOCS_DIR, run by meson install with the
+interpreter the program runs on, which honours DESTDIR as meson does.
 """
 
 import os
@@ -64,7 +65,7 @@ def copyTree(fromDir: Path, toDir: Path, skip=lambda relative: False) -> int:
 
 
 def main() -> None:
-	appDir, artefactsDir, installPaths = sys.argv[1:4]
+	appDir, artefactsDir, installPaths, docsDir = sys.argv[1:5]
 	destDir = os.path.abspath(os.environ["DESTDIR"]) if os.environ.get("DESTDIR") else ""
 	target = Path(destDir + appDir) if destDir else Path(appDir)
 	print(f"install-tree: start, into {target}")
@@ -77,7 +78,16 @@ def main() -> None:
 	copied = copyTree(source, target, skipped)
 	built = copyTree(Path(artefactsDir), target)
 	shutil.copyfile(installPaths, target / "linuxPlatform" / "installPaths.py")
-	print(f"install-tree: {copied} files from source, {built} built")
+	docsTarget = target.parent / "user_docs"
+	# Replaced whole for the same reason, so that a language the build no longer makes is not left.
+	if docsTarget.is_dir() and any((d / "styles.css").is_file() for d in docsTarget.iterdir()):
+		shutil.rmtree(docsTarget)
+	elif docsTarget.exists():
+		sys.exit(
+			f"install-tree: error: {docsTarget} exists and is not installed documentation; remove it by hand"
+		)
+	documents = copyTree(Path(docsDir), docsTarget)
+	print(f"install-tree: {copied} files from source, {built} built, {documents} of documentation")
 	# Compiled with the paths the files have once installed, and checked by hash alone, as nothing
 	# changes them after this.
 	command = [sys.executable, "-m", "compileall", "-q", "-j0", "--invalidation-mode", "unchecked-hash"]

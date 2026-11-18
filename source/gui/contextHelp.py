@@ -4,6 +4,7 @@
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 import os  # noqa: I001
+import sys
 import tempfile
 import typing
 
@@ -19,6 +20,17 @@ def writeRedirect(helpId: str, helpFilePath: str, contextHelpPath: str):
 	redirect = rf"""
 <html><head>
 <meta http-equiv="refresh" content="0;url=file:///{helpFilePath}#{helpId}" />
+</head></html>
+	"""
+	if sys.platform != "win32":
+		import html
+		import pathlib
+
+		# A POSIX path already starts with the slash file:/// would add again.
+		url = f"{pathlib.Path(os.path.abspath(helpFilePath)).as_uri()}#{helpId}"
+		redirect = f"""
+<html><head>
+<meta http-equiv="refresh" content="0;url={html.escape(url)}" />
 </head></html>
 	"""
 	with open(contextHelpPath, "w") as f:
@@ -46,6 +58,13 @@ def showHelp(helpId: str):
 	log.debug(f"Opening help: helpId = {helpId}, userGuidePath: {helpFile}")
 
 	nvdaTempDir = os.path.join(tempfile.gettempdir(), "nvda")
+	if sys.platform != "win32":
+		# /tmp/nvda is shared by every user of the machine, so another could own it or plant a link
+		# where the redirect is written.
+		from linuxPlatform import xdg
+
+		nvdaTempDir = xdg.userCacheDir()
+		os.makedirs(nvdaTempDir, exist_ok=True)
 	if not os.path.exists(nvdaTempDir):
 		os.mkdir(nvdaTempDir)
 

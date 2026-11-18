@@ -1,24 +1,52 @@
 #!/usr/bin/env python3
 """Produces what NVDA's Windows build would have produced and Linux needs: the compiled catalogues,
-the CLDR dictionaries and the liblouis tables arranged as NVDA names them. Safe to run repeatedly:
-a second run changes nothing.
+the CLDR dictionaries, the liblouis tables arranged as NVDA names them, and the user guide, commands
+quick reference and change log as HTML. Safe to run repeatedly: a second run changes nothing.
 
 With no arguments, inside the dev shell, it writes them into the tree, where the tests run from,
 taking the CLDR data and the tables from the directories the shell exports, and writes only to paths
 upstream's .gitignore already ignores. With --out, as the Meson build runs it, it writes them under
-that directory instead, laid out as under source/, from the directories the options name.
+that directory instead, laid out as under source/, from the directories the options name, and the
+documentation under the directory --docs-out names, laid out as under user_docs/.
 """
 
 import argparse
+import concurrent.futures
+import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
 sourceLocaleDir = root / "source" / "locale"
 unitTablesDir = root / "tests" / "unit" / "brailleTables"
+userDocsDir = root / "user_docs"
+
+#: Put at the top of every page, in every language, because the guide is NVDA's for Windows and is
+#: merged from NVDA's releases unchanged.
+lindaNotice = (
+	'<div id="lindaNotice" role="note"><p>'
+	"This is NVDA's own documentation, and Linda follows it. "
+	"Where it says the NVDA key, Linda calls that key the Linda key. "
+	"What it says about Windows, the installer and Windows programs does not apply to Linda."
+	"</p></div>"
+)
+
+#: What a page is built from besides its own Markdown or XLIFF, so that a change to any of them builds
+#: every page again.
+docBuildInputs = (
+	Path(__file__).resolve(),
+	root / "source" / "md2html.py",
+	root / "source" / "keyCommandsDoc.py",
+	root / "source" / "markdownTranslate.py",
+	root / "source" / "buildVersion.py",
+)
+docStyles = (userDocsDir / "styles.css", userDocsDir / "numberedHeadings.css")
+docIcon = root / "source" / "images" / "nvda.ico"
 
 # NVDA registers these in mixed case; liblouis ships them in lower case.
 mixedCaseTables = (
@@ -140,7 +168,162 @@ def copyUnitFixtures(tablesDir: Path) -> int:
 	return changed
 
 
+def docSubstitutions() -> dict[str, str]:
+	"""What SCons puts in place of these names in the Markdown: the release the guide describes, NV
+	Access's address and NVDA's copyright years, all from buildVersion."""
+	spec = importlib.util.spec_from_file_location("buildVersion", root / "source" / "buildVersion.py")
+	buildVersion = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(buildVersion)
+	return {
+		"NVDA_VERSION": buildVersion.formatVersionForGUI(
+			buildVersion.version_year, buildVersion.version_major, buildVersion.version_minor
+		),
+		"NVDA_URL": buildVersion.url,
+		"NVDA_COPYRIGHT_YEARS": buildVersion.copyrightYears,
+	}
+
+
+def docSources() -> list[tuple[str, str, Path]]:
+	"""Each language's user guide and change log, as (language, document, source): English and the
+	few languages kept as Markdown from their Markdown, the rest from their XLIFF, as SCons does."""
+	sources = []
+	for langDir in sorted(d for d in userDocsDir.iterdir() if d.is_dir()):
+		for docType in ("userGuide", "changes"):
+			xliff = langDir / f"{docType}.xliff"
+			markdown = langDir / f"{docType}.md"
+			if langDir.name != "en" and xliff.is_file():
+				sources.append((langDir.name, docType, xliff))
+			elif markdown.is_file():
+				sources.append((langDir.name, docType, markdown))
+	return sources
+
+
+def runQuietly(command: list[str], what: str) -> None:
+	result = subprocess.run(command, cwd=root, capture_output=True, text=True, check=False)
+	if result.returncode != 0:
+		raise RuntimeError(f"{what} failed: {(result.stderr or result.stdout).strip()}")
+
+
+class _IndexedXliffRoot:
+	"""An XLIFF root element that answers markdownTranslate's lookup of a unit by its id from a table.
+	lxml answers each such lookup by walking every unit, so a guide of five thousand strings took five
+	to ten seconds of a processor, and all the languages together twenty minutes."""
+
+	_unitPath = re.compile(r'^\./xliff:file/xliff:unit\[@id="([^"]*)"\]$')
+
+	def __init__(self, element):
+		self._element = element
+		self.tag = element.tag
+		self._units = {}
+		namespaces = {"xliff": "urn:oasis:names:tc:xliff:document:2.0"}
+		for unit in element.iterfind("./xliff:file/xliff:unit", namespaces=namespaces):
+			# lxml's find gives the first unit with an id.
+			self._units.setdefault(unit.get("id"), unit)
+
+	def find(self, path, namespaces=None):
+		if match := self._unitPath.match(path):
+			return self._units.get(match.group(1))
+		return self._element.find(path, namespaces=namespaces)
+
+
+def xliffToMarkdown(xliff: str, markdown: str) -> None:
+	"""markdownTranslate's own generateMarkdown, with lookups of units by id from a table."""
+	import lxml.etree
+
+	spec = importlib.util.spec_from_file_location(
+		"markdownTranslate", root / "source" / "markdownTranslate.py"
+	)
+	markdownTranslate = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(markdownTranslate)
+	parse = lxml.etree.parse
+
+	class IndexedTree:
+		def __init__(self, path):
+			self._root = _IndexedXliffRoot(parse(path).getroot())
+
+		def getroot(self):
+			return self._root
+
+	lxml.etree.parse = IndexedTree
+	markdownTranslate.generateMarkdown(xliff, markdown)
+
+
+def buildDoc(lang: str, docType: str, source: Path, outLangDir: Path, substitutions: dict[str, str]) -> None:
+	"""Build one document with NVDA's own markdownTranslate and md2html, each run as SCons runs it, and
+	put Linda's notice at the top of each page; the user guide gives the commands quick reference
+	too."""
+	with tempfile.TemporaryDirectory(prefix="linda-docs-") as work:
+		markdown = Path(work) / f"{docType}.md"
+		if source.suffix == ".xliff":
+			runQuietly(
+				[
+					sys.executable,
+					str(Path(__file__).resolve()),
+					"--xliff-to-markdown",
+					str(source),
+					str(markdown),
+				],
+				f"markdownTranslate on {source.relative_to(root)}",
+			)
+		else:
+			shutil.copyfile(source, markdown)
+		text = markdown.read_text(encoding="utf-8")
+		for name, value in substitutions.items():
+			text = text.replace(name, value)
+		substituted = Path(work) / f"{docType}.md.sub"
+		substituted.write_text(text, encoding="utf-8")
+		pages = [docType] + (["keyCommands"] if docType == "userGuide" else [])
+		for page in pages:
+			html = Path(work) / f"{page}.html"
+			runQuietly(
+				[sys.executable, "source/md2html.py", "-l", lang, "-t", page, str(substituted), str(html)],
+				f"md2html on {lang}/{page}",
+			)
+			content = html.read_text(encoding="utf-8")
+			if "<body>" not in content:
+				raise RuntimeError(f"md2html wrote {lang}/{page}.html without the body it always opens")
+			content = content.replace("<body>", f"<body>\n{lindaNotice}\n", 1)
+			target = outLangDir / f"{page}.html"
+			temp = target.with_name(target.name + ".tmp")
+			temp.write_text(content, encoding="utf-8")
+			temp.replace(target)
+
+
+def buildDocs(outDocsDir: Path, languages: set[str] | None) -> tuple[int, int]:
+	"""Build each document of the languages named, all of them when None, whose pages are older than
+	what they are built from."""
+	sources = [s for s in docSources() if languages is None or s[0] in languages]
+	newestInput = max(path.stat().st_mtime for path in (*docBuildInputs, *docStyles, docIcon))
+	substitutions = docSubstitutions()
+	pending = []
+	for lang, docType, source in sources:
+		outLangDir = outDocsDir / lang
+		outLangDir.mkdir(parents=True, exist_ok=True)
+		for path in (*docStyles, docIcon):
+			writeIfDifferent(path, outLangDir / ("favicon.ico" if path == docIcon else path.name))
+		pages = [outLangDir / f"{docType}.html"]
+		if docType == "userGuide":
+			pages.append(outLangDir / "keyCommands.html")
+		newest = max(newestInput, source.stat().st_mtime)
+		if all(page.is_file() and page.stat().st_mtime >= newest for page in pages):
+			continue
+		pending.append((lang, docType, source, outLangDir))
+	failures = []
+	with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as pool:
+		futures = [pool.submit(buildDoc, *job, substitutions) for job in pending]
+		for future in concurrent.futures.as_completed(futures):
+			if future.exception() is not None:
+				failures.append(str(future.exception()))
+	if failures:
+		fail("; ".join(sorted(failures)))
+	return len(pending), len(sources)
+
+
 def main() -> None:
+	# How buildDoc runs xliffToMarkdown in a process of its own, so that languages convert in parallel.
+	if len(sys.argv) == 4 and sys.argv[1] == "--xliff-to-markdown":
+		xliffToMarkdown(sys.argv[2], sys.argv[3])
+		return
 	parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
 	parser.add_argument("--out", type=Path, help="write under this directory rather than into the tree")
 	parser.add_argument("--cldr-dir", help="nvda-cldr's tree; the dev shell's LINDA_NVDA_CLDR_DIR by default")
@@ -148,8 +331,20 @@ def main() -> None:
 		"--louis-tables-dir",
 		help="liblouis's tables; the dev shell's LINDA_LOUIS_TABLES_DIR by default",
 	)
+	parser.add_argument(
+		"--docs-out",
+		type=Path,
+		help="write the documentation under this directory; user_docs/ in the tree by default, and required with --out",
+	)
+	parser.add_argument(
+		"--doc-languages",
+		default="all",
+		help="the languages to build the documentation in, separated by commas, or all, the default",
+	)
 	parser.add_argument("--stamp", type=Path, help="a file to touch once everything is written")
 	args = parser.parse_args()
+	if args.out and not args.docs_out:
+		parser.error("--out needs --docs-out")
 	print("build-artifacts: start")
 	hint = "run this inside the dev shell, or name the directory with the option"
 	cldrDir = checkedDir(
@@ -171,6 +366,9 @@ def main() -> None:
 	if not args.out:
 		changed += copyUnitFixtures(tablesDir)
 	print(f"braille tables: {changed} changes")
+	languages = None if args.doc_languages == "all" else set(args.doc_languages.split(","))
+	built, total = buildDocs(args.docs_out.resolve() if args.docs_out else userDocsDir, languages)
+	print(f"documents: {built} built, {total - built} already current")
 	if args.stamp:
 		args.stamp.touch()
 	print("build-artifacts: done")

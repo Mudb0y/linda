@@ -85,10 +85,12 @@ endif
 
 if get_option('program')
   # What the Linux side imports beyond the standard library, and the GObject typelibs it asks for.
+  # The last five are the Markdown extensions md2html builds the user guide with.
   modules = [
     'bleak', 'configobj', 'cryptography', 'detect_secrets', 'fast_diff_match_patch', 'fuzzysearch',
     'gi', 'louis', 'lxml', 'markdown', 'nh3', 'pyphen', 'regex', 'requests', 'rpyc', 'schedule',
     'serial', 'url_normalize', 'wx', 'xkbcommon', 'Xlib',
+    'l2m4m', 'markdown_link_attr_modifier', 'mdx_gh_links', 'mdx_truly_sane_lists', 'pymdownx',
   ]
   typelibs = ['Atspi:2.0', 'Gdk:3.0', 'GdkX11:3.0', 'Gtk:3.0']
   probe = run_command(python, '-c', '''
@@ -190,12 +192,17 @@ print("; ".join(missing))
     },
   )
 
+  # The user guide, the commands quick reference and the change log go beside the program's folder,
+  # where NVDA looks for them when it runs from source.
   artefacts = meson.current_build_dir() / 'artefacts'
+  docs = meson.current_build_dir() / 'user_docs'
   custom_target('artefacts',
     output: 'artefacts.stamp',
     command: [
       python, src / 'tools' / 'build-artifacts',
       '--out', artefacts,
+      '--docs-out', docs,
+      '--doc-languages', get_option('doc_languages'),
       '--cldr-dir', cldr,
       '--louis-tables-dir', tables,
       '--stamp', '@OUTPUT@',
@@ -204,7 +211,7 @@ print("; ".join(missing))
     build_by_default: true,
   )
   meson.add_install_script(python, src / 'tools' / 'install-tree', appdir, artefacts,
-    meson.current_build_dir() / 'installPaths.py')
+    meson.current_build_dir() / 'installPaths.py', docs)
 
   # NVDA's View licence item reads it from beside the program's folder when it runs from source,
   # which on Linux it always does.

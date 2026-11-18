@@ -41,9 +41,15 @@
         diff-match-patch
         fast-diff-match-patch
         fuzzysearch
+        # With markdown-link-attr-modifier, mdx-gh-links, mdx-truly-sane-lists
+        # and pymdown-extensions, the Markdown extensions md2html converts the
+        # user guide with.
+        l2m4m
         louis
         lxml
         markdown
+        markdown-link-attr-modifier
+        mdx-gh-links
         mdx-truly-sane-lists
         nh3
         parameterized
@@ -164,7 +170,10 @@
           configobj
           fast-diff-match-patch
           fuzzysearch
+          l2m4m
           louis
+          markdown-link-attr-modifier
+          mdx-gh-links
           ;
         louis-tables = louisTables;
         nvda-cldr = nvdaCldr;
