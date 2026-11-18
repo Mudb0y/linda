@@ -1,17 +1,19 @@
 """Stand-ins for a screen saver on the session bus and for logind on a bus of the test's choosing.
 
-	python3 lockServices.py saver NAME PATH
+	python3 lockServices.py saver NAME PATH [silent]
 	python3 lockServices.py logind ADDRESS SESSION_PATH
 
 Each prints "ready" once it owns its name, then carries out one command a line from standard input
 and prints "done" once what it sent has left for the bus:
 
 	active true|false   the screen saver's ActiveChanged, which its GetActive then answers
+	dialog              the screen saver starts a child named mate-screensaver-dialog, as
+	                    mate-screensaver starts its unlock prompt, and prints "dialog PID" first
+	nodialog            that child ends
 	lock | unlock       logind's Lock or Unlock signal on the session
 	hint true|false     logind's LockedHint, with its PropertiesChanged signal
 
-The screen saver also starts a child named mate-screensaver-dialog, and prints its process ID
-first as "dialog PID", as mate-screensaver starts its unlock prompt.
+A silent screen saver never answers GetActive.
 """
 
 import os
@@ -47,6 +49,8 @@ LOGIND_XML = f"""
 """
 
 state = {"active": False, "hint": False}
+dialogs = []
+unanswered = []
 
 
 def main() -> None:
@@ -54,20 +58,17 @@ def main() -> None:
 	loop = GLib.MainLoop()
 	if role == "saver":
 		name, path = sys.argv[2], sys.argv[3]
+		silent = sys.argv[4:] == ["silent"]
 		connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 		node = Gio.DBusNodeInfo.new_for_xml(SAVER_XML.format(name=name))
 
 		def onCall(connection, sender, objectPath, interface, method, parameters, invocation):
+			if silent:
+				unanswered.append(invocation)
+				return
 			invocation.return_value(GLib.Variant("(b)", (state["active"],)))
 
 		connection.register_object(path, node.interfaces[0], onCall, None, None)
-		# bash runs whatever its first argument names it, and waits on its builtin read.
-		dialog = subprocess.Popen(
-			["mate-screensaver-dialog", "-c", "read -r line"],
-			executable=shutil.which("bash"),
-			stdin=subprocess.PIPE,
-		)
-		print(f"dialog {dialog.pid}", flush=True)
 	else:
 		address, sessionPath = sys.argv[2], sys.argv[3]
 		name = LOGIND
@@ -107,7 +108,22 @@ def main() -> None:
 	for line in sys.stdin:
 		command, *argument = line.split()
 		value = argument == ["true"]
-		if command == "active":
+		if command == "dialog":
+			# bash runs whatever its first argument names it, and waits on its builtin read.
+			dialogs.append(
+				subprocess.Popen(
+					["mate-screensaver-dialog", "-c", "read -r line"],
+					executable=shutil.which("bash"),
+					stdin=subprocess.PIPE,
+				),
+			)
+			print(f"dialog {dialogs[-1].pid}", flush=True)
+		elif command == "nodialog":
+			for dialog in dialogs:
+				dialog.kill()
+				dialog.wait()
+			dialogs.clear()
+		elif command == "active":
 			state["active"] = value
 			connection.emit_signal(None, path, name, "ActiveChanged", GLib.Variant("(b)", (value,)))
 		elif command in ("lock", "unlock"):
@@ -123,7 +139,7 @@ def main() -> None:
 			)
 		connection.flush_sync(None)
 		print("done", flush=True)
-	if role == "saver":
+	for dialog in dialogs:
 		dialog.kill()
 		dialog.wait()
 	os._exit(0)

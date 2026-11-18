@@ -40,11 +40,8 @@ class _SessionLockedState(AutoPropertyObject):
 def initialize() -> None:
 	global _lockStateTracker
 	_lockStateTracker = _SessionLockedState()
-	if not sessionLock.start():
-		log.warning(
-			"NVDA cannot tell whether this Linux session is locked,"
-			" so it does not withhold content below a screen locker.",
-		)
+	# It connects on a thread of its own, and warns from there when it cannot tell.
+	sessionLock.start()
 
 
 def pumpAll() -> None:

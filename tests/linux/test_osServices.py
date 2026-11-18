@@ -974,6 +974,10 @@ def test_sessionTrackingAnnouncesLockChanges(tmp_path):
 
 		post_sessionLockStateChanged.register(onLockStateChanged)
 		sessionTracking.initialize()
+		# It connects on a thread of its own, which warns once it finds nothing to tell by.
+		from linuxPlatform import sessionLock
+
+		sessionLock._waitForFirstAttempts(10)
 		sessionTracking.pumpAll()
 		beforeStartUpEnds = sessionTracking.isLockScreenModeActive()
 		_TrackNVDAInitialization.markInitializationComplete()
