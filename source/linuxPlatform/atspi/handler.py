@@ -930,15 +930,34 @@ def _backgroundEventsOf(node: Node) -> frozenset[str]:
 	return getattr(appModule, "backgroundEvents", frozenset())
 
 
+def _isWithheldWhileLocked(node: Node) -> bool:
+	"""Whether the session is locked and node's application is not the screen locker's."""
+	from winAPI.sessionTracking import isLockScreenModeActive
+
+	if not isLockScreenModeActive():
+		return False
+	from linuxPlatform import session
+
+	return session.isProcessWithheld(processIDOf(node))
+
+
 def _announce(event) -> None:
 	"""Speak what an application announced, from any application: a chat program announces new
 	messages while another window has the focus, as it would to Orca."""
 	import queueHandler
-	import ui
 
 	text = event[4]
 	if isinstance(text, str) and text.strip():
-		queueHandler.queueFunction(queueHandler.eventQueue, ui.message, text.strip())
+		queueHandler.queueFunction(queueHandler.eventQueue, _speakAnnouncement, text.strip(), event[1])
+
+
+def _speakAnnouncement(text: str, node: Node) -> None:
+	import ui
+
+	# Asked again as it is spoken, as a lock may have begun since it was queued.
+	if _isWithheldWhileLocked(node):
+		return
+	ui.message(text)
 
 
 def _reportTextChange(obj, event) -> None:
@@ -1124,12 +1143,15 @@ def pumpAll() -> None:
 			continue
 		if not windowsChanged:
 			flushFocus()
-		if liveRegions.handle(event):
+		# What these speak goes past eventHandler, where NVDA withholds the rest while locked.
+		withheld = _isWithheldWhileLocked(event[1])
+		if not withheld and liveRegions.handle(event):
 			continue
 		if index in overLimit:
 			continue
 		if eventType == ANNOUNCEMENT_EVENT:
-			_announce(event)
+			if not withheld:
+				_announce(event)
 			continue
 		if event[1].key in blurred and eventType in (
 			"object:text-caret-moved",

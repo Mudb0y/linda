@@ -21,9 +21,7 @@ def isBelowLockScreen(obj: object) -> bool:
 	locked. utils.security asks this only while winAPI.sessionTracking reports the session locked.
 
 	The desktop and the screen locker's own processes, as linuxPlatform.sessionLock knows them, are
-	above it. Everything else is below, including any object whose process cannot be told: where
-	no screen saver is known, as when logind alone reports the lock, that is all but the desktop,
-	the unlock prompt of an unknown locker among them.
+	above it. Everything else is below, including any object whose process cannot be told.
 	"""
 	import api
 
@@ -43,6 +41,18 @@ def isBelowLockScreen(obj: object) -> bool:
 		log.debugWarning("Cannot tell the process of an object while the session is locked", exc_info=True)
 		return True
 	return not (isinstance(processID, int) and sessionLock.isLockerProcess(processID))
+
+
+def isProcessWithheld(processID: int) -> bool:
+	"""Whether what a process says of itself, such as an announcement or a live region's change, must
+	not be spoken now: the session is locked and the process is not the screen locker's."""
+	from winAPI.sessionTracking import isLockScreenModeActive
+
+	if not isLockScreenModeActive():
+		return False
+	from linuxPlatform import sessionLock
+
+	return not (processID and sessionLock.isLockerProcess(processID))
 
 
 @functools.cache

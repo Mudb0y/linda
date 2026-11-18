@@ -5,11 +5,16 @@ announced through utils.security.post_sessionLockStateChanged, nothing counts as
 has finished starting, and the secure desktop takes precedence over the lock screen. Where the lock
 state comes from differs: linuxPlatform.sessionLock listens to logind and the desktop's screen saver.
 
+Windows' lock screen speaks for itself and moves the focus as it closes; here nothing does either. So
+the change is spoken, and once the lock has gone the focus is read again, unless something took the
+focus in the meantime, as whatever took it while the lock withheld it was never presented.
+
 While the session is locked, utils.security asks linuxPlatform.session.isBelowLockScreen of every
 object NVDA would present, which lets through the desktop and the screen locker's own processes,
 the unlock prompt among them, and withholds the rest.
 """
 
+import time
 from typing import NoReturn
 
 from baseObject import AutoPropertyObject
@@ -21,6 +26,10 @@ _lockStateTracker: "_SessionLockedState | None" = None
 """Caches the session's lock state for one core cycle."""
 _wasLockedPreviousPumpAll = False
 """The lock state the previous core cycle saw, so that a change can be announced."""
+_refocus: "tuple[float, object] | None" = None
+"""When to look at the focus again after a lock ended, and the focus NVDA had queued as it ended."""
+REFOCUS_DELAY = 0.3
+"""Seconds an application has after the end of a lock to report its focus before it is looked up."""
 
 
 def _querySessionLocked() -> bool:
@@ -53,6 +62,45 @@ def pumpAll() -> None:
 	if isNowLocked != _wasLockedPreviousPumpAll:
 		_wasLockedPreviousPumpAll = isNowLocked
 		post_sessionLockStateChanged.notify(isNowLocked=isNowLocked)
+		_announce(isNowLocked)
+	elif _refocus is not None and time.monotonic() >= _refocus[0]:
+		_refocusAfterLock()
+
+
+def _announce(isNowLocked: bool) -> None:
+	global _refocus
+	import eventHandler
+	import queueHandler
+	import ui
+
+	queueHandler.queueFunction(
+		queueHandler.eventQueue,
+		ui.message,
+		# Translators: Reported when the screen locker of the session takes over the screen.
+		_("Screen locked")
+		if isNowLocked
+		# Translators: Reported when the screen locker of the session lets the user back in.
+		else _("Screen unlocked"),
+	)
+	_refocus = None if isNowLocked else (time.monotonic() + REFOCUS_DELAY, eventHandler.lastQueuedFocusObject)
+
+
+def _refocusAfterLock() -> None:
+	global _refocus
+	import eventHandler
+	from NVDAObjects import NVDAObject
+
+	_at, focusAtUnlock = _refocus
+	_refocus = None
+	if eventHandler.lastQueuedFocusObject is not focusAtUnlock:
+		return
+	try:
+		focus = NVDAObject.objectWithFocus()
+	except Exception:
+		log.exception("Cannot find the focus after the session was unlocked")
+		return
+	if focus:
+		eventHandler.queueEvent("gainFocus", focus)
 
 
 def _isSessionLocked() -> bool:

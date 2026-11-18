@@ -369,6 +369,67 @@ def test_aBusThatNeverAnswersDelaysNothing(tmp_path):
 	assert value["unlocked"] is False
 
 
+def test_lockIsSpokenAnnouncementsAreWithheldAndTheFocusIsReadAfter(tmp_path):
+	done = run(
+		tmp_path,
+		"""
+		import eventHandler
+		import queueHandler
+		import ui
+		from linuxPlatform.atspi import handler
+
+		spoken = []
+		ui.message = lambda text, *args, **kwargs: spoken.append(text)
+		queued = []
+		eventHandler.queueEvent = lambda name, obj, **kwargs: queued.append((name, obj.name))
+		NVDAObject.objectWithFocus = staticmethod(lambda: window(4242, "the editor"))
+		processes = {"chat": 4242}
+		handler.processIDOf = lambda node: processes[node]
+
+		saver = startSaver()
+		startTracking()
+		sessionLock._waitForFirstAttempts(10)
+		tell(saver, "active true")
+		processes["dialog"] = openDialog(saver)
+		lockedAfter()
+		queueHandler.pumpAll()
+		result = {"onLock": list(spoken)}
+		spoken.clear()
+		handler._speakAnnouncement("a private message", "chat")
+		handler._speakAnnouncement("Incorrect password.", "dialog")
+		result["announcedWhileLocked"] = list(spoken)
+		spoken.clear()
+		lockedAfter("active false", saver)
+		lockedAfter(settle=0.6)
+		queueHandler.pumpAll()
+		result["onUnlock"] = list(spoken)
+		result["refocused"] = list(queued)
+		spoken.clear()
+		handler._speakAnnouncement("a public message", "chat")
+		result["announcedUnlocked"] = list(spoken)
+		# Once something has taken the focus since the lock ended, nothing is read again.
+		queued.clear()
+		tell(saver, "active true")
+		openDialog(saver)
+		lockedAfter()
+		lockedAfter("active false", saver)
+		eventHandler.lastQueuedFocusObject = window(4243, "a new window")
+		lockedAfter(settle=0.6)
+		result["refocusedAfterAFocus"] = list(queued)
+		stopServices()
+		""",
+	)
+	done.assertClean()
+	assert done.value == {
+		"onLock": ["Screen locked"],
+		"announcedWhileLocked": ["Incorrect password."],
+		"onUnlock": ["Screen unlocked"],
+		"refocused": [["gainFocus", "the editor"]],
+		"announcedUnlocked": ["a public message"],
+		"refocusedAfterAFocus": [],
+	}
+
+
 def test_withoutEitherSourceTheLockCannotBeTold(tmp_path):
 	done = run(
 		tmp_path,
