@@ -1914,46 +1914,104 @@ def savedMateSettings(tmpPath: Path) -> str:
 	return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
-def test_registeringWithTheDesktopSetsAndResetsMatesScreenReader(tmp_path):
+def test_registeringWithTheDesktopNamesLindaAndStartsItFromItsOwnEntry(tmp_path):
 	done = run(
 		tmp_path,
 		"""
-		import sys
-
 		from gi.repository import Gio
-		from linuxPlatform import desktopRegistration, launcher
+		from linuxPlatform import desktopRegistration, launcher, xdg
 
 		launcher.lastingCommand = lambda: "/opt/my linda/bin/linda"
 		settings = Gio.Settings.new(desktopRegistration.SCHEMA)
+		path = xdg.autostartEntryPath(xdg.autostartEntryName)
 
 
-		def keys():
-			return [settings.get_string("exec"), settings.get_boolean("startup")]
+		def state():
+			try:
+				with open(path, encoding="utf-8") as f:
+					entry = f.read()
+			except FileNotFoundError:
+				entry = None
+			return [settings.get_string("exec"), settings.get_boolean("startup"), entry]
 
 
-		result = {"before": keys(), "register": desktopRegistration.register(), "registered": keys()}
-		try:
-			desktopRegistration.register()
-		except desktopRegistration._Unchanged as e:
-			result["again"] = str(e)
+		def again(action):
+			try:
+				return action()
+			except desktopRegistration._Unchanged as e:
+				return f"unchanged: {e}"
+
+
+		result = {"before": state(), "register": desktopRegistration.register(), "registered": state()}
+		result["again"] = again(desktopRegistration.register)
 		result["unregister"] = desktopRegistration.unregister()
-		result["unregistered"] = keys()
+		result["unregistered"] = state()
+		result["unregisterAgain"] = again(desktopRegistration.unregister)
+		# As MATE's own settings leave it with Orca chosen to start at sign-in.
+		settings.set_boolean("startup", True)
+		result["fromMatesStart"] = desktopRegistration.register()
+		result["fromMatesStartState"] = state()[:2]
 		""",
 		env=gsettingsEnv(tmp_path),
 	)
 	done.assertClean()
+	entry = tmp_path / "xdgConfig" / "autostart" / "linda.desktop"
+	enabled = (
+		'[Desktop Entry]\nType=Application\nName=Linda\nExec="/opt/my linda/bin/linda"\n'
+		"X-MATE-Autostart-Phase=Initialization\n"
+	)
 	assert done.value == {
-		"before": ["orca", False],
-		"register": "MATE's screen reader is now '/opt/my linda/bin/linda' in place of orca,"
-		" and MATE starts it when you sign in.",
-		"registered": ["'/opt/my linda/bin/linda'", True],
-		"again": "MATE's screen reader is already '/opt/my linda/bin/linda', which it starts when you sign in",
-		"unregister": "MATE's screen reader is back to its default, orca, and MATE does not start it when you"
-		" sign in.",
-		"unregistered": ["orca", False],
+		"before": ["orca", False, None],
+		"register": "MATE's screen reader is now linda in place of orca. Linda now starts when you sign in,"
+		f" before the rest of the desktop, from {entry}.",
+		# MATE knows Linda by its application entry and never starts it itself, as Linda's own entry does.
+		"registered": ["linda", False, enabled],
+		"again": "unchanged: MATE's screen reader is already linda, and Linda already starts when you sign"
+		f" in, from {entry}",
+		"unregister": "MATE's screen reader is back to its default, orca, in place of linda. Linda no longer"
+		f" starts when you sign in, as {entry} is turned off.",
+		"unregistered": [
+			"orca",
+			False,
+			"[Desktop Entry]\nType=Application\nName=Linda\nExec=linda\nHidden=true\n",
+		],
+		"unregisterAgain": "unchanged: MATE's screen reader is already its default, orca, and Linda does not"
+		" start when you sign in",
+		"fromMatesStart": "MATE's screen reader is now linda in place of orca. MATE no longer starts its"
+		" screen reader itself when you sign in, so that only one copy of Linda starts. Linda now starts"
+		f" when you sign in, before the rest of the desktop, from {entry}.",
+		"fromMatesStartState": ["linda", False],
 	}
-	# Reset, not written over with the defaults, so a later change of default reaches the user.
-	assert "exec" not in savedMateSettings(tmp_path) and "startup" not in savedMateSettings(tmp_path)
+	# Reset, not written over with the defaults, once unregistered, so a later change of default reaches
+	# the user; the last registration set them again.
+	assert "exec='linda'" in savedMateSettings(tmp_path) and "startup=false" in savedMateSettings(tmp_path)
+
+
+def test_registeringRefusesWhatItCannotWriteAndChangesNothing(tmp_path):
+	autostart = tmp_path / "xdgConfig" / "autostart"
+	autostart.mkdir(parents=True)
+	# A directory where the entry would be, so that the entry cannot be written.
+	(autostart / "linda.desktop.new").mkdir()
+	done = run(
+		tmp_path,
+		"""
+		from gi.repository import Gio
+		from linuxPlatform import desktopRegistration, launcher
+
+		launcher.lastingCommand = lambda: "/usr/bin/linda"
+		settings = Gio.Settings.new(desktopRegistration.SCHEMA)
+		try:
+			desktopRegistration.register()
+		except desktopRegistration._Unchanged as e:
+			result = [str(e), settings.get_string("exec"), settings.get_boolean("startup")]
+		""",
+		env=gsettingsEnv(tmp_path),
+	)
+	done.assertClean()
+	why, mateExec, startup = done.value
+	assert why.startswith(f"{autostart / 'linda.desktop'} could not be written: "), why
+	assert [mateExec, startup] == ["orca", False]
+	assert savedMateSettings(tmp_path) == ""
 
 
 def registration(launches, name: str, *arguments: str, env: dict[str, str | None]) -> harness.Launch:
@@ -1992,11 +2050,30 @@ def test_registrationOptionsSayWhyTheyChangedNothing(launches, tmp_path):
 	)
 	withOthers.assertClean(ignoring={"returnCode", "stderr"})
 	assert savedMateSettings(tmp_path) == ""
+	# What an installed copy registered, which a copy without a lasting command can still undo.
+	keyfile = tmp_path / "xdgConfig" / "glib-2.0" / "settings" / "keyfile"
+	keyfile.parent.mkdir(parents=True, exist_ok=True)
+	keyfile.write_text("[org/mate/desktop/applications/at/visual]\nexec='linda'\n", encoding="utf-8")
+	entry = tmp_path / "xdgConfig" / "autostart" / "linda.desktop"
+	entry.parent.mkdir(parents=True, exist_ok=True)
+	entry.write_text(
+		"[Desktop Entry]\nType=Application\nName=Linda\nExec=/usr/bin/linda\n"
+		"X-MATE-Autostart-Phase=Initialization\n",
+		encoding="utf-8",
+	)
 	unregister = registration(launches, "unregister", "--unregister-desktop", env=mate)
 	assert unregister.process.returncode == 0, unregister.describe()
 	unregister.assertClean()
 	assert unregister.text("stdout.txt") == (
-		"MATE's screen reader is back to its default, orca, and MATE does not start it when you sign in.\n"
+		"MATE's screen reader is back to its default, orca, in place of linda. Linda no longer starts when"
+		f" you sign in, as {entry} is turned off.\n"
+	)
+	again = registration(launches, "unregisterAgain", "--unregister-desktop", env=mate)
+	assert again.process.returncode == 1, again.describe()
+	again.assertClean(ignoring={"returnCode"})
+	assert again.text("stdout.txt") == (
+		"Nothing was changed, because MATE's screen reader is already its default, orca, and Linda does"
+		" not start when you sign in.\n"
 	)
 
 
@@ -2014,7 +2091,7 @@ def test_helpListsTheRegistrationOptions(tmp_path):
 	)
 	done.assertClean()
 	assert "--register-desktop" in done.stdout
-	assert "Make Linda the screen reader that MATE starts when you sign in" in done.stdout
+	assert "Make Linda MATE's screen reader, and start it when you sign in" in done.stdout
 	assert "--unregister-desktop" in done.stdout
 
 

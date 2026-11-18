@@ -1,6 +1,7 @@
 """Linda started by MATE's session manager, as a sign-in starts it: from an autostart entry, from
 the entry Linda's own "start after I sign in" setting writes, in the early Initialization phase, and
-from MATE's own choice of screen reader; and what becomes of it when the session ends.
+after linda --register-desktop; how it registers with the session manager; and what becomes of it when
+the session ends.
 
 Each test runs a real mate-session on an X server and buses of its own, inside the rig (see
 mateSession.py), with marco as its only required component. The launcher the entries name stands in
@@ -402,42 +403,61 @@ def test_startOutsideASessionManagerIsUnchanged(launches, tmp_path: Path):
 	assert sessionManagerRecords(linda) == [NOT_STARTED_BY_ONE]
 
 
-def test_registeredScreenReaderIsNotStarted(session: MateSession, tmp_path: Path):
-	"""linda --register-desktop names the launcher by its path, which mate-session cannot use."""
-	done = registerDesktop(session, tmp_path, str(session.launcher))
-	assert done.value.startswith(f"MATE's screen reader is now {session.launcher} in place of orca"), (
-		done.value
-	)
-	session.start()
-	session.waitForPhase("RUNNING")
-	time.sleep(5)
-	assert session.runs() == [], session.log()
-	assert managerSaid(session, "g_key_file_load_from_dirs: assertion '!g_path_is_absolute (file)' failed")
+#: Seconds after the session's last phase begins in which no second Linda may start.
+SECOND_COPY_WAIT = 5.0
 
 
-def test_screenReaderNamedByItsEntryStartsAmongTheApplications(session: MateSession, tmp_path: Path):
-	"""What mate-session does with MATE's choice of screen reader when that names an application by its
-	desktop entry, as Orca's default does: it starts the Exec of that entry, in the entry's phase."""
+def installApplicationEntry(session: MateSession) -> None:
+	"""Linda's application entry, as the package installs it, naming the launcher the session starts."""
 	applications = session.dataDir / "applications"
-	applications.mkdir()
+	applications.mkdir(exist_ok=True)
 	entry = (harness.ROOT / "linux" / "linda.desktop").read_text(encoding="utf-8")
 	entry = re.sub(r"^Exec=.*$", f"Exec={session.launcher}", entry, flags=re.MULTILINE)
 	(applications / "linda.desktop").write_text(entry, encoding="utf-8")
-	registerDesktop(session, tmp_path, "linda")
-	assertStartsAmongTheApplications(session)
 
 
-def registerDesktop(session: MateSession, tmp_path: Path, command: str) -> harness.ChildResult:
+def test_registeredLindaStartsOnceInTheInitializationPhase(session: MateSession, tmp_path: Path):
+	installApplicationEntry(session)
+	done = desktopRegistration(session, tmp_path, "register")
+	assert done.value.startswith("MATE's screen reader is now linda in place of orca."), done.value
+	session.start()
+	linda = session.waitForLinda()
+	spoke = linda.started + linda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	ended = session.waitForPhase("INITIALIZATION", "ending", PHASE_TIMEOUT + STARTUP_BOUND)
+	assert session.phaseTime("INITIALIZATION") <= linda.started <= ended, session.log()
+	assert abs(ended - spoke) < 5, f"the phase ended {ended - spoke:.1f} s after Linda spoke\n{session.log()}"
+	assertRegistered(linda)
+	time.sleep(max(0, session.waitForPhase("RUNNING") + SECOND_COPY_WAIT - time.monotonic()))
+	assert len(session.runs()) == 1, session.log()
+	assertKeysWork(session, linda)
+	stopLinda(linda)
+
+
+def test_unregisteredLindaIsNotStarted(session: MateSession, tmp_path: Path):
+	installApplicationEntry(session)
+	desktopRegistration(session, tmp_path, "register")
+	done = desktopRegistration(session, tmp_path, "unregister")
+	assert done.value.startswith("MATE's screen reader is back to its default, orca, in place of linda."), (
+		done.value
+	)
+	session.start()
+	time.sleep(max(0, session.waitForPhase("RUNNING") + SECOND_COPY_WAIT - time.monotonic()))
+	assert session.runs() == [], session.log()
+
+
+def desktopRegistration(session: MateSession, tmp_path: Path, action: str) -> harness.ChildResult:
+	"""linda --register-desktop or --unregister-desktop, as an installed copy runs it in the session."""
 	done = harness.runChild(
 		tmp_path,
 		f"""
 		from linuxPlatform import desktopRegistration, launcher
 
-		launcher.lastingCommand = lambda: {command!r}
-		result = desktopRegistration.register()
+		launcher.lastingCommand = lambda: {str(session.launcher)!r}
+		result = desktopRegistration.{action}()
 		""",
 		env={
 			"XDG_CONFIG_HOME": str(session.configHome),
+			"XDG_CONFIG_DIRS": str(session.systemConfig),
 			"GSETTINGS_BACKEND": "keyfile",
 			"GSETTINGS_SCHEMA_DIR": os.environ["LINDA_MATE_DESKTOP_SCHEMAS"],
 			"XDG_CURRENT_DESKTOP": "MATE",
