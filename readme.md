@@ -199,7 +199,7 @@ Wherever NVDA's documentation says the NVDA key, Linda says the Linda key: Inser
 
 A few to start with:
 
-* Linda+N opens Linda's menu, with the settings under Preferences and the user guide under Help.
+* Linda+N opens Linda's menu, with the settings under Preferences.
 * Linda+Q quits.
 * Control stops speech.
 * Linda+1 turns input help on and off. While it is on, every key says what it does.
@@ -207,7 +207,7 @@ A few to start with:
 * In a web page, H moves by heading, K by link, F by form field and T by table, Linda+F7 lists them, and Linda+Space switches between browse mode and focus mode.
 * Linda+F2 passes the next key straight to the program.
 
-The user guide in the Help menu is NVDA's. Read Linda where it says NVDA, and skip what is about Windows.
+Linda has no user guide of its own yet, and the guide in its Help menu does not open. [NVDA's user guide](https://download.nvaccess.org/documentation/userGuide.html) describes the same commands: read Linda where it says NVDA, and skip what is about Windows.
 
 Your settings live in `~/.config/linda`, and the log of the current run is `~/.local/state/linda/nvda.log`.
 
