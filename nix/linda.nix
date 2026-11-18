@@ -108,6 +108,7 @@ let
     ../copying.txt
     ../source
     ../linux
+    ../user_docs
     ../tools/build-artifacts
     ../tools/install-tree
   ];
@@ -233,6 +234,13 @@ stdenv.mkDerivation {
     for library in ${lib.escapeShellArgs (lib.attrValues (lib.filterAttrs (n: _: lib.hasSuffix "_LIB" n || lib.hasSuffix "_ENGINE" n) installedPaths))}; do
       if [ ! -f "$library" ]; then
         echo "error: linuxPlatform/installPaths.py names $library, which is not a file"
+        exit 1
+      fi
+    done
+    # Where documentationUtils looks for the Help menu's pages when NVDA runs from source.
+    for page in userGuide keyCommands changes; do
+      if [ ! -f "${appDir}/../user_docs/en/$page.html" ]; then
+        echo "error: share/linda/user_docs/en holds no $page.html"
         exit 1
       fi
     done

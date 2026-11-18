@@ -131,6 +131,7 @@ def test_installsTheLayoutAndNothingElse(installed: Installed):
 	for directory, names, files in os.walk(installed.destDir):
 		if Path(directory) == appDir.parent:
 			names.remove("source")
+			names.remove("user_docs")
 		found.update("/" + str((Path(directory) / name).relative_to(installed.destDir)) for name in files)
 	assert found == expected
 	for name in ("linda", "linda-say"):
@@ -157,6 +158,21 @@ def test_installsTheLayoutAndNothingElse(installed: Installed):
 	assert (appDir / ".." / "copying.txt").read_bytes() == (ROOT / "copying.txt").read_bytes()
 	# Nothing generated in the checkout comes along: the build directory is where it was made.
 	assert not (ROOT / "source" / "linuxPlatform" / "installPaths.py").exists()
+
+
+def test_installsTheDocumentationWhereNvdaLooksWhenRunFromSource(installed: Installed):
+	"""documentationUtils.getDocFilePath looks in user_docs beside the program's folder; each page is the
+	one tools/build-artifacts writes into the checkout, with Linda's notice at its top."""
+	docs = installed.appDir.parent / "user_docs"
+	languages = sorted(d.name for d in docs.iterdir())
+	assert len(languages) > 50 and {"en", "pl", "de_CH", "zh_TW"} <= set(languages), languages
+	for language, page in (("en", "userGuide"), ("en", "keyCommands"), ("en", "changes"), ("pl", "userGuide")):
+		text = (docs / language / f"{page}.html").read_text(encoding="utf-8")
+		assert '<body>\n<div id="lindaNotice" role="note"><p>This is NVDA\'s own documentation' in text
+		assert text == (ROOT / "user_docs" / language / f"{page}.html").read_text(encoding="utf-8")
+	for name in ("styles.css", "numberedHeadings.css", "favicon.ico"):
+		assert (docs / "en" / name).is_file(), name
+	assert not list(docs.rglob("*.md")) and not list(docs.rglob("*.xliff"))
 
 
 def test_everyModuleIsCompiledForTheInstalledPath(installed: Installed):

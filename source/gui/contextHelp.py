@@ -88,6 +88,8 @@ def bindHelpEvent(helpId: str, window: wx.Window):
 		wx.EVT_HELP,
 		lambda evt: _onEvtHelp(helpId, evt),
 	)
+	if sys.platform != "win32":
+		_bindF1(window)
 	log.debug(f"Did context help binding for {window.__class__.__qualname__}")
 
 
@@ -96,6 +98,25 @@ def _onEvtHelp(helpId: str, evt: wx.HelpEvent):
 	# Don't call evt.skip. Events bubble upwards through parent controls.
 	# Context help for more specific controls should override the less specific parent controls.
 	showHelp(helpId)
+
+
+if sys.platform != "win32":
+
+	def _bindF1(window: wx.Window):
+		"""wxGTK makes no help event of F1, as Windows does. The key's char hook event starts at the
+		focused control and rises through its parents as the help event does, so the innermost window
+		with context help turns it into that window's help event."""
+		if not getattr(window, "_lindaF1Bound", False):
+			window.Bind(wx.EVT_CHAR_HOOK, lambda evt: _onCharHook(window, evt))
+			window._lindaF1Bound = True
+
+	def _onCharHook(window: wx.Window, evt: wx.KeyEvent):
+		if evt.GetKeyCode() != wx.WXK_F1 or evt.GetModifiers() != wx.MOD_NONE:
+			evt.Skip()
+			return
+		helpEvent = wx.HelpEvent(wx.wxEVT_HELP, window.GetId(), origin=wx.HelpEvent.Origin_Keyboard)
+		helpEvent.SetEventObject(window)
+		window.GetEventHandler().ProcessEvent(helpEvent)
 
 
 class ContextHelpMixin:

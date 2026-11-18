@@ -480,7 +480,11 @@ source/gui/contextHelp.py
   every platform: context help opens through startfile from
   linuxPlatform.windowsOnly, which is os.startfile on Windows and on Linux
   opens the file:// URL through xdg-open, where os.startfile is absent
-  Linux runtime: the redirect to the user guide's section is written in the
+  Linux runtime: bindHelpEvent also turns F1 into the window's help event,
+  through the char hook event, which rises from the focused control through
+  its parents as the help event does; wxGTK makes no help event of F1, so
+  without it F1 did nothing in any dialog. The redirect to the user guide's
+  section is written in the
   user's cache directory rather than in /tmp/nvda, which every user of the
   machine shares, and names the guide by a well-formed file URL, where
   file:/// before an absolute POSIX path gives four slashes. The redirect

@@ -207,7 +207,7 @@ A few to start with:
 * In a web page, H moves by heading, K by link, F by form field and T by table, Linda+F7 lists them, and Linda+Space switches between browse mode and focus mode.
 * Linda+F2 passes the next key straight to the program.
 
-Linda has no user guide of its own yet, and the guide in its Help menu does not open. [NVDA's user guide](https://download.nvaccess.org/documentation/userGuide.html) describes the same commands: read Linda where it says NVDA, and skip what is about Windows.
+Linda has no user guide of its own yet, but the guide in its Help menu, which is NVDA's, opens in your web browser, and F1 in a dialog opens it at the control you are on. [NVDA's user guide](https://download.nvaccess.org/documentation/userGuide.html) describes the same commands: read Linda where it says NVDA, and skip what is about Windows.
 
 Your settings live in `~/.config/linda`, and the log of the current run is `~/.local/state/linda/nvda.log`.
 
