@@ -10,6 +10,9 @@ LINDA_BOOT_PROBE turns it on and says what follows the sentence:
 - "exitDialog" runs NVDA's exit command, which asks first under upstream's default configuration,
 	says exitDialogSentence once that dialog is open, and waits.
 - "magnifier" runs the magnifier's toggle command and then exits as "exit" does.
+- "progressDialog" shows gui.IndeterminateProgressDialog, as the add-on store and Remote Access do
+	while they wait, looks for the focus among NVDA's windows as reading them does, ends the dialog
+	with its done(), says progressSentence once it is gone, and exits as "exit" does.
 - "slowStart" takes six seconds longer to start, as a plugin with a slow constructor would, and then
 	waits.
 - "slowExit" makes this plugin's terminate, which NVDA's exit calls, take two seconds.
@@ -77,6 +80,7 @@ otherModes = (
 	"restartHangingInTerminate",
 	"exitDialog",
 	"magnifier",
+	"progressDialog",
 	"slowStart",
 	"slowExit",
 	"hangAtExit",
@@ -92,6 +96,7 @@ FOLLOW_UP_DELAY = 0.5
 sentence = "the boot probe has started"
 dialogSentence = "the boot probe's dialog is open"
 exitDialogSentence = "the exit dialog is open"
+progressSentence = "the progress dialog is gone"
 #: What dialog modes change before opening a dialog, so that a test can see the configuration saved.
 #: Nothing the probe does types, so it changes nothing that is spoken.
 changedSetting = ("keyboard", "speakTypedWords", 2)
@@ -142,6 +147,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
 			_magnifier.commands.toggleMagnifier()
 			core.triggerNVDAExit()
+		elif self._mode == "progressDialog":
+			wx.CallAfter(self._progressDialog)
 		elif self._mode in ("hangAtExit", "hangInTerminate", "hangInC"):
 			self._changeSetting()
 			if self._mode == "hangAtExit":
@@ -158,6 +165,26 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			wx.CallAfter(getattr(self, f"_{self._mode}"))
 		elif self._exitWhenOpen:
 			core.triggerNVDAExit()
+
+	def _progressDialog(self) -> None:
+		import gui
+		from linuxPlatform import ownGui
+
+		dialog = gui.IndeterminateProgressDialog(gui.mainFrame, "Boot probe progress", "Waiting")
+
+		def end() -> None:
+			ownGui._focusAndItsParent()
+			dialog.done()
+			wx.CallLater(_POLL_INTERVAL, gone)
+
+		def gone() -> None:
+			if any(isinstance(w, gui.IndeterminateProgressDialog) for w in wx.GetTopLevelWindows()):
+				wx.CallLater(_POLL_INTERVAL, gone)
+				return
+			ui.message(progressSentence)
+			core.triggerNVDAExit()
+
+		wx.CallLater(1500, end)
 
 	def _changeSetting(self) -> None:
 		section, key, value = changedSetting

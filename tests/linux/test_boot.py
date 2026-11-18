@@ -31,6 +31,7 @@ CONFIG_FIXTURE = HERE / "fixtures" / "bootConfig" / "nvda.ini"
 SENTENCE = "the boot probe has started"
 DIALOG_SENTENCE = "the boot probe's dialog is open"
 EXIT_DIALOG_SENTENCE = "the exit dialog is open"
+PROGRESS_SENTENCE = "the progress dialog is gone"
 #: The setting the probe changes before it opens a dialog or hangs, as section, key and value.
 CHANGED_SETTING = ("keyboard", "speakTypedWords", "2")
 #: Seconds from starting the process to the sentence; a start under the rig takes about three.
@@ -511,6 +512,14 @@ def test_restartWhoseExitHangsStillStartsTheNewCopy(start: Start):
 		assert time.monotonic() < deadline, f"the new copy did not speak\n{nvda.describe()}"
 		time.sleep(0.05)
 	assert "did not finish within" in nvda.text("nvda-old.log")
+
+
+def test_progressDialogEnds(start: Start):
+	# Beeping is upstream's default for progress bars, and the end of one beeps only if it is active.
+	nvda = start("progress", "progressDialog", welcome=False)
+	nvda.waitForSpeech(PROGRESS_SENTENCE, STARTUP_BOUND)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
 
 
 def test_checkRunningAndQuit(start: Start):

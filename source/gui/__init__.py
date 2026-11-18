@@ -1056,18 +1056,25 @@ class IndeterminateProgressDialog(wx.ProgressDialog):
 			speech.speakMessage(_("Please wait"))
 
 	def IsActive(self):
+		if sys.platform != "win32":
+			# wxGTK's generic progress dialog knows whether it is active; there is no Windows foreground.
+			return super().IsActive()
 		# 4714: In wxPython 3, ProgressDialog.IsActive always seems to return False.
 		return winUser.isDescendantWindow(winUser.getForegroundWindow(), self.Handle)
 
 	def done(self):
 		self.timer.Stop()
-		pbConf = config.conf["presentation"]["progressBarUpdates"]
-		if pbConf["progressBarOutputMode"] in ("beep", "both") and (
-			pbConf["reportBackgroundProgressBars"] or self.IsActive()
-		):
-			tones.beep(1760, 40)
-		self.Hide()
-		self.Destroy()
+		# The dialog is application modal: left open by a failed beep, it would disable every other
+		# window of NVDA's for good.
+		try:
+			pbConf = config.conf["presentation"]["progressBarUpdates"]
+			if pbConf["progressBarOutputMode"] in ("beep", "both") and (
+				pbConf["reportBackgroundProgressBars"] or self.IsActive()
+			):
+				tones.beep(1760, 40)
+		finally:
+			self.Hide()
+			self.Destroy()
 
 
 def shouldConfigProfileTriggersBeSuspended():

@@ -456,6 +456,11 @@ source/gui/__init__.py
   Create portable copy, Install NVDA and the System Accessibility Repair
   Tool, which Linux does not support, rather than leaving them out only
   because Linda runs from source
+  Linux runtime: IndeterminateProgressDialog.IsActive asks wx, as there is
+  no Windows foreground window to compare with
+  every platform: IndeterminateProgressDialog.done hides and destroys the
+  dialog even when deciding on or playing its beep fails, since the dialog
+  is application modal and would otherwise disable every other window
 source/gui/addonStoreGui/controls/details.py
   every platform: the details say whether an add-on supports the platform
   NVDA runs on, or which it was made for
