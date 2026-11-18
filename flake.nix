@@ -186,9 +186,12 @@
           # The pinned ruff: a let binding takes precedence over with.
           ruff
           pkg-config
-          # The Meson build, which installs Linda as a distribution would.
+          # The Meson build, which installs Linda as a distribution would, and
+          # the validators of its desktop entry and metadata.
           meson
           ninja
+          desktop-file-utils
+          appstream
           gobject-introspection
           gettext
           dbus

@@ -209,6 +209,10 @@ print("; ".join(missing))
   # NVDA's View licence item reads it from beside the program's folder when it runs from source,
   # which on Linux it always does.
   install_data('copying.txt', install_dir: get_option('datadir') / 'linda')
+  install_data('copying.txt', install_dir: get_option('datadir') / 'licenses' / 'linda')
+  install_data('linux/linda.desktop', install_dir: get_option('datadir') / 'applications')
+  install_data('linux/io.github.mudb0y.linda.metainfo.xml', install_dir: get_option('datadir') / 'metainfo')
+  install_man('linux/linda.1', 'linux/linda-say.1')
 
   foreach name, arguments : {'linda': '', 'linda-say': ' say'}
     configure_file(
@@ -228,6 +232,17 @@ if ruff.found()
   tools = ['tools/build-artifacts', 'tools/cargo-libraries', 'tools/check-upstream-edits', 'tools/install-tree']
   test('ruff check', ruff, args: ['check', '--no-cache', '.', tools], workdir: src, suite: 'lint')
   test('ruff format', ruff, args: ['format', '--check', '--no-cache', '.', tools], workdir: src, suite: 'lint')
+endif
+desktop_file_validate = find_program('desktop-file-validate', required: false)
+if desktop_file_validate.found()
+  test('desktop entry', desktop_file_validate, args: [files('linux/linda.desktop')], suite: 'files')
+endif
+appstreamcli = find_program('appstreamcli', required: false)
+if appstreamcli.found()
+  test('metainfo', appstreamcli,
+    args: ['validate', '--no-net', '--explain', files('linux/io.github.mudb0y.linda.metainfo.xml')],
+    suite: 'files',
+  )
 endif
 if fs.exists(src / '.git') and find_program('git', required: false).found()
   test('upstream edits', python, args: [src / 'tools' / 'check-upstream-edits'], workdir: src, suite: 'lint')

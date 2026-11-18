@@ -119,6 +119,11 @@ def test_installsTheLayoutAndNothingElse(installed: Installed):
 		f"{PREFIX}/bin/linda",
 		f"{PREFIX}/bin/linda-say",
 		f"{PREFIX}/share/linda/copying.txt",
+		f"{PREFIX}/share/licenses/linda/copying.txt",
+		f"{PREFIX}/share/applications/linda.desktop",
+		f"{PREFIX}/share/metainfo/io.github.mudb0y.linda.metainfo.xml",
+		f"{PREFIX}/share/man/man1/linda.1",
+		f"{PREFIX}/share/man/man1/linda-say.1",
 		*(f"{installed.libDir}/linda/{name}" for name in LIBRARIES),
 	}
 	found = set()
@@ -346,3 +351,55 @@ def test_configureNamesWhatIsMissing(tmp_path: Path, option: str, value: str, me
 	done = meson("setup", str(tmp_path / "build"), str(ROOT), *given, f"-D{option}={value}", timeout=300)
 	assert done.returncode != 0
 	assert message in done.stdout, done.stdout[-3000:]
+
+
+def test_desktopEntryAndMetadataSayWhatLindaIs(installed: Installed):
+	"""Both validate, the entry starts linda with no icon of NVDA's, and the metadata says what the
+	readme says of NVDA and NV Access."""
+	done = meson("test", "-C", str(installed.build), "--suite", "files", "--print-errorlogs")
+	assert done.returncode == 0, done.stdout[-6000:]
+	assert re.search(r"^Ok:\s+2\s*$", done.stdout, re.MULTILINE), done.stdout
+	entry = installed.path(f"{PREFIX}/share/applications/linda.desktop").read_text(encoding="utf-8")
+	lines = entry.splitlines()
+	for line in ("Type=Application", "Name=Linda", "Exec=linda", "Categories=Utility;Accessibility;"):
+		assert line in lines, entry
+	assert any(line.startswith("Comment=") for line in lines), entry
+	assert not any(line.startswith("Icon=") for line in lines), entry
+	metainfo = installed.path(f"{PREFIX}/share/metainfo/io.github.mudb0y.linda.metainfo.xml").read_text(
+		encoding="utf-8"
+	)
+	description = " ".join(metainfo.split())
+	assert "<id>io.github.mudb0y.linda</id>" in description
+	assert '<launchable type="desktop-id">linda.desktop</launchable>' in description
+	readme = (ROOT / "readme.md").read_text(encoding="utf-8")
+	assert "is not affiliated with or endorsed by NV Access." in readme
+	assert "It is an independent project and is not affiliated with or endorsed by NV Access." in description
+	assert "based on NVDA by NV Access and the NVDA contributors" in description
+	assert (installed.path(f"{PREFIX}/share/licenses/linda/copying.txt")).read_bytes() == (
+		ROOT / "copying.txt"
+	).read_bytes()
+
+
+def test_manualPagesNameEveryOptionTheHelpDoes(installed: Installed, tmp_path: Path):
+	"""Each option linda --help and linda say --help name is in the manual page for it."""
+	environment = installedEnvironment(installed)
+	for page, arguments in (("linda.1", ["--help"]), ("linda-say.1", ["say", "--help"])):
+		name = "linda" if page == "linda.1" else "linda-say"
+		shown = subprocess.run(
+			[*launcher(installed, "linda", tmp_path), *arguments],
+			env=environment,
+			capture_output=True,
+			text=True,
+			timeout=60,
+			check=False,
+		)
+		text = shown.stdout + shown.stderr
+		options = set(re.findall(r"(?<![\w-])--[a-z][a-z-]+", text))
+		assert len(options) > 5, text
+		manual = (
+			installed.path(f"{PREFIX}/share/man/man1/{page}").read_text(encoding="utf-8").replace("\\-", "-")
+		)
+		assert manual.startswith(f".TH {name.upper()} 1 "), manual[:80]
+		# NVDA's help mentions --loglevel in passing, a spelling no option has.
+		missing = sorted(option for option in options - {"--loglevel"} if option not in manual)
+		assert not missing, (page, missing)

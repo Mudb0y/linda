@@ -24,6 +24,8 @@
   icu,
   liblouis,
   strace,
+  desktop-file-utils,
+  appstream,
   python,
   cargoVendorDir,
   louisTables ? null,
@@ -181,12 +183,22 @@ stdenv.mkDerivation {
     ];
   dontWrapGApps = true;
 
-  # Meson's tests here are the engine's: the ring, the position and the clock of the PipeWire sink.
-  # The lint needs the git history, which a Nix build has not got.
-  doCheck = buildsLibraries;
-  mesonCheckFlags = [
-    "--suite"
-    "engine"
+  # Meson's tests here are the engine's, of the ring, the position and the clock of the PipeWire
+  # sink, and the validation of the desktop entry and the metadata. The lint needs the git history,
+  # which a Nix build has not got.
+  doCheck = true;
+  mesonCheckFlags =
+    lib.optionals buildsLibraries [
+      "--suite"
+      "engine"
+    ]
+    ++ lib.optionals (!librariesOnly) [
+      "--suite"
+      "files"
+    ];
+  nativeCheckInputs = lib.optionals (!librariesOnly) [
+    desktop-file-utils
+    appstream
   ];
 
   postInstall = lib.optionalString librariesOnly ''

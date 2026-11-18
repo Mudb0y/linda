@@ -1,0 +1,103 @@
+.TH LINDA 1 2026-11-18 Linda "User Commands"
+.SH NAME
+linda \- a screen reader for the Linux desktop, based on NVDA
+.SH SYNOPSIS
+.B linda
+.RI [ options ]
+.br
+.B linda say
+.RI [ options ] " text"
+.SH DESCRIPTION
+Linda Is Non-visual Desktop Access: NVDA, the screen reader most blind people use on Windows,
+brought to Linux.
+It reads programs through AT-SPI, speaks through PipeWire and takes its keys from X11.
+Started without options, it starts the screen reader, or, when a copy is already running for this
+display, stops that copy and takes its place.
+.PP
+.B linda say
+speaks one text through Linda's speech and audio and exits; see
+.BR linda-say (1).
+.PP
+Linda is based on NVDA by NV Access and the NVDA contributors.
+It is an independent project and is not affiliated with or endorsed by NV Access.
+.SH OPTIONS
+These are NVDA's options, as
+.B linda \-\-help
+lists them.
+.TP
+.BR \-h ", " \-\-help
+Show the help message and exit.
+.TP
+.BR \-q ", " \-\-quit
+Quit the copy of Linda that is already running.
+.TP
+.BR \-k ", " \-\-check\-running
+Report whether Linda is running through the exit status: 0 if it is running, 1 if it is not.
+.TP
+.BR \-f ", " \-\-log\-file " \fILOGFILENAME\fR"
+The file log messages are written to.
+By default it is nvda.log in Linda's directory under the XDG state directory,
+normally \fI~/.local/state/linda\fR.
+Logging is always off in secure mode.
+.TP
+.BR \-l ", " \-\-log\-level " \fILEVEL\fR"
+The lowest level of message logged: 5 for secrets, 10 for debug, 12 for input and output,
+15 for debug warnings, 20 for information and 100 for none.
+The default is 20, or the level set in the configuration.
+Logging is always off in secure mode.
+.TP
+.BR \-c ", " \-\-config\-path " \fICONFIGPATH\fR"
+The directory where all of Linda's settings are kept, normally \fI~/.config/linda\fR.
+Secure mode always uses the default.
+.TP
+.BR \-n ", " \-\-lang " \fILANGUAGE\fR"
+Use this language instead of the configured one, such as en for English.
+.TP
+.BR \-m ", " \-\-minimal
+No sounds, no interface and no start message.
+.TP
+.BR \-s ", " \-\-secure
+Start in secure mode.
+.TP
+.BR \-d ", " \-\-disable\-addons
+Disable all add-ons.
+.TP
+.B \-\-debug\-logging
+Log at the debug level for this run alone, whatever other log level is given.
+.TP
+.B \-\-no\-logging
+Turn logging off for this run; a log level or debug logging given as well wins over it.
+.TP
+.B \-\-no\-sr\-flag
+Do not change the system's screen reader flag.
+.TP
+.B \-\-register\-desktop
+Make Linda the screen reader the MATE desktop starts at sign-in and from its accessibility
+settings, say what was changed, and exit without starting the screen reader.
+GNOME always starts Orca, so there is nothing to register there.
+.TP
+.B \-\-unregister\-desktop
+Put MATE's choice of screen reader back to its defaults, Orca and off, say what was changed, and
+exit.
+.PP
+The options \-\-install, \-\-install\-silent, \-\-create\-portable, \-\-create\-portable\-silent,
+\-\-portable\-path, \-\-launcher, \-\-enable\-start\-on\-logon, \-\-copy\-portable\-config and
+\-\-ease\-of\-access are NVDA's for Windows, where they install it, make portable copies of it and
+start it at sign-in. Linda accepts them because NVDA does.
+.SH FILES
+.TP
+.I ~/.config/linda
+Settings, profiles, speech dictionaries and add-ons.
+.TP
+.I ~/.local/state/linda/nvda.log
+The log of the last run.
+.SH ENVIRONMENT
+An installation knows where its libraries, eSpeak NG, ICU and openevv's driver are.
+The variables LINDA_VBUF_LIB, LINDA_VBUF_ENGINE, LINDA_PWSINK_LIB, LINDA_ESPEAK_LIB,
+LINDA_ESPEAK_DATA_DIR, LINDA_ICU_LIB_DIR, LINDA_ICU_VERSION_MAJOR, LINDA_OPENEVV_DRIVER_DIR and
+LINDA_AUDIO_SINK, when set, name others instead; they are for development and testing.
+.SH SEE ALSO
+.BR linda-say (1)
+.PP
+https://github.com/Mudb0y/linda, where problems with Linda are reported; never report them to
+NV Access.

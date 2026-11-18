@@ -1,0 +1,76 @@
+.TH LINDA-SAY 1 2026-11-18 Linda "User Commands"
+.SH NAME
+linda-say \- speak a text through Linda's speech and audio, then exit
+.SH SYNOPSIS
+.B linda-say
+.RI [ options ] " text"
+.br
+.B linda say
+.RI [ options ] " text"
+.SH DESCRIPTION
+.B linda say
+speaks the text after its options through Linda's speech and audio, waits until it has been heard,
+and exits.
+It reads the synthesizer and its settings from your Linda configuration and never changes it.
+It starts nothing else of Linda, so it runs beside any screen reader already speaking.
+.B linda-say
+is the same as
+.BR "linda say" .
+.SH OPTIONS
+.TP
+.BI \-\-synth " name"
+Choose the synthesizer, such as espeak or openevv.
+.TP
+.BI \-\-voice " identifier"
+Choose the voice, as \-\-list\-voices names it.
+.TP
+.BI \-\-rate " number" "\fR, \fP" \-\-pitch " number" "\fR, \fP" \-\-volume " number"
+Set the synthesizer's own settings, each a whole number from 0 to 100.
+.TP
+.BI \-\-gain " number"
+Scale every sound it makes by a number from 0 to 1; 1 when not given.
+.TP
+.B \-\-check
+Play to an output that makes no sound, to check everything else.
+.TP
+.B \-\-list\-voices
+List the voices of the synthesizer, one to a line, and speak nothing.
+.TP
+.B \-\-sounds
+Play Linda's start sound, a short beep and its error sound after the text.
+.TP
+.B \-\-factory
+Ignore your configuration.
+.TP
+.BI \-\-config\-path " directory"
+Read the configuration in this directory instead of yours.
+.TP
+.BI \-\-timeout " seconds"
+How long to wait for speech to finish; 30 when not given.
+.TP
+.BR \-h ", " \-\-help
+Say all this and exit.
+.SH EXIT STATUS
+.TP
+.B 0
+The text was heard.
+.TP
+.B 1
+An unexpected error.
+.TP
+.B 2
+A mistake in what it was given.
+.TP
+.B 3
+The synthesizer did not load.
+.TP
+.B 4
+Nothing could be heard.
+.TP
+.B 5
+Speech did not finish in time.
+.TP
+.B 6
+Stopped by Control C.
+.SH SEE ALSO
+.BR linda (1)

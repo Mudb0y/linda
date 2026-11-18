@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Linda
+GenericName=Screen Reader
+Comment=Read the desktop aloud and in braille, with NVDA's commands
+Exec=linda
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=screen reader;speech;braille;NVDA;accessibility;

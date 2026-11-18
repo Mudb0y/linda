@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.mudb0y.linda</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-2.0-or-later</project_license>
+  <name>Linda</name>
+  <summary>A screen reader for the Linux desktop, based on NVDA</summary>
+  <description>
+    <p>
+      Linda Is Non-visual Desktop Access: a screen reader for the Linux desktop. It is NVDA, the
+      screen reader most blind people use on Windows, brought to Linux. The commands, the settings,
+      browse mode for web pages and the add-on interface are NVDA's own. Underneath, Linda reads
+      programs through AT-SPI, speaks through PipeWire and takes its keys from X11.
+    </p>
+    <p>
+      Linda is based on NVDA by NV Access and the NVDA contributors. It is an independent project
+      and is not affiliated with or endorsed by NV Access. Please report problems with Linda to its
+      own issue tracker, never to NV Access.
+    </p>
+  </description>
+  <launchable type="desktop-id">linda.desktop</launchable>
+  <url type="homepage">https://github.com/Mudb0y/linda</url>
+  <url type="bugtracker">https://github.com/Mudb0y/linda/issues</url>
+  <developer id="io.github.mudb0y">
+    <name>Mudb0y</name>
+  </developer>
+  <categories>
+    <category>Accessibility</category>
+    <category>Utility</category>
+  </categories>
+  <provides>
+    <binary>linda</binary>
+    <binary>linda-say</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+</component>
