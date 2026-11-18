@@ -1641,3 +1641,83 @@ def test_xdgDirectoriesFollowTheSpecification(tmp_path):
 		"stateHome": os.path.join(home, ".local", "state"),
 		"userStateDir": os.path.join(home, ".local", "state", "linda"),
 	}
+
+
+def test_cachesLiveInTheXdgCacheDirectoryUnlessTheConfigurationWasChosen(tmp_path):
+	chosen = tmp_path / "chosen"
+	done = run(
+		tmp_path,
+		f"""
+		import config
+		from NVDAState import WritePaths
+
+
+		def paths():
+			return [
+				WritePaths.addonStoreDir,
+				WritePaths.addonStoreDownloadDir,
+				WritePaths.updateCheckStateFile,
+				WritePaths.addonsDir,
+				WritePaths.guiStateFile,
+			]
+
+
+		WritePaths.configDir = config.getUserDefaultConfigPath()
+		result = {{"default": paths()}}
+		WritePaths.configDir = {str(chosen)!r}
+		result["chosen"] = paths()
+		os.environ["XDG_CACHE_HOME"] = "relative/cache"
+		WritePaths.configDir = config.getUserDefaultConfigPath()
+		result["relativeCacheHome"] = WritePaths.addonStoreDir
+		""",
+		env={**xdgEnv(tmp_path), "XDG_CACHE_HOME": str(tmp_path / "xdgCache")},
+	)
+	done.assertClean()
+	config = tmp_path / "xdgConfig" / "linda"
+	cache = tmp_path / "xdgCache" / "linda"
+	assert done.value == {
+		"default": [
+			str(cache / "addonStore"),
+			str(cache / "addonStore" / "_dl"),
+			str(cache / "updateCheckState.pickle"),
+			str(config / "addons"),
+			str(config / "guiState.ini"),
+		],
+		# A configuration directory given with -c stays self-contained.
+		"chosen": [
+			str(chosen / "addonStore"),
+			str(chosen / "addonStore" / "_dl"),
+			str(chosen / "updateCheckState.pickle"),
+			str(chosen / "addons"),
+			str(chosen / "guiState.ini"),
+		],
+		"relativeCacheHome": os.path.join(os.path.expanduser("~"), ".cache", "linda", "addonStore"),
+	}
+
+
+def test_cachesLeftInTheConfigurationMoveOnlyWhereTheCacheHasNone(tmp_path):
+	config = tmp_path / "xdgConfig" / "linda"
+	cache = tmp_path / "xdgCache" / "linda"
+	(config / "addonStore" / "_dl").mkdir(parents=True)
+	(config / "addonStore" / "_cachedSettings.json").write_text('{"showWarning": false}', encoding="utf-8")
+	(config / "updateCheckState.pickle").write_bytes(b"old state")
+	cache.mkdir(parents=True)
+	(cache / "updateCheckState.pickle").write_bytes(b"new state")
+	done = run(
+		tmp_path,
+		"""
+		from linuxPlatform import xdg
+
+		result = [xdg.moveCachesOutOfConfigDir(), xdg.moveCachesOutOfConfigDir()]
+		""",
+		env={**xdgEnv(tmp_path), "XDG_CACHE_HOME": str(tmp_path / "xdgCache")},
+	)
+	done.assertClean()
+	assert done.value == [[], []]
+	settings = cache / "addonStore" / "_cachedSettings.json"
+	assert settings.read_text(encoding="utf-8") == '{"showWarning": false}'
+	assert (cache / "addonStore" / "_dl").is_dir()
+	assert not (config / "addonStore").exists()
+	# The cache already had its own, so nothing is moved over it and nothing of the user's is deleted.
+	assert (cache / "updateCheckState.pickle").read_bytes() == b"new state"
+	assert (config / "updateCheckState.pickle").read_bytes() == b"old state"

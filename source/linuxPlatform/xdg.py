@@ -27,6 +27,10 @@ def stateHome() -> str:
 	return _baseDir("XDG_STATE_HOME", os.path.join(".local", "state"))
 
 
+def cacheHome() -> str:
+	return _baseDir("XDG_CACHE_HOME", ".cache")
+
+
 def configDirs() -> list[str]:
 	"""The system configuration directories, most important first."""
 	dirs = [d for d in os.environ.get("XDG_CONFIG_DIRS", "").split(":") if os.path.isabs(d)]
@@ -41,6 +45,56 @@ def userConfigDir() -> str:
 def userStateDir() -> str:
 	"""The directory that holds what NVDA keeps between runs but is not configuration: the log."""
 	return os.path.join(stateHome(), appDirName)
+
+
+def userCacheDir() -> str:
+	"""The directory that holds what NVDA can fetch or work out again: the add-on store's cache and
+	downloads, and the update check's state."""
+	return os.path.join(cacheHome(), appDirName)
+
+
+#: What NVDA keeps in its configuration directory that is a cache, and so lives in userCacheDir
+#: wherever the configuration directory is the default one.
+cacheNames = ("addonStore", "updateCheckState.pickle")
+
+
+def isDefaultConfigDir(configDir: str) -> bool:
+	"""Whether configDir is the user's own configuration directory rather than another one chosen
+	with -c, which keeps its caches inside it so that it stays self-contained."""
+	return os.path.realpath(configDir) == os.path.realpath(userConfigDir())
+
+
+def cacheDirFor(configDir: str) -> str:
+	"""Where the caches of the configuration in configDir belong."""
+	return userCacheDir() if isDefaultConfigDir(configDir) else configDir
+
+
+def moveCachesOutOfConfigDir() -> list[str]:
+	"""Move the caches that a copy from before they had a directory of their own left in the user's
+	configuration directory, where there are none in the cache directory yet, and make the cache
+	directory, so that the update check, which writes its state without making any directory, can.
+
+	Run only while no other copy is left to write into either directory.
+
+	:return: A sentence for each cache that could not be moved, which then stays where it was.
+	"""
+	cacheDir = userCacheDir()
+	try:
+		os.makedirs(cacheDir, exist_ok=True)
+	except OSError as e:
+		return [f"could not make {cacheDir}: {e}"]
+	failures = []
+	for name in cacheNames:
+		former = os.path.join(userConfigDir(), name)
+		current = os.path.join(cacheDir, name)
+		if os.path.lexists(current) or not os.path.lexists(former):
+			continue
+		try:
+			# Copies and then removes where the two are on different file systems.
+			shutil.move(former, current)
+		except OSError as e:
+			failures.append(f"could not move {former} to {current}: {e}")
+	return failures
 
 
 def adoptFormerDirectories() -> list[str]:

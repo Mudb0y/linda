@@ -33,6 +33,11 @@ class _WritePaths:
 
 	@property
 	def addonStoreDir(self) -> str:
+		if sys.platform != "win32":
+			# A cache, which the XDG specification keeps apart from configuration.
+			from linuxPlatform import xdg
+
+			return os.path.join(xdg.cacheDirFor(self.configDir), "addonStore")
 		return os.path.join(self.configDir, "addonStore")
 
 	@property
@@ -101,6 +106,10 @@ class _WritePaths:
 
 	@property
 	def updateCheckStateFile(self) -> str:
+		if sys.platform != "win32":
+			from linuxPlatform import xdg
+
+			return os.path.join(xdg.cacheDirFor(self.configDir), "updateCheckState.pickle")
 		return os.path.join(self.configDir, "updateCheckState.pickle")
 
 	@property

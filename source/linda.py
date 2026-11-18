@@ -143,6 +143,11 @@ def main() -> NoReturn:
 		# nvda.pyw gives the installed copy's systemConfig directory here, which holds the settings
 		# copied for the sign-in screen. Linux has nothing of the kind, so the copy on the login screen
 		# uses, and creates, its own user's configuration directory, and starts from upstream's defaults.
+	# Also only once the locks are held, as the copy being replaced could still have been writing the
+	# add-on store's cache. Secure mode writes nothing, and a directory given with -c keeps its caches.
+	if not appArgs.secure and xdg.isDefaultConfigDir(appArgs.configPath or xdg.userConfigDir()):
+		for failure in xdg.moveCachesOutOfConfigDir():
+			_tell(failure)
 	# After the secure mode decision, which turns the test hooks off.
 	testHooks.install()
 	# Before core.main loads the configured synthesizer, which may be one built outside this tree.

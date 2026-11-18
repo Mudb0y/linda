@@ -149,7 +149,11 @@ source/NVDAState.py
   linuxPlatform.windowsOnly.NoWindowsLibrary, a NoLinuxImplementation that is
   also a FileNotFoundError, as NVDA's helper DLLs do not exist on Linux;
   Chinese word segmentation then finds cppjieba missing, as it does on a
-  Windows copy without it, instead of a RuntimeError escaping its initializer
+  Windows copy without it, instead of a RuntimeError escaping its initializer.
+  addonStoreDir, and with it the downloads, and updateCheckStateFile are
+  under XDG_CACHE_HOME/linda while the configuration directory is the
+  default one, as the XDG specification keeps caches apart from
+  configuration; a directory given with -c keeps them inside it
 source/_magnifier/__init__.py
   Linux runtime: initialize() makes no magnifier, as every magnified view is
   built on Windows' Magnification API and its constructor reads the cursor

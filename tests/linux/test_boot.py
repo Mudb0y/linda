@@ -1144,3 +1144,49 @@ def test_settingsAndLogsUnderTheFormerNameCarryOver(launches, tmp_path: Path):
 	assert (configHome / "linda" / "nvda.ini").is_file()
 	assert os.readlink(stateHome / "basedreader") == "linda"
 	assert (stateHome / "linda" / "nvda.log").read_text(encoding="utf-8") == "a log of the former name\n"
+
+
+def test_addOnStoreCacheLeavesTheDefaultConfiguration(launches, tmp_path: Path):
+	_rigLockPath()
+	configDir = tmp_path / "xdgConfig" / "linda"
+	cacheHome = tmp_path / "xdgCache"
+	(configDir / "addonStore").mkdir(parents=True)
+	(configDir / "addonStore" / "_cachedSettings.json").write_text(
+		'{"showWarning": false, "addonSettings": {}}', encoding="utf-8"
+	)
+	(configDir / "nvda.ini").write_text(CONFIG_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+	nvda = launches(
+		"cache",
+		"-f",
+		str(tmp_path / "launches" / "cache" / "nvda.log"),
+		"--debug-logging",
+		env={
+			"LINDA_BOOT_PROBE": "exit",
+			"XDG_CONFIG_HOME": str(configDir.parent),
+			"XDG_CACHE_HOME": str(cacheHome),
+		},
+	)
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	assert not (configDir / "addonStore").exists()
+	moved = cacheHome / "linda" / "addonStore" / "_cachedSettings.json"
+	assert moved.read_text(encoding="utf-8") == '{"showWarning": false, "addonSettings": {}}'
+
+
+def test_chosenConfigurationKeepsItsAddOnStoreCache(start: Start, tmp_path: Path):
+	cacheHome = tmp_path / "xdgCache"
+	defaultConfig = tmp_path / "xdgConfig" / "linda"
+	(defaultConfig / "addonStore").mkdir(parents=True)
+	nvda = start(
+		"chosen",
+		"exit",
+		env={"XDG_CONFIG_HOME": str(defaultConfig.parent), "XDG_CACHE_HOME": str(cacheHome)},
+	)
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+	assert (configDirOf(nvda) / "addonStore").is_dir()
+	# The default configuration is not this copy's, so its cache stays where it is.
+	assert (defaultConfig / "addonStore").is_dir()
+	assert not (cacheHome / "linda").exists()
