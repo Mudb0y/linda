@@ -374,7 +374,9 @@ source/core.py
   launcher installs first, has given SIGINT to GLib, or left it ignored when
   NVDA was started with it ignored, as nohup starts a program. A restart
   starts the new copy through linuxPlatform.singleInstance, as a child
-  process, instead of through ShellExecute. On exit, _closeAllWindows first
+  process, instead of through ShellExecute, and tells
+  linuxPlatform.exitGuard of it as the exit is queued, so that an exit that
+  hangs before reaching _startNewInstance still starts it. On exit, _closeAllWindows first
   ends, through linuxPlatform.modalDialogs, every modal dialog, innermost
   first, GTK's own dialogs among them, and runs again from the main loop
   once they are gone, or saves the configuration and ends NVDA when they

@@ -468,9 +468,9 @@ def _startNewInstance(newNVDA: NewNVDAInstance):
 
 	log.debug(f"Starting new NVDA instance: {newNVDA}")
 	if sys.platform != "win32":
-		from linuxPlatform.singleInstance import startNewInstance
+		from linuxPlatform import exitGuard
 
-		startNewInstance(newNVDA.filePath, newNVDA.parameters, newNVDA.directory)
+		exitGuard.startNewInstance(newNVDA)
 		return
 	shellapi.ShellExecute(
 		hwnd=None,
@@ -509,6 +509,10 @@ def triggerNVDAExit(newNVDA: NewNVDAInstance | None = None) -> bool:
 			log.debug("NVDA has already been triggered to exit safely.")
 			return False
 		else:
+			if sys.platform != "win32" and newNVDA is not None:
+				from linuxPlatform import exitGuard
+
+				exitGuard.expectNewInstance(newNVDA)
 			# queue this so that the calling process can exit safely (eg a Popup menu)
 			queueHandler.queueFunction(queueHandler.eventQueue, _doShutdown, newNVDA)
 			_hasShutdownBeenTriggered = True

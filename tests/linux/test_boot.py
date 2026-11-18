@@ -500,6 +500,19 @@ def test_restartStartsACopyThatTakesOver(start: Start):
 	assert "NVDA exit" in nvda.text("nvda.log")
 
 
+def test_restartWhoseExitHangsStillStartsTheNewCopy(start: Start):
+	# The probe's terminate never returns, so the exit never reaches the point where core starts the
+	# new copy, and exitGuard ends this one.
+	nvda = start("restartHangs", "restartHangingInTerminate", welcome=False)
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	deadline = time.monotonic() + STARTUP_BOUND
+	while spokenCount(nvda) < 2:
+		assert time.monotonic() < deadline, f"the new copy did not speak\n{nvda.describe()}"
+		time.sleep(0.05)
+	assert "did not finish within" in nvda.text("nvda-old.log")
+
+
 def test_checkRunningAndQuit(start: Start):
 	before = start("checkBefore", None, "--check-running")
 	assert before.waitForExit(SHUTDOWN_BOUND) == 1, before.describe()

@@ -5,6 +5,8 @@ LINDA_BOOT_PROBE turns it on and says what follows the sentence:
 - "wait" leaves NVDA running until something signals it.
 - "restart" restarts NVDA through core.restart, with the variable changed to "exit" for the copy
 	that replaces it.
+- "restartHangingInTerminate" does the same from a wx callback, as the add-on store's restart prompt
+	does, and makes this plugin's terminate, which the restart calls, never return.
 - "exitDialog" runs NVDA's exit command, which asks first under upstream's default configuration,
 	says exitDialogSentence once that dialog is open, and waits.
 - "magnifier" runs the magnifier's toggle command and then exits as "exit" does.
@@ -72,6 +74,7 @@ otherModes = (
 	"exit",
 	"wait",
 	"restart",
+	"restartHangingInTerminate",
 	"exitDialog",
 	"magnifier",
 	"slowStart",
@@ -123,6 +126,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			# The new copy inherits this environment.
 			os.environ[ENVIRONMENT_VARIABLE] = "exit"
 			core.restart()
+		elif self._mode == "restartHangingInTerminate":
+			os.environ[ENVIRONMENT_VARIABLE] = "exit"
+			wx.CallAfter(core.restart)
 		elif self._mode == "exitDialog":
 			import gui
 
@@ -271,7 +277,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		self._innerDialog(welcome[0])
 
 	def terminate(self) -> None:
-		if self._mode == "hangInTerminate":
+		if self._mode in ("hangInTerminate", "restartHangingInTerminate"):
 			threading.Event().wait()
 		elif self._mode == "slowExit":
 			time.sleep(SLOW_EXIT)
