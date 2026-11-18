@@ -196,6 +196,8 @@ KEPT_UNDER_GRAB = frozenset(
 		"SCROLL",
 	)
 )
+#: Virtual-key codes of the modifiers a key is typed with.
+MODIFIER_VKS = KEPT_UNDER_GRAB - {keyMap.VK[name] for name in ("CAPITAL", "NUMLOCK", "SCROLL")}
 #: Virtual-key code of each lock key: the modifier it locks, as X maps it.
 LOCK_MASKS = {keyMap.VK["CAPITAL"]: X.LockMask, keyMap.VK["NUMLOCK"]: NUM_LOCK_MASK}
 #: The generic modifier each left or right one also holds down, for keyState.
@@ -396,8 +398,12 @@ class X11KeySource:
 		self._keyboardDown: set[int] = set()
 		#: Key codes held down by XTEST.
 		self._xtestDown: set[int] = set()
-		#: (key code, isUp, echo) of keys to send once the keyboard has let go of the first one's key.
-		self._unsent: deque[tuple[int, bool, bool]] = deque()
+		#: (key code, isUp, echo, modifiers) of keys to send once the keyboard has let go of the first
+		#: one's key; modifiers are the key codes of those the keyboard held as a press was put off.
+		self._unsent: deque[tuple[int, bool, bool, tuple[int, ...]]] = deque()
+		#: Key code: the modifiers pressed here for it, as the keyboard had let go of them by the time
+		#: it was sent, to be released after it.
+		self._modifiersFor: dict[int, list[int]] = {}
 		#: Key codes typeKey holds down.
 		self._typedDown: set[int] = set()
 		#: Whether Num Lock was on before typeKey changed it for a numpad key; None while it has not.
@@ -649,6 +655,7 @@ class X11KeySource:
 		self._documentPending = None
 		self._held = False
 		self._unsent.clear()
+		self._modifiersFor.clear()
 		for ticket in self._tickets:
 			ticket.answered = True
 			ticket.settled.set()
@@ -1664,7 +1671,9 @@ class X11KeySource:
 			self._held = False
 			self._grabKey = self._serverGrab = None
 
-	def _fake(self, keycode: int, isUp: bool, echo: bool = True) -> None:
+	def _fake(
+		self, keycode: int, isUp: bool, echo: bool = True, modifiers: tuple[int, ...] | None = None
+	) -> None:
 		"""Send a key through XTEST, or as soon as it can reach the application.
 
 		The X server drops a press of a key that another device holds down, as the keyboard does the key
@@ -1674,17 +1683,43 @@ class X11KeySource:
 		comes to that grab, which replays it to the application as one sent here.
 
 		:param echo: Whether the key's own event is dropped rather than delivered to NVDA.
+		:param modifiers: Key codes of the modifiers a press put off was typed with, of which those
+			the keyboard no longer holds are pressed here for it.
 		"""
 		if self._unsent or (not isUp and keycode in self._keyboardDown):
-			self._unsent.append((keycode, isUp, echo))
+			if modifiers is None:
+				# As NVDA sends a key back, it leaves out the modifiers the keyboard holds; a person lets
+				# go of Shift before Tab as often as not, and Shift+Tab would come as Tab.
+				modifiers = () if isUp else self._modifiersHeld()
+			self._unsent.append((keycode, isUp, echo, modifiers))
 			return
 		if isUp and keycode in self._keyboardDown and keycode not in self._xtestDown:
 			return
+		pressed = [] if isUp else [code for code in modifiers or () if code not in self._keycodesDown]
+		for code in pressed:
+			self._send(code, False, True)
+		if pressed:
+			self._modifiersFor[keycode] = pressed
+		self._send(keycode, isUp, echo)
+		if isUp:
+			for code in reversed(self._modifiersFor.pop(keycode, ())):
+				self._send(code, True, True)
+		self._display.flush()
+
+	def _send(self, keycode: int, isUp: bool, echo: bool) -> None:
 		if echo:
 			with self._lock:
 				self._echoes.append((time.monotonic(), keycode, isUp))
 		xtest.fake_input(self._display, X.KeyRelease if isUp else X.KeyPress, keycode)
-		self._display.flush()
+
+	def _modifiersHeld(self) -> tuple[int, ...]:
+		with self._lock:
+			translator = self._translator
+			if translator is None:
+				return ()
+			return tuple(
+				code for code in sorted(self._keyboardDown) if translator.translate(code)[0] in MODIFIER_VKS
+			)
 
 	def _typeKey(self, vkCode: int, extended: bool, isUp: bool) -> None:
 		"""Press or release a key as a keyboard of the X server's would, so that the grabs take it and

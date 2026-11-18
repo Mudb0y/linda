@@ -815,6 +815,66 @@ def reaches(key, timeout=3.0):
 	return False
 """
 
+#: Shift+Tab in browse mode, the Tab kept and sent back by NVDA a moment later as
+#: KeyboardInputGesture.send sends it, while the person still holds both keys; then let go of in
+#: each order. Each press of Tab the window gets, with whether Shift was down for it.
+SENT_BACK_CHILD = r"""
+import threading
+from Xlib import XK
+VK = x11.keyMap.VK
+first = makeWindow()
+source.setCapture("browse")
+time.sleep(0.5)
+
+def sendBack():
+	time.sleep(0.02)
+	shift = not source.keyState(VK["SHIFT"]) & 0x8000
+	if shift:
+		source.inject(VK["SHIFT"], 0, False, False)
+	if source.keyState(VK["TAB"]) & 0x8000:
+		source.inject(VK["TAB"], 0, False, True)
+	source.inject(VK["TAB"], 0, False, False)
+	source.inject(VK["TAB"], 0, False, True)
+	if shift:
+		source.inject(VK["SHIFT"], 0, False, True)
+
+def keepTab(event):
+	if event.captured and event.vkCode == VK["TAB"] and not event.isUp:
+		threading.Thread(target=sendBack).start()
+		return False
+	return True
+
+source._deliver = keepTab
+tab = app.keysym_to_keycode(XK.string_to_keysym("Tab"))
+result = {}
+for order in (("Shift_L", "Tab"), ("Tab", "Shift_L")):
+	while app.pending_events():
+		app.next_event()
+	kb.down("Shift_L")
+	kb.down("Tab")
+	time.sleep(0.15)
+	for name in order:
+		kb.up(name)
+	time.sleep(0.5)
+	tabs = []
+	while app.pending_events():
+		event = app.next_event()
+		if event.type == X.KeyPress and event.detail == tab:
+			tabs.append(bool(event.state & X.ShiftMask))
+	result[order[0] + " first"] = tabs
+source.stop()
+"""
+
+
+def test_keySentBackKeepsItsModifiers(tmp_path: Path):
+	# The X server drops a key sent while the keyboard holds it, so it goes once the keyboard lets
+	# go, by which time a person has often let go of Shift too.
+	with DesktopSession(tmp_path / "desktop", windowManager=False):
+		done = harness.runChild(tmp_path, SOURCE_CHILD + SENT_BACK_CHILD, timeout=60)
+	assert done.error is None, done.error
+	assert done.value == {"Shift_L first": [True], "Tab first": [True]}
+
+
 #: Space kept by NVDA in browse mode, its window going while the key is still down, then NVDA+Space
 #: in the window after it.
 WINDOW_GONE_CHILD = r"""
