@@ -332,6 +332,15 @@ while True:
 """
 
 
+def _logError(message: str) -> None:
+	"""log.exception, for a thread that must outlive it: logging an error reads NVDA's configuration,
+	for whether to play the error sound, and raises while a reset of the configuration leaves none."""
+	try:
+		log.exception(message)
+	except Exception:  # noqa: BLE001, S110
+		pass
+
+
 @dataclass
 class _Ticket:
 	"""A press under a grab of this source, which the X server holds the keyboard on until it is
@@ -738,44 +747,51 @@ class X11KeySource:
 			item = self._decisions.get()
 			if item is None:
 				return
-			event, ticket, keycode, modifiers = item
-			kept = False
-			if ticket is not None:
-				# Taken for held from the grabs as they were; whether the server held it decides.
-				ticket.settled.wait(CAPTURE_EXPIRY)
-				if not ticket.frozen:
-					# The application had it as it was typed, as it has every key not grabbed.
-					event = replace(event, captured=False, reachedApplication=True, nvdaKeyGrab=False)
-					ticket = None
-				elif ticket.answered:
-					if ticket.replayed:
-						# The application has had the key, as NVDA did not answer in time; NVDA acting on it
-						# as well would act twice.
-						continue
-					# Kept for NVDA without its answer, as the NVDA key's chords are: NVDA's still.
-					ticket = None
-				elif event.vkCode in KEPT_UNDER_GRAB:
-					kept = True
-				elif ticket.kind == CAPTURE_GRAB and not self._capturedNow(
-					keycode,
-					modifiers,
-					# Answered in time, before the X thread replays it by itself.
-					ticket.arrival + DOCUMENT_WAIT - CAPTURE_TIMEOUT / 2 if ticket.documentPending else None,
-				):
-					# Grabbed for either mode, and not one NVDA's mode takes at this moment.
-					ticket.verdict = True
-					self._wake()
-					event = replace(event, captured=False, reachedApplication=True)
-					ticket = None
 			try:
-				passed = self._deliver(event)
-			except Exception:
-				log.exception("Delivering a key")
-				passed = True
-			if ticket is not None:
-				# The Windows hook passes a key its callback does not block, whatever else is held.
-				ticket.verdict = passed is not False and not kept
+				self._decideKey(*item)
+			# Every key after this one reaches NVDA only through this thread, which must go on whatever
+			# one key raised. A press left unanswered is answered by the X thread in CAPTURE_TIMEOUT.
+			except Exception:  # noqa: BLE001
+				_logError("Deciding a key")
+
+	def _decideKey(self, event: KeyEvent, ticket: _Ticket | None, keycode: int, modifiers: int) -> None:
+		kept = False
+		if ticket is not None:
+			# Taken for held from the grabs as they were; whether the server held it decides.
+			ticket.settled.wait(CAPTURE_EXPIRY)
+			if not ticket.frozen:
+				# The application had it as it was typed, as it has every key not grabbed.
+				event = replace(event, captured=False, reachedApplication=True, nvdaKeyGrab=False)
+				ticket = None
+			elif ticket.answered:
+				if ticket.replayed:
+					# The application has had the key, as NVDA did not answer in time; NVDA acting on it
+					# as well would act twice.
+					return
+				# Kept for NVDA without its answer, as the NVDA key's chords are: NVDA's still.
+				ticket = None
+			elif event.vkCode in KEPT_UNDER_GRAB:
+				kept = True
+			elif ticket.kind == CAPTURE_GRAB and not self._capturedNow(
+				keycode,
+				modifiers,
+				# Answered in time, before the X thread replays it by itself.
+				ticket.arrival + DOCUMENT_WAIT - CAPTURE_TIMEOUT / 2 if ticket.documentPending else None,
+			):
+				# Grabbed for either mode, and not one NVDA's mode takes at this moment.
+				ticket.verdict = True
 				self._wake()
+				event = replace(event, captured=False, reachedApplication=True)
+				ticket = None
+		try:
+			passed = self._deliver(event)
+		except Exception:  # noqa: BLE001
+			_logError("Delivering a key")
+			passed = True
+		if ticket is not None:
+			# The Windows hook passes a key its callback does not block, whatever else is held.
+			ticket.verdict = passed is not False and not kept
+			self._wake()
 
 	def _findXtestDevices(self) -> None:
 		devices = self._display.xinput_query_device(xinput.AllDevices).devices

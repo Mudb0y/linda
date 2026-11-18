@@ -369,11 +369,44 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 """
 
 
-def blockHooks(directory: Path) -> dict[str, str]:
+#: A global plugin for these tests only: a reset of the configuration that leaves it missing for a
+#: second, rather than the tens of milliseconds reading nvda.ini takes, so that what reads it from
+#: another thread meanwhile surely does; and a command that records which key threads are running.
+RESET_PLUGIN = """
+import threading
+import time
+
+import config
+import globalPluginHandler
+from logHandler import log
+from scriptHandler import script
+
+
+class GlobalPlugin(globalPluginHandler.GlobalPlugin):
+	def __init__(self):
+		super().__init__()
+		build = config.conf._initBaseConf
+
+		def slowly(factoryDefaults=False):
+			log.info("The configuration is missing")
+			time.sleep(1)
+			build(factoryDefaults=factoryDefaults)
+			log.info("The configuration is back")
+
+		config.conf._initBaseConf = slowly
+
+	@script(gesture="kb:NVDA+shift+f11")
+	def script_keyThreads(self, gesture):
+		running = {thread.name for thread in threading.enumerate()}
+		log.info(f"Key threads: {sorted(running & {'keyboardWatch', 'X11KeySource decider'})}")
+"""
+
+
+def blockHooks(directory: Path, plugin: str = BLOCK_PLUGIN) -> dict[str, str]:
 	hooks = directory / "hooks"
 	(hooks / "globalPlugins").mkdir(parents=True)
 	(hooks / "synthDrivers").symlink_to(harness.HERE / "synthDrivers")
-	(hooks / "globalPlugins" / "blockProbe.py").write_text(BLOCK_PLUGIN)
+	(hooks / "globalPlugins" / "blockProbe.py").write_text(plugin)
 	return {"LINDA_TEST_HOOKS_DIR": str(hooks)}
 
 
@@ -394,6 +427,26 @@ def test_blockedMainThreadLeavesTheNVDAKeysWorking(
 	desktop.nvda.waitForLog("The main thread is free again", 5)
 	desktop.expect("Fixture window", since=mark)
 	keys.quit().assertClean(logNames=("nvda.log",))
+
+
+def test_keysTypedDuringAResetLeaveTheCommandsWorking(
+	desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path
+):
+	keys = KeySession(desktop, tmp_path, "desktop", env=blockHooks(tmp_path, RESET_PLUGIN))
+	launch = desktop.nvda
+	keyboard.press(keys.chord("control+r"))
+	launch.waitForLog("The configuration is missing", 5)
+	# NVDA reads its configuration for every key, and logging the failure reads it again.
+	keyboard.type("xy")
+	launch.waitForLog("The configuration is back", 5)
+	time.sleep(1)
+	mark = desktop.mark()
+	keyboard.press(keys.chord("t"))
+	desktop.expect("Fixture window", since=mark)
+	launch = keys.quit()
+	# NVDA failing those keys is logged; the thread that hands NVDA its keys dying of it is not.
+	launch.assertClean(ignoring=("logErrors",), logNames=("nvda.log",))
+	assert "Exception in thread X11KeySource decider" not in launch.text("nvda.log")
 
 
 @pytest.mark.parametrize("chord", (False, True), ids=("nvdaKey", "chordAfterAPassedKey"))
