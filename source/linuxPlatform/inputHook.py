@@ -316,10 +316,11 @@ def _onKey(event: KeyEvent) -> bool:
 	finally:
 		_delivering.event = None
 	if event.vkCode == VK_CAPITAL and _source is not None and not event.repeat:
-		if not event.isUp and not event.reachedApplication and not passed:
+		if not event.isUp and not passed:
 			# On Windows a key the hook blocks toggles nothing. The X server locks Caps Lock as the key goes
 			# down, whatever the grab does, and unlocks it as the key comes up when it was locked before;
-			# it is put back both times.
+			# it is put back both times. So it is when the application had the key too, as every key
+			# reaches the program that holds the keyboard, an open menu or a password prompt.
 			_capsLockBlockedWasOn = event.capsLockWasOn
 			_source.setCapsLock(event.capsLockWasOn)
 		elif event.isUp and _capsLockBlockedWasOn is not None:

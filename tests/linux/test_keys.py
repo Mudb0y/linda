@@ -660,6 +660,27 @@ def test_chordAfterInputHelpOffInTheSameHoldIsNVDAs(
 	keys.quit().assertClean(logNames=("nvda.log",))
 
 
+def test_capsLockChordInAnOpenMenuLeavesTheLockAlone(
+	desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path
+):
+	keys = KeySession(desktop, tmp_path, "laptop")
+	# The menu holds the keyboard, so no grab of NVDA's becomes active and every key reaches the menu
+	# too; the X server toggles Caps Lock as it goes down whatever.
+	keyboard.press("F10")
+	time.sleep(0.5)
+	keyboard.press("Down")
+	time.sleep(0.5)
+	mark = desktop.mark()
+	keyboard.press(keys.chord("t"))
+	desktop.expect("Fixture window", since=mark)
+	time.sleep(0.5)
+	locked = desktopSession.capsLockIsOn()
+	keyboard.press("Escape")
+	keyboard.press("Escape")
+	assert not locked, "Caps Lock was left on"
+	keys.quit().assertClean(logNames=("nvda.log",))
+
+
 @pytest.mark.parametrize("layoutName", LAYOUTS)
 def test_controlCancelsReading(desktop: DesktopSession, tmp_path: Path, layoutName: str):
 	keys = KeySession(
