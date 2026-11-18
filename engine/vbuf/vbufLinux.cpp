@@ -54,6 +54,8 @@ class LinuxBuffer final: public VBufStorage_buffer_t {
 	// The fields an update batch replaces, as backend.cpp's list of the subtrees being re-rendered.
 	VBufStorage_controlFieldNodeList_t workingInvalidSubtreesList;
 
+	VBufStorage_controlFieldNode_t* root() { return dynamic_cast<VBufStorage_controlFieldNode_t*>(rootNode); }
+
 	// backend.cpp VBufBackend_t::reuseExistingNodeInRender, unchanged.
 	VBufStorage_controlFieldNode_t* reuseExistingNodeInRender(VBufStorage_controlFieldNode_t* parent, VBufStorage_fieldNode_t* previous, int docHandle, int ID) {
 		if(!parent) return nullptr;
@@ -310,6 +312,17 @@ int applyUpdate(LinuxBuffer& b, const uint16_t* stream, size_t length) {
 			auto a = replacements[i].first;
 			auto c = replacements[j].first;
 			if(a == c || isStrictDescendant(a, c)) return discardAll();
+		}
+	}
+	// replaceSubtrees makes room for an identifier the buffer already has by removing the field that
+	// holds it and keeping its children, which it cannot do for the root. It then leaves the new field
+	// out of the identifier map, which still names the root, and a later update frees the wrong field
+	// or never returns. So only a replacement of the root itself may carry the root's identifier.
+	if(auto root = b.root()) {
+		int rootDocHandle, rootID;
+		root->getIdentifier(&rootDocHandle, &rootID);
+		for(auto& r: replacements) {
+			if(r.first != root && r.second->getControlFieldNodeWithIdentifier(rootDocHandle, rootID)) return discardAll();
 		}
 	}
 	std::map<VBufStorage_fieldNode_t*, VBufStorage_buffer_t*> m;

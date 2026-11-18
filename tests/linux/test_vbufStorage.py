@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import textwrap
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
@@ -509,6 +510,8 @@ def test_reuseKeepsTheField(vbuf: ModuleType, buffers):
 		replace(1, control(1, reuse(77))),
 		"S1,2;C1,2,1,-1;E",
 		"S1,2;C1,2,1,0;T-1:E",
+		replace(2, control(2, text("x"), control(1, text("y")))),
+		replace(3, control(1, text("y"))),
 	],
 )
 def test_badBatchChangesNothing(vbuf: ModuleType, buffers, batch: str):
@@ -555,18 +558,39 @@ def nested(depth: int, firstID: int = 1) -> str:
 	return "".join(f"C1,{ID},0,0;" for ID in range(firstID, firstID + depth)) + text("Bottom.") + "E" * depth
 
 
-def test_nestingTooDeepForTheStackIsRefused(tmp_path: Path, library: Path):
-	script = tmp_path / "deep.py"
-	script.write_text(
-		"\n\n".join(
-			inspect.getsource(f)
-			for f in (units, string, attributes, text, replace, nested, Stream, loadBinding)
-		)
-		+ f"""
+def runScript(tmp_path: Path, library: Path, body: str) -> dict:
+	"""Run body in a process of its own, where vbuf is the binding, the stream writers are defined and
+	result is printed at the end, so that a crash or a hang fails the test rather than ending it.
 
-import ctypes, importlib.util, json, sys
-vbuf = loadBinding({str(BINDING)!r}, sys.argv[1])
-result = {{}}
+	:return: result.
+	"""
+	script = tmp_path / "script.py"
+	writers = (units, string, attributes, control, text, replace, reuse, nested, Stream, loadBinding)
+	script.write_text(
+		"\n\n".join(inspect.getsource(f) for f in writers)
+		+ "\n\nimport ctypes, importlib.util, json, sys\n"
+		+ f"vbuf = loadBinding({str(BINDING)!r}, sys.argv[1])\n"
+		+ "result = {}\n"
+		+ textwrap.dedent(body)
+		+ "\nprint(json.dumps(result))\n",
+		encoding="utf-8",
+	)
+	done = subprocess.run(
+		[sys.executable, "-I", str(script), str(library)],
+		capture_output=True,
+		text=True,
+		timeout=60,
+		check=False,
+	)
+	assert done.returncode == 0, f"{harness.describeExit(done.returncode)}:\n{done.stderr[-4000:]}"
+	return json.loads(done.stdout)
+
+
+def test_nestingTooDeepForTheStackIsRefused(tmp_path: Path, library: Path):
+	result = runScript(
+		tmp_path,
+		library,
+		f"""
 for name, depth in (("tooDeep", {TOO_DEEP}), ("deepest", {MAX_NESTING}), ("deeper", {MAX_NESTING + 1})):
 	handle = vbuf.create()
 	try:
@@ -581,24 +605,48 @@ for name, depth in (("tooDeep", {TOO_DEEP}), ("deepest", {MAX_NESTING}), ("deepe
 		result["shallowUpdate"] = vbuf.update(handle, Stream(replace({MAX_NESTING}, nested(1, {MAX_NESTING}))))
 		result["deepUpdate"] = vbuf.update(handle, Stream(replace({MAX_NESTING}, nested(2, {MAX_NESTING}))))
 	vbuf.destroy(handle)
-print(json.dumps(result))
 """,
-		encoding="utf-8",
 	)
-	done = subprocess.run(
-		[sys.executable, "-I", str(script), str(library)],
-		capture_output=True,
-		text=True,
-		timeout=300,
-		check=False,
-	)
-	assert done.returncode == 0, f"{harness.describeExit(done.returncode)}:\n{done.stderr[-4000:]}"
-	result = json.loads(done.stdout)
 	assert result["tooDeep"] is None
 	assert result["deeper"] is None
 	assert result["deepest"] > MAX_NESTING
 	assert result["shallowUpdate"] is True
 	assert result["deepUpdate"] is False
+
+
+def test_aFieldWithTheRootsIdentifierLeavesLaterUpdatesWhole(tmp_path: Path, library: Path):
+	# Each batch carrying the root's identifier below the root once broke the storage's identifier
+	# map: the next replacement of the root never returned, and replacing the fields that carried it
+	# freed memory that was never allocated.
+	result = runScript(
+		tmp_path,
+		library,
+		f"""
+		def textOf(handle):
+			return vbuf.VBuf_getTextInRange(handle, 0, vbuf.lib().VBuf_getTextLength(handle), False)
+		page = {control(1, control(2, text("a")), control(3, text("b")))!r}
+		handle = vbuf.create()
+		vbuf.build(handle, Stream(page))
+		result["clash"] = vbuf.update(handle, Stream({replace(2, control(2, text("a"), control(1, text("x"))))!r}))
+		result["root"] = vbuf.update(handle, Stream({replace(1, control(1, control(2, text("c"))))!r}))
+		result["afterRoot"] = textOf(handle)
+		vbuf.destroy(handle)
+		handle = vbuf.create()
+		vbuf.build(handle, Stream(page))
+		for ID, value in ((2, "x"), (3, "y")):
+			vbuf.update(handle, Stream(replace(ID, control(ID, control(1, text(value))))))
+		result["fields"] = [vbuf.update(handle, Stream(replace(ID, control(ID, text(value))))) for ID, value in ((2, "c"), (3, "d"))]
+		result["afterFields"] = textOf(handle)
+		vbuf.destroy(handle)
+		""",
+	)
+	assert result == {
+		"clash": False,
+		"root": True,
+		"afterRoot": "c",
+		"fields": [True, True],
+		"afterFields": "cd",
+	}
 
 
 def test_badHandlesGetZero(vbuf: ModuleType, buffers):
