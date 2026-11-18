@@ -83,7 +83,7 @@ def main() -> NoReturn:
 
 	import config
 	import logHandler
-	from linuxPlatform import sessionClient
+	from linuxPlatform import idleInhibitor, sessionClient
 	from logHandler import log
 
 	# Before anything here can start a program, which must not register in this copy's name.
@@ -220,6 +220,7 @@ def main() -> NoReturn:
 		# for this one to be entirely gone, as it waits on the mutex on Windows.
 		log.info("NVDA exit")
 	sessionClient.stop()
+	idleInhibitor.stop()
 	# The copy a restart started sends SIGTERM as it takes over, and as the interpreter finalises it puts
 	# the handler's signals back to their default action, so that a copy slower to finalise than the new
 	# one to start was ended by the signal instead of exiting cleanly. It is leaving anyway, and the new

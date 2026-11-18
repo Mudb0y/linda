@@ -254,6 +254,66 @@ def test_cancelledLogoutLeavesLindaRunning(session: MateSession):
 			inhibitor.close_sync(None)
 
 
+def isIdleInhibited(session: MateSession) -> bool:
+	"""Whether mate-session holds an idle inhibitor, which keeps its presence, and with it the screen
+	saver and power manager that follow it, from going idle."""
+	reply = session.busCall(
+		"--dest=org.gnome.SessionManager",
+		"/org/gnome/SessionManager",
+		"org.gnome.SessionManager.IsInhibited",
+		"uint32:8",
+	)
+	assert reply.returncode == 0, reply.stderr
+	return "boolean true" in reply.stdout
+
+
+def waitForIdleInhibited(session: MateSession, linda: harness.Launch, wanted: bool) -> None:
+	deadline = time.monotonic() + 10
+	while isIdleInhibited(session) != wanted:
+		assert time.monotonic() < deadline, (
+			f"idle inhibited is not {wanted}\n{linda.text('nvda.log')[-6000:]}"
+		)
+		time.sleep(0.05)
+
+
+def test_sayAllKeepsTheSessionAwake(session: MateSession):
+	# The transcript synth takes 10 ms a character, so that say all reads for minutes.
+	session.variables.update({"LINDA_TRANSCRIPT_MODE": "timed", "LINDA_TRANSCRIPT_MS_PER_CHAR": "10"})
+	session.lindaEntry()
+	session.start()
+	session.waitForPhase("RUNNING")
+	linda = session.waitForLinda()
+	linda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	document = session.home / "long.txt"
+	document.write_text("".join(f"Line {number} of a document read aloud.\n" for number in range(400)))
+	mark = len(linda.spoken())
+	session._spawn(["pluma", str(document)], "pluma.log")
+	waitForSpokenStart(linda, "edit multi line Line 0", mark, 30)
+	assert not isIdleInhibited(session)
+
+	session.press("Insert+Down")
+	waitForIdleInhibited(session, linda, True)
+	assert "kept awake through org.gnome.SessionManager" in linda.text("nvda.log")
+	session.press("Control_L")
+	waitForIdleInhibited(session, linda, False)
+
+	# Say all on a menu item, which has no caret to read from: nothing is read and nothing is held.
+	mark = len(linda.spoken())
+	session.press("F10")
+	waitForSpokenStart(linda, "File sub Menu", mark, 10)
+	session.press("Insert+Down")
+	time.sleep(2)
+	assert not isIdleInhibited(session)
+	session.press("Escape")
+
+	# A killed Linda's inhibitor goes with its connection to the bus.
+	session.press("Insert+Down")
+	waitForIdleInhibited(session, linda, True)
+	linda.process.kill()
+	linda.process.wait(EXIT_BOUND)
+	waitForIdleInhibited(session, linda, False)
+
+
 def test_restartedCopyIsNotTheSessionsClient(session: MateSession):
 	"""A copy NVDA starts in its own place gets no startup ID, so it runs as one started by hand."""
 	session.variables["LINDA_BOOT_PROBE"] = "restart"

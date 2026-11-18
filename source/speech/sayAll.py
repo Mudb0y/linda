@@ -8,6 +8,7 @@ from abc import ABCMeta, abstractmethod  # noqa: I001
 from enum import IntEnum
 from typing import TYPE_CHECKING
 from collections.abc import Callable
+import sys
 import weakref
 import garbageHandler
 from logHandler import log
@@ -233,7 +234,14 @@ class _TextReader(_Reader):
 		self.reader = None
 		super().__init__(handler)
 		self.trigger = SayAllProfileTrigger()
-		self.reader = self.getInitialTextInfo()
+		try:
+			self.reader = self.getInitialTextInfo()
+		except BaseException:
+			if sys.platform != "win32":
+				# The request _Reader made to keep the session awake, which stop, finding no reader, never
+				# ends; on Linux it holds an inhibitor, and the screen would never lock.
+				systemUtils.resetThreadExecutionState()
+			raise
 		# #10899: SayAll profile can't be activated earlier because they may not be anything to read
 		self.trigger.enter()
 		self.speakTextInfoState = SayAllHandler._makeSpeakTextInfoState(self.reader.obj)

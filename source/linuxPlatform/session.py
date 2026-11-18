@@ -59,16 +59,36 @@ def isProcessWithheld(processID: int) -> bool:
 def _warnIdleNotPrevented() -> None:
 	log.warning(
 		"NVDA cannot keep this Linux session from going idle,"
-		" so the screen may blank or lock during say all or while only a braille display is used.",
+		" so the screen may blank or lock during say all.",
 	)
 
 
-def preventIdle() -> None:
-	"""Keep the session from going idle, as NVDA does on Windows for braille keys and say all.
+@functools.cache
+def _warnBrailleKeysNotActivity() -> None:
+	log.warning(
+		"NVDA cannot count a braille display's keys as activity in this Linux session,"
+		" so the screen may blank or lock while only a braille display is used.",
+	)
 
-	This holds nothing: org.freedesktop.ScreenSaver's SimulateUserActivity and Inhibit on the session
-	bus are what would count a braille key as activity and keep the session awake for say all. Missing
-	them only lets the screen blank, so it is warned about once and never stops the key or the say all
-	that asked.
+
+def preventIdle(persistent: bool) -> None:
+	"""Keep the session from going idle, as NVDA does on Windows for say all and braille keys.
+
+	A persistent request, say all's, holds an idle inhibitor through linuxPlatform.idleInhibitor until
+	allowIdle ends it. One that is not, a braille key's, would count as the user's activity on Windows;
+	nothing on the session bus does that for every desktop, so it is warned of once and never stops
+	the key that asked.
 	"""
-	_warnIdleNotPrevented()
+	if persistent:
+		from linuxPlatform import idleInhibitor
+
+		idleInhibitor.hold()
+	else:
+		_warnBrailleKeysNotActivity()
+
+
+def allowIdle() -> None:
+	"""End a persistent request preventIdle counted."""
+	from linuxPlatform import idleInhibitor
+
+	idleInhibitor.release()

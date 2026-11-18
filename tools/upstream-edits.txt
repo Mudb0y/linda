@@ -719,6 +719,12 @@ source/screenCurtain/_screenCurtain.py
   it found, in place of the Magnification API; enabling is tried once, as
   an X server either has ramps to set or does not, and enabled reads false
   once the curtain was lost, as when the X server closed its connection
+source/speech/sayAll.py
+  Linux runtime: a text reader whose first position cannot be made, as on
+  an object without a caret, ends the request to keep the session awake
+  that it made as it began, which stop never ends, since on Linux the
+  request holds an idle inhibitor and the screen would never lock
+  every platform: imports sys for that test of the platform
 source/synthDriverHandler.py
   Linux runtime: getSynthList skips NVDA's own copies of
   the Windows-only driver modules (mssp, oneCore, sapi4_32, sapi5,
@@ -764,9 +770,11 @@ source/systemUtils.py
   would take it to mean input transforms are supported, is never built on
   Linux. hasSyswow64Dir() and
   _isSystemClockSecondsVisible() are False; the configuration directory
-  opens through xdg-open; preventSystemIdle() warns once that the session may
-  still go idle and returns, as say all and braille keys call it, and
-  resetThreadExecutionState() has nothing to release. ExecAndPump waits for
+  opens through xdg-open; preventSystemIdle(persistent=True), say all's,
+  counts a request for linuxPlatform.idleInhibitor, which holds an idle
+  inhibitor while any stands, and resetThreadExecutionState() ends one;
+  a braille key's preventSystemIdle() warns once that it does not count as
+  activity. ExecAndPump waits for
   its thread while yielding to the wx main loop instead of pumping Windows
   messages. The process token, logon session, elevation and desktop name
   functions still fail on Linux through the Windows stand-ins

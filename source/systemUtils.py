@@ -292,7 +292,7 @@ def preventSystemIdle(preventDisplayTurningOff: bool | None = None, persistent: 
 		# Say all and every braille key ask this; a session that may still idle must not stop either.
 		from linuxPlatform import session
 
-		return session.preventIdle()
+		return session.preventIdle(persistent)
 	if preventDisplayTurningOff is None:
 		import config
 
@@ -307,8 +307,9 @@ def preventSystemIdle(preventDisplayTurningOff: bool | None = None, persistent: 
 def resetThreadExecutionState() -> None:
 	"""Reset the thread execution state to the default."""
 	if sys.platform != "win32":
-		# preventSystemIdle holds nothing on Linux, so there is nothing to release.
-		return
+		from linuxPlatform import session
+
+		return session.allowIdle()
 	winBindings.kernel32.SetThreadExecutionState(winKernel.ES_CONTINUOUS)
 
 
