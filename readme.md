@@ -260,11 +260,18 @@ When you report a problem, say which distribution and desktop you use and attach
 
 ## Building and working on it
 
-Everything goes through the flake.
+The flake is how Linda is built and tested today.
 
 * `nix build` builds the package.
 * `nix develop` opens a shell with everything the source tree needs, and `tools/build-artifacts` there builds what the tree runs with.
 * The tests never touch your desktop. `tests/linux/rig` runs a command in a sandbox with its own display, session bus, accessibility bus and sound server, so `nix develop -c tests/linux/rig python -m pytest tests/linux` is safe to run with your own screen reader talking.
+
+The package itself is built by a Meson build, which a distribution can use too.
+`meson setup`, `meson compile` and `meson install` install the `linda` and `linda-say` commands, NVDA's Python tree under `share/linda/source`, the three native libraries under `lib/linda`, a desktop entry, the software centre's metadata, manual pages and the licence.
+The build needs Python 3.13 with the modules Linda imports, cargo, a C++ compiler, PipeWire, AT-SPI, ICU and liblouis, and an option naming a copy of NV Access's nvda-cldr data.
+Without other options it speaks with the distribution's own eSpeak NG, which has not been tested yet; the flake uses the eSpeak NG that NVDA pins.
+`meson.options` lists every option.
+There are no distribution packages yet.
 
 Linda stays close to NVDA on purpose, so that NVDA's new releases can be merged in.
 NVDA's files are changed as little as possible, each change is listed with its reason in `tools/upstream-edits.txt`, and `tools/check-upstream-edits` fails when the list and the tree disagree.
