@@ -823,6 +823,10 @@ def test_sayAllStartsReadingFromTheCaret(tmp_path):
 		}
 		for reader in started:
 			reader.stop()
+		from linuxPlatform import idleInhibitor
+
+		# Waits for the inhibitor's thread, which looked for a service and found none.
+		idleInhibitor.stop()
 		""",
 		env=xdgEnv(tmp_path),
 	)

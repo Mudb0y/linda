@@ -66,8 +66,8 @@ def _warnIdleNotPrevented() -> None:
 @functools.cache
 def _warnBrailleKeysNotActivity() -> None:
 	log.warning(
-		"NVDA cannot count a braille display's keys as activity in this Linux session,"
-		" so the screen may blank or lock while only a braille display is used.",
+		"NVDA cannot count a braille display's keys as activity, so this Linux session may go idle"
+		" and the screen blank or lock while only a braille display is used.",
 	)
 
 
