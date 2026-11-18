@@ -1207,6 +1207,40 @@ def test_addOnStoreCacheLeavesTheDefaultConfiguration(launches, tmp_path: Path):
 	assert moved.read_text(encoding="utf-8") == '{"showWarning": false, "addonSettings": {}}'
 
 
+@pytest.mark.parametrize("how", ["readOnly", "isAFile"])
+def test_unusableCacheDirectoryLeavesTheCachesInTheConfiguration(launches, tmp_path: Path, how: str):
+	_rigLockPath()
+	configDir = tmp_path / "xdgConfig" / "linda"
+	configDir.mkdir(parents=True)
+	(configDir / "nvda.ini").write_text(CONFIG_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+	cacheHome = tmp_path / "xdgCache"
+	if how == "readOnly":
+		# As a directory left owned by root by a program run under sudo would be.
+		cacheHome.mkdir(mode=0o555)
+	else:
+		cacheHome.write_text("", encoding="utf-8")
+	try:
+		nvda = launches(
+			how,
+			"-f",
+			str(tmp_path / "launches" / how / "nvda.log"),
+			"--debug-logging",
+			env={
+				"LINDA_BOOT_PROBE": "exit",
+				"XDG_CONFIG_HOME": str(configDir.parent),
+				"XDG_CACHE_HOME": str(cacheHome),
+			},
+		)
+		nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+		assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+		# The launcher says on standard error that it could not make the cache directory.
+		nvda.assertClean(ignoring={"stderr"}, logNames=("nvda.log",))
+		assert (configDir / "addonStore").is_dir()
+	finally:
+		if cacheHome.is_dir():
+			cacheHome.chmod(0o755)
+
+
 def test_chosenConfigurationKeepsItsAddOnStoreCache(start: Start, tmp_path: Path):
 	cacheHome = tmp_path / "xdgCache"
 	defaultConfig = tmp_path / "xdgConfig" / "linda"

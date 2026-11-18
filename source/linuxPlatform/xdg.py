@@ -64,9 +64,26 @@ def isDefaultConfigDir(configDir: str) -> bool:
 	return os.path.realpath(configDir) == os.path.realpath(userConfigDir())
 
 
+def _isUsableDir(path: str) -> bool:
+	"""Whether path is a directory this user can make files in, once made if it was missing."""
+	try:
+		os.makedirs(path, exist_ok=True)
+	except OSError:
+		return False
+	return os.path.isdir(path) and os.access(path, os.W_OK | os.X_OK)
+
+
 def cacheDirFor(configDir: str) -> str:
-	"""Where the caches of the configuration in configDir belong."""
-	return userCacheDir() if isDefaultConfigDir(configDir) else configDir
+	"""Where the caches of the configuration in configDir belong.
+
+	A cache directory that cannot be made or written, as one left owned by root by a program run under
+	sudo, or on a mount that is missing or read only, leaves the caches in configDir, where they were
+	before they had a directory of their own: a cache is no reason for NVDA not to start.
+	"""
+	if not isDefaultConfigDir(configDir):
+		return configDir
+	cacheDir = userCacheDir()
+	return cacheDir if _isUsableDir(cacheDir) else configDir
 
 
 def moveCachesOutOfConfigDir() -> list[str]:
