@@ -24,11 +24,11 @@ What works today:
 * The add-on store. An add-on that keeps to NVDA's own interfaces works. One that calls Windows directly does not and cannot.
 * Scripts that speak through Orca keep working: while Linda runs it answers `PresentMessage` on `org.gnome.Orca.Service`.
 * `linda say`, which speaks one sentence from the command line and exits.
+* Braille displays, through BRLTTY.
 
 What does not work yet:
 
 * Wayland sessions. Linda needs an X11 session.
-* Braille displays.
 * The login screen and screen lockers.
 * The parts of NVDA built on Windows services: the magnifier, sound split, audio ducking, touch, Windows OCR, the installer, portable copies and the update check.
 * Remote Access starts and can host or join a relay server, but nobody has yet controlled one machine from another with it.
@@ -88,6 +88,12 @@ mkdir -p ~/.config/nix
 
 ```
 echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
+```
+
+For braille, BRLTTY has to be running and driving your display, as your distribution's `brltty` package usually does once the display is plugged in, and you have to be in the `brlapi` group, which may use BRLTTY's BrlAPI. This adds you to the group; sign out and in afterwards. On NixOS, `services.brltty.enable = true;` runs BRLTTY and makes the group instead, and adding `"brlapi"` to your user's `extraGroups` puts you in it. Linda's default braille display, Automatic, then finds BRLTTY by itself.
+
+```
+sudo usermod -aG brlapi $USER
 ```
 
 ### NixOS
