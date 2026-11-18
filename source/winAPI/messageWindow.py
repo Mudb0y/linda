@@ -85,7 +85,11 @@ class _MessageWindow(windowUtils.CustomWindow):
 		if sys.platform != "win32":
 			# Nothing sends NVDA window messages on Linux, so there is no window. A new instance asks this
 			# one to quit with SIGTERM, and Linux announces power, display and device changes through
-			# UPower, RandR and udev, none of which is a window message.
+			# UPower, RandR and udev, none of which is a window message; power changes are heard from
+			# UPower instead.
+			from linuxPlatform import power
+
+			power.start()
 			return
 		super().__init__(windowName)
 		_displayTracking.initialize()
@@ -93,6 +97,9 @@ class _MessageWindow(windowUtils.CustomWindow):
 
 	def destroy(self) -> None:
 		if sys.platform != "win32":
+			from linuxPlatform import power
+
+			power.stop()
 			return
 		super().destroy()
 

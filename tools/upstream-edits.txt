@@ -711,9 +711,11 @@ source/winAPI/dpiAwareness.py
   display by itself and a process has no DPI awareness to declare; core.main
   calls it on every run from source
 source/winAPI/messageWindow.py
-  Linux runtime: _MessageWindow creates no window and its destroy() does nothing, as
-  no other process sends NVDA window messages there; core.main still creates
-  and destroys it
+  Linux runtime: _MessageWindow creates no window, as no other process sends
+  NVDA window messages there; core.main still creates and destroys it, and
+  its creation starts and its destroy() stops linuxPlatform.power, which
+  hears UPower say the charger was plugged in or pulled out and reports it
+  as WM_POWERBROADCAST does on Windows
   every platform: Windows runs the destroy() override, which there calls
   CustomWindow's destroy() and nothing else
 source/winInputHook.py
@@ -724,7 +726,9 @@ source/winKernel.py
   Linux runtime: GetTimeFormatEx and GetDateFormatEx go to
   linuxPlatform.posixLocale, which has ICU write the time and the date for
   the locale the environment names for dates and times. Through them works
-  the date and time command, NVDA+F12
+  the date and time command, NVDA+F12. GetSystemPowerStatus goes to
+  linuxPlatform.power, which fills SYSTEM_POWER_STATUS from UPower's
+  display device; through it works report battery status, NVDA+shift+B
 source/winUser.py
   Linux runtime: getKeyState, keybd_event and getKeyNameText go to
   linuxPlatform.inputHook, which answers from the X key source and sends

@@ -227,6 +227,10 @@ def closeHandle(*args):
 
 
 def GetSystemPowerStatus(sps: "SystemPowerStatus") -> int:
+	if sys.platform != "win32":
+		from linuxPlatform import power
+
+		return power.getSystemPowerStatus(sps)
 	return winBindings.kernel32.GetSystemPowerStatus(ctypes.byref(sps))
 
 
