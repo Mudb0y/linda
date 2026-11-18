@@ -74,6 +74,10 @@ def _runtimeDir() -> str:
 	path = os.environ.get("XDG_CACHE_HOME", "")
 	if not os.path.isabs(path):
 		path = os.path.join(os.path.expanduser("~"), ".cache")
+	# Not the cache home itself, where APP_NAME is the cache directory: that is made at whatever mode
+	# the umask gives, which the lock refuses, and emptied by whoever clears caches, which would let a
+	# second copy start beside this one.
+	path = os.path.join(path, f"{APP_NAME}-runtime")
 	os.makedirs(path, 0o700, exist_ok=True)
 	return path
 

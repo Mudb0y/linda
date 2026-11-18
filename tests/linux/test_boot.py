@@ -836,10 +836,14 @@ def test_lockWithoutRuntimeDirectoryIsInTheUsersCache(monkeypatch, tmp_path: Pat
 	# As under su or sudo. No other user can make this directory first, as one could in /tmp.
 	monkeypatch.delenv("XDG_RUNTIME_DIR")
 	monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-	assert singleInstance.lockFilePath().startswith(str(tmp_path / "cache" / "linda") + os.sep)
+	assert singleInstance.lockFilePath().startswith(
+		str(tmp_path / "cache" / "linda-runtime" / "linda") + os.sep
+	)
 	monkeypatch.delenv("XDG_CACHE_HOME")
 	monkeypatch.setenv("HOME", str(tmp_path / "home"))
-	assert singleInstance.lockFilePath().startswith(str(tmp_path / "home" / ".cache" / "linda") + os.sep)
+	assert singleInstance.lockFilePath().startswith(
+		str(tmp_path / "home" / ".cache" / "linda-runtime" / "linda") + os.sep
+	)
 
 
 @pytest.mark.parametrize(
@@ -1239,6 +1243,36 @@ def test_unusableCacheDirectoryLeavesTheCachesInTheConfiguration(launches, tmp_p
 	finally:
 		if cacheHome.is_dir():
 			cacheHome.chmod(0o755)
+
+
+def test_startsWithoutARuntimeDirectoryOnceTheCacheDirectoryExists(launches, tmp_path: Path):
+	_rigLockPath()
+	configDir = tmp_path / "xdgConfig" / "linda"
+	configDir.mkdir(parents=True)
+	(configDir / "nvda.ini").write_text(CONFIG_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+	cacheHome = tmp_path / "xdgCache"
+	# As a start with XDG_RUNTIME_DIR set leaves it, under the usual umask.
+	(cacheHome / "linda").mkdir(parents=True, mode=0o755)
+	(cacheHome / "linda").chmod(0o755)
+	# As under su or sudo, or on a system without pam_systemd or elogind.
+	nvda = launches(
+		"noRuntimeDir",
+		"-f",
+		str(tmp_path / "launches" / "noRuntimeDir" / "nvda.log"),
+		"--debug-logging",
+		env={
+			"LINDA_BOOT_PROBE": "exit",
+			"XDG_CONFIG_HOME": str(configDir.parent),
+			"XDG_CACHE_HOME": str(cacheHome),
+			"XDG_RUNTIME_DIR": None,
+		},
+	)
+	nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+	# GTK's accessibility bridge puts a socket in the cache home too, and says on standard error when
+	# a test's scratch path makes its name too long.
+	nvda.assertClean(ignoring={"stderr"}, logNames=("nvda.log",))
+	assert (cacheHome / "linda" / "addonStore").is_dir()
 
 
 def test_chosenConfigurationKeepsItsAddOnStoreCache(start: Start, tmp_path: Path):
