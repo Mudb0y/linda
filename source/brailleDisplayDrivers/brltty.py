@@ -109,15 +109,13 @@ class BrailleDisplayDriver(braille.display.driver.BrailleDisplayDriver):
 					brlapiClient.watch()
 				raise
 			self._con = self._link.connection
-			if wx.IsMainThread():
-				self._startKeyCheckTimer()
-			else:
-				# Automatic detection makes the driver on its own thread, and wx starts timers on the main one.
-				wx.CallAfter(self._startKeyCheckTimer)
+			# Automatic detection makes the driver on its own thread, and wx starts timers on the main one.
+			brlapiClient.onMainThread(self._startKeyCheckTimer)
 
 		def _startKeyCheckTimer(self):
 			with self._timerLock:
-				if self._closed:
+				# Without a wx application there is no main loop for the timer to run in.
+				if self._closed or wx.GetApp() is None:
 					return
 				self._keyCheckTimer = wx.PyTimer(self._handleKeyPresses)
 				self._keyCheckTimer.Start(KEY_CHECK_INTERVAL)
@@ -130,7 +128,7 @@ class BrailleDisplayDriver(braille.display.driver.BrailleDisplayDriver):
 				return
 			self._lost = True
 			log.warning("Lost the connection to BRLTTY", exc_info=True)  # noqa: LOG014
-			wx.CallAfter(self._replaceAfterLoss)
+			brlapiClient.onMainThread(self._replaceAfterLoss)
 
 		def _replaceAfterLoss(self):
 			if braille.handler is None or braille.handler.display is not self:

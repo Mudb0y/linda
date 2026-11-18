@@ -218,11 +218,31 @@ def deviceMatch():
 	)
 
 
+def onMainThread(call: Callable[[], Any]) -> None:
+	"""Run call on the main thread: now if this is it, or from wx's main loop once it gets there. Without
+	a wx application there is no main loop to run it, and it is dropped.
+
+	wx makes and starts timers only on the main thread, and the scan and Automatic's driver run on the
+	detection thread. wx.IsMainThread cannot tell before a wx application exists.
+	"""
+	if threading.current_thread() is threading.main_thread():
+		call()
+		return
+	import wx
+
+	if wx.GetApp() is not None:
+		wx.CallAfter(call)
+
+
 def scan(limitToDevices: list[str] | None = None, **_kwargs):
 	"""bdDetect's device scanner for BRLTTY: offers it to the detection while its socket is there."""
 	if limitToDevices and DRIVER_NAME not in limitToDevices:
 		return
-	_watcher.start()
+	try:
+		onMainThread(_watcher.start)
+	except Exception:  # noqa: BLE001
+		# The detection logs whatever a scanner raises as an error; retrying later is only a nicety.
+		log.debugWarning("Could not start looking for BRLTTY again", exc_info=True)
 	if not isReachable():
 		return
 	_watcher.noteAttempt()
@@ -230,7 +250,11 @@ def scan(limitToDevices: list[str] | None = None, **_kwargs):
 
 
 class _Watcher:
-	"""Tries BRLTTY again while no display is in use; see the module's description."""
+	"""Tries BRLTTY again while no display is in use; see the module's description.
+
+	A wx timer on the main thread rather than a thread of its own: it runs only while NVDA's main loop
+	does, leaves no thread behind for terminate to stop, and stops itself once there is nothing to do.
+	"""
 
 	def __init__(self) -> None:
 		self._timer = None
@@ -238,11 +262,10 @@ class _Watcher:
 		self._retry: threading.Thread | None = None
 
 	def start(self) -> None:
-		"""Start looking, from any thread; the looking stops by itself once there is nothing to do."""
+		"""Start looking; on the main thread only, through onMainThread."""
 		import wx
 
-		if not wx.IsMainThread():
-			wx.CallAfter(self.start)
+		if wx.GetApp() is None:
 			return
 		if self._timer is None:
 			self._timer = wx.PyTimer(self._look)
@@ -315,5 +338,5 @@ _watcher = _Watcher()
 
 def watch() -> None:
 	"""Look for BRLTTY again while no display is in use: after a connection is lost, or a chosen
-	BRLTTY could not be reached."""
-	_watcher.start()
+	BRLTTY could not be reached. From any thread."""
+	onMainThread(_watcher.start)
