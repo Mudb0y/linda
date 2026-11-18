@@ -565,7 +565,6 @@ impl<D: Devices> Core<D> {
             && now < e.arrival + VERDICT_TIMEOUT
         {
             e.verdict = Some(keep);
-            self.unanswered_since = None;
         }
         self.advance(now);
     }
@@ -1083,7 +1082,13 @@ impl<D: Devices> Core<D> {
         while let Some(&e) = self.line.front() {
             if e.press {
                 let keep = match e.verdict {
-                    Some(keep) => keep,
+                    // A run of unanswered presses ends at a press answered in time, taken in the
+                    // order the keys were read: its answer may well have come before an earlier
+                    // press's bound ran out.
+                    Some(keep) => {
+                        self.unanswered_since = None;
+                        keep
+                    }
                     None if now >= e.arrival + VERDICT_TIMEOUT => {
                         let first = *self.unanswered_since.get_or_insert(e.arrival);
                         self.send_client(ToClient::Expired { seq: e.seq });

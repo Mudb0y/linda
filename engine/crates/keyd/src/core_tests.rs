@@ -594,6 +594,30 @@ fn a_pause_of_the_client_is_not_taken_for_a_hang() {
     assert!(t.w.grabbed(k));
 }
 
+#[test]
+fn a_press_answered_between_two_unanswered_ones_ends_the_run() {
+    let (mut t, k) = T::capturing();
+    // A goes unanswered, and B behind it is answered at once, before A's bound runs out.
+    t.press(k, KEY_A);
+    t.release(k, KEY_A);
+    t.press(k, KEY_T);
+    let seq = t.last_seq();
+    t.verdict(seq, false);
+    t.release(k, KEY_T);
+    t.pass(ms(110));
+    assert_eq!(
+        t.w.emitted(),
+        vec![(KEY_A, 1), (KEY_A, 0), (KEY_T, 1), (KEY_T, 0)]
+    );
+    // A second later another press goes unanswered: not a run of a second, since B was answered.
+    t.pass(ms(900));
+    t.press(k, KEY_A);
+    t.release(k, KEY_A);
+    t.pass(ms(110));
+    assert!(!t.closed(CLIENT), "{:?}", t.sent());
+    assert!(t.w.grabbed(k));
+}
+
 // The heartbeat, and clients that go quiet or go away.
 
 #[test]
