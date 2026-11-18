@@ -180,6 +180,11 @@ def _bash(value: str) -> None:
 	assert result.returncode == 0, result.stderr
 
 
+def _brltty(value: str) -> None:
+	path = _elfFile(value)
+	assert path.name == "brltty" and os.access(path, os.X_OK), value
+
+
 def _storePath(path: Path) -> Path:
 	"""The store path a file is in."""
 	return Path(STORE) / path.relative_to(STORE).parts[0]
@@ -249,6 +254,7 @@ SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
 	"LINDA_XORG_BIN": _xorgBin,
 	"LINDA_XORG_MODULE_PATH": _xorgModulePath,
 	"LINDA_BASH": _bash,
+	"LINDA_BRLTTY": _brltty,
 	"LINDA_RIG_PATH": _searchPath,
 	"LINDA_RIG_XDG_DATA_DIRS": _searchPath,
 }

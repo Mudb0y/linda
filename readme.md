@@ -90,11 +90,13 @@ mkdir -p ~/.config/nix
 echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
 ```
 
-For braille, BRLTTY has to be running and driving your display, as your distribution's `brltty` package usually does once the display is plugged in, and you have to be in the `brlapi` group, which may use BRLTTY's BrlAPI. This adds you to the group; sign out and in afterwards. On NixOS, `services.brltty.enable = true;` runs BRLTTY and makes the group instead, and adding `"brlapi"` to your user's `extraGroups` puts you in it. Linda's default braille display, Automatic, then finds BRLTTY by itself.
+For braille, BRLTTY has to be running and driving your display, as your distribution's `brltty` package usually does once the display is plugged in, and you have to be in the `brlapi` group, which may use BRLTTY's BrlAPI. This adds you to the group; sign out and in afterwards.
 
 ```
 sudo usermod -aG brlapi $USER
 ```
+
+On NixOS, `services.brltty.enable = true;` runs BRLTTY and makes the group instead, and adding `"brlapi"` to your user's `extraGroups` puts you in it. Linda's default braille display, Automatic, then finds BRLTTY by itself.
 
 ### NixOS
 
