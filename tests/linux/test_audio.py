@@ -443,6 +443,48 @@ def test_beepReachesCapture(tmp_path: Path):
 	assert files[2]["frames"] == last
 
 
+def test_messageBoxSoundsReachCapture(tmp_path: Path):
+	"""The sound an error and a warning box make as they open, which Windows plays through
+	winsound.MessageBeep, goes through NVDA's tone player whole: an error falls an octave, a warning
+	rises."""
+	captureDir = tmp_path / "capture"
+	captureDir.mkdir()
+	value = runAudio(
+		tmp_path,
+		"""
+		import ctypes
+
+		import tones
+		import winsound
+		from NVDAHelper import localLib
+		from linuxPlatform import messageSounds
+
+		tones.initialize()
+		expected = []
+		for soundId in (winsound.MB_ICONHAND, winsound.MB_ICONASTERISK):
+			messageSounds.play(soundId)
+			tones.player.sync()
+			frames = b""
+			for hz, length in messageSounds.NOTES[soundId]:
+				buf = ctypes.create_string_buffer(localLib.generateBeep(None, hz, length))
+				localLib.generateBeep(buf, hz, length)
+				frames += buf.raw
+			expected.append({"frames": frames.hex(), "notes": messageSounds.NOTES[soundId]})
+		tones.terminate()
+		gc.collect()
+		result = expected
+		""",
+		captureDir=captureDir,
+	)
+	files = captured(captureDir)
+	assert [(f["channels"], f["rate"], f["width"]) for f in files] == [(2, 44100, 2)] * 2
+	for got, sound in zip(files, value):
+		assert got["frames"] == bytes.fromhex(sound["frames"])
+	error, warning = (sound["notes"] for sound in value)
+	assert error[0][0] > error[-1][0]
+	assert warning[0][0] < warning[-1][0]
+
+
 def test_leadingSilenceIsTrimmedWithOneSilentFrameKept(tmp_path: Path):
 	captureDir = tmp_path / "capture"
 	captureDir.mkdir()

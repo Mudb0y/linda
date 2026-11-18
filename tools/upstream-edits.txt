@@ -519,6 +519,10 @@ source/gui/addonStoreGui/controls/messageDialogs.py
   tested
   Linux runtime: the daily check for updates asks nothing while the add-on
   store is off
+  Linux runtime: the notice of add-on updates plays the notes
+  linuxPlatform.messageSounds has for Windows' exclamation, which on
+  Windows is winsound.MessageBeep and on Linux would raise before the
+  notice is shown
 source/gui/addonStoreGui/controls/storeDialog.py
   every platform: the tabs are those of _tabKeys, which on Windows holds
   every status filter as before
@@ -551,11 +555,10 @@ source/gui/logViewer.py
   thread, during which NVDA says nothing; while it holds only the end,
   Save As copies the whole log file
 source/gui/message.py
-  Linux runtime: MessageDialog._playSound plays nothing, as the sounds are
-  Windows' system sounds through winsound.MessageBeep, which have no Linux
-  counterpart. For a dialog that has a sound it notes the gap through
-  linuxPlatform.noteNoLinuxImplementation; raising would stop the dialog's
-  show handler before it focuses the default button. Every error and warning message box, the
+  Linux runtime: MessageDialog._playSound plays the notes
+  linuxPlatform.messageSounds has for the dialog's kind through NVDA's
+  tone player, as the sounds are Windows' system sounds through
+  winsound.MessageBeep. Every error and warning message box, the
   configuration error at start-up among them, has one.
   HtmlMessageDialog shows its message through linuxPlatform.htmlMessage,
   as text in a read-only field with a button for each nvda-action link,

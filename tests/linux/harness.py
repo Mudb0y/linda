@@ -82,8 +82,6 @@ FREEZE_MESSAGE = "Starting freeze recovery after "
 #: Gaps that Linux bodies note through linuxPlatform.noteNoLinuxImplementation rather than raise, which
 #: a clean run may record, each with where and why.
 NOTED_GAPS = {
-	"winsound.MessageBeep": "gui.message.MessageDialog._playSound: Windows' system sound for an error, "
-	"warning or question box. Raising would stop the dialog before it focuses its default button.",
 	"hwPortUtils.listComPorts": "Linux has no SetupAPI and hwIo opens no serial, USB or HID device, so "
 	"there is nothing to list; braille display detection asks on every scan.",
 	"hwPortUtils.listUsbDevices": "As for hwPortUtils.listComPorts.",

@@ -931,8 +931,8 @@ def test_exitsOnSignalWithMessageBoxOpen(start: Start, probe: str, answer: int |
 	assert answers(nvda) == {probe: answer}
 	assert savedSetting(nvda) == CHANGED_SETTING[2]
 	if probe == "messageBox":
-		# An error box, whose sound Linux does not have.
-		assert nvda.result().noLinuxImplementation == ["winsound.MessageBeep"]
+		# An error box, which sounds as it opens.
+		assert "Message beep 0x10" in log
 	print(f"SIGTERM to exit with {probe} open: {toExit:.2f} s")
 
 

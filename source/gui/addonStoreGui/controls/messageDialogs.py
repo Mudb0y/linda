@@ -628,7 +628,12 @@ class UpdatableAddonsDialog(
 			case AddonsAutomaticUpdate.NOTIFY:
 
 				def delayCreateDialog():
-					winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+					if sys.platform != "win32":
+						from linuxPlatform import messageSounds
+
+						messageSounds.play(winsound.MB_ICONEXCLAMATION)
+					else:
+						winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
 					displayDialogAsModal(cls(gui.mainFrame, addonsPendingUpdate))
 
 				wx.CallAfter(delayCreateDialog)

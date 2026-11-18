@@ -653,11 +653,13 @@ def test_launchAllowsOnlyNotedGaps(tmp_path: Path):
 	def gap(what: str) -> dict:
 		return {"kind": "noLinuxImplementation", "what": what, "thread": "MainThread", "stack": []}
 
-	endedLaunch(tmp_path / "noted", [gap("winsound.MessageBeep")], {}).assertClean()
-	raised = endedLaunch(tmp_path / "raised", [gap("winsound.MessageBeep"), gap("winsound.PlaySound")], {})
+	endedLaunch(tmp_path / "noted", [gap("hwPortUtils.listComPorts")], {}).assertClean()
+	raised = endedLaunch(
+		tmp_path / "raised", [gap("hwPortUtils.listComPorts"), gap("winsound.PlaySound")], {}
+	)
 	with pytest.raises(AssertionError, match="winsound.PlaySound") as failed:
 		raised.assertClean()
-	assert "winsound.MessageBeep" not in str(failed.value)
+	assert "hwPortUtils.listComPorts" not in str(failed.value)
 
 
 def test_audioLibrariesAreKnownByName():
