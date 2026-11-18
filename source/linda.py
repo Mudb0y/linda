@@ -141,6 +141,11 @@ def main() -> NoReturn:
 			_fail(f"cannot take {lock.path}: {e}")
 		if not isLockTaken:
 			_fail(f"another copy still holds {lock.path}")
+	# Before anything else can fail: a copy killed with the screen curtain on, its guard with it, left
+	# the screen black.
+	from linuxPlatform import gammaCurtain
+
+	staleCurtain = gammaCurtain.liftStale()
 	# Only now, as a copy started under the former name could still have written its configuration
 	# as it exited.
 	from linuxPlatform import xdg
@@ -179,6 +184,8 @@ def main() -> NoReturn:
 
 	log.info(f"Starting NVDA version {buildVersion.version} {platform.machine()}")
 	log.debug("Debug level logging enabled")
+	if staleCurtain:
+		log.warning(staleCurtain)
 	# nvda.pyw sets Windows' screen reader flag here. Its AT-SPI counterpart, the bus's IsEnabled, turns
 	# on when NVDA registers for events, and setting it by hand would also write a GSettings key that the
 	# desktop's other screen reader shares. Nor does Linux need nvda.pyw's next steps: there are no

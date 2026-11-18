@@ -4,6 +4,7 @@
 # For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
 import os
+import sys
 from typing import Final, TypedDict, cast
 
 import config
@@ -18,6 +19,9 @@ from logHandler import log
 from NVDAHelper.localLib import isScreenFullyBlack
 from NVDAState import _TrackNVDAInitialization
 from winBindings import magnification
+
+if sys.platform != "win32":
+	from linuxPlatform import gammaCurtain
 
 # homogeneous matrix for a 4-space transformation (red, green, blue, opacity).
 # https://docs.microsoft.com/en-gb/windows/win32/gdiplus/-gdiplus-using-a-color-matrix-to-transform-a-single-color-use
@@ -156,7 +160,9 @@ class ScreenCurtain:
 	There should only ever be a single object created from this class at a time.
 	"""
 
-	_MAX_ENABLE_RETRIES: Final[int] = 3
+	# Whether an X server has gamma ramps to set does not change between attempts, and one that does
+	# not answer would hold NVDA's main thread through each of them.
+	_MAX_ENABLE_RETRIES: Final[int] = 3 if sys.platform == "win32" else 1
 	"""Maximum number of times to try enabling Screen Curtain."""
 
 	def __init__(self):
@@ -186,6 +192,9 @@ class ScreenCurtain:
 	@property
 	def enabled(self) -> bool:
 		"""Whether the Screen Curtain is currently enabled."""
+		if sys.platform != "win32" and self._enabled and not gammaCurtain.isActive():
+			# Lost since, as when the X server closed the connection it was kept on: the screen shows again.
+			self._enabled = False
 		return self._enabled
 
 	def enable(self, *, persist: bool = False) -> None:
@@ -211,6 +220,9 @@ class ScreenCurtain:
 		for attempt in range(self._MAX_ENABLE_RETRIES):
 			exception: Exception | None = None
 			try:
+				if sys.platform != "win32":
+					gammaCurtain.enable()
+					break
 				magnification.MagInitialize()
 				magnification.MagSetFullscreenColorEffect(TRANSFORM_BLACK)
 				magnification.MagShowSystemCursor(False)
@@ -218,6 +230,9 @@ class ScreenCurtain:
 					raise RuntimeError("Screen is not black.")
 				break
 			except Exception as e:  # noqa: BLE001
+				if sys.platform != "win32":
+					exception = e
+					continue
 				# We must call MagUninitialize at least as many times as we call MagInitialize,
 				# as if we don't, we are liable to get permission errors
 				# when attempting to use the magnification API
@@ -248,8 +263,11 @@ class ScreenCurtain:
 			log.debug("ScreenCurtain is already disabled")
 			return
 		log.debug("Disabling ScreenCurtain")
-		magnification.MagShowSystemCursor(True)
-		magnification.MagUninitialize()
+		if sys.platform != "win32":
+			gammaCurtain.disable()
+		else:
+			magnification.MagShowSystemCursor(True)
+			magnification.MagUninitialize()
 		self._enabled = False
 		if persist:
 			self.settings["enabled"] = False

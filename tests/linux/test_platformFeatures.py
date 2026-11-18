@@ -185,7 +185,6 @@ NOT_READ = (
 	"ducking",
 	"Sound split",
 	"sound split",
-	"Screen Curtain",
 	"usage statistics",
 	"UI Automation",
 	"Windows Console",
@@ -254,6 +253,12 @@ def test_settingsLeaveOutWhatLinuxLacks(desktop: DesktopSession):
 
 	toCategory(desktop, "Audio", "Privacy and Security")
 	privacy = readWindow(desktop, "separator")
+	assert privacy[privacy.index("Screen Curtain grouping") : privacy.index("General grouping")] == [
+		"Screen Curtain grouping",
+		"Make screen black (immediate effect) check box not checked",
+		"Always show a warning when enabling Screen Curtain check box checked Alt plus S",
+		"Play sound when toggling Screen Curtain check box checked Alt plus P",
+	], privacy
 	# The rig's debug logging flag is what disables the logging level.
 	assert privacy[privacy.index("General grouping") :] == [
 		"General grouping",
@@ -337,7 +342,6 @@ HIDDEN_COMMANDS = sorted(
 		"panToTopEdge",
 		"panUp",
 		"recognizeWithUwpOcr",
-		"reportScreenCurtainState",
 		"showEntireScreenOverview",
 		"test_navigatorDisplayModelText",
 		"toggleAllFollow",
@@ -347,7 +351,6 @@ HIDDEN_COMMANDS = sorted(
 		"toggleFollowReview",
 		"toggleFollowSystemFocus",
 		"toggleMagnifier",
-		"toggleScreenCurtain",
 		"toggleTouchSupport",
 		"touch_changeMode",
 		"touch_explore",
@@ -462,7 +465,9 @@ def test_hiddenCommandsAreNotOfferedAndSayWhyWhenStillReached(desktop: DesktopSe
 	shown = filterGestures(desktop, "current time")
 	assert "level 2 Pressing once reverts…" not in shown
 	assert [text for text in shown if "time" in text], shown
-	for hidden in ("magnif", "curtain", "ducking", "sound split", "touch", "OCR", "display model"):
+	shown = filterGestures(desktop, "curtain")
+	assert shown[:2] == ["tree view", "Miscellaneous (2 results) expanded 1 of 1 level 1"], shown
+	for hidden in ("magnif", "ducking", "sound split", "touch", "OCR", "display model"):
 		shown = filterGestures(desktop, hidden)
 		assert shown == ["tree view"], (hidden, shown)
 	step(desktop, "Escape", *AT_START)

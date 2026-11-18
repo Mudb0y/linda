@@ -386,6 +386,12 @@ source/config/configSpec.py
 source/config/registry.py
   every platform: winreg comes from linuxPlatform.windowsOnly, so
   _deleteKeyAndSubkeys raises NoLinuxImplementation on Linux
+source/contentRecog/recogUi.py
+  Linux runtime: recognition captures the screen as X has it whether or
+  not the screen curtain is on, as the curtain blacks out what the monitors
+  show rather than what a program reads, and never asks for Windows
+  Graphics Capture; nor does a recognition result keep the curtain from
+  being enabled
 source/core.py
   Linux runtime: the desktop object is linuxPlatform.desktop's, which
   belongs to no process and finds no object with focus, in the foreground
@@ -686,6 +692,12 @@ source/platformFeatures.py
   offer a feature, so that what cannot work on Linux is not shown there.
   On Windows every feature is supported, so every question asked of it is
   answered yes and Windows shows what it showed
+source/screenCurtain/_screenCurtain.py
+  Linux runtime: the curtain is linuxPlatform.gammaCurtain's, which sets
+  the gamma ramps of every CRTC to zero through RandR and puts back those
+  it found, in place of the Magnification API; enabling is tried once, as
+  an X server either has ramps to set or does not, and enabled reads false
+  once the curtain was lost, as when the X server closed its connection
 source/synthDriverHandler.py
   Linux runtime: getSynthList skips NVDA's own copies of
   the Windows-only driver modules (mssp, oneCore, sapi4_32, sapi5,
