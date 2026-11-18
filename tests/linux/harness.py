@@ -113,6 +113,12 @@ ALLOWED_STANDARD_ERROR = (
 	# wxGTK pops a menu up at the pointer with no event of GTK's to place it by, as the NVDA menu
 	# opens from a key NVDA captured rather than from GTK; GTK places it at the pointer all the same.
 	re.compile(r"\n?\([^()\n:]+:\d+\): Gtk-WARNING \*\*: [\d:.]+: no trigger event for menu popup\n"),
+	# The braille viewer's text controls are laid out once before its window has a width, now and
+	# then, and GTK complains of the room they then have. They get their size a moment later.
+	re.compile(
+		r"\n?\([^()\n:]+:\d+\): Gtk-WARNING \*\*: [\d:.]+: Negative content (?:width|height) -?\d+ "
+		r"\(allocation \d+, extents \d+x\d+\) while allocating gadget \(node entry, owner GtkEntry\)\n",
+	),
 )
 
 #: Libraries that can reach a sound server or a sound card, by the start of their file name with any
