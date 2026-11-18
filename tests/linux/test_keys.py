@@ -436,6 +436,34 @@ def test_stoppedNVDALetsTheKeyboardGo(
 	keys.quit().assertClean(logNames=("nvda.log",))
 
 
+def test_nvdaKeyReleasedWhileNVDAWasStoppedIsReleased(
+	desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path
+):
+	keys = KeySession(desktop, tmp_path, "desktop")
+	launch = desktop.nvda
+	keyboard.press("End")
+	keyboard.down("Insert")
+	time.sleep(0.3)
+	os.kill(launch.process.pid, signal.SIGSTOP)
+	try:
+		# The guard lets the keyboard go, and the release goes with the connection it closes.
+		time.sleep(3.5)
+		keyboard.up("Insert")
+	finally:
+		os.kill(launch.process.pid, signal.SIGCONT)
+	launch.waitForLog("Keys are read from the X display again", 10)
+	time.sleep(0.5)
+	# A plain t, which an NVDA key still taken for held would make NVDA+t as well.
+	mark = desktop.mark()
+	keyboard.press("t")
+	waitForEntry(ENTRY_TEXT + "t")
+	time.sleep(0.5)
+	assert "Fixture window" not in desktop.spokenSince(mark)
+	launch = keys.quit()
+	launch.assertClean(logNames=("nvda.log",))
+	assert f"Input: kb({keys.layout}):NVDA+t" not in launch.text("nvda.log")
+
+
 @pytest.mark.parametrize("layoutName", LAYOUTS)
 def test_numpadReviewKeyLeavesTheCaret(desktop: DesktopSession, tmp_path: Path, layoutName: str):
 	keys = KeySession(desktop, tmp_path, layoutName)
@@ -730,6 +758,45 @@ def test_stoppedJobLetsTheKeyboardGo(tmp_path: Path):
 		)
 	assert done.error is None, done.error
 	assert done.value["reached"] is True, f"F5 was held while the job was stopped: {done.value}"
+
+
+#: The NVDA key held on the rig's keyboard by a helper, and released while the whole child stalls,
+#: as the guard sees a process that holds the interpreter lock in a call that does not return.
+STALLED_CHILD = r"""
+import ctypes, subprocess, textwrap
+first = makeWindow()
+time.sleep(0.5)
+helper = textwrap.dedent(f'''
+	import sys, time
+	sys.path.insert(0, {str(harness.HERE)!r})
+	from test_keys import Keyboard
+	kb = Keyboard()
+	time.sleep(0.3)
+	kb.down("Insert")
+	time.sleep(1.0)
+	kb.up("Insert")
+''')
+typist = subprocess.Popen([sys.executable, "-c", helper])
+time.sleep(0.8)
+heldBefore = 118 in source._keycodesDown
+ctypes.PyDLL(None).sleep(4)
+typist.wait()
+time.sleep(3)
+result = {
+	"heldBefore": heldBefore,
+	"keyState": source.keyState(0x2D),
+	"keyboardDown": sorted(source._keyboardDown),
+	"released": (0x2D, True) in delivered,
+}
+source.stop()
+"""
+
+
+def test_keyReleasedDuringAStallIsReleased(tmp_path: Path):
+	with DesktopSession(tmp_path / "desktop", windowManager=False):
+		done = harness.runChild(tmp_path, SOURCE_CHILD + STALLED_CHILD, timeout=60)
+	assert done.error is None, done.error
+	assert done.value == {"heldBefore": True, "keyState": 0, "keyboardDown": [], "released": True}
 
 
 @pytest.mark.parametrize("gone", ("destroyed", "unmapped", "parentUnmapped"))

@@ -644,7 +644,7 @@ class X11KeySource:
 			ticket.answered = True
 			ticket.settled.set()
 		self._tickets.clear()
-		self._raw.clear()
+		raw, self._raw = self._raw, deque()
 		for attempt in range(RECONNECT_ATTEMPTS):
 			if self._stopping:
 				return False
@@ -658,6 +658,7 @@ class X11KeySource:
 					)
 					return False
 				time.sleep(1)
+		self._catchUp(raw)
 		self._startGuard()
 		if self._consumedWanted is not None:
 			self._applyGrabs(*self._consumedWanted)
@@ -667,6 +668,21 @@ class X11KeySource:
 		self._lastBeat = (0.0, "")
 		log.info("Keys are read from the X display again")
 		return True
+
+	def _catchUp(self, raw: deque[tuple[float, int, bool, int]]) -> None:
+		"""Tell NVDA what the keyboard did while there was no connection, before any grab is made again:
+		the raw events that were waiting for their slave events, then the release of each key held as
+		the connection went that the X server has up now, whose own release went with that connection.
+		Without it NVDA would take the key for held from then on, an NVDA key making every key a command.
+		"""
+		for arrival, keycode, isUp, sourceid in raw:
+			self._process(keycode, isUp, False, None, None, sourceid, arrival)
+		pressed = self._display.query_keymap()
+		now = time.monotonic()
+		for keycode in sorted(self._keycodesDown | self._keyboardDown | self._xtestDown):
+			if not pressed[keycode // 8] & 1 << keycode % 8:
+				self._process(keycode, True, False, None, None, None, now)
+				self._xtestDown.discard(keycode)
 
 	def _run(self) -> None:
 		try:
