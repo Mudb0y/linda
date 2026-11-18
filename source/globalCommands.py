@@ -3440,6 +3440,22 @@ class GlobalCommands(ScriptableObject):
 		# Translators: Spoken to indicate that the next key press will be sent straight to the current program as though NVDA is not running.
 		ui.message(_("Pass next key through"))
 
+	if sys.platform != "win32":
+
+		@script(
+			description=_(
+				# Translators: Input help mode message on Linux for the command that has NVDA take the
+				# keyboard in the kernel again, through linda-keyd, after the emergency chord of Backspace,
+				# Escape and Enter let it go.
+				"Takes the keyboard back after the emergency chord let it go",
+			),
+			category=SCRCAT_INPUT,
+		)
+		def script_takeKeyboardBack(self, gesture: inputCore.InputGesture) -> None:
+			from linuxPlatform import inputHook
+
+			inputHook.takeKeyboardBack()
+
 	@script(
 		description=_(
 			# Translators: Input help mode message for report current program name and app module name command.

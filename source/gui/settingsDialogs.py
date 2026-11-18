@@ -97,7 +97,7 @@ import ui
 from . import guiHelper
 
 if sys.platform != "win32":
-	from linuxPlatform import nvdaAddonStore
+	from linuxPlatform import keyRouteChoice, nvdaAddonStore
 
 try:
 	import updateCheck
@@ -4842,6 +4842,9 @@ class AdvancedPanelControls(
 		self.playErrorSoundCombo.SetSelection(config.conf["featureFlag"]["playErrorSound"])
 		self.playErrorSoundCombo.defaultValue = self._getDefaultValue(["featureFlag", "playErrorSound"])
 
+		if sys.platform != "win32":
+			self._keyRoute = keyRouteChoice.KeyRouteChoice(self, sHelper)
+
 		# Translators: This is the label for a textfield in the
 		# advanced settings panel.
 		self.textParagraphRegexLabelText = _("Regular expression for text paragraph navigation")
@@ -4913,6 +4916,7 @@ class AdvancedPanelControls(
 			and set(self.logCategoriesList.CheckedItems) == set(self.logCategoriesList.defaultCheckedItems)
 			and self.playErrorSoundCombo.GetSelection() == self.playErrorSoundCombo.defaultValue
 			and self.textParagraphRegexEdit.GetValue() == self.textParagraphRegexEdit.defaultValue
+			and (sys.platform == "win32" or self._keyRoute.isDefault())
 			and True  # reduce noise in diff when the list is extended.
 		)
 
@@ -4943,6 +4947,8 @@ class AdvancedPanelControls(
 		self.logCategoriesList.CheckedItems = self.logCategoriesList.defaultCheckedItems
 		self.playErrorSoundCombo.SetSelection(self.playErrorSoundCombo.defaultValue)
 		self.textParagraphRegexEdit.SetValue(self.textParagraphRegexEdit.defaultValue)
+		if sys.platform != "win32":
+			self._keyRoute.restoreToDefault()
 		self._defaultsRestored = True
 
 	def onSave(self):
@@ -4989,6 +4995,8 @@ class AdvancedPanelControls(
 			config.conf["debugLog"][key] = self.logCategoriesList.IsChecked(index)
 		config.conf["featureFlag"]["playErrorSound"] = self.playErrorSoundCombo.GetSelection()
 		config.conf["virtualBuffers"]["textParagraphRegex"] = self.textParagraphRegexEdit.GetValue()
+		if sys.platform != "win32":
+			self._keyRoute.save()
 
 		if shouldResetSynth:
 			currentSynth = getSynth()

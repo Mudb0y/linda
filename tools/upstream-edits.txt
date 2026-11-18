@@ -463,6 +463,9 @@ source/globalCommands.py
   says the platform lacks are replaced, before the instance is made, by
   ones bound to no gesture and listed nowhere, which say they are not
   available. Windows supports every feature, so none is replaced
+  Linux runtime: a command with no gesture, takeKeyboardBack, has NVDA
+  take the keyboard through linda-keyd again after its emergency chord let
+  it go, through linuxPlatform.inputHook
 source/gui/__init__.py
   Linux runtime: MainFrame.prePopup and postPopup skip their foreground
   window steps. Windows' foreground window has no counterpart for NVDA to
@@ -594,6 +597,9 @@ source/gui/settingsDialogs.py
   and starts with the check box that turns the store on, which warns first
   through linuxPlatform.nvdaAddonStore; the category's other controls are
   disabled while the store is off
+  Linux runtime: the Advanced category has a choice of where keys come
+  from, linda-keyd or the X display, made in linuxPlatform.keyRouteChoice
+  and saved, restored to its default and compared with it with the rest
 source/gui/startupDialogs.py
   Linux runtime: the welcome dialog's "Start NVDA after I sign in" is
   enabled outside secure mode, installed copy or not, as an XDG autostart
