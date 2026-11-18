@@ -2373,7 +2373,7 @@ def test_soundSplitDegradesAndItsToggleSaysSo(tmp_path: Path):
 		""",
 	)
 	assert value == {
-		"spoken": ["Sound split not supported"],
+		"spoken": ["Not available on Linux."],
 		"stateUnchanged": True,
 		"offResult": {"foundSessionWithNot2Channels": False},
 	}

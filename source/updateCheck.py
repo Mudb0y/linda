@@ -22,12 +22,15 @@ import garbageHandler
 import globalVars
 import config
 import core
+import platformFeatures
 from NVDAState import WritePaths
 
 if globalVars.appArgs.secure:
 	raise RuntimeError("updates disabled in secure mode")
 elif config.isAppX:
 	raise RuntimeError("updates managed by Windows Store")
+elif not platformFeatures.isSupported(platformFeatures.Feature.UPDATE_CHECK):
+	raise RuntimeError("update checking not supported on this platform")
 import buildVersion
 
 if not buildVersion.updateVersionType:

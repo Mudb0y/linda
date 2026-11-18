@@ -44,6 +44,8 @@ from _magnifier.commands import toggleMagnifier
 import _magnifier.config as magnifierConfig
 from _magnifier.utils.types import Filter, FullScreenMode, MagnifierTrackingType
 from _magnifier.fullscreenMagnifier import FullScreenMagnifier
+import platformFeatures
+from platformFeatures import Feature
 import queueHandler
 import requests
 import speech
@@ -116,6 +118,21 @@ from .dpiScalingHelper import DpiScalingHelperMixinWithoutInit
 #: The size that settings panel text descriptions should be wrapped at.
 # Ensure self.scaleSize is used to adjust for OS scaling adjustments.
 PANEL_DESCRIPTION_WIDTH = 544
+
+
+def _hideUnsupported(feature: Feature, *items: wx.Window | wx.Sizer) -> None:
+	"""Hides the controls of a feature this platform lacks, which would only fail or do nothing.
+
+	:param items: Controls, and sizers whose every item is hidden: a group's, or a labelled control's
+		containing sizer, which holds its label too.
+	"""
+	if platformFeatures.isSupported(feature):
+		return
+	for item in items:
+		if isinstance(item, wx.Sizer):
+			item.ShowItems(False)
+		else:
+			item.Hide()
 
 
 class SettingsDialog(
@@ -978,6 +995,14 @@ class GeneralSettingsPanel(SettingsPanel):
 		self.bindHelpEvent("PreventDisplayTurningOff", self.preventDisplayTurningOffCheckBox)
 		item.Value = config.conf["general"]["preventDisplayTurningOff"]
 		settingsSizerHelper.addItem(item)
+		_hideUnsupported(Feature.SECURE_SCREENS, self.startOnLogonScreenCheckBox, self.copySettingsButton)
+		_hideUnsupported(
+			Feature.UPDATE_CHECK,
+			self.autoCheckForUpdatesCheckBox,
+			self.notifyForPendingUpdateCheckBox,
+			mirrorBoxSizer,
+		)
+		_hideUnsupported(Feature.KEEP_DISPLAY_ON, self.preventDisplayTurningOffCheckBox)
 
 	def onChangeMirrorURL(self, evt: wx.CommandEvent | wx.KeyEvent):
 		"""Show the dialog to change the update mirror URL, and refresh the dialog in response to the URL being changed."""
@@ -2718,6 +2743,7 @@ class BrowseModePanel(SettingsPanel):
 			choices=[label for _itemType, label in self._browseModeElements],
 		)
 		self._browseModeCheckListBox.Enable(touchHandler.touchSupported())
+		_hideUnsupported(Feature.TOUCH, self._browseModeCheckListBox.GetContainingSizer())
 		enabledTypes = set(config.conf["virtualBuffers"]["browseModeTouchNavigationElements"])
 		for i, (itemType, _label) in enumerate(self._browseModeElements):
 			self._browseModeCheckListBox.Check(i, itemType in enabledTypes)
@@ -3743,6 +3769,12 @@ class AudioPanel(SettingsPanel):
 			initial=config.conf["audio"]["audioAwakeTime"],
 		)
 		self.bindHelpEvent("AudioAwakeTime", self.audioAwakeTimeEdit)
+		_hideUnsupported(Feature.AUDIO_DUCKING, self.duckingList.GetContainingSizer())
+		_hideUnsupported(
+			Feature.SOUND_SPLIT,
+			self.soundSplitComboBox.GetContainingSizer(),
+			self.soundSplitModesList.GetContainingSizer(),
+		)
 
 	def _appendSoundSplitModesList(self, settingsSizerHelper: guiHelper.BoxSizerHelper) -> None:
 		self._allSoundSplitModes = list(audio.SoundSplitState)
@@ -3777,14 +3809,15 @@ class AudioPanel(SettingsPanel):
 		config.conf["audio"]["soundVolumeFollowsVoice"] = self.soundVolFollowCheckBox.IsChecked()
 		config.conf["audio"]["soundVolume"] = self.soundVolSlider.GetValue()
 
-		index = self.soundSplitComboBox.GetSelection()
-		config.conf["audio"]["soundSplitState"] = index
-		audio._setSoundSplitState(audio.SoundSplitState(index))
-		config.conf["audio"]["includedSoundSplitModes"] = [
-			mIndex
-			for mIndex in range(len(self._allSoundSplitModes))
-			if mIndex in self.soundSplitModesList.CheckedItems
-		]
+		if platformFeatures.isSupported(Feature.SOUND_SPLIT):
+			index = self.soundSplitComboBox.GetSelection()
+			config.conf["audio"]["soundSplitState"] = index
+			audio._setSoundSplitState(audio.SoundSplitState(index))
+			config.conf["audio"]["includedSoundSplitModes"] = [
+				mIndex
+				for mIndex in range(len(self._allSoundSplitModes))
+				if mIndex in self.soundSplitModesList.CheckedItems
+			]
 		if audioDucking.isAudioDuckingSupported():
 			index = self.duckingList.GetSelection()
 			config.conf["audio"]["audioDuckingMode"] = index
@@ -4494,6 +4527,7 @@ class AdvancedPanelControls(
 			conf=config.conf,
 		)
 		self.bindHelpEvent("UIAEnhancedEventProcessing", self.enhancedEventProcessingComboBox)
+		_hideUnsupported(Feature.UI_AUTOMATION, UIASizer)
 
 		# Translators: This is the label for a group of advanced options in the
 		#  Advanced settings panel
@@ -4613,6 +4647,11 @@ class AdvancedPanelControls(
 			conf=config.conf,
 		)
 		self.bindHelpEvent("WtStrategy", self.wtStrategyCombo)
+		_hideUnsupported(
+			Feature.WINDOWS_CONSOLE,
+			self.keyboardSupportInLegacyCheckBox,
+			self.wtStrategyCombo.GetContainingSizer(),
+		)
 
 		# Translators: This is the label for a group of advanced options in the
 		#  Advanced settings panel
@@ -4667,6 +4706,7 @@ class AdvancedPanelControls(
 			conf=config.conf,
 		)
 		self.bindHelpEvent("UseWASAPIForSAPI4", self.useWASAPIForSAPI4Combo)
+		_hideUnsupported(Feature.SAPI4, self.useWASAPIForSAPI4Combo.GetContainingSizer())
 
 		# Translators: This is the label for a combo-box control in the
 		# Advanced settings panel.
@@ -4695,6 +4735,7 @@ class AdvancedPanelControls(
 			keyPath=["virtualBuffers", "loadChromiumVBufOnBusyState"],
 			conf=config.conf,
 		)
+		_hideUnsupported(Feature.IACCESSIBLE, vBufSizer)
 
 		# Translators: This is the label for a group of advanced options in the
 		#  Advanced settings panel
@@ -5115,6 +5156,11 @@ class BrailleSettingsPanel(SettingsPanel):
 		self.brailleSubPanel.onSave()
 
 
+#: The braille display drivers that reach their displays other than through ports of their own: BRLTTY
+#: through its daemon, and no braille display at all.
+_PORTLESS_DISPLAY_DRIVERS = ("brltty", "noBraille")
+
+
 class BrailleDisplaySelectionDialog(SettingsDialog):
 	# Translators: This is the label for the braille display selection dialog.
 	title = _("Select Braille Display")
@@ -5139,6 +5185,8 @@ class BrailleDisplaySelectionDialog(SettingsDialog):
 			choices=[],
 		)
 		self.bindHelpEvent("SelectBrailleDisplayAutoDetect", self.autoDetectList)
+		# Every driver it names reaches its display through a port.
+		_hideUnsupported(Feature.BRAILLE_PORTS, self.autoDetectList.GetContainingSizer())
 
 		# Translators: The label for a setting in braille settings to choose the connection port (if the selected braille display supports port selection).
 		portsLabelText = _("&Port:")
@@ -5164,7 +5212,11 @@ class BrailleDisplaySelectionDialog(SettingsDialog):
 
 	def updateBrailleDisplayLists(self):
 		driverList = [(braille.constants.AUTO_DISPLAY_NAME, self.getCurrentAutoDisplayDescription())]
-		driverList.extend(braille.display.getDisplayList())
+		driverList.extend(
+			driver
+			for driver in braille.display.getDisplayList()
+			if platformFeatures.isSupported(Feature.BRAILLE_PORTS) or driver[0] in _PORTLESS_DISPLAY_DRIVERS
+		)
 		self.displayNames = [driver[0] for driver in driverList]
 		displayChoices = [driver[1] for driver in driverList]
 		self.displayList.Clear()
@@ -6500,6 +6552,7 @@ class PrivacyAndSecuritySettingsPanel(SettingsPanel):
 		)
 		self._screenCurtainPlayToggleSoundsCheckbox.SetValue(self._screenCurtainConfig["playToggleSounds"])
 		self.bindHelpEvent("ScreenCurtainPlayToggleSounds", self._screenCurtainPlayToggleSoundsCheckbox)
+		_hideUnsupported(Feature.SCREEN_CURTAIN, screenCurtainSizer)
 
 		# Translators: name of a grouping in Privacy and Security settings
 		# which contains miscellaneous settings.
@@ -6540,6 +6593,7 @@ class PrivacyAndSecuritySettingsPanel(SettingsPanel):
 		if not updateCheck:
 			self._allowUsageStatsCheckBox.Value = False
 			self._allowUsageStatsCheckBox.Disable()
+		_hideUnsupported(Feature.UPDATE_CHECK, self._allowUsageStatsCheckBox)
 
 	def onDiscard(self):
 		# Restore screen curtain state and setting to the most recently saved baseline,
@@ -6673,6 +6727,16 @@ class NVDASettingsDialog(MultiCategorySettingsDialog):
 		DocumentNavigationPanel,
 		RemoteSettingsPanel,
 	]
+	# The whole of each of these panels is a feature some platforms lack. Visual Highlight is the only
+	# vision enhancement provider NVDA comes with.
+	for panel, feature in (
+		(VisionSettingsPanel, Feature.VISUAL_HIGHLIGHT),
+		(MagnifierPanel, Feature.MAGNIFIER),
+		(InputCompositionPanel, Feature.INPUT_COMPOSITION),
+	):
+		if not platformFeatures.isSupported(feature):
+			categoryClasses.remove(panel)
+	del panel, feature
 	# #19634: the desktop heap on the secure desktop is quite restrictive.
 	# The math settings panel contains many controls,
 	# none of which are particularly relevant when running on the secure desktop.

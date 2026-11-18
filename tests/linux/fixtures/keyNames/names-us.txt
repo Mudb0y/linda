@@ -166,7 +166,7 @@ combo right alt+a without the fake control: -> kb:alt+a display='alt+a' characte
 combo shift+a: -> kb:shift+a display='shift+a' character=True speech=cancel
 combo numpad insert+downArrow (NVDA+downArrow): -> kb:NVDA+downArrow display='Linda+down arrow' character=False speech=cancel
 combo capsLock+t: -> kb:capsLock+t display='caps lock+t' character=False speech=cancel
-combo windows+d: -> kb:windows+d display='windows+d' character=False speech=cancel
+combo windows+d: -> kb:windows+d display='super+d' character=False speech=cancel
 fromName 'a': kb:a
 fromName 'A': kb:shift+a
 fromName '1': kb:1

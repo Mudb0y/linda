@@ -189,3 +189,6 @@ if sys.platform != "win32":
 
 	# The NVDA key is Linda's key, though gesture identifiers still call it nvda.
 	localizedKeyLabels["nvda"] = buildVersion.name
+	# X and the desktops on it call the key with the Windows logo Super. English only, as no translation
+	# of NVDA's has the name.
+	localizedKeyLabels.update(windows="super", leftwindows="left super", rightwindows="right super")

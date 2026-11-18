@@ -408,6 +408,10 @@ source/globalCommands.py
   under the pointer through linuxPlatform.pointer, as the mouse object is
   otherwise the one the last followed move found, which is stale while
   mouse tracking is off
+  every platform: GlobalCommands' scripts of the features platformFeatures
+  says the platform lacks are replaced, before the instance is made, by
+  ones bound to no gesture and listed nowhere, which say they are not
+  available. Windows supports every feature, so none is replaced
 source/gui/__init__.py
   Linux runtime: MainFrame.prePopup and postPopup skip their foreground
   window steps. Windows' foreground window has no counterpart for NVDA to
@@ -444,7 +448,10 @@ source/gui/__init__.py
   support and its shop, which on Linux it does not, since NV Access do not
   support Linda: it offers Report a problem with Linda in their place,
   which opens Linda's issues on GitHub. Windows supports every feature, so
-  it shows what it showed
+  it shows what it showed. The Tools menu asks it too whether to offer
+  Create portable copy, Install NVDA and the System Accessibility Repair
+  Tool, which Linux does not support, rather than leaving them out only
+  because Linda runs from source
 source/gui/addonStoreGui/controls/details.py
   every platform: the details say whether an add-on supports the platform
   NVDA runs on, or which it was made for
@@ -495,7 +502,16 @@ source/gui/settingsDialogs.py
   every platform: the scratchpad directory opens through startfile from
   linuxPlatform.windowsOnly, which is os.startfile on Windows and on Linux
   opens it through xdg-open, where os.startfile is absent; os, which
-  nothing else in the module uses, is no longer imported.
+  nothing else in the module uses, is no longer imported. The settings
+  dialog asks platformFeatures what to show: the Vision, Magnifier and
+  Input Composition categories, and in the panels the sign-in and update
+  controls, keeping the display on, audio ducking, sound split, Screen
+  Curtain, usage statistics, touch navigation elements, UI Automation,
+  the Windows Console and Windows Terminal options, SAPI 4, the Chromium
+  virtual buffer option, the braille displays that need ports of their
+  own and the displays to detect automatically. Each control it does not
+  support is hidden, and the audio panel does not apply sound split.
+  Windows supports every feature, so it shows and saves what it did.
   Linux runtime: "Start NVDA after I sign in" is enabled outside secure mode,
   installed copy or not, as an XDG autostart entry can start any copy;
   easeOfAccess tells the user when this copy has no command that would last.
@@ -554,7 +570,9 @@ source/keyboardHandler.py
   description is named by keyLabels, which names it Linda on Linux
 source/keyLabels.py
   Linux runtime: the NVDA key has the label Linda, which input help and the
-  input gestures dialog say, while gesture identifiers keep nvda
+  input gestures dialog say, while gesture identifiers keep nvda. The keys
+  with the Windows logo are named super, as X and the desktops on it call
+  them
 source/languageHandler.py
   Linux runtime: the interface language, the C locale, language names and the
   measurement system come from linuxPlatform.posixLocale, which reads the
@@ -692,7 +710,10 @@ source/textUtils/uniscribe.py
 source/updateCheck.py
   every platform: the donate button opens the page through startfile from
   linuxPlatform.windowsOnly, which is os.startfile on Windows and on Linux
-  opens it through xdg-open, where os.startfile is absent
+  opens it through xdg-open, where os.startfile is absent. Importing it
+  raises RuntimeError, as for a build without an update version type, where
+  platformFeatures says the platform does not support update checks, as on
+  Linux; Windows supports them, so it imports as before
 source/utils/_deprecate.py
   every platform: _getCallerModule takes the caller's
   frame from sys._getframe instead of inspect.stack(), which read the source

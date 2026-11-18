@@ -746,16 +746,18 @@ class SysTrayIcon(wx.adv.TaskBarIcon):
 			self.Bind(wx.EVT_MENU, frame.onPythonConsoleCommand, item)
 
 		if not globalVars.appArgs.secure and not config.isAppX and not NVDAState.isRunningAsSource():
-			# Translators: The label for the menu item to create a portable copy of NVDA from an installed or another portable version.
-			item = menu_tools.Append(wx.ID_ANY, _("&Create portable copy..."))
-			self.Bind(wx.EVT_MENU, frame.onCreatePortableCopyCommand, item)
-			if not config.isInstalledCopy():
+			if platformFeatures.isSupported(Feature.PORTABLE_COPY):
+				# Translators: The label for the menu item to create a portable copy of NVDA from an installed or another portable version.
+				item = menu_tools.Append(wx.ID_ANY, _("&Create portable copy..."))
+				self.Bind(wx.EVT_MENU, frame.onCreatePortableCopyCommand, item)
+			if not config.isInstalledCopy() and platformFeatures.isSupported(Feature.INSTALLER):
 				# Translators: The label for the menu item to install NVDA on the computer.
 				item = menu_tools.Append(wx.ID_ANY, _("&Install NVDA..."))
 				self.Bind(wx.EVT_MENU, frame.onInstallCommand, item)
-			# Translators: The label for the menu item to run the System Accessibility Repair Tool
-			item = menu_tools.Append(wx.ID_ANY, _("Run System Accessibility Repair Tool..."))
-			self.Bind(wx.EVT_MENU, frame.onRunCOMRegistrationFixesCommand, item)
+			if platformFeatures.isSupported(Feature.COM_REGISTRATION_FIXES):
+				# Translators: The label for the menu item to run the System Accessibility Repair Tool
+				item = menu_tools.Append(wx.ID_ANY, _("Run System Accessibility Repair Tool..."))
+				self.Bind(wx.EVT_MENU, frame.onRunCOMRegistrationFixesCommand, item)
 		if not config.isAppX:
 			# Translators: The label for the menu item to reload plugins.
 			item = menu_tools.Append(wx.ID_ANY, _("Reload plugins"))

@@ -17,6 +17,8 @@ from annotation import (
 )
 
 import audioDucking
+import platformFeatures
+from platformFeatures import Feature
 import touchHandler
 import keyboardHandler
 import mouseHandler
@@ -5593,6 +5595,25 @@ class GlobalCommands(ScriptableObject):
 		lastSpeechText = CHUNK_SEPARATOR.join(item for item in lastSpeech[0] if isinstance(item, str))
 		api.copyToClip(lastSpeechText, notify=True)
 
+
+platformFeatures.hideUnsupportedScripts(
+	GlobalCommands,
+	{
+		"cycleAudioDuckingMode": Feature.AUDIO_DUCKING,
+		"cycleSoundSplit": Feature.SOUND_SPLIT,
+		"toggleScreenCurtain": Feature.SCREEN_CURTAIN,
+		"reportScreenCurtainState": Feature.SCREEN_CURTAIN,
+		"activateVisionSettingsDialog": Feature.VISUAL_HIGHLIGHT,
+		"activateMagnifierSettingsDialog": Feature.MAGNIFIER,
+		"activateInputCompositionDialog": Feature.INPUT_COMPOSITION,
+		"recognizeWithUwpOcr": Feature.WINDOWS_OCR,
+		"cycleOcrLanguage": Feature.WINDOWS_OCR,
+		"toggleAutomaticRefreshOfRecogResult": Feature.WINDOWS_OCR,
+		"activateWindowsOCRSettings": Feature.WINDOWS_OCR,
+		"test_navigatorDisplayModelText": Feature.DISPLAY_MODEL,
+	},
+	categoryFeatures={SCRCAT_MAGNIFIER: Feature.MAGNIFIER, SCRCAT_TOUCH: Feature.TOUCH},
+)
 
 #: The single global commands instance.
 #: @type: L{GlobalCommands}

@@ -135,7 +135,7 @@ def step(desktop: DesktopSession, chord: str, *expected: str, timeout: float = 5
 def downToKeyboard(desktop: DesktopSession) -> None:
 	"""Arrow down the settings dialog's categories from General to Keyboard, each spoken."""
 	for index, category in enumerate(
-		("Speech", "Braille", "Audio", "Privacy and Security", "Vision", "Magnifier", "Keyboard"),
+		("Speech", "Braille", "Audio", "Privacy and Security", "Keyboard"),
 		start=2,
 	):
 		step(desktop, "Down", f"{category} {index} of …")
@@ -332,11 +332,11 @@ def test_inputGesturesAreReadAndChangedFromTheKeyboard(desktop: DesktopSession):
 	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
 
 	# The tree, which wxGTK draws itself, is read from wx: each move, expansion and collapse.
-	openInputGestures(desktop, "level 1 Audio collapsed 1 of …")
-	step(desktop, "Down", "Braille collapsed 2 of …")
+	openInputGestures(desktop, "level 1 Braille collapsed 1 of …")
+	step(desktop, "Down", "Browse mode collapsed 2 of …")
 	step(desktop, "Right", "expanded")
 	step(desktop, "Down", "level 2 …")
-	step(desktop, "Left", "level 1 Braille expanded 2 of …")
+	step(desktop, "Left", "level 1 Browse mode expanded 2 of …")
 	step(desktop, "Left", "collapsed")
 
 	# A gesture added from the keyboard, choosing one of the forms of the key, works once saved.
@@ -353,7 +353,7 @@ def test_inputGesturesAreReadAndChangedFromTheKeyboard(desktop: DesktopSession):
 	)
 
 	# Removed with Delete, it does nothing once saved.
-	openInputGestures(desktop, "level 1 Audio collapsed 1 of …")
+	openInputGestures(desktop, "level 1 Braille collapsed 1 of …")
 	findNavigatorObjectScript(desktop)
 	step(desktop, "Right", "expanded")
 	step(desktop, "Down", "level 3 shift plus f 12 (keyboard, all layouts) 1 of 3")

@@ -5,7 +5,8 @@ since every message edited here would lose its translations and conflict at each
 The translation languageHandler installs gives Linda instead wherever a message has the whole word
 NVDA, in every language, except in a message that speaks of NV Access, which is about the upstream
 project and its NVDA, and in one that names something of NVDA's own rather than the program running,
-which UPSTREAM_NAMED_MESSAGES lists as the code gives it.
+which UPSTREAM_NAMED_MESSAGES lists as the code gives it. It also gives the few messages that tell of
+Windows where Linux has something else as they are true on Linux, in English only.
 """
 
 import gettext
@@ -32,6 +33,34 @@ _UPSTREAM_WORD = re.compile(r"(?<![A-Za-z0-9_])NVDA(?![A-Za-z0-9_])")
 _ENGLISH_UPSTREAM_WORD = re.compile(
 	r"(?:(?<![A-Za-z0-9_])(?P<article>[Aa])n )?(?<![A-Za-z0-9_])NVDA(?![A-Za-z0-9_])"
 )
+
+
+#: Each message that speaks of Windows, the way it is true on Linux.
+_LINUX_WORDING = {
+	(
+		"The next key that is pressed will not be handled at all by NVDA, "
+		"it will be passed directly through to Windows."
+	): (
+		"The next key that is pressed will not be handled at all by NVDA, "
+		"it will be passed directly through to the focused application."
+	),
+	(
+		"Reports the text on the Windows clipboard. "
+		"Pressing twice spells this information. "
+		"Pressing three times spells it using character descriptions."
+	): (
+		"Reports the text on the clipboard. "
+		"Pressing twice spells this information. "
+		"Pressing three times spells it using character descriptions."
+	),
+	(
+		"Virtually toggles the left windows key to emulate a keyboard shortcut with braille input"
+	): "Virtually toggles the left super key to emulate a keyboard shortcut with braille input",
+	(
+		"Virtually toggles the left windows and shift keys to emulate a keyboard shortcut with braille input"
+	): "Virtually toggles the left super and shift keys to emulate a keyboard shortcut with braille input",
+	"Action unavailable while Windows is locked": "Action unavailable while the computer is locked",
+}
 
 
 def _englishName(match: re.Match[str]) -> str:
@@ -74,6 +103,8 @@ class RenamingTranslations(gettext.NullTranslations):
 		return renamed
 
 	def gettext(self, message: str) -> str:
+		if (linux := _LINUX_WORDING.get(message)) is not None:
+			return self._rename(linux, linux)
 		return self._rename(self.upstream.gettext(message), message)
 
 	def ngettext(self, msgid1: str, msgid2: str, n: int) -> str:
