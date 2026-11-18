@@ -493,7 +493,13 @@ def test_theSettingsCheckBoxMakesTheScreenBlackAfterTheWarning(desktop: DesktopS
 	nvda = startLinda(desktop, tmp_path, warnOnLoad=True)
 	say(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
 	say(desktop, "Return", "Settings... S 1 of 4")
-	say(desktop, "Return", "Linda Settings: General (normal configuration) dialog…", "General 1 of 15")
+	say(
+		desktop,
+		"Return",
+		"Linda Settings: General (normal configuration) dialog",
+		"Categories: list",
+		"General 1 of 16",
+	)
 	for category in ("Speech", "Braille", "Audio", "Privacy and Security"):
 		say(desktop, "Down", f"{category}…")
 	say(desktop, "Tab", "Screen Curtain grouping…")

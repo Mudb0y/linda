@@ -148,20 +148,24 @@ if sys.platform != "win32":
 		def _get_value(self):
 			return ownGui.focusedListItemText()
 
-		#: Milliseconds between looks for the item scrolled into view, and how many looks it gets before the
-		#: list itself is read as the focus.
+		#: Milliseconds between looks for the row an item scrolled into view is put in, and how many looks it
+		#: gets before the list itself is read as the focus: about a second, which a loaded machine needs.
 		REVEAL_RETRY_MS = 30
-		REVEAL_TRIES = 10
+		REVEAL_TRIES = 30
 
 		def event_gainFocus(self):
-			# wxGTK has no object for an item out of view, and gives no focus to the one it makes for an item
-			# scrolled into view. Given it here, with the list read as entered, both are read as on Windows.
-			if ownGui.revealFocusedListItem():
-				self._focusRevealedItem(self.REVEAL_TRIES)
+			# The focus of the row with the list's focused item comes after the list's own, in the same
+			# batch of events or, when Linda is slow, in a later one, which read the list as the focus with
+			# the item as its value and then the item. wxGTK has no row for an item out of view, and gives no
+			# focus to the one an item scrolled into view is put in. So the row is given the focus here, with
+			# the list read as entered before it as on Windows; the row's own focus, when it comes, repeats
+			# the last focus queued, which linuxPlatform.atspi.handler drops.
+			if ownGui.revealFocusedListItem() or self._focusedItem() is not None:
+				self._focusItem(self.REVEAL_TRIES)
 				return
 			super().event_gainFocus()
 
-		def _focusRevealedItem(self, tries: int) -> None:
+		def _focusItem(self, tries: int) -> None:
 			if api.getFocusObject() is not self:
 				return
 			item = self._focusedItem()
@@ -170,7 +174,7 @@ if sys.platform != "win32":
 				eventHandler.executeEvent("focusEntered", self)
 				eventHandler.queueEvent("gainFocus", item)
 			elif tries > 0:
-				core.callLater(self.REVEAL_RETRY_MS, self._focusRevealedItem, tries - 1)
+				core.callLater(self.REVEAL_RETRY_MS, self._focusItem, tries - 1)
 			else:
 				super().event_gainFocus()
 
@@ -552,8 +556,13 @@ class AppModule(appModuleHandler.AppModule):
 	def chooseNVDAObjectOverlayClasses(self, obj, clsList):
 		if sys.platform != "win32":
 			# An AT-SPI object, which has no window class to tell NVDA's own dialogs apart by.
-			if obj.role == controlTypes.Role.FRAME and (dialog := _shownWxDialog(obj.name)) is not None:
-				clsList.insert(0, Dialog)
+			if (
+				obj.role in (controlTypes.Role.FRAME, controlTypes.Role.DIALOG)
+				and (dialog := _shownWxDialog(obj.name)) is not None
+			):
+				# NVDAObjects.AtSpi makes a dialog of each wx dialog whose window says it is one.
+				if Dialog not in clsList:
+					clsList.insert(0, Dialog)
 				clsList.insert(0, NvdaGtkDialog)
 				if isinstance(dialog, gui.settingsDialogs.SettingsDialog):
 					clsList.insert(0, NvdaGtkSettingsDialog)

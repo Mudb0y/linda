@@ -305,19 +305,21 @@ source/appModules/nvda.py
   menu directly in a window while gui says the menu is open, as it has no
   IAccessible identity there, so the menu is named NVDA as on Windows; and
   the focus on the unnamed window GTK puts that menu in is not spoken, as it
-  passes to the first item at once. A frame of NVDA's own titled as a shown
-  wx.Dialog is a dialog, whose text is read as on Windows, since wxGTK shows
-  every wx dialog as a frame; a settings dialog's description is empty, as
-  NvdaDialogEmptyDescription makes it on Windows. Of NVDA's own objects, a
+  passes to the first item at once. A frame or dialog of NVDA's own titled
+  as a shown wx.Dialog is a dialog, whose text is read as on Windows, since
+  wxGTK shows every wx dialog as a frame; a settings dialog's description is
+  empty, as NvdaDialogEmptyDescription makes it on Windows, rather than
+  whatever labels GTK has not yet paired as it is read. Of NVDA's own objects, a
   read-only field that takes the focus is a read-only edit field read with
   the caret, as on Windows, so that the log viewer is read by line; a check list's check box cell is a check box named by its row's
   text; a wx list is named by its scroll pane when it has no name and
   gives its focused item as its value, and its focused item is selected,
   as GTK says only a moment later. wxGTK gives GTK an object for each row of
-  a wx list in view, not for each item, so a list that gets the focus with
-  its focused item out of view scrolls it into view and gives the focus to
-  its row, read after the list as entered, and an item scrolled into the
-  focused row, which only renames it, is read as the new focus; and the label GTK keeps inside a group box is
+  a wx list in view, not for each item, so a list that gets the focus gives
+  it to the row of its focused item, scrolled into view first when it is
+  out of view, read after the list as entered, and an item scrolled into
+  the focused row, which only renames it, is read as the new focus; and the
+  label GTK keeps inside a group box is
   invisible, so that a dialog's text leaves it out. A wx tree control, such
   as the Input Gestures dialog's, which wxGTK draws itself and shows GTK as
   an empty panel, is a tree view whose focus goes to its selected item, an
