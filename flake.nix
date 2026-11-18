@@ -187,6 +187,9 @@
         linda-libraries = libraries;
       };
 
+      # The key capture tests in virtual machines: nix build .#checks.x86_64-linux.vm
+      checks.${system} = import ./tests/linux/vm { inherit pkgs lib linda; };
+
       devShells.${system}.default = pkgs.mkShell (runtimeEnv // {
         nativeBuildInputs = with pkgs; [
           python
