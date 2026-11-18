@@ -166,7 +166,12 @@ def test_installsTheDocumentationWhereNvdaLooksWhenRunFromSource(installed: Inst
 	docs = installed.appDir.parent / "user_docs"
 	languages = sorted(d.name for d in docs.iterdir())
 	assert len(languages) > 50 and {"en", "pl", "de_CH", "zh_TW"} <= set(languages), languages
-	for language, page in (("en", "userGuide"), ("en", "keyCommands"), ("en", "changes"), ("pl", "userGuide")):
+	for language, page in (
+		("en", "userGuide"),
+		("en", "keyCommands"),
+		("en", "changes"),
+		("pl", "userGuide"),
+	):
 		text = (docs / language / f"{page}.html").read_text(encoding="utf-8")
 		assert '<body>\n<div id="lindaNotice" role="note"><p>This is NVDA\'s own documentation' in text
 		assert text == (ROOT / "user_docs" / language / f"{page}.html").read_text(encoding="utf-8")
