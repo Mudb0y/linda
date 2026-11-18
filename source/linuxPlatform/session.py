@@ -20,11 +20,10 @@ def isBelowLockScreen(obj: object) -> bool:
 	"""Whether obj lies below the screen locker, so that NVDA must not present it while the session is
 	locked. utils.security asks this only while winAPI.sessionTracking reports the session locked.
 
-	Nothing here can tell the screen locker's own objects from the applications it covers, so every
-	object except the desktop counts as below it: while locked, NVDA withholds the unlock prompt along
-	with everything else rather than read out what the locker hides. That is why
-	winAPI.sessionTracking._querySessionLocked must not report a locked session until this function
-	recognises the locker's objects, by their process or their AT-SPI application.
+	The desktop and the screen locker's own processes, as linuxPlatform.sessionLock knows them, are
+	above it. Everything else is below, including any object whose process cannot be told: where
+	no screen saver is known, as when logind alone reports the lock, that is all but the desktop,
+	the unlock prompt of an unknown locker among them.
 	"""
 	import api
 
@@ -33,7 +32,17 @@ def isBelowLockScreen(obj: object) -> bool:
 		return False
 	# While the session is locked every new object gets an overlay class, so a desktop object made
 	# since is of another class than the one NVDA holds and never compares equal to it.
-	return desktop is None or obj.APIClass is not desktop.APIClass or not obj._isEqual(desktop)
+	if desktop is not None and obj.APIClass is desktop.APIClass and obj._isEqual(desktop):
+		return False
+	from linuxPlatform import sessionLock
+
+	try:
+		processID = obj.processID
+	except Exception:  # noqa: BLE001
+		# Whatever the failure, the object is withheld rather than read out over the lock.
+		log.debugWarning("Cannot tell the process of an object while the session is locked", exc_info=True)
+		return True
+	return not (isinstance(processID, int) and sessionLock.isLockerProcess(processID))
 
 
 @functools.cache
