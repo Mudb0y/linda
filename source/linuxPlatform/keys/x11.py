@@ -1312,13 +1312,17 @@ class X11KeySource:
 			wanted.extend((evdev + 8, numpadMods, "numpad review keys") for evdev in NUMPAD_REVIEW_KEYS)
 		return wanted
 
-	def _ungrabKeys(self) -> None:
-		window, self._keysWindow = self._keysWindow, None
+	def _ungrabKeys(self, window=None, grabbed: dict[int, list[int] | None] | None = None) -> None:
+		""":param window: The window the keys were grabbed on, with grabbed what was grabbed there, when
+		they are no longer this source's NVDA key grabs; by default those."""
+		if grabbed is None:
+			window, self._keysWindow = self._keysWindow, None
+			grabbed, self._grabbed = self._grabbed, {}
 		if window is None:
 			return
 		# The window may have gone, and its grabs with it.
 		gone = error.CatchError(error.BadWindow)
-		for keycode, modifiers in self._grabbed.items():
+		for keycode, modifiers in grabbed.items():
 			for mod in modifiers or [X.AnyModifier]:
 				window.ungrab_key(keycode, mod, onerror=gone)
 		if self._chordKey is not None:
@@ -1331,19 +1335,25 @@ class X11KeySource:
 			self._captureWindow is None or window.id != self._captureWindow.id
 		):
 			window.change_attributes(event_mask=X.NoEventMask, onerror=gone)
-		self._grabbed = {}
 
 	def _grabKeys(self, window) -> None:
 		"""Grab the NVDA keys and the numpad review keys on window: the one with the focus, so that no
 		application sees its window lose the focus while one is held, as one grabbed on the root
 		would; the root when no window may be grabbed on."""
 		self._keysWindow = window
-		refused = []
+		catchers = []
 		for keycode, modifiers, label in self._keysWanted():
 			catcher = error.CatchError(error.BadAccess, error.BadWindow)
 			for mod in modifiers or [X.AnyModifier]:
 				window.grab_key(keycode, mod, False, X.GrabModeAsync, X.GrabModeSync, onerror=catcher)
-			self._display.sync()
+			# Until they are made, a chord typed in the window as the focus reaches it reaches the
+			# application as well: each key's go out as soon as they are built, the NVDA keys' first, and
+			# the replies are waited for once.
+			self._display.flush()
+			catchers.append((keycode, modifiers, label, catcher))
+		self._display.sync()
+		refused = []
+		for keycode, modifiers, label, catcher in catchers:
 			if catcher.get_error():
 				if label not in refused:
 					refused.append(label)
@@ -1364,8 +1374,11 @@ class X11KeySource:
 		window = self._focusWindow() or self._display.screen().root
 		if self._keysWindow is not None and window.id == self._keysWindow.id:
 			return
-		self._ungrabKeys()
+		old, oldGrabbed = self._keysWindow, self._grabbed
+		self._grabbed = {}
+		# Taken on the new window before they are let go of on the old, which may hold the new one.
 		self._grabKeys(window)
+		self._ungrabKeys(old, oldGrabbed)
 
 	def _captureSet(self, mode: CaptureMode) -> dict[int, set[int]]:
 		"""Key code: the modifier masks, without the locks, it is captured with in mode."""

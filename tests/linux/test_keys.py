@@ -11,6 +11,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -541,6 +542,61 @@ def test_nvdaKeyReleasedWhileNVDAWasStoppedIsReleased(
 	launch = keys.quit()
 	launch.assertClean(logNames=("nvda.log",))
 	assert f"Input: kb({keys.layout}):NVDA+t" not in launch.text("nvda.log")
+
+
+#: A window with a text field that prints what the field holds each time it changes.
+ENTRY_APP = """
+import sys
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk
+window = Gtk.Window(title=sys.argv[1])
+entry = Gtk.Entry()
+window.add(entry)
+entry.connect("changed", lambda entry: print(entry.get_text(), flush=True))
+window.connect("destroy", Gtk.main_quit)
+window.show_all()
+print("ready", flush=True)
+Gtk.main()
+"""
+
+
+def test_nvdaChordJustAfterTheFocusMovesIsNVDAs(desktop: DesktopSession, keyboard: Keyboard, tmp_path: Path):
+	# The NVDA keys are grabbed on the window with the focus, and follow it only once the focus has
+	# moved: a chord typed in between reaches the application. X has no way to close that gap, which
+	# is kept to a few milliseconds; this is how often a chord 5 ms after the switch gets through it.
+	app = tmp_path / "entry.py"
+	app.write_text(ENTRY_APP)
+	titles = ("Left entry", "Right entry")
+	apps = {}
+	for title in titles:
+		apps[title] = desktop.startApp([sys.executable, str(app), title], title=title)
+		assert apps[title].stdout.readline().strip() == "ready"
+		os.set_blocking(apps[title].stdout.fileno(), False)
+	config = tmp_path / "nvda.ini"
+	config.write_text(configText("desktop", 6))
+	desktop.startNVDA(config)
+	desktop.expect(titles[-1], since=0, timeout=STARTUP_TIMEOUT)
+	time.sleep(1)
+	leaked = []
+	for attempt in range(16):
+		title = titles[attempt % 2]
+		subprocess.run(["wmctrl", "-F", "-a", title], check=True, capture_output=True)
+		time.sleep(0.005)
+		keyboard._send("Insert", True)
+		keyboard._send("t", True)
+		keyboard._send("t", False)
+		keyboard._send("Insert", False)
+		time.sleep(0.6)
+		try:
+			if os.read(apps[title].stdout.fileno(), 65536):
+				leaked.append(attempt)
+		except BlockingIOError:
+			pass
+	# Some 18 in 24 got through before the grabs were sent as soon as they were made.
+	assert len(leaked) <= 4, f"{len(leaked)} of 16 chords reached the application: {leaked}"
+	desktop.nvda.process.terminate()
+	desktop.nvda.waitForExit(20)
 
 
 @pytest.mark.parametrize("layoutName", LAYOUTS)
