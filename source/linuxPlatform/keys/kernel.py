@@ -1003,9 +1003,10 @@ class KernelKeySource:
 		self._holding = False
 		emergency = reason == keydClient.RELEASED_EMERGENCY
 		self._releaseAll(dropUndecided=emergency)
-		if reason == keydClient.RELEASED_BACKGROUND:
+		if reason in (keydClient.RELEASED_BACKGROUND, keydClient.RELEASED_SESSION_UNKNOWN):
 			# It captures again by itself once this session is in front again, before which no key of
-			# this session's comes anywhere.
+			# this session's comes anywhere, or once logind says which session is; meanwhile the keys
+			# reach the X display straight, and the X source reads them, as with no helper.
 			log.info(f"linda-keyd let go of the keyboard, as {why}")
 			return
 		if reason == keydClient.RELEASED_STOPPED and self._stopping:

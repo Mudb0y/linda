@@ -1157,3 +1157,44 @@ def test_stopLeavesTheWakePipesOfAThreadStillRunning(tmp_path: Path):
 	assert value["reused"] == [] and value["open"] == [True] * 4, (
 		f"the kernel source closed the pipes a thread of its still running writes its wake-ups into: {value}"
 	)
+
+
+#: The helper lets go as it cannot tell which session is in front, and captures again by itself once
+#: it can: whether NVDA stays with that helper and says nothing, and has the keys typed meanwhile and
+#: after.
+SESSION_UNKNOWN_CHILD = r"""
+source = startSource()
+kernel = source._kernel
+keyboard.letGo(5)
+time.sleep(0.5)
+delivered.clear()
+keyboard.press("a")
+time.sleep(0.3)
+meanwhile = [e["text"] for e in presses()]
+with keyboard._lock:
+	keyboard._capture()
+time.sleep(2.5)
+delivered.clear()
+keyboard.press("b")
+time.sleep(0.3)
+result = {
+	"same": source._kernel is kernel and source.isKernel,
+	"starts": keyboard.starts,
+	"said": list(said),
+	"meanwhile": meanwhile,
+	"after": [e["text"] for e in presses()],
+	"window": [key for key in windowKeys() if key[1]],
+}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_helperUnsureOfTheSessionInFrontIsWaitedFor(tmp_path: Path):
+	value = runKernelChild(tmp_path, SESSION_UNKNOWN_CHILD)
+	assert value["same"] and value["starts"] == 1 and value["said"] == [], (
+		f"the helper let go as it could not tell which session is in front, which it takes back by itself: "
+		f"NVDA gave it up instead: {value}"
+	)
+	assert value["meanwhile"] == ["a"] and value["after"] == ["b"], value
+	assert value["window"] == [[30, True], [48, True]], value
