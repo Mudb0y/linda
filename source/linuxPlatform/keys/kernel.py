@@ -118,22 +118,6 @@ MODIFIERS_KEPT_UNDER_NVDA = X.Mod1Mask | X.Mod4Mask
 _DEPRESSED = xkb.StateComponent.XKB_STATE_MODS_DEPRESSED
 
 
-class _XkbSelectEvents(rq.Request):
-	"""Ask the X server for XKB's events, here every detail of the kinds named."""
-
-	_request = rq.Struct(
-		rq.Card8("opcode"),
-		rq.Opcode(1),
-		rq.RequestLength(),
-		rq.Card16("deviceSpec"),
-		rq.Card16("affectWhich"),
-		rq.Card16("clear"),
-		rq.Card16("selectAll"),
-		rq.Card16("affectMap"),
-		rq.Card16("map"),
-	)
-
-
 class _XkbGetState(rq.ReplyRequest):
 	"""The keyboard's modifiers and group as the X server has them."""
 
@@ -596,7 +580,7 @@ class KernelKeySource:
 				raise RuntimeError("the X server's XKB is not one NVDA knows")
 			self._xkbOpcode, self._xkbEvent = opcode, info.first_event
 			wanted = 1 << XKB_STATE_NOTIFY | 1 << XKB_CONTROLS_NOTIFY
-			_XkbSelectEvents(
+			x11._XkbSelectEvents(
 				display=d.display,
 				opcode=opcode,
 				deviceSpec=x11.XKB_CORE_KEYBOARD,

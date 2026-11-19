@@ -79,6 +79,145 @@ class _XkbUseExtension(rq.ReplyRequest):
 	)
 
 
+class _XkbSelectEvents(rq.Request):
+	"""Ask the X server for XKB's events, here every detail of the kinds named."""
+
+	_request = rq.Struct(
+		rq.Card8("opcode"),
+		rq.Opcode(1),
+		rq.RequestLength(),
+		rq.Card16("deviceSpec"),
+		rq.Card16("affectWhich"),
+		rq.Card16("clear"),
+		rq.Card16("selectAll"),
+		rq.Card16("affectMap"),
+		rq.Card16("map"),
+	)
+
+
+class _XkbGetControls(rq.ReplyRequest):
+	"""A keyboard's XKB controls: the repeat, AccessX's sticky, slow and bounce keys and their timeout,
+	mouse keys, and which of them are on."""
+
+	_request = rq.Struct(
+		rq.Card8("opcode"),
+		rq.Opcode(6),
+		rq.RequestLength(),
+		rq.Card16("deviceSpec"),
+		rq.Pad(2),
+	)
+	_reply = rq.Struct(
+		rq.ReplyCode(),
+		rq.Card8("deviceID"),
+		rq.Card16("sequence_number"),
+		rq.ReplyLength(),
+		rq.Card8("mouseKeysDfltBtn"),
+		rq.Card8("numGroups"),
+		rq.Card8("groupsWrap"),
+		rq.Card8("internalMods"),
+		rq.Card8("ignoreLockMods"),
+		rq.Card8("internalRealMods"),
+		rq.Card8("ignoreLockRealMods"),
+		rq.Pad(1),
+		rq.Card16("internalVirtualMods"),
+		rq.Card16("ignoreLockVirtualMods"),
+		rq.Card16("repeatDelay"),
+		rq.Card16("repeatInterval"),
+		rq.Card16("slowKeysDelay"),
+		rq.Card16("debounceDelay"),
+		rq.Card16("mouseKeysDelay"),
+		rq.Card16("mouseKeysInterval"),
+		rq.Card16("mouseKeysTimeToMax"),
+		rq.Card16("mouseKeysMaxSpeed"),
+		rq.Int16("mouseKeysCurve"),
+		rq.Card16("accessXOptions"),
+		rq.Card16("accessXTimeout"),
+		rq.Card16("accessXTimeoutOptionsMask"),
+		rq.Card16("accessXTimeoutOptionsValues"),
+		rq.Pad(2),
+		rq.Card32("accessXTimeoutMask"),
+		rq.Card32("accessXTimeoutValues"),
+		rq.Card32("enabledControls"),
+		rq.FixedBinary("perKeyRepeat", 32),
+	)
+
+
+class _XkbSetControls(rq.Request):
+	"""Set a keyboard's XKB controls, those changeControls names and the on or off of those
+	affectEnabledControls names."""
+
+	_request = rq.Struct(
+		rq.Card8("opcode"),
+		rq.Opcode(7),
+		rq.RequestLength(),
+		rq.Card16("deviceSpec"),
+		rq.Card8("affectInternalRealMods"),
+		rq.Card8("internalRealMods"),
+		rq.Card8("affectIgnoreLockRealMods"),
+		rq.Card8("ignoreLockRealMods"),
+		rq.Card16("affectInternalVirtualMods"),
+		rq.Card16("internalVirtualMods"),
+		rq.Card16("affectIgnoreLockVirtualMods"),
+		rq.Card16("ignoreLockVirtualMods"),
+		rq.Card8("mouseKeysDfltBtn"),
+		rq.Card8("groupsWrap"),
+		rq.Card16("accessXOptions"),
+		rq.Pad(2),
+		rq.Card32("affectEnabledControls"),
+		rq.Card32("enabledControls"),
+		rq.Card32("changeControls"),
+		rq.Card16("repeatDelay"),
+		rq.Card16("repeatInterval"),
+		rq.Card16("slowKeysDelay"),
+		rq.Card16("debounceDelay"),
+		rq.Card16("mouseKeysDelay"),
+		rq.Card16("mouseKeysInterval"),
+		rq.Card16("mouseKeysTimeToMax"),
+		rq.Card16("mouseKeysMaxSpeed"),
+		rq.Int16("mouseKeysCurve"),
+		rq.Card16("accessXTimeout"),
+		rq.Card32("accessXTimeoutMask"),
+		rq.Card32("accessXTimeoutValues"),
+		rq.Card16("accessXTimeoutOptionsMask"),
+		rq.Card16("accessXTimeoutOptionsValues"),
+		rq.FixedBinary("perKeyRepeat", 32),
+	)
+
+
+#: XKB's ControlsNotify.
+XKB_CONTROLS_NOTIFY = 3
+#: XkbAllBooleanCtrlsMask: the controls that are on or off, from the repeat to the group lock's.
+XKB_BOOLEAN_CONTROLS = 0x1FFF
+#: The controls' values copied to the virtual keyboard: the repeat's, slow keys', bounce keys',
+#: sticky keys', mouse keys', AccessX's keys, timeout and feedback, the bell's, the per-key repeat, and
+#: which are on; not the modifiers and groups, which are the layout's.
+XKB_COPIED_CONTROLS = 0x1FF | 1 << 30 | 1 << 31
+#: The fields of _XkbGetControls's reply that _XkbSetControls takes by the same name.
+CONTROL_FIELDS = (
+	"mouseKeysDfltBtn",
+	"accessXOptions",
+	"repeatDelay",
+	"repeatInterval",
+	"slowKeysDelay",
+	"debounceDelay",
+	"mouseKeysDelay",
+	"mouseKeysInterval",
+	"mouseKeysTimeToMax",
+	"mouseKeysMaxSpeed",
+	"mouseKeysCurve",
+	"accessXTimeout",
+	"accessXTimeoutMask",
+	"accessXTimeoutValues",
+	"accessXTimeoutOptionsMask",
+	"accessXTimeoutOptionsValues",
+	"perKeyRepeat",
+)
+
+
+def _controls(reply) -> tuple:
+	return (*(getattr(reply, name) for name in CONTROL_FIELDS), reply.enabledControls & XKB_BOOLEAN_CONTROLS)
+
+
 class _XkbPerClientFlags(rq.ReplyRequest):
 	"""Set how the X server reports keys to this connection alone."""
 
@@ -547,6 +686,8 @@ class X11KeySource:
 		self._wmStateAtom: int | None = None
 		self._activeWindowAtom: int | None = None
 		self._xkbOpcode: int | None = None
+		#: XKB's first event number, while XKB is used.
+		self._xkbEvent: int | None = None
 		#: Key code: grab modifiers, for every key grabbed now; None means any modifiers.
 		self._grabbed: dict[int, list[int] | None] = {}
 		#: The window the NVDA keys and the numpad review keys are grabbed on.
@@ -791,7 +932,21 @@ class X11KeySource:
 					autoCtrls=0,
 					autoCtrlValues=0,
 				)
+				if self._xkbOpcode is not None:
+					self._xkbEvent = xkbInfo.first_event
+					# The desktop's repeat and AccessX settings, to give the virtual keyboard as they change.
+					_XkbSelectEvents(
+						display=self._display.display,
+						opcode=opcode,
+						deviceSpec=XKB_CORE_KEYBOARD,
+						affectWhich=1 << XKB_CONTROLS_NOTIFY,
+						clear=0,
+						selectAll=1 << XKB_CONTROLS_NOTIFY,
+						affectMap=0,
+						map=0,
+					)
 			self._loadKeymap()
+			self._copyControls()
 			self._display.sync()
 		except Exception:
 			self._display.close()
@@ -1059,6 +1214,54 @@ class X11KeySource:
 					self._onVirtualKeyboard()
 				except Exception:  # noqa: BLE001
 					_logError("Reporting the virtual keyboard's state")
+		self._copyControls()
+
+	def _copyControls(self) -> None:
+		"""Give linda-keyd's virtual keyboard the core keyboard's repeat and AccessX settings.
+
+		The X server keeps them for each keyboard, and a desktop sets them on the core keyboard, and so
+		on the keyboards there are at that moment: a keyboard that comes later, as the virtual one does,
+		has the X server's own, a repeat after 660 ms at 25 a second and no sticky, slow or bounce keys,
+		and every key the helper passes on comes from it. Set only where they differ, as setting them
+		can tell of a change in turn.
+		"""
+		d = self._display
+		if self._xkbOpcode is None or not self._virtualDevices or d is None:
+			return
+		try:
+			core = _XkbGetControls(display=d.display, opcode=self._xkbOpcode, deviceSpec=XKB_CORE_KEYBOARD)
+		except error.XError:
+			return
+		wanted = _controls(core)
+		for device in sorted(self._virtualDevices):
+			try:
+				have = _XkbGetControls(display=d.display, opcode=self._xkbOpcode, deviceSpec=device)
+			except error.XError:
+				# Gone, or not a keyboard the X server has XKB for.
+				continue
+			if _controls(have) == wanted:
+				continue
+			_XkbSetControls(
+				display=d.display,
+				opcode=self._xkbOpcode,
+				deviceSpec=device,
+				affectInternalRealMods=0,
+				internalRealMods=0,
+				affectIgnoreLockRealMods=0,
+				ignoreLockRealMods=0,
+				affectInternalVirtualMods=0,
+				internalVirtualMods=0,
+				affectIgnoreLockVirtualMods=0,
+				ignoreLockVirtualMods=0,
+				groupsWrap=have.groupsWrap,
+				affectEnabledControls=XKB_BOOLEAN_CONTROLS,
+				enabledControls=core.enabledControls & XKB_BOOLEAN_CONTROLS,
+				changeControls=XKB_COPIED_CONTROLS,
+				onerror=error.CatchError(),
+				**{name: getattr(core, name) for name in CONTROL_FIELDS},
+			)
+			log.debug("The virtual keyboard was given the core keyboard's repeat and AccessX settings")
+		d.flush()
 
 	@property
 	def captureState(self) -> CaptureState:
@@ -1172,6 +1375,10 @@ class X11KeySource:
 			self._applyCapture(self._captureMode)
 
 	def _handle(self, event) -> None:
+		if self._xkbEvent is not None and event.type == self._xkbEvent:
+			if getattr(event, "detail", None) == XKB_CONTROLS_NOTIFY:
+				self._copyControls()
+			return
 		evtype = getattr(event, "evtype", None)
 		if evtype in (xinput.KeyPress, xinput.KeyRelease):
 			data = event.data
