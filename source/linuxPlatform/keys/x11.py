@@ -464,24 +464,37 @@ def free(windows):
 		pass
 
 
+def drain():
+	# Every event the X server has sent read, of which only the mark counts: whether it came.
+	marked = False
+	while connection.pending_events():
+		event = connection.next_event()
+		marked = marked or (event.type == X.PropertyNotify and event.atom == done)
+	return marked
+
+
 def awaitDone(deadline):
-	while time.monotonic() < deadline:
-		while connection.pending_events():
-			event = connection.next_event()
-			if event.type == X.PropertyNotify and event.atom == done:
-				return
-		select.select([connection.fileno()], [], [], max(0.0, deadline - time.monotonic()))
+	while not drain():
+		left = deadline - time.monotonic()
+		if left <= 0:
+			return
+		select.select([connection.fileno()], [], [], left)
 
 
 connection = display.Display()
 done = connection.intern_atom("_LINDA_KEY_GUARD")
+# Selected from the start, so that the mark needs no round trip as the keyboard is freed; every other
+# change of a root property is read and let go of as it comes, so that none waits in the socket or in
+# the X server, the guard running for as long as NVDA does.
 connection.screen().root.change_attributes(event_mask=X.PropertyChangeMask)
 connection.sync()
 guarding, resource, windows, heard, pending = False, 0, [], time.monotonic(), b""
 while True:
 	timeout = max(0.0, heard + silence - time.monotonic()) if guarding and resource else None
-	readable, _w, _x = select.select([0], [], [], timeout)
-	if readable:
+	readable, _w, _x = select.select([0, connection.fileno()], [], [], timeout)
+	if connection.fileno() in readable:
+		drain()
+	if 0 in readable:
 		chunk = os.read(0, 4096)
 		if not chunk:
 			# NVDA has gone, or let the connection go; this guard's copy of the socket is the last.
@@ -493,7 +506,7 @@ while True:
 			state, number, *grabWindows = line.split() + [b"0", b"0"]
 			guarding, resource, windows = state == b"1", int(number), [int(w) for w in grabWindows]
 			heard = time.monotonic()
-	elif guarding and resource:
+	elif guarding and resource and time.monotonic() >= heard + silence:
 		free(windows)
 		try:
 			awaitDone(time.monotonic() + 1)

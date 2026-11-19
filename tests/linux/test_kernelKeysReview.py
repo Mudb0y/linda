@@ -1341,3 +1341,56 @@ keyboard.close()
 def test_releasedPressesAreForgottenOnceTheHelperCanSayNothingOfThem(tmp_path: Path):
 	value = runKernelChild(tmp_path, NOTHING_KEPT_CHILD)
 	assert value["kept"] == 0, value
+
+
+#: On the X route, twenty thousand changes of a root property, as a desktop makes over weeks: what the
+#: guard has left unread on its sockets a second later; then another twenty thousand, and the X source
+#: falls silent, as a stopped NVDA does: how long until the guard has freed the keyboard and closed the
+#: source's connection, which the source sees as it connects again.
+GUARD_UNREAD_CHILD = r"""
+import subprocess
+source = startSource("x11")
+x = source._x
+guard = x._guard.pid
+filler = app.intern_atom("_LINDA_TEST_FILLER")
+
+
+def changeRootProperty(times):
+	for i in range(times):
+		root.change_property(filler, Xatom.CARDINAL, 32, [i])
+		if i % 500 == 0:
+			app.flush()
+	app.sync()
+
+
+def unread(pid):
+	sockets = subprocess.run(["ss", "-xpn"], capture_output=True, text=True, check=True).stdout
+	return sorted(int(line.split()[2]) for line in sockets.splitlines() if f"pid={pid}," in line)
+
+
+changeRootProperty(20000)
+time.sleep(1.0)
+idle = unread(guard)
+changeRootProperty(20000)
+connection = x._display
+x._beat = lambda now: None
+silent = time.monotonic()
+deadline = silent + 10
+while x._display is connection and time.monotonic() < deadline:
+	time.sleep(0.01)
+result = {"idle": idle, "freedAfter": time.monotonic() - silent, "again": x._display is not connection}
+root.delete_property(filler)
+app.sync()
+source.stop()
+keyboard.close()
+"""
+
+
+def test_guardReadsWhatTheXServerSendsItAndFreesTheKeyboardInTime(tmp_path: Path):
+	value = runKernelChild(tmp_path, GUARD_UNREAD_CHILD)
+	assert value["idle"] and max(value["idle"]) == 0, (
+		f"the guard left on its sockets what the X server sent it: {value}"
+	)
+	# Its silence of two seconds after the last heartbeat, half a second apart, and its wait for the X
+	# server of up to one.
+	assert value["again"] and value["freedAfter"] < 3.5, value
