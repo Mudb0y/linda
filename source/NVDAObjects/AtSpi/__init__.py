@@ -17,7 +17,6 @@ from typing import ClassVar
 
 import api
 from controlTypes import Role, State
-from linuxPlatform import windowSwitcher
 from linuxPlatform.atspi import client as atspiClient
 from linuxPlatform.atspi import handler
 from linuxPlatform.atspi.client import Node, NodeGone
@@ -1126,29 +1125,6 @@ class TopLevelWindow(AtSpi):
 	def _get_indexInParent(self) -> int | None:
 		siblings = _topLevelNodes()
 		return siblings.index(self.node) if self.node in siblings else None
-
-	def _titleJustSaid(self) -> bool:
-		"""Whether marco's switcher has just named this window, a frame whose title is all that is said
-		of it as the focus enters it, and nothing has been said since."""
-		return self.role in (Role.FRAME, Role.WINDOW) and windowSwitcher.namedJustNow(self.name)
-
-	def event_foreground(self):
-		windowSwitcher.noteFront(self.name)
-		if self._titleJustSaid():
-			# Cancelling would cut off the switcher, still saying this window's title.
-			import vision
-
-			vision.handler.handleForeground(self)
-			return
-		super().event_foreground()
-
-	def event_focusEntered(self):
-		if not self._titleJustSaid():
-			super().event_focusEntered()
-
-	def reportFocus(self):
-		if not self._titleJustSaid():
-			super().reportFocus()
 
 
 class DesktopNotification(Notification, AtSpi):

@@ -11,8 +11,6 @@ import appModuleHandler
 import controlTypes
 import speech
 import ui
-from linuxPlatform import windowSwitcher
-from logHandler import log
 
 
 class AppModule(appModuleHandler.AppModule):
@@ -21,15 +19,8 @@ class AppModule(appModuleHandler.AppModule):
 
 	def event_nameChange(self, obj, nextHandler):
 		if obj.role == controlTypes.Role.STATUSBAR and obj.name:
-			name = obj.name
-			if windowSwitcher.cameToFrontJustNow(name) and "showing" not in obj.atspiStates:
-				# Heard only once the switcher had gone and the window it named was in front, its title
-				# already said, and the focus in it being said, which cancelling would cut off.
-				log.debug(f"marco's switcher named {name!r} after it was gone; already in front")
-				return
 			# A newer choice makes the one still being spoken worthless.
 			speech.cancelSpeech()
-			ui.message(name)
-			windowSwitcher.noteNamed(name)
+			ui.message(obj.name)
 			return
 		nextHandler()

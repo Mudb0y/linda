@@ -297,9 +297,7 @@ source/appModules/mate_screensaver_dialog.py
 source/appModules/marco.py
   Linux runtime: added. The app module for MATE's window manager, which
   speaks the window or workspace its switcher names while Alt+Tab is held,
-  as NVDA speaks the Windows task switcher, and leaves the window it named
-  to come to the front without being named again; no Windows program is
-  named marco
+  as NVDA speaks the Windows task switcher; no Windows program is named marco
 source/appModules/nvda.py
   Linux runtime: chooseNVDAObjectOverlayClasses adds no overlay on Linux,
   where NVDA's own dialogs are AT-SPI objects with no window class or window
