@@ -935,6 +935,9 @@ class KernelKeySource:
 			self._locks ^= light
 
 	def _onExpired(self, seq: int) -> None:
+		# By number only, as a key typed is kept out of the log; a count of these says how often NVDA
+		# answered too late for the helper.
+		log.debug(f"linda-keyd passed key {seq} on before NVDA answered it")
 		press = self._bySeq.get(seq)
 		if press is None:
 			return
