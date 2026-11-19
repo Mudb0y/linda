@@ -192,6 +192,18 @@ pub const WATCHDOG_CHECK: Duration = Duration::from_millis(100);
 
 /// The most connections at once that have not been admitted yet. Any more are closed at once.
 pub const MAX_CALLERS: usize = 4;
+/// The most connections the loop accepts in one turn; the rest wait in the socket's backlog for the
+/// next. Any local user may connect, and each connection costs the loop an accept, a look at the
+/// caller's credentials and often a refusal, so without a bound a few processes connecting without
+/// pause would keep the loop from the keyboards until the watchdog ended the helper. As many as may
+/// wait to be admitted, so that a burst of rightful callers is not held up.
+pub const ACCEPTS_PER_TURN: usize = MAX_CALLERS;
+/// The most refusals the log has a line each for within [`REFUSAL_LOG_SPAN`]; the rest are counted,
+/// and the count is logged when the span ends. Any local user can be turned away as often as they
+/// connect, and a line each would let them use up the journal's allowance for the helper, so that
+/// what it logs about the keyboards would be lost. Ten is more than a client retrying ever needs.
+pub const REFUSALS_LOGGED: usize = 10;
+pub const REFUSAL_LOG_SPAN: Duration = Duration::from_secs(60);
 /// The most messages the helper keeps for a client that is not reading them, beyond what the
 /// socket holds; past this the client is taken for hung and dropped.
 pub const OUTBOX_LIMIT: usize = 512;

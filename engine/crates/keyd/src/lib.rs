@@ -18,8 +18,25 @@
 
 macro_rules! log {
     ($($t:tt)*) => {
-        eprintln!("linda-keyd: {}", format_args!($($t)*))
+        $crate::log_line(format_args!($($t)*))
     };
+}
+
+fn log_line(line: std::fmt::Arguments) {
+    eprintln!("linda-keyd: {line}");
+    #[cfg(test)]
+    LOGGED.with(|n| n.set(n.get() + 1));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many lines this thread has logged, for the tests of what reaches the log.
+    static LOGGED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn logged() -> usize {
+    LOGGED.with(|n| n.get())
 }
 
 pub mod core;

@@ -171,6 +171,9 @@ pub struct Core<D: Devices> {
     unanswered: Option<(Instant, Instant)>,
     drop_pending: Option<Refusal>,
     virtual_broken: bool,
+    /// Since when refusals have been counted for the log, how many it has a line for, and how many
+    /// more there were, as REFUSALS_LOGGED has it.
+    refusals: Option<(Instant, usize, usize)>,
     out: Vec<Output>,
 }
 
@@ -198,6 +201,7 @@ impl<D: Devices> Core<D> {
             unanswered: None,
             drop_pending: None,
             virtual_broken: false,
+            refusals: None,
             out: Vec::new(),
         }
     }
@@ -278,6 +282,11 @@ impl<D: Devices> Core<D> {
         {
             at(r);
         }
+        if let Some((since, _, unlogged)) = self.refusals
+            && unlogged > 0
+        {
+            at(since + REFUSAL_LOG_SPAN);
+        }
         t
     }
 
@@ -287,17 +296,23 @@ impl<D: Devices> Core<D> {
                 conn,
                 Goodbye::TooMany,
                 "too many connections are waiting to be admitted".into(),
+                now,
             );
             return;
         }
         match &self.front {
             Front::Session { uid, .. } if *uid != peer.uid => {
                 let why = format!("user {} is not the user of the session in front", peer.uid);
-                self.refuse(conn, Goodbye::NotInFront, why);
+                self.refuse(conn, Goodbye::NotInFront, why, now);
                 return;
             }
             Front::Nobody => {
-                self.refuse(conn, Goodbye::NotInFront, "no session is in front".into());
+                self.refuse(
+                    conn,
+                    Goodbye::NotInFront,
+                    "no session is in front".into(),
+                    now,
+                );
                 return;
             }
             _ => {}
@@ -323,7 +338,7 @@ impl<D: Devices> Core<D> {
         } else if self.callers.contains_key(&conn) {
             match message {
                 Ok(msg) => self.caller_said(conn, msg, now),
-                Err(e) => self.refuse(conn, Goodbye::Malformed, e.0),
+                Err(e) => self.refuse(conn, Goodbye::Malformed, e.0, now),
             }
         }
         self.settle(now);
@@ -357,11 +372,12 @@ impl<D: Devices> Core<D> {
             return;
         };
         match result {
-            Err((reason, text)) => self.refuse(conn, reason, text),
+            Err((reason, text)) => self.refuse(conn, reason, text, now),
             Ok(_) if self.client_in_front() => self.refuse(
                 conn,
                 Goodbye::Busy,
                 "another client of the session in front is being served".into(),
+                now,
             ),
             Ok(session) => {
                 if self.client.is_some() {
@@ -507,8 +523,9 @@ impl<D: Devices> Core<D> {
             })
             .collect();
         for (conn, reason, text) in late {
-            self.refuse(conn, reason, text);
+            self.refuse(conn, reason, text, now);
         }
+        self.end_refusal_span(now);
         self.settle_virtual(now);
         let due: Vec<u32> = self
             .keyboards
@@ -536,10 +553,10 @@ impl<D: Devices> Core<D> {
                     let why = format!(
                         "the helper speaks protocol version {PROTOCOL_VERSION}, not {version}"
                     );
-                    self.refuse(conn, Goodbye::Version, why);
+                    self.refuse(conn, Goodbye::Version, why, now);
                 } else if self.client_in_front() {
                     let why = "another client of the session in front is being served";
-                    self.refuse(conn, Goodbye::Busy, why.into());
+                    self.refuse(conn, Goodbye::Busy, why.into(), now);
                 } else {
                     let peer = caller.peer;
                     if let Some(c) = self.callers.get_mut(&conn) {
@@ -550,7 +567,7 @@ impl<D: Devices> Core<D> {
             }
             (msg, _) => {
                 let why = format!("{} before WELCOME", name(&msg));
-                self.refuse(conn, Goodbye::Malformed, why);
+                self.refuse(conn, Goodbye::Malformed, why, now);
             }
         }
     }
@@ -620,15 +637,22 @@ impl<D: Devices> Core<D> {
         }
     }
 
-    fn refuse(&mut self, conn: ConnId, reason: Goodbye, text: String) {
-        if let Some(c) = self.callers.remove(&conn) {
-            log!(
-                "turned away process {} of user {}: {text}",
-                c.peer.pid,
-                c.peer.uid
-            );
+    fn refuse(&mut self, conn: ConnId, reason: Goodbye, text: String, now: Instant) {
+        let caller = self.callers.remove(&conn);
+        self.end_refusal_span(now);
+        let (_, logged, unlogged) = self.refusals.get_or_insert((now, 0, 0));
+        if *logged < REFUSALS_LOGGED {
+            *logged += 1;
+            match caller {
+                Some(c) => log!(
+                    "turned away process {} of user {}: {text}",
+                    c.peer.pid,
+                    c.peer.uid
+                ),
+                None => log!("turned away a connection: {text}"),
+            }
         } else {
-            log!("turned away a connection: {text}");
+            *unlogged += 1;
         }
         self.out.push(Output::Send(
             conn,
@@ -639,6 +663,22 @@ impl<D: Devices> Core<D> {
             },
         ));
         self.out.push(Output::Close(conn));
+    }
+
+    /// Ends the span of REFUSAL_LOG_SPAN once it is over, saying how many refusals in it had no
+    /// line of their own.
+    fn end_refusal_span(&mut self, now: Instant) {
+        if let Some((since, _, unlogged)) = self.refusals
+            && now >= since + REFUSAL_LOG_SPAN
+        {
+            if unlogged > 0 {
+                log!(
+                    "turned away {unlogged} more connections in {} s, not logged one by one",
+                    REFUSAL_LOG_SPAN.as_secs()
+                );
+            }
+            self.refusals = None;
+        }
     }
 
     fn drop_later(&mut self, reason: Goodbye, text: String) {

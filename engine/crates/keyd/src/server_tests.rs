@@ -370,6 +370,53 @@ fn the_watchdog_lets_go_when_the_loop_hangs() {
     drop(c);
 }
 
+/// Connections from any number of processes at once, each turned away.
+fn flood(h: &Helper) -> (Arc<AtomicBool>, Vec<JoinHandle<()>>) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let flooders = (0..8)
+        .map(|_| {
+            let stop = stop.clone();
+            let socket = h.socket.clone();
+            thread::spawn(move || {
+                while !stop.load(Relaxed) {
+                    let _ = Client::connect(&socket);
+                }
+            })
+        })
+        .collect();
+    (stop, flooders)
+}
+
+#[test]
+fn keys_go_round_in_time_through_a_flood_of_connections() {
+    let h = Helper::start();
+    let k = h.w.plug("keyboard");
+    let c = h.capturing(k);
+    let (stop, flooders) = flood(&h);
+    let mut took = Vec::new();
+    for _ in 0..10 {
+        let pressed = Instant::now();
+        h.w.press(k, KEY_A);
+        let got = c.until(MARGIN, |m| key(m).is_some());
+        c.send(&FromClient::Verdict {
+            seq: key(got.last().unwrap()).unwrap().seq,
+            keep: false,
+        });
+        eventually(MARGIN, "the key out", || h.w.virtual_down().contains(KEY_A));
+        took.push(pressed.elapsed());
+        h.w.release(k, KEY_A);
+        c.until(MARGIN, |m| key(m).is_some_and(|k| k.value == KEY_RELEASE));
+        eventually(MARGIN, "the release out", || h.w.virtual_down().is_empty());
+    }
+    stop.store(true, Relaxed);
+    for f in flooders {
+        let _ = f.join();
+    }
+    assert!(!h.ended.load(Relaxed));
+    took.sort();
+    assert!(took[took.len() / 2] < VERDICT_TIMEOUT, "{took:?}");
+}
+
 // Found in the security review of admission. It fails on purpose and says in its message what goes
 // wrong.
 

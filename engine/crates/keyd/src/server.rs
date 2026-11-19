@@ -19,7 +19,7 @@ use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketAddrUnix, SocketFla
 
 use crate::core::{ConnId, Core, Front, Output, Peer, Refusal, Source};
 use crate::device::Devices;
-use crate::protocol::{Goodbye, LOOP_TICK, MAX_MESSAGE, OUTBOX_LIMIT};
+use crate::protocol::{ACCEPTS_PER_TURN, Goodbye, LOOP_TICK, MAX_MESSAGE, OUTBOX_LIMIT};
 use crate::watchdog::{Notifier, Progress};
 
 /// What the other threads tell the loop.
@@ -221,12 +221,11 @@ impl<D: Devices> Server<D> {
         Ok(())
     }
 
+    /// What is ready, in the order it is to be served: the keyboards first, and new connections,
+    /// which any local user can make, last.
     fn poll(&self, timeout: Option<Duration>) -> io::Result<Vec<(Ready, PollFlags)>> {
-        let mut what = vec![Ready::Listener, Ready::Notices];
-        let mut fds = vec![
-            PollFd::new(&self.listener, PollFlags::IN),
-            PollFd::new(&self.notices.wake, PollFlags::IN),
-        ];
+        let mut what = vec![Ready::Notices];
+        let mut fds = vec![PollFd::new(&self.notices.wake, PollFlags::IN)];
         for (source, fd) in self.core.poll_set() {
             what.push(Ready::Core(source));
             fds.push(PollFd::from_borrowed_fd(fd, PollFlags::IN));
@@ -239,6 +238,8 @@ impl<D: Devices> Server<D> {
             what.push(Ready::Conn(*id));
             fds.push(PollFd::from_borrowed_fd(c.fd.as_fd(), flags));
         }
+        what.push(Ready::Listener);
+        fds.push(PollFd::new(&self.listener, PollFlags::IN));
         let timeout = timeout.map(|d| Timespec {
             tv_sec: d.as_secs() as _,
             tv_nsec: d.subsec_nanos() as _,
@@ -283,7 +284,7 @@ impl<D: Devices> Server<D> {
     }
 
     fn accept(&mut self, now: Instant) {
-        loop {
+        for _ in 0..ACCEPTS_PER_TURN {
             let fd = match rustix::net::accept_with(
                 &self.listener,
                 SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,

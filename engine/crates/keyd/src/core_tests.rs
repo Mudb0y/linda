@@ -900,6 +900,27 @@ fn too_many_callers_at_once_are_turned_away() {
 }
 
 #[test]
+fn refusals_are_not_logged_one_line_each() {
+    let mut t = T::new();
+    let stranger = Peer {
+        pid: 5000,
+        uid: 1001,
+        gid: 1001,
+    };
+    let before = crate::logged();
+    for c in 0..1000 {
+        t.connect(100 + c, stranger);
+    }
+    assert_eq!(crate::logged() - before, REFUSALS_LOGGED);
+    assert_eq!(t.core.next_wake(), Some(t.now + REFUSAL_LOG_SPAN));
+    // The count of the rest when the span ends, and a line for the first refusal after it.
+    t.pass(REFUSAL_LOG_SPAN);
+    assert_eq!(crate::logged() - before, REFUSALS_LOGGED + 1);
+    t.connect(99, stranger);
+    assert_eq!(crate::logged() - before, REFUSALS_LOGGED + 2);
+}
+
+#[test]
 fn unknown_features_are_not_granted() {
     let mut t = T::new();
     t.connect(CLIENT, PEER);
