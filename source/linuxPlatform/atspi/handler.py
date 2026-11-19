@@ -301,6 +301,11 @@ def _topLevelOf(node: Node) -> Node | None:
 	return None
 
 
+#: Accessibles found to lie under their application's root, by key. Only that is remembered: an
+#: accessible gone and its path given to one beside the root would at worst take the focus as before.
+_underRoot: set[tuple[str, str]] = set()
+
+
 def _inShadowTree(node: Node) -> bool:
 	"""Whether node is in a tree a toolkit keeps beside its application's own, under an application object
 	that is not the application's root, which holds none of it.
@@ -310,16 +315,30 @@ def _inShadowTree(node: Node) -> bool:
 	drawn in. GTK says that grouping has the focus whenever the window is activated, beside Firefox
 	saying where the focus is; taken for the focus, it would move NVDA's out of the page and back, each
 	time into a frame named as the window, whose title would be said again.
+
+	The walk up stops at an accessible already found under the root: each level costs a round trip or
+	two, and a control deep in a page has thirty of them, which took 20 ms from every Tab.
 	"""
 	c = client()
+	walked = []
 	current = node
 	for _ in range(64):
+		if current.key in _underRoot:
+			break
 		parent = c.parent(current)
-		if parent is None or parent.path == ROOT_PATH:
+		if parent is None:
 			return False
+		walked.append(current.key)
+		if parent.path == ROOT_PATH or parent.key in _underRoot:
+			break
 		if c.role(parent) == "application":
 			return True
 		current = parent
+	else:
+		return False
+	if len(_underRoot) > MAX_QUEUED:
+		_underRoot.clear()
+	_underRoot.update(walked)
 	return False
 
 
@@ -625,6 +644,7 @@ def terminate() -> None:
 	liveRegions.forget()
 	_applicationNames.clear()
 	_topLevels.clear()
+	_underRoot.clear()
 	_focusWhileHung.clear()
 	_setForeground(None)
 	_settleStartedAt = None
