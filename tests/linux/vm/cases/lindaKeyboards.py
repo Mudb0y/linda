@@ -3,8 +3,9 @@ is taken by the helper and its Linda key is Linda's; one unplugged in the middle
 passed on and the Linda key kept, leaves no key held, to the X server or to Linda.
 
 A keyboard the helper leaves alone, as it leaves one made through uinput by a remapper, one that is
-also a pointer, and one another program holds, reaches the X server straight, while Linda, on the
-kernel route, reads nothing from the X server: recorded as the expected failure it is.
+also a pointer, and one another program holds, reaches the X server straight, where Linda reads it as
+on the X route beside the kernel route: its Linda key is Linda's, and what is typed on it is echoed
+once.
 """
 
 from typing import TYPE_CHECKING
@@ -92,19 +93,17 @@ def run(ground: "Ground") -> None:
 		ground.settle(APART)
 		mark = ground.mark()
 		remapped.chord(*CHORD_KEYS)
-		ground.settle(1.5)
-		spoken = ground.speech(mark)
-		reached = [(r["key"], r["value"]) for r in ground.keys("app", mark) if r["key"] in CHORD_KEYS]
-		ground.machine.log(
-			f"the Linda key with T on a keyboard left alone: Linda spoke {spoken}, the program had {reached}"
-		)
-		with ground.expectedFailure(
-			"on the kernel route Linda hears nothing of a keyboard the helper leaves alone, and its "
-			"commands typed there reach the program"
-		):
-			assert WINDOW_TITLE in [text for _t, text in spoken] and not reached, (spoken, reached)
-		mark = ground.mark()
-		remapped.tap("KEY_R")
-		ground.waitForKeys("app", [("KEY_R", 1), ("KEY_R", 0)], mark)
+		ground.expect(WINDOW_TITLE, since=mark)
 		ground.settle(0.5)
-		ground.machine.log(f"R typed on it: Linda spoke {ground.speech(mark)}")
+		reached = [(r["key"], r["value"]) for r in ground.keys("app", mark) if r["key"] in CHORD_KEYS]
+		assert not reached, reached
+		assert [text for _t, text in ground.speech(mark)].count(WINDOW_TITLE) == 1, ground.speech(mark)
+		mark = ground.mark()
+		remapped.tap("KEY_R", "KEY_E")
+		app = ground.waitForKeys("app", [("KEY_R", 1), ("KEY_R", 0), ("KEY_E", 1), ("KEY_E", 0)], mark)
+		assert [r["keyval"] for r in app if r["value"] == 1] == ["r", "e"], app
+		ground.expect("r", "e", since=mark)
+		ground.settle(0.5)
+		spoken = [text for _t, text in ground.speech(mark)]
+		assert spoken.count("r") == 1 and spoken.count("e") == 1, spoken
+		assert len(ground.lindaLogRecords(X_ROUTE)) == 1, "Linda left the kernel route"
