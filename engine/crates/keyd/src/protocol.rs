@@ -255,7 +255,7 @@ pub const WELCOME: u8 = 0x81;
 /// words, for the client's log.
 pub const GOODBYE: u8 = 0x82;
 /// `<BQIHBB`: type, sequence number, device, key code, value, flags. The sequence number counts
-/// every KEY the helper sends from 1, over the whole life of the helper. The device is the kernel's
+/// the KEYs the helper sends this client, from 1. The device is the kernel's
 /// number of the input device (N in /sys/class/input/inputN). The code is the kernel's evdev key
 /// code, an X key code less 8. The value is [`KEY_RELEASE`], [`KEY_PRESS`] or [`KEY_REPEAT`]; the
 /// flags are [`KEY_ASK`], [`KEY_SYNTHETIC`] and [`KEY_TYPED`].
@@ -269,7 +269,8 @@ pub const DEVICE: u8 = 0x86;
 /// `<BH`: type, the lock lights that are on, [`LOCK_NUM`], [`LOCK_CAPS`], [`LOCK_SCROLL`] and the
 /// other LED codes' bits. They are what the X server, the compositor or the console, whichever owns
 /// the locks, last set on the helper's virtual keyboard, which the helper also shows on the real
-/// keyboards' lights.
+/// keyboards' lights. It comes only while the client's session is in front and of lights that
+/// session set, and again when the helper captures again, with what changed meanwhile.
 pub const LOCKS: u8 = 0x87;
 /// `<BI`: type, the counter of the client's HEARTBEAT.
 pub const HEARTBEAT_ECHO: u8 = 0x88;

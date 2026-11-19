@@ -523,6 +523,67 @@ fn the_locks_come_from_the_first_keyboard_until_the_desktop_says() {
     assert_eq!(t.sent_to(OTHER), vec![ToClient::Locks { leds: LOCK_NUM }]);
 }
 
+/// What the client was sent but the state of each keyboard.
+fn told(t: &mut T) -> Vec<ToClient> {
+    let mut sent = t.sent();
+    sent.retain(|m| !matches!(m, ToClient::Device { .. }));
+    sent
+}
+
+#[test]
+fn the_lights_are_told_only_of_the_clients_own_session_while_it_is_in_front() {
+    let (mut t, _k) = T::capturing();
+    t.desktop_leds(LOCK_NUM);
+    assert_eq!(told(&mut t), vec![ToClient::Locks { leds: LOCK_NUM }]);
+    t.logind(front("5", 1001));
+    t.desktop_leds(LOCK_NUM | LOCK_CAPS);
+    assert_eq!(told(&mut t), vec![released(Released::Background)]);
+    // Back in front, it is not told of the lights the other session left.
+    t.logind(front(SESSION, 1000));
+    assert!(told(&mut t).is_empty());
+    // Its own X server sets them again, and it hears.
+    t.desktop_leds(LOCK_NUM);
+    assert_eq!(told(&mut t), vec![ToClient::Locks { leds: LOCK_NUM }]);
+    // Nor of lights set on a text console of the same user, before or after logind says so.
+    t.console(X_CONSOLE);
+    t.console(2);
+    t.desktop_leds(LOCK_CAPS);
+    t.logind(on_console("c2", 1000, 2));
+    t.desktop_leds(LOCK_SCROLL);
+    assert_eq!(told(&mut t), vec![released(Released::Background)]);
+    t.console(X_CONSOLE);
+    t.logind(front(SESSION, 1000));
+    assert!(told(&mut t).is_empty());
+}
+
+#[test]
+fn each_client_counts_its_keys_from_one() {
+    let (mut t, k) = T::capturing();
+    for _ in 0..3 {
+        t.press(k, KEY_A);
+        let seq = t.last_seq();
+        t.verdict(seq, false);
+        t.release(k, KEY_A);
+    }
+    t.core.disconnected(CLIENT, t.now);
+    t.take();
+    t.out.clear();
+    t.admit(OTHER);
+    t.from(OTHER, FromClient::Start);
+    t.pass(ms(1));
+    assert!(t.w.grabbed(k));
+    t.press(k, KEY_A);
+    let keys: Vec<u64> = t
+        .sent_to(OTHER)
+        .into_iter()
+        .filter_map(|m| match m {
+            ToClient::Key(k) => Some(k.seq),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(keys, vec![1]);
+}
+
 // The bounded wait for a verdict.
 
 #[test]

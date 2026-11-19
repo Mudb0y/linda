@@ -161,6 +161,8 @@ pub struct Core<D: Devices> {
     /// it go.
     pressed: Vec<u16>,
     leds: Option<u16>,
+    /// The session that was in front when the lights were last set, whose they are.
+    leds_by: Option<String>,
     next_seq: u64,
     client: Option<Client>,
     callers: BTreeMap<ConnId, Caller>,
@@ -198,6 +200,7 @@ impl<D: Devices> Core<D> {
             passed: HashMap::new(),
             pressed: vec![0; KEY_CNT],
             leds: None,
+            leds_by: None,
             next_seq: 1,
             client: None,
             callers: BTreeMap::new(),
@@ -427,10 +430,11 @@ impl<D: Devices> Core<D> {
                     wants: false,
                     last_heard: now,
                 });
+                // Numbered afresh, so that the first key's number tells nothing of how many keys
+                // another client had. Nothing is in line: no client, no capture.
+                self.next_seq = 1;
                 self.send_client(ToClient::welcome(features & FEATURES_KNOWN));
-                if let Some(leds) = self.leds {
-                    self.send_client(ToClient::Locks { leds });
-                }
+                self.tell_locks();
             }
         }
         self.settle(now);
@@ -819,6 +823,8 @@ impl<D: Devices> Core<D> {
         if !self.capturing {
             log!("capturing");
             self.capturing = true;
+            // What changed while it was in the background was kept from it.
+            self.tell_locks();
             if let Err(e) = self.devices.watch(true) {
                 log!("cannot watch for keyboards coming and going: {e}");
             }
@@ -1047,17 +1053,20 @@ impl<D: Devices> Core<D> {
             None => {
                 if let Ok(leds) = kbd.k.leds() {
                     self.leds = Some(leds);
-                    self.send_client(ToClient::Locks { leds });
+                    self.leds_by = self.session_in_front().map(str::to_owned);
+                    self.tell_locks();
                 }
             }
         }
     }
 
     fn set_leds(&mut self, leds: u16) {
-        if self.leds == Some(leds) {
+        let by = self.session_in_front().map(str::to_owned);
+        if self.leds == Some(leds) && self.leds_by == by {
             return;
         }
         self.leds = Some(leds);
+        self.leds_by = by;
         for (n, k) in &mut self.keyboards {
             if k.state == KState::Held
                 && let Err(e) = k.k.set_leds(leds)
@@ -1065,7 +1074,19 @@ impl<D: Devices> Core<D> {
                 log!("cannot set the lights of keyboard {n}: {e}");
             }
         }
-        self.send_client(ToClient::Locks { leds });
+        self.tell_locks();
+    }
+
+    /// Sends the client the lights, when they are its own session's and that session is in front:
+    /// a client in the background must learn nothing of the session in front, and lights another
+    /// session set are not its own.
+    fn tell_locks(&mut self) {
+        if let (Some(leds), Some(c)) = (self.leds, &self.client)
+            && self.leds_by.as_deref() == Some(c.session.as_str())
+            && self.session_in_front() == Some(c.session.as_str())
+        {
+            self.send_client(ToClient::Locks { leds });
+        }
     }
 
     /// Forgets a keyboard that is gone, with a release put in line for each key it held down.
