@@ -43,6 +43,8 @@ LOGS = {
 	"app": f"{GROUND}/app.jsonl",
 }
 LINDA_DIRECTORY = f"{GROUND}/linda"
+#: Reads of a file made before one that is not garbled is given up on.
+READ_ATTEMPTS = 3
 TRANSCRIPT = f"{LINDA_DIRECTORY}/transcript.jsonl"
 WINDOW_TITLE = "Ground window"
 USER = "alice"
@@ -101,22 +103,6 @@ def keyEvents(records: list[dict]) -> list[tuple[str, int]]:
 	return [(r["key"], r["value"]) for r in records if r["kind"] == "key" and r["value"] != 2]
 
 
-def jsonLines(text: str) -> list[dict]:
-	"""Each record of a JSON Lines file read while it is written to, leaving out a line that does not
-	parse: the last may be half written, and now and then one read of a file the window writes to
-	comes back with a line in the middle run into the next, though the file itself had them apart
-	when its end was printed after the failure. A test that waits for records reads again; one that
-	asserts on them sees the record missing."""
-	records = []
-	for line in text.split("\n"):
-		if line.strip():
-			try:
-				records.append(json.loads(line))
-			except json.JSONDecodeError:
-				pass
-	return records
-
-
 def unitName(prefix: str, name: str) -> str:
 	return prefix + "".join(c if c.isalnum() else "-" for c in name)
 
@@ -164,9 +150,7 @@ class FakeKeyboard:
 
 	def records(self, since: "Mark | None" = None) -> list[dict]:
 		"""What the keyboard wrote, and for a uhid one what the kernel set its lights to."""
-		path = shlex.quote(f"{GROUND}/keyboards/{self.name}.jsonl")
-		text = self.ground.shell(f"cat {path} 2>/dev/null || true")
-		records = jsonLines(text)
+		records = self.ground.readJsonLines(f"{GROUND}/keyboards/{self.name}.jsonl")
 		return [r for r in records if since is None or r["t"] >= since.t]
 
 
@@ -236,9 +220,7 @@ class KeydClient:
 
 	def records(self, since: "Mark | None" = None, type: str | None = None) -> list[dict]:
 		"""What the client got from the helper and sent it, as guest/keydClient.py records it."""
-		path = shlex.quote(f"{KEYD_DIRECTORY}/{self.name}.jsonl")
-		text = self.ground.shell(f"cat {path} 2>/dev/null || true")
-		records = jsonLines(text)
+		records = self.ground.readJsonLines(f"{KEYD_DIRECTORY}/{self.name}.jsonl")
 		return [
 			r for r in records if (since is None or r["t"] >= since.t) and (type is None or r["type"] == type)
 		]
@@ -334,6 +316,26 @@ class Ground:
 	def start(self, name: str, argv: Sequence[str], env: dict[str, str] | None = None) -> int:
 		"""Start a program in the X session as its user; its output goes to /tmp/ground/jobs/NAME.*."""
 		return self.session({"op": "start", "name": name, "argv": list(argv), "env": env or {}})["pid"]
+
+	def readJsonLines(self, path: str) -> list[dict]:
+		"""Each record of a JSON Lines file in the guest, which may be written to as it is read, so that
+		its last line may be half written and is then left out. Now and then a read comes back with a
+		stretch of lines garbled or run together, which Linda's log and the file's own end, printed after
+		the failure, had whole; such a read is made again."""
+		for _attempt in range(READ_ATTEMPTS):
+			text = self.shell(f"cat {shlex.quote(path)} 2>/dev/null || true")
+			lines = [line for line in text.split("\n") if line.strip()]
+			try:
+				records = [json.loads(line) for line in lines[:-1]]
+			except json.JSONDecodeError:
+				continue
+			if lines:
+				try:
+					records.append(json.loads(lines[-1]))
+				except json.JSONDecodeError:
+					pass
+			return records
+		raise AssertionError(f"{path} came back garbled {READ_ATTEMPTS} times running")
 
 	def run(self, argv: Sequence[str], timeout: float = 30) -> subprocess.CompletedProcess:
 		"""Run a short command in the X session as its user, and answer how it ended."""
@@ -448,8 +450,7 @@ class Ground:
 		self.session({"op": "signal", "name": "linda", "signal": signal})
 
 	def _transcript(self) -> list[dict]:
-		text = self.shell(f"cat {TRANSCRIPT} 2>/dev/null || true")
-		return jsonLines(text)
+		return self.readJsonLines(TRANSCRIPT)
 
 	def spoken(self) -> list[str]:
 		"""The text of each of Linda's speak records so far."""
@@ -622,8 +623,7 @@ class Ground:
 
 	def records(self, source: str, since: Mark | None = None) -> list[dict]:
 		"""Every record of source ("evdev", "x" or "app") read after since."""
-		text = self.shell(f"cat {LOGS[source]} 2>/dev/null || true")
-		records = jsonLines(text)
+		records = self.readJsonLines(LOGS[source])
 		return [r for r in records if since is None or r["received"] >= since.t]
 
 	def keys(self, source: str, since: Mark, *, device: str | None = None) -> list[dict]:
