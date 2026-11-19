@@ -181,6 +181,9 @@ def test_cajaFolderWindow(desktop: DesktopSession, tmp_path: Path):
 	step(desktop, "control+1", "Icon View list")
 	step(desktop, "Home", "sub 1 of 3")
 	step(desktop, "Return", "sub")
+	# Caja renames its window before it has filled the view, and a key in the first tens of
+	# milliseconds after does nothing, with no screen reader running too.
+	time.sleep(0.5)
 	step(desktop, "Down", "inner dot txt 1 of 1")
 	step(desktop, "alt+Up", "docs", "sub 1 of 3")
 
