@@ -39,11 +39,17 @@
 //! 5. While a keyboard is held, every press, release and repeat read from it comes to the client
 //!    as KEY, in the order read, at once. A press asks for a verdict: the client answers VERDICT,
 //!    keep or pass. A release and a repeat ask nothing: a key whose press was kept has its repeats
-//!    and its release kept, and one whose press was passed has them passed. The helper puts a key
-//!    on its virtual keyboard only once every key read before it has been decided, so the client
+//!    and its release kept, and one whose press was passed has them passed. The helper puts a press
+//!    on its virtual keyboard only once every press read before it has been decided, so the client
 //!    may be sent several presses before it has answered the first, and answers them in any order.
+//!    A release waits behind the presses read before it, in the same way, if its key is one of the
+//!    modifiers (both Shifts, Controls, Alts and Supers, and Caps Lock), or if its own press, or a
+//!    later press of the same key, is still waiting; any other release goes out as soon as its
+//!    press has gone out, ahead of presses still waiting, so that a key let go of is not held down
+//!    long enough for the desktop to repeat it. A release overtaking another key's press changes
+//!    nothing for a program.
 //!    A press not answered within [`VERDICT_TIMEOUT`] of its reading is passed on, and EXPIRED
-//!    says so, once every key read before it has been decided: at its bound, or later, when a
+//!    says so, once every press read before it has been decided: at its bound, or later, when a
 //!    press before it holds the line longer (with WAIT). Until EXPIRED, a verdict for it counts,
 //!    after its bound too; one that comes after EXPIRED is ignored. When the client fails to answer a run of
 //!    presses spanning [`UNANSWERED_SPAN`], the helper lets go and sends GOODBYE UNANSWERED; what
@@ -92,8 +98,9 @@
 //!   passed on at its bound, or let go of) changes nothing, as a late VERDICT does not.
 //! - The press is still answered with keep or pass, at any time before its longer bound; without
 //!   an answer by then it is passed on and EXPIRED is sent, as at the usual bound.
-//! - The order rule holds: keys read after it wait behind it, each with its own bound from its own
-//!   reading, and each may itself be answered, WAIT included, while it waits.
+//! - The order rule of point 5 holds: presses read after it wait behind it, each with its own bound
+//!   from its own reading, and each may itself be answered, WAIT included, while it waits; releases
+//!   wait behind it or go ahead of it as point 5 says.
 //! - WAIT is no answer to the rule of UNANSWERED_SPAN: a press passed on at its bound after a WAIT
 //!   counts as unanswered, so a client that answers only WAIT is dropped by it as one that says
 //!   nothing is, when it holds up typing for UNANSWERED_SPAN.

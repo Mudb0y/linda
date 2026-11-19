@@ -10,9 +10,10 @@
 //!   and the virtual keyboard exists, has appeared and has had time to be taken up.
 //! - A keyboard is grabbed only while every key on it is up, looked at again after the grab.
 //! - Every press waits at most VERDICT_TIMEOUT for its verdict, or VERDICT_WAIT_TIMEOUT once the
-//!   client has answered it WAIT, and is passed on without one. A
-//!   key's release and repeats follow what became of its press, and no key goes out on the virtual
-//!   keyboard before every key read before it has been decided.
+//!   client has answered it WAIT, and is passed on without one. A key's release and repeats follow
+//!   what became of its press. No press goes out on the virtual keyboard before every press read
+//!   before it has been decided, nor the release of a modifier; any other release goes out as soon
+//!   as its press has, unless its own press, or a later press of the same key, still waits.
 //! - Letting go, for any reason, ends with every key the virtual keyboard holds down released and
 //!   every keyboard closed, which the kernel takes as the end of the grab. It happens on STOP, on
 //!   the emergency chord, when the client goes, falls silent, breaks the protocol or leaves keys
