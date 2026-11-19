@@ -1301,3 +1301,76 @@ fn the_oldest_undecided_key_and_the_next_deadline_are_known() {
     assert!(set.iter().any(|(s, _)| *s == Source::Virtual));
     assert!(set.iter().any(|(s, _)| *s == Source::Watch));
 }
+
+// Found in the security review of admission and the session in front. Each fails on purpose and
+// says in its message what goes wrong.
+
+#[test]
+fn review_logind_before_the_kernel_on_a_switch_back_does_not_shut_the_reader_out() {
+    let (mut t, k) = T::capturing();
+    t.console(7);
+    // Away to console 2, where nobody is in front; the kernel and logind agree.
+    t.console(2);
+    t.logind(Front::Nobody);
+    t.assert_let_go();
+    // Back to console 7. Both learn of it from the same sysfs notification; here logind's answer
+    // reaches the loop before the console thread's.
+    t.logind(front(SESSION, 1000));
+    t.console(7);
+    // From now on logind says the same thing every SESSION_RECHECK, and the kernel nothing more.
+    for _ in 0..5 {
+        t.pass(SESSION_RECHECK);
+        t.logind(front(SESSION, 1000));
+    }
+    assert!(
+        t.w.grabbed(k),
+        "the client's session is in front on the console logind and the kernel agree on, yet the \
+         helper takes every later answer from logind for a stale one and never captures again"
+    );
+}
+
+#[test]
+fn review_a_client_whose_session_is_not_in_front_hears_nothing_of_the_one_that_is() {
+    let (mut t, _k) = T::capturing();
+    // Another user's session comes to the front; the old client stays connected, as it may.
+    t.logind(front("5", 1001));
+    assert_eq!(t.sent(), vec![released(Released::Background)]);
+    // The other user presses Caps Lock, and their X server lights it on the virtual keyboard.
+    t.desktop_leds(LOCK_CAPS);
+    let sent = t.sent();
+    assert!(
+        sent.is_empty(),
+        "the client of a session in the background was told of the lock lights of the session in \
+         front: {sent:?}"
+    );
+}
+
+#[test]
+fn review_callers_that_hang_up_leave_no_admission_work_behind() {
+    let mut t = T::new();
+    // logind cannot be asked for a moment: at the helper's start, or while logind or the bus
+    // restarts. Every user's caller is let in while it lasts.
+    t.logind(Front::Unknown);
+    let stranger = Peer {
+        pid: 5000,
+        uid: 1001,
+        gid: 1001,
+    };
+    for c in 0..1000u64 {
+        t.connect(100 + c, stranger);
+        t.hello(100 + c);
+        t.core.disconnected(100 + c, t.now);
+        t.take();
+    }
+    let asked = t
+        .out
+        .iter()
+        .filter(|o| matches!(o, Output::Admit(..)))
+        .count();
+    assert!(
+        asked <= MAX_CALLERS,
+        "another user's process queued {asked} questions to logind and polkit, each still asked \
+         after its connection had gone, ahead of the rightful client's, which waits behind them \
+         past ADMISSION_TIMEOUT"
+    );
+}

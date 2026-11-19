@@ -369,3 +369,47 @@ fn the_watchdog_lets_go_when_the_loop_hangs() {
     assert!(!h.w.any_grabbed());
     drop(c);
 }
+
+// Found in the security review of admission. It fails on purpose and says in its message what goes
+// wrong.
+
+/// Any local user may connect, and each connection is accepted, logged and turned away in the
+/// loop that reads the keyboards. The accept loop in Server::accept runs until the backlog is
+/// empty, so callers who connect faster than one thread turns them away keep it there.
+#[test]
+fn review_a_flood_of_connections_does_not_stop_the_loop() {
+    let h = Helper::start();
+    let k = h.w.plug("keyboard");
+    let c = h.capturing(k);
+    let stop = Arc::new(AtomicBool::new(false));
+    let flooders: Vec<_> = (0..8)
+        .map(|_| {
+            let stop = stop.clone();
+            let socket = h.socket.clone();
+            thread::spawn(move || {
+                while !stop.load(Relaxed) {
+                    let _ = Client::connect(&socket);
+                }
+            })
+        })
+        .collect();
+    let flood = Instant::now();
+    let mut stalled = None;
+    while flood.elapsed() < Duration::from_secs(3) {
+        c.send(&FromClient::Heartbeat { counter: 1 });
+        if h.ended.load(Relaxed) {
+            stalled = Some(flood.elapsed());
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    stop.store(true, Relaxed);
+    for f in flooders {
+        let _ = f.join();
+    }
+    assert!(
+        stalled.is_none(),
+        "connections from another process kept the loop from turning for STALL_LIMIT, and the \
+         watchdog ended the helper {stalled:?} into the flood"
+    );
+}
