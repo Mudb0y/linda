@@ -1118,6 +1118,37 @@ fn the_emergency_chord_lets_go_at_once_with_the_client_hung() {
 }
 
 #[test]
+fn a_key_that_went_down_unseen_goes_nowhere_and_leaves_nothing_down() {
+    let (mut t, k) = T::capturing();
+    t.w.press(k, KEY_A);
+    t.w.overflow(k, &[]);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    t.w.release(k, KEY_A);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    t.pass(VERDICT_TIMEOUT * 2);
+    assert!(t.keys().is_empty());
+    assert!(t.w.emitted().is_empty());
+    // Pressed again, it is an ordinary key.
+    t.press(k, KEY_A);
+    assert_eq!(t.keys().len(), 1);
+}
+
+#[test]
+fn a_chord_held_wholly_while_events_were_lost_lets_go_at_once() {
+    let (mut t, k) = T::capturing();
+    for c in CHORD {
+        t.w.press(k, c);
+    }
+    t.w.overflow(k, &[]);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    assert_eq!(t.sent(), vec![released(Released::Emergency)]);
+    t.assert_let_go();
+}
+
+#[test]
 fn the_emergency_chord_counts_across_keyboards() {
     let (mut t, k) = T::capturing();
     let k2 = t.w.plug("second keyboard");

@@ -106,6 +106,10 @@ struct Kbd<K> {
     reported: Option<DeviceStatus>,
     /// The keys whose press has been read and put in line, and whose release has not.
     down: KeySet,
+    /// Keys the kernel had down after it dropped events, whose press was never read: never sent to
+    /// the client nor passed on. They count towards the emergency chord, and their repeats and
+    /// release go nowhere.
+    unseen: KeySet,
     /// The kernel dropped events: what comes until the next report is discarded.
     dropping: bool,
 }
@@ -944,6 +948,7 @@ impl<D: Devices> Core<D> {
                         state: KState::Waiting(now),
                         reported: None,
                         down: KeySet::new(),
+                        unseen: KeySet::new(),
                         dropping: false,
                     },
                 );
@@ -1130,7 +1135,8 @@ impl<D: Devices> Core<D> {
 
     /// After the kernel dropped events: a key the helper has down that the kernel has up was
     /// released unseen, and gets its release now. A key that went down unseen has no press in
-    /// line, and its release will be ignored.
+    /// line; it is kept among the unseen, which the chord is looked for in at once, since the
+    /// person may be holding it for a way out of a helper that fell behind.
     fn resync(&mut self, n: u32, now: Instant) {
         let Some(kbd) = self.keyboards.get_mut(&n) else {
             return;
@@ -1143,12 +1149,23 @@ impl<D: Devices> Core<D> {
                 return;
             }
         };
+        let mut unseen = KeySet::new();
+        for code in down
+            .iter()
+            .filter(|c| is_virtual_key(*c) && !kbd.down.contains(*c))
+        {
+            unseen.insert(code);
+        }
+        kbd.unseen = unseen;
         let lost: Vec<u16> = kbd.down.iter().filter(|c| !down.contains(*c)).collect();
         for code in lost {
             if let Some(kbd) = self.keyboards.get_mut(&n) {
                 kbd.down.remove(code);
             }
             self.enter(n, code, KEY_RELEASE, KEY_SYNTHETIC, now);
+        }
+        if self.chord_held() {
+            self.emergency(now);
         }
     }
 
@@ -1161,15 +1178,17 @@ impl<D: Devices> Core<D> {
         if !is_virtual_key(code) {
             return;
         }
+        if kbd.unseen.contains(code) {
+            if value == 0 {
+                kbd.unseen.remove(code);
+            }
+            return;
+        }
         match value {
             1 if !kbd.down.contains(code) => {
                 kbd.down.insert(code);
                 if self.chord_held() {
-                    log!("the emergency chord: letting go of every keyboard");
-                    if let Some(c) = self.client.as_mut() {
-                        c.wants = false;
-                    }
-                    self.let_go(Some(Released::Emergency), true, now);
+                    self.emergency(now);
                     return;
                 }
                 self.enter(n, code, KEY_PRESS, KEY_ASK, now);
@@ -1189,8 +1208,16 @@ impl<D: Devices> Core<D> {
         CHORD.iter().all(|c| {
             self.keyboards
                 .values()
-                .any(|k| k.state == KState::Held && k.down.contains(*c))
+                .any(|k| k.state == KState::Held && (k.down.contains(*c) || k.unseen.contains(*c)))
         })
+    }
+
+    fn emergency(&mut self, now: Instant) {
+        log!("the emergency chord: letting go of every keyboard");
+        if let Some(c) = self.client.as_mut() {
+            c.wants = false;
+        }
+        self.let_go(Some(Released::Emergency), true, now);
     }
 
     /// Tells the client of a key, and puts a press or release in line. Repeats go to the client
