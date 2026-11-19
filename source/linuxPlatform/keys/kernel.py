@@ -475,14 +475,14 @@ class KernelKeySource:
 		self._stopping = True
 		self._wake()
 		self._wakeLayout()
-		for thread in (self._thread, self._layoutThread):
-			if thread is not None:
-				thread.join(2)
-		self._thread = self._layoutThread = None
+		threads = [thread for thread in (self._thread, self._layoutThread) if thread is not None]
+		for thread in threads:
+			thread.join(2)
 		self._decisions.put(None)
 		if self._decider is not None:
 			self._decider.join(2)
-			self._decider = None
+			threads.append(self._decider)
+		self._thread = self._layoutThread = self._decider = None
 		for connection in (self._events, self._requests):
 			if connection is not None:
 				try:
@@ -495,8 +495,14 @@ class KernelKeySource:
 			self._sock.close()
 		except OSError:
 			pass
-		for fd in (self._wakeRead, self._wakeWrite, self._layoutWakeRead, self._layoutWakeWrite):
-			os.close(fd)
+		alive = [thread.name for thread in threads if thread.is_alive()]
+		if alive:
+			# A thread still running would write its wake-up into whatever came to have the number next,
+			# another helper's connection or an X connection: the pipes are left open instead.
+			log.warning(f"Threads of the kernel key source outlived its stop: {', '.join(alive)}")
+		else:
+			for fd in (self._wakeRead, self._wakeWrite, self._layoutWakeRead, self._layoutWakeWrite):
+				os.close(fd)
 		if self._switchBefore is not None and sys.getswitchinterval() == SWITCH_INTERVAL:
 			sys.setswitchinterval(self._switchBefore)
 

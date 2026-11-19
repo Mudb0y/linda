@@ -1109,3 +1109,51 @@ def test_emergencyChordAsTheKernelSourceStopsIsHonoured(tmp_path: Path):
 	assert not value["kernel"], value
 	assert value["starts"] == 1, f"NVDA asked the helper to capture again after the emergency chord: {value}"
 	assert value["said"] == [LET_GO_MESSAGE], value
+
+
+#: The layout's thread is held up past the two seconds stop waits for it: whether its wake-up pipes
+#: were closed under it, so that the numbers go to the next connection made, which it would write into.
+STOP_UNDER_A_LIVE_THREAD_CHILD = r"""
+import os, socket, stat
+source = startSource()
+kernel = source._kernel
+watch = kernel._watchCapture
+stuck = threading.Event()
+
+
+def slowWatch():
+	if not stuck.is_set():
+		stuck.set()
+		time.sleep(3)
+	watch()
+
+
+kernel._watchCapture = slowWatch
+kernel._wakeLayout()
+stuck.wait(2)
+pipes = (kernel._wakeRead, kernel._wakeWrite, kernel._layoutWakeRead, kernel._layoutWakeWrite)
+source.stop()
+
+
+def isPipe(fd):
+	try:
+		return stat.S_ISFIFO(os.fstat(fd).st_mode)
+	except OSError:
+		return False
+
+
+open_ = [isPipe(fd) for fd in pipes]
+reused = []
+for _ in range(4):
+	a, b = socket.socketpair()
+	reused += [fd for fd in (a.fileno(), b.fileno()) if fd in pipes]
+result = {"open": open_, "reused": reused}
+keyboard.close()
+"""
+
+
+def test_stopLeavesTheWakePipesOfAThreadStillRunning(tmp_path: Path):
+	value = runKernelChild(tmp_path, STOP_UNDER_A_LIVE_THREAD_CHILD)
+	assert value["reused"] == [] and value["open"] == [True] * 4, (
+		f"the kernel source closed the pipes a thread of its still running writes its wake-ups into: {value}"
+	)
