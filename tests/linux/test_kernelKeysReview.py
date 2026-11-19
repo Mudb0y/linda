@@ -497,6 +497,75 @@ def test_keyTypedAsTheFocusReachesTheDocumentsTopLevelWindowIsBrowseModes(tmp_pa
 	)
 
 
+#: The document's window inside a top-level one, as in TOP_LEVEL_CHILD; the focus leaves for another
+#: application's window, then goes to the root window or to PointerRoot with the pointer over the
+#: top-level window, where by the X protocol a grab on the window under the pointer takes keys, and NVDA's
+#: focus stays in the document. h is typed, its XInput event never coming, so that the X source has it
+#: only from the grab: where it went.
+POINTER_ROOT_CHILD = r"""
+other = root.create_window(0, 0, 100, 100, 0, app.screen().root_depth, event_mask=X.KeyPressMask)
+other.change_property(pidAtom, Xatom.CARDINAL, 32, [2])
+other.map()
+top = root.create_window(0, 0, 300, 300, 0, app.screen().root_depth, event_mask=X.KeyPressMask)
+top.change_property(pidAtom, Xatom.CARDINAL, 32, [1])
+wmState = app.intern_atom("WM_STATE")
+top.change_property(wmState, wmState, 32, [1, 0])
+top.map()
+page = top.create_window(-1, -1, 1, 1, 0, app.screen().root_depth, event_mask=X.KeyPressMask)
+page.map()
+app.sync()
+time.sleep(0.2)
+page.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+time.sleep(0.2)
+source = startSource(ROUTE)
+mode["now"] = "browse"
+source.setCapture("browse", 1)
+time.sleep(0.3)
+other.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+time.sleep(0.3)
+onSlave = source._x._onSlave
+
+
+def losingH(data, isUp):
+	if data.detail != 43 or isUp:
+		onSlave(data, isUp)
+
+
+source._x._onSlave = losingH
+root.warp_pointer(250, 250)
+if FOCUS == "root":
+	root.set_input_focus(X.RevertToPointerRoot, X.CurrentTime)
+else:
+	app.set_input_focus(X.PointerRoot, X.RevertToPointerRoot, X.CurrentTime)
+app.sync()
+time.sleep(0.3)
+windowKeys()
+delivered.clear()
+keyboard.press("h", hold=0.03)
+time.sleep(0.5)
+result = {
+	"kernel": source.isKernel,
+	"window": [key for key in windowKeys() if key[1]],
+	"nvda": [[e["captured"], e["reached"]] for e in presses(ord("H"))],
+}
+source.stop()
+keyboard.close()
+"""
+
+
+@pytest.mark.parametrize("focus", ("root", "pointerRoot"))
+@pytest.mark.parametrize("route", ("x11", "auto"))
+def test_keyTypedWithTheFocusOnTheRootOverTheDocumentsWindowReachesIt(tmp_path: Path, route: str, focus: str):
+	value = runKernelChild(tmp_path, f"ROUTE = {route!r}\nFOCUS = {focus!r}\n" + POINTER_ROOT_CHILD)
+	assert value["kernel"] == (route == "auto")
+	assert value["window"] == [[35, True]], (
+		f"on the {route} route h was kept from the window under the pointer, the focus on {focus}: {value}"
+	)
+	assert value["nvda"] == [[False, True]], value
+
+
 #: A second window of the document's own application takes the focus, as a file chooser opened with
 #: Control+O from Firefox does, and h is typed in it before NVDA's focus has followed: where h went.
 SAME_APPLICATION_WINDOW_CHILD = r"""

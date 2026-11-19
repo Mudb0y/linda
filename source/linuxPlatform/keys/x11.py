@@ -1188,8 +1188,23 @@ class X11KeySource:
 				ticket.frozen = True
 				ticket.settled.set()
 				return
-		# Its slave event has not come, and may never: deliver it from its raw event.
 		now = time.monotonic()
+		if (
+			self._grabKey is None
+			and not self._captureFocused
+			and not self._grabMatches(keycode, event.state & 0xFF)
+		):
+			# A grab of a document's keys that took a key with the focus not in the document: with the
+			# focus on the root window or PointerRoot, a grab on the window under the pointer takes keys
+			# too. The key goes back to the X server, to go where it would have gone, and comes to NVDA
+			# from its own event as any key not grabbed does, whichever of the two came first.
+			ticket = _Ticket(
+				keycode, now, grab=keycode, effective=event.state & 0xFF, verdict=True, frozen=True
+			)
+			ticket.settled.set()
+			self._tickets.append(ticket)
+			return
+		# Its slave event has not come, and may never: deliver it from its raw event.
 		ticket = self._ticket(keycode, event.state & 0xFF, now)
 		ticket.frozen = True
 		ticket.settled.set()
