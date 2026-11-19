@@ -215,6 +215,24 @@ def test_cajaSelectsTheFolderLeftAfterASlowAnswer(desktop: DesktopSession, tmp_p
 	assertQuitCleanly(desktop, nvda)
 
 
+def test_cajaSelectsTheFolderLeftJustAfterAMoveInItsListView(desktop: DesktopSession, tmp_path: Path):
+	"""The first move in a list view Caja has just built tells of its current row twice, a millisecond
+	apart, or of the row the cursor sat on and then the row reached; one key is no flood, and the folder
+	Caja selects as it goes up a folder within the second after is still spoken."""
+	folder = makeFolder(tmp_path / "docs", "sub/", "alpha.txt")
+	makeFolder(folder / "sub", "a.txt", "b.txt")
+	desktop.startApp(["caja", "--no-desktop", str(folder / "sub")], title="sub", timeout=WINDOW_TIMEOUT)
+	desktopSession.activate("sub")
+	nvda = startNVDA(desktop, "sub", "Icon View list")
+	step(desktop, "control+2", "List View list")
+	# Caja is still filling the new view when it says it has the focus.
+	time.sleep(0.5)
+	step(desktop, "Down", "a dot txt; Size: …")
+	step(desktop, "control+1", "Icon View list")
+	step(desktop, "alt+Up", "docs", "sub 1 of 2")
+	assertQuitCleanly(desktop, nvda)
+
+
 def test_cajaBigFolder(desktop: DesktopSession, tmp_path: Path):
 	folder = tmp_path / "big"
 	folder.mkdir()

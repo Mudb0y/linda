@@ -548,10 +548,13 @@ def _onEvent(eventType: str, source: Node | None, detail1: int, detail2: int, an
 	elif eventType == "object:active-descendant-changed":
 		if len(_descendantChanges) > MAX_QUEUED:
 			_descendantChanges.clear()
+			_quickChanges.clear()
 		previous = _descendantChanges.get(source.key)
 		gap = now - previous[0] if previous else DESCENDANT_FLOOD_SECONDS
 		_descendantChanges[source.key] = (now, gap)
-		if gap < DESCENDANT_FLOOD_SECONDS:
+		quick = _quickChanges.get(source.key, 0) + 1 if gap < DESCENDANT_FLOOD_SECONDS else 0
+		_quickChanges[source.key] = quick
+		if quick >= FLOOD_QUICK_CHANGES:
 			_floodingUntil[source.busName] = now + FLOOD_SECONDS
 	elif eventType in WINDOW_ACTIVATION_EVENTS:
 		global _lastWindowEventAt, _settleStartedAt
@@ -635,6 +638,7 @@ def terminate() -> None:
 	_retries.clear()
 	_rescans.clear()
 	_descendantChanges.clear()
+	_quickChanges.clear()
 	_floodingUntil.clear()
 	_heldDescendantChanges.clear()
 	_holdingSince.clear()
@@ -1097,10 +1101,18 @@ def _asWindowEvent(event) -> tuple | None:
 #: moved through quickly is not asked about at every step, and it is looked in last for the active window.
 BUSY_SECONDS = 2.0
 #: Seconds after a container last changed its active descendant within DESCENDANT_FLOOD_SECONDS of the
-#: change before, during which its application is taken to be flooding.
+#: change before, FLOOD_QUICK_CHANGES times in a row, during which its application is taken to be
+#: flooding.
 FLOOD_SECONDS = 1.0
+#: Changes in a row, each within DESCENDANT_FLOOD_SECONDS of the one before, that make a flood. One key
+#: in a list view Caja has just built makes one such change: GTK names the row the cursor sat on and
+#: then the row reached, or the one row twice, a millisecond apart.
+FLOOD_QUICK_CHANGES = 2
 #: Until when each application is taken to be flooding, by bus name.
 _floodingUntil: dict[str, float] = {}
+#: How many changes in a row each container's active descendant has made within
+#: DESCENDANT_FLOOD_SECONDS of the one before, by the container's key.
+_quickChanges: dict[tuple[str, str], int] = {}
 
 
 def _isFloodBackground(event, now: float) -> bool:
