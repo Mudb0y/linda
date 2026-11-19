@@ -1572,6 +1572,70 @@ fn not_knowing_which_session_is_in_front_lets_go() {
     assert!(t.w.grabbed(k));
 }
 
+// Sleep.
+
+#[test]
+fn going_to_sleep_lets_go_and_waking_captures_again_once_every_key_is_up() {
+    let (mut t, k) = T::capturing();
+    t.press(k, KEY_LEFTSHIFT);
+    let seq = t.last_seq();
+    t.verdict(seq, false);
+    t.keys();
+    t.core.sleeping(true, t.now);
+    t.take();
+    assert_eq!(t.sent(), vec![released(Released::Background)]);
+    t.assert_let_go();
+    assert!(t.core.client.is_some() && !t.closed(CLIENT));
+    // logind's word on the session in front captures nothing while asleep.
+    t.logind(front(SESSION, 1000));
+    t.pass(Duration::from_secs(3));
+    assert!(!t.w.is_open(k));
+    // Woken with Shift still down: grabbed only once it is up.
+    t.core.sleeping(false, t.now);
+    t.take();
+    assert!(t.w.is_open(k) && !t.w.grabbed(k));
+    t.w.release(k, KEY_LEFTSHIFT);
+    t.pass(KEYS_UP_RETRY);
+    assert!(t.w.grabbed(k));
+}
+
+#[test]
+fn waking_starts_the_clients_silence_afresh() {
+    let (mut t, k) = T::capturing();
+    t.core.sleeping(true, t.now);
+    t.take();
+    // Every process frozen for five seconds: no turn of the loop, no heartbeat.
+    t.now += Duration::from_secs(5);
+    t.core.sleeping(false, t.now);
+    t.core.tick(t.now);
+    t.take();
+    assert!(!t.closed(CLIENT), "{:?}", t.out);
+    assert!(t.w.grabbed(k));
+    t.quiet(HEARTBEAT_TIMEOUT);
+    assert_eq!(goodbye_reason(&t.sent()), Some(Goodbye::Silent));
+}
+
+#[test]
+fn a_frozen_stretch_counts_against_neither_the_heartbeat_nor_a_verdict() {
+    let (mut t, k) = T::capturing();
+    t.press(k, KEY_A);
+    let a = t.last_seq();
+    let frozen = Duration::from_secs(3);
+    t.now += frozen;
+    t.core.thawed(frozen);
+    t.core.tick(t.now);
+    t.take();
+    assert!(!t.closed(CLIENT));
+    assert!(t.w.emitted().is_empty(), "passed on for the frozen time");
+    t.verdict(a, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1)]);
+    // The bounds run again from the thaw.
+    t.press(k, KEY_T);
+    t.quiet(HEARTBEAT_TIMEOUT);
+    assert_eq!(goodbye_reason(&t.sent()), Some(Goodbye::Silent));
+    t.assert_let_go();
+}
+
 // The virtual keyboard failing while in use, other grabbers, and stopping.
 
 #[test]

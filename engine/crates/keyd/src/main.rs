@@ -48,6 +48,8 @@ fn run() -> io::Result<()> {
     session::watch_front(move |f| n.post(Notice::Front(f)))?;
     let n = notices.clone();
     session::watch_console(move |c| n.post(Notice::Console(c)))?;
+    let n = notices.clone();
+    session::watch_sleep(move |asleep, inhibitor| n.post(Notice::Sleep { asleep, inhibitor }))?;
     let mut bus = SystemBus::new();
     let admit = server::spawn_admitter(notices.clone(), move |peer| {
         session::admit(&mut bus, peer, &session::start_time)

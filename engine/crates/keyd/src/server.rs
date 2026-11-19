@@ -19,7 +19,9 @@ use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketAddrUnix, SocketFla
 
 use crate::core::{ConnId, Core, Front, Output, Peer, Refusal, Source};
 use crate::device::Devices;
-use crate::protocol::{ACCEPTS_PER_TURN, Goodbye, LOOP_TICK, MAX_MESSAGE, OUTBOX_LIMIT};
+use crate::protocol::{
+    ACCEPTS_PER_TURN, Goodbye, LOOP_TICK, MAX_MESSAGE, OUTBOX_LIMIT, WATCHDOG_FROZEN,
+};
 use crate::watchdog::{Notifier, Progress};
 
 /// What the other threads tell the loop.
@@ -29,6 +31,12 @@ pub enum Notice {
     /// The kernel put this console in front.
     Console(u32),
     Admitted(ConnId, Result<String, Refusal>),
+    /// logind says the machine is going to sleep, or has woken. Going to sleep, it comes with the
+    /// delay inhibitor that holds the sleep back, released once the helper has let go.
+    Sleep {
+        asleep: bool,
+        inhibitor: Option<OwnedFd>,
+    },
     /// Nothing but a wake, as when the loop is to stop.
     Wake,
 }
@@ -218,7 +226,15 @@ impl<D: Devices> Server<D> {
             sooner(t);
         }
         let ready = self.poll(deadline.map(|d| d.saturating_duration_since(now)))?;
-        let now = Instant::now();
+        let woke = Instant::now();
+        if let Some(frozen) = frozen_for(deadline, now, woke) {
+            log!(
+                "every thread was stopped for {} ms; the client is not held to it",
+                frozen.as_millis()
+            );
+            self.core.thawed(frozen);
+        }
+        let now = woke;
         // Before anything that could grab: the loop may have slept long while it held nothing,
         // which the watchdog must not take for a stall once a keyboard is held.
         self.progress.turned(now, self.core.oldest_undecided());
@@ -280,6 +296,17 @@ impl<D: Devices> Server<D> {
                         Notice::Front(f) => self.core.front_changed(f, now),
                         Notice::Console(n) => self.core.console_changed(n, now),
                         Notice::Admitted(conn, r) => self.core.admitted(conn, r, now),
+                        Notice::Sleep { asleep, inhibitor } => {
+                            self.core.sleeping(asleep, now);
+                            self.carry_out(now);
+                            // Holding nothing while asleep, the helper cannot leave a keyboard dead
+                            // if systemd's watchdog lets it be frozen longer; holding again, it is
+                            // back on the unit's own.
+                            if let Some(n) = &mut self.notifier {
+                                n.sleeping(asleep, now);
+                            }
+                            drop(inhibitor);
+                        }
                         Notice::Wake => {}
                     }
                 }
@@ -430,6 +457,17 @@ impl<D: Devices> Server<D> {
             }
         }
     }
+}
+
+/// How long the whole process was frozen, when a poll that asked to wake by `deadline`, begun at
+/// `began`, came back at `woke` more than WATCHDOG_FROZEN late; as the watchdog thread judges its own
+/// sleep. A loop stalled in its own work gains nothing by this, since only the time spent waiting in
+/// poll is measured: poll comes back late only when the process is not run, frozen or starved of
+/// the processor, and then the client was not run either. The most it gives is a stretch that the
+/// watchdog thread, which judges the loop by its turns whatever this says, has let pass.
+fn frozen_for(deadline: Option<Instant>, began: Instant, woke: Instant) -> Option<Duration> {
+    let late = woke.saturating_duration_since(deadline?.max(began));
+    (late > WATCHDOG_FROZEN).then_some(late)
 }
 
 /// Reads and drops what a connection about to be closed sent that was not read. Closed with messages

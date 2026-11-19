@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::os::fd::BorrowedFd;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::device::{Devices, Found, GrabError, InputEvent, Keyboard, ReadError, VirtualKeyboard};
 use crate::keys::{
@@ -201,6 +201,8 @@ pub struct Core<D: Devices> {
     unanswered: Option<(Instant, Instant)>,
     drop_pending: Option<Refusal>,
     virtual_broken: bool,
+    /// logind has said the machine is going to sleep, and has not said it woke.
+    asleep: bool,
     /// Since when refusals have been counted for the log, how many it has a line for, and how many
     /// more there were, as REFUSALS_LOGGED has it.
     refusals: Option<(Instant, usize, usize)>,
@@ -232,6 +234,7 @@ impl<D: Devices> Core<D> {
             unanswered: None,
             drop_pending: None,
             virtual_broken: false,
+            asleep: false,
             refusals: None,
             out: Vec::new(),
         }
@@ -479,6 +482,52 @@ impl<D: Devices> Core<D> {
         }
         self.ask_waiting();
         self.settle(now);
+    }
+
+    /// logind says the machine is about to sleep, or has woken. Before sleep the helper lets go
+    /// of every keyboard, as when the session leaves the front: nothing needs holding while the
+    /// machine goes down, and a helper that holds nothing cannot leave a keyboard dead however long
+    /// it is frozen. On waking the client is not held to the time it was frozen, and the helper
+    /// captures again, all keys up first, if the client's session is still in front.
+    pub fn sleeping(&mut self, asleep: bool, now: Instant) {
+        if asleep == self.asleep {
+            return;
+        }
+        log!(
+            "{}",
+            if asleep {
+                "the machine is going to sleep"
+            } else {
+                "the machine has woken"
+            }
+        );
+        self.asleep = asleep;
+        if !asleep && let Some(c) = self.client.as_mut() {
+            c.last_heard = now;
+        }
+        self.settle(now);
+    }
+
+    /// The whole process was frozen for `frozen`, as while the machine suspended or resumed, which
+    /// the loop knows by a wait that came back that much later than it asked. Neither the client's
+    /// silence nor a press's wait for its verdict counts that time: the client was frozen too.
+    pub fn thawed(&mut self, frozen: Duration) {
+        if let Some(c) = self.client.as_mut() {
+            c.last_heard += frozen;
+        }
+        for c in self.callers.values_mut() {
+            c.since += frozen;
+            if let Some((t, _)) = &mut c.admitting {
+                *t += frozen;
+            }
+        }
+        for e in &mut self.line {
+            e.arrival += frozen;
+        }
+        if let Some((first, last)) = &mut self.unanswered {
+            *first += frozen;
+            *last += frozen;
+        }
     }
 
     /// The kernel has put console `n` in front. A console other than that of the session logind
@@ -823,6 +872,7 @@ impl<D: Devices> Core<D> {
     fn reconcile(&mut self, now: Instant) {
         let wanted = self.client.as_ref().is_some_and(|c| c.wants);
         let in_front = wanted
+            && !self.asleep
             && self
                 .client
                 .as_ref()
@@ -831,6 +881,8 @@ impl<D: Devices> Core<D> {
             if self.capturing {
                 let why = if !wanted {
                     Released::Stopped
+                } else if self.asleep {
+                    Released::Background
                 } else if self.front == Front::Unknown && !self.console_moved {
                     Released::SessionUnknown
                 } else {

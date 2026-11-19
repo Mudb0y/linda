@@ -218,6 +218,10 @@ pub const LOOP_TICK: Duration = Duration::from_millis(200);
 /// scheduler under load is not taken for a hung one; well short of the systemd watchdog, which
 /// covers the watchdog thread itself.
 pub const STALL_LIMIT: Duration = Duration::from_secs(1);
+/// systemd's watchdog timeout while the machine sleeps, set before sleep and put back on waking,
+/// when the helper holds nothing. Ten minutes: the processes are frozen only while devices suspend
+/// and resume, seconds and not minutes, and a helper that hangs meanwhile is still caught.
+pub const SLEEP_WATCHDOG: Duration = Duration::from_secs(600);
 /// How often the watchdog thread looks at the loop.
 pub const WATCHDOG_CHECK: Duration = Duration::from_millis(100);
 /// A sleep of WATCHDOG_CHECK that the watchdog thread finds took longer than this means the whole

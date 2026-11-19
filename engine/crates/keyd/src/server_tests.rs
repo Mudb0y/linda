@@ -506,6 +506,55 @@ fn fault_a_stream_of_connections_keeps_the_loop_from_the_keyboard() {
     );
 }
 
+#[test]
+fn going_to_sleep_lets_go_before_the_inhibitor_is_released() {
+    let h = Helper::start();
+    let k = h.w.plug("keyboard");
+    let c = h.capturing(k);
+    let (held, inhibitor) = rustix::pipe::pipe().unwrap();
+    h.notices.post(Notice::Sleep {
+        asleep: true,
+        inhibitor: Some(inhibitor),
+    });
+    let mut b = [0u8; 1];
+    let read = rustix::io::read(&held, &mut b).unwrap();
+    assert_eq!(read, 0, "the inhibitor is released");
+    assert!(
+        !h.w.any_grabbed(),
+        "released before the keyboards were let go"
+    );
+    c.until(MARGIN, |m| {
+        *m == ToClient::Released {
+            reason: Released::Background,
+        }
+    });
+    c.send(&FromClient::Heartbeat { counter: 1 });
+    h.notices.post(Notice::Sleep {
+        asleep: false,
+        inhibitor: None,
+    });
+    c.until(MARGIN, |m| {
+        matches!(m, ToClient::Device { device, status: DeviceStatus::Held, .. } if *device == k)
+    });
+}
+
+#[test]
+fn only_a_poll_that_came_back_late_is_a_freeze() {
+    let t = Instant::now();
+    let ms = Duration::from_millis;
+    // Asked to wake in 200 ms, woken 3 s later: frozen for 2.8 s.
+    assert_eq!(
+        frozen_for(Some(t + ms(200)), t, t + ms(3000)),
+        Some(ms(2800))
+    );
+    assert_eq!(frozen_for(Some(t + ms(200)), t, t + ms(600)), None);
+    // A deadline already past when the poll began counts from the poll's start: a loop that was
+    // late getting there, stalled in its own work, gains nothing.
+    assert_eq!(frozen_for(Some(t - ms(5000)), t, t + ms(10)), None);
+    // Nothing asked of the clock, nothing to judge.
+    assert_eq!(frozen_for(None, t, t + ms(10_000)), None);
+}
+
 // Standard error that does not take what is written to it: under systemd it is a socket to the
 // journal, which stops reading when journald does. Each of these runs a test of this binary in a
 // process of its own whose standard error is such a socket, filled first, so that any write to it

@@ -13,7 +13,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::device::Guard;
-use crate::protocol::{STALL_LIMIT, VERDICT_TIMEOUT, WATCHDOG_CHECK, WATCHDOG_FROZEN};
+use crate::protocol::{
+    SLEEP_WATCHDOG, STALL_LIMIT, VERDICT_TIMEOUT, WATCHDOG_CHECK, WATCHDOG_FROZEN,
+};
 
 const NONE: u64 = u64::MAX;
 
@@ -145,6 +147,8 @@ pub fn feed_interval(timeout: Duration) -> Duration {
 /// systemd's notification socket, when the helper runs as a service of type notify.
 pub struct Notifier {
     socket: UnixDatagram,
+    /// systemd's watchdog timeout, WatchdogSec of the unit.
+    timeout: Option<Duration>,
     /// How often to feed systemd's watchdog, by [`feed_interval`].
     interval: Option<Duration>,
     next: Instant,
@@ -155,7 +159,7 @@ impl Notifier {
     /// started by systemd.
     pub fn from_env() -> Option<Notifier> {
         let path = std::env::var_os("NOTIFY_SOCKET")?;
-        let interval = std::env::var("WATCHDOG_USEC")
+        let timeout = std::env::var("WATCHDOG_USEC")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|_| {
@@ -163,8 +167,8 @@ impl Notifier {
                     .ok()
                     .is_none_or(|p| p.parse() == Ok(std::process::id()))
             })
-            .map(|usec| feed_interval(Duration::from_micros(usec)));
-        match Notifier::connect(path.as_encoded_bytes(), interval) {
+            .map(Duration::from_micros);
+        match Notifier::connect(path.as_encoded_bytes(), timeout) {
             Ok(n) => Some(n),
             Err(e) => {
                 log!("cannot reach systemd's notification socket: {e}");
@@ -173,7 +177,7 @@ impl Notifier {
         }
     }
 
-    fn connect(path: &[u8], interval: Option<Duration>) -> io::Result<Notifier> {
+    fn connect(path: &[u8], timeout: Option<Duration>) -> io::Result<Notifier> {
         let socket = UnixDatagram::unbound()?;
         match path.strip_prefix(b"@") {
             Some(name) => {
@@ -189,9 +193,23 @@ impl Notifier {
         socket.set_nonblocking(true)?;
         Ok(Notifier {
             socket,
-            interval,
+            timeout,
+            interval: timeout.map(feed_interval),
             next: Instant::now(),
         })
+    }
+
+    /// Lets systemd's watchdog wait SLEEP_WATCHDOG while the machine sleeps, the helper holding
+    /// nothing, and puts it back to the unit's own timeout once it has woken. systemd times it on
+    /// the monotonic clock, which runs on while every process is frozen around a suspend, and would
+    /// otherwise kill the helper as it thawed. Each starts systemd's timer afresh.
+    pub fn sleeping(&mut self, asleep: bool, now: Instant) {
+        let Some(timeout) = self.timeout else {
+            return;
+        };
+        let usec = if asleep { SLEEP_WATCHDOG } else { timeout }.as_micros();
+        self.send(&format!("WATCHDOG_USEC={usec}"));
+        self.next = now + feed_interval(timeout);
     }
 
     pub fn send(&self, state: &str) {
@@ -358,7 +376,7 @@ mod tests {
             .unwrap();
         let mut n = Notifier::connect(
             path.as_os_str().as_encoded_bytes(),
-            Some(Duration::from_millis(500)),
+            Some(Duration::from_millis(2000)),
         )
         .unwrap();
         n.send("READY=1");
@@ -374,6 +392,18 @@ mod tests {
             got.push(String::from_utf8_lossy(&b[..len]).into_owned());
         }
         assert_eq!(got, ["READY=1", "WATCHDOG=1", "WATCHDOG=1"]);
+        // Around a sleep: the long timeout while asleep, the unit's own after, each restarting
+        // the feeding.
+        let later = t + Duration::from_secs(3);
+        n.sleeping(true, later);
+        n.sleeping(false, later);
+        assert_eq!(n.next_feed(), Some(later + Duration::from_millis(500)));
+        let mut got = Vec::new();
+        for _ in 0..2 {
+            let len = systemd.recv(&mut b).unwrap();
+            got.push(String::from_utf8_lossy(&b[..len]).into_owned());
+        }
+        assert_eq!(got, ["WATCHDOG_USEC=600000000", "WATCHDOG_USEC=2000000"]);
         let _ = std::fs::remove_dir_all(&dir);
         // An abstract socket, as systemd may give.
         let name = format!("keyd-notify-test-{}", std::process::id());

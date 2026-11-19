@@ -378,6 +378,108 @@ async fn follow(post: &dyn Fn(Front)) -> zbus::Error {
     }
 }
 
+/// Starts the thread that follows logind's PrepareForSleep and posts whether the machine is going to
+/// sleep each time that changes, going to sleep with the delay inhibitor that holds the sleep back
+/// until the helper has let go. It holds that inhibitor while the machine is awake, takes it again
+/// on waking, and asks logind every SESSION_RECHECK as well as on each signal, so that a signal lost
+/// with the bus leaves the helper asleep no longer than it takes to ask again. Without an inhibitor,
+/// which polkit may refuse, the helper still lets go on the signal, but sleep need not wait for it.
+pub fn watch_sleep(
+    post: impl Fn(bool, Option<std::os::fd::OwnedFd>) + Send + 'static,
+) -> io::Result<thread::JoinHandle<()>> {
+    thread::Builder::new().name("sleep".into()).spawn(move || {
+        let mut asleep = false;
+        let mut told = false;
+        loop {
+            let e = zbus::block_on(follow_sleep(&post, &mut asleep, &mut told));
+            log!("lost track of sleep: {e}");
+            thread::sleep(DBUS_RETRY);
+        }
+    })
+}
+
+async fn follow_sleep(
+    post: &dyn Fn(bool, Option<std::os::fd::OwnedFd>),
+    asleep: &mut bool,
+    told: &mut bool,
+) -> zbus::Error {
+    let r: zbus::Result<()> = async {
+        let conn = within(DBUS_CALL_TIMEOUT, connect()).await??;
+        let rule = MatchRule::builder()
+            .msg_type(Type::Signal)
+            .sender(LOGIN1)
+            .path(LOGIN1_PATH)
+            .interface(MANAGER)
+            .member("PrepareForSleep")
+            .build()?;
+        // Subscribed before the first look, so that no change between the two is missed.
+        let mut signals = MessageStream::for_match_rule(rule, &conn, NonZeroUsize::new(16)).await?;
+        let mut inhibitor = None;
+        let mut now_asleep: bool = within(
+            DBUS_CALL_TIMEOUT,
+            get(&conn, LOGIN1_PATH, MANAGER, "PreparingForSleep"),
+        )
+        .await??
+        .try_into()?;
+        loop {
+            if !now_asleep && inhibitor.is_none() {
+                match within(DBUS_CALL_TIMEOUT, inhibit(&conn)).await? {
+                    Ok(fd) => inhibitor = Some(fd),
+                    Err(e) if !*told => {
+                        *told = true;
+                        log!(
+                            "logind will not wait for the helper before sleep, which it lets go \
+                             of the keyboards for as soon as it hears: {e}"
+                        );
+                    }
+                    Err(_) => {}
+                }
+            }
+            if now_asleep != *asleep {
+                *asleep = now_asleep;
+                post(now_asleep, if now_asleep { inhibitor.take() } else { None });
+            }
+            let timer = zruntime::SharedRuntime::current()?.sleep(SESSION_RECHECK);
+            now_asleep = match select(signals.next(), timer).await {
+                Either::Left((None, _)) => {
+                    return Err(zbus::Error::Failure("the bus connection closed".into()));
+                }
+                Either::Left((Some(m), _)) => m?.body().deserialize::<bool>()?,
+                Either::Right(_) => within(
+                    DBUS_CALL_TIMEOUT,
+                    get(&conn, LOGIN1_PATH, MANAGER, "PreparingForSleep"),
+                )
+                .await??
+                .try_into()?,
+            };
+        }
+    }
+    .await;
+    match r {
+        Err(e) => e,
+        Ok(()) => zbus::Error::Failure("stopped".into()),
+    }
+}
+
+/// A delay inhibitor for sleep: logind waits, up to its InhibitDelayMaxSec, for it to be closed.
+async fn inhibit(c: &Connection) -> zbus::Result<std::os::fd::OwnedFd> {
+    let m = c
+        .call_method(
+            Some(LOGIN1),
+            LOGIN1_PATH,
+            Some(MANAGER),
+            "Inhibit",
+            &(
+                "sleep",
+                "linda-keyd",
+                "Lets go of the keyboards before sleep",
+                "delay",
+            ),
+        )
+        .await?;
+    Ok(m.body().deserialize::<zbus::OwnedFd>()?.into())
+}
+
 /// The file naming the console in front, whose pollers the kernel notifies at every switch.
 const ACTIVE_CONSOLE: &str = "/sys/class/tty/tty0/active";
 
