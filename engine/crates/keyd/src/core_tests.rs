@@ -2169,3 +2169,238 @@ fn letting_go_with_releases_and_presses_queued_leaves_nothing_down() {
     t.send(FromClient::Stop);
     t.assert_let_go();
 }
+
+// Found in the third review. Each is ignored, so that the package's checks still pass, and fails
+// with cargo test -p linda-keyd -- --ignored fault_ while the fault it names stands.
+
+/// The Menu key, KEY_COMPOSE in the kernel's codes.
+const KEY_MENU: u16 = 127;
+const KEY_C: u16 = 46;
+
+/// MODIFIERS is nine fixed keys, but which keys change what a later key means is the layout's to
+/// say, as Linda's own tables have it (levelShift and keyMods in kernel.py). XKB's options
+/// ctrl:menu_rctrl, altwin:menu_win and lv3:menu_switch make the Menu key a Control, a Super or a
+/// level three shift; lv3:lsgt_switch and lv5:lsgt_switch make the key left of Z (KEY_102ND) a level
+/// shift, and the Neo layouts make it and the key left of Enter (KEY_BACKSLASH) their level three
+/// and four shifts. The release of such a key goes out ahead of a press read while it was held
+/// whenever that press is still waiting for its verdict, which every press does for the round trip
+/// to the client, up to VERDICT_WAIT_TIMEOUT with WAIT: Control+C typed as Menu and C, with Menu let
+/// go of before the client has answered C, reaches the program as a plain c, while Linda, told the
+/// keys in the order read, takes it for Control+C. No WAIT is needed, only a client that answers C
+/// after Menu's release has been read.
+#[test]
+#[ignore = "third review: a key the layout makes a modifier comes up ahead of a key pressed under it"]
+fn fault_a_key_the_layout_makes_a_modifier_does_not_come_up_ahead_of_a_key_pressed_under_it() {
+    let (mut t, k) = T::capturing();
+    t.pressed_out(k, KEY_MENU);
+    t.press(k, KEY_C);
+    let c = t.last_seq();
+    t.release(k, KEY_MENU);
+    t.verdict(c, false);
+    assert_eq!(
+        t.w.emitted(),
+        vec![(KEY_MENU, 1), (KEY_C, 1), (KEY_MENU, 0)],
+        "Menu, which ctrl:menu_rctrl makes a Control, came up on the virtual keyboard before C, \
+         pressed while Menu was held, went down: the program gets c, not Control+C"
+    );
+}
+
+/// The kernel's EVIOCGKEY, as the mock does not have it: asking which keys are down also empties
+/// the open file's queue of every key event not yet read (__evdev_flush_queue, called from
+/// evdev_handle_get_val in drivers/input/evdev.c, since Linux 3.12). A key in `flushed` stands for
+/// one let go of after the helper's last read and before it asked: the kernel has it up, and its
+/// release went with the queue.
+struct FlushingDevices {
+    inner: MockDevices,
+    flushed: std::sync::Arc<std::sync::Mutex<KeySet>>,
+}
+
+struct FlushingKeyboard {
+    inner: crate::mock::MockKeyboard,
+    flushed: std::sync::Arc<std::sync::Mutex<KeySet>>,
+}
+
+impl Devices for FlushingDevices {
+    type Keyboard = FlushingKeyboard;
+    type Virtual = <MockDevices as Devices>::Virtual;
+
+    fn scan(&mut self) -> std::io::Result<Vec<Found>> {
+        self.inner.scan()
+    }
+
+    fn open(&mut self, found: &Found) -> std::io::Result<FlushingKeyboard> {
+        Ok(FlushingKeyboard {
+            inner: self.inner.open(found)?,
+            flushed: self.flushed.clone(),
+        })
+    }
+
+    fn create_virtual(&mut self) -> std::io::Result<Self::Virtual> {
+        self.inner.create_virtual()
+    }
+
+    fn watch(&mut self, on: bool) -> std::io::Result<()> {
+        self.inner.watch(on)
+    }
+
+    fn watch_fd(&self) -> Option<BorrowedFd<'_>> {
+        self.inner.watch_fd()
+    }
+
+    fn watch_drain(&mut self) -> bool {
+        self.inner.watch_drain()
+    }
+
+    fn guard(&self) -> std::sync::Arc<dyn crate::device::Guard> {
+        self.inner.guard()
+    }
+}
+
+impl Keyboard for FlushingKeyboard {
+    fn fd(&self) -> BorrowedFd<'_> {
+        self.inner.fd()
+    }
+
+    fn read(&mut self, out: &mut Vec<InputEvent>) -> Result<(), ReadError> {
+        self.inner.read(out)
+    }
+
+    fn keys_down(&self) -> std::io::Result<KeySet> {
+        let mut down = self.inner.keys_down()?;
+        for code in self.flushed.lock().unwrap().iter() {
+            down.remove(code);
+        }
+        Ok(down)
+    }
+
+    fn grab(&mut self) -> Result<(), GrabError> {
+        self.inner.grab()
+    }
+
+    fn ungrab(&mut self) -> bool {
+        self.inner.ungrab()
+    }
+
+    fn leds(&self) -> std::io::Result<u16> {
+        self.inner.leds()
+    }
+
+    fn set_leds(&mut self, leds: u16) -> std::io::Result<()> {
+        self.inner.set_leds(leds)
+    }
+}
+
+/// After a loss of events the helper reads everything the kernel has queued, and only at the report
+/// that ends the loss asks which keys are down; it then goes on with what it read after that report
+/// as though it came after the answer. It came before: the answer is the kernel's state at the
+/// question, and the question emptied the queue of every key event not yet read. A key pressed after
+/// the loss, its press read in that batch, and let go of before the question, has its release thrown
+/// away by the kernel and its press put out by the helper: it stays down on the virtual keyboard,
+/// and the desktop repeats it, Tab moving the focus on and on, until the key is pressed and let go
+/// of again. The question comes microseconds after the read unless the helper is taken off the
+/// processor in between, as on the starved machine that made it lose events.
+#[test]
+#[ignore = "third review: a key let go of as the helper catches up after lost events stays down"]
+fn fault_a_key_let_go_of_as_the_helper_catches_up_after_lost_events_does_not_stay_down() {
+    fn say(core: &mut Core<FlushingDevices>, m: FromClient, now: Instant) {
+        core.received(CLIENT, &m.encode(), now);
+    }
+    let w = World::new();
+    let flushed = std::sync::Arc::new(std::sync::Mutex::new(KeySet::new()));
+    let mut core = Core::new(FlushingDevices {
+        inner: w.devices(),
+        flushed: flushed.clone(),
+    });
+    let mut now = Instant::now();
+    let k = w.plug("AT Translated Set 2 keyboard");
+    core.front_changed(front(SESSION, 1000), now);
+    core.connected(CLIENT, PEER, now);
+    let hello = FromClient::Hello {
+        version: PROTOCOL_VERSION,
+        features: 0,
+    };
+    say(&mut core, hello, now);
+    core.admitted(CLIENT, Ok(SESSION.into()), now);
+    say(&mut core, FromClient::Start, now);
+    for _ in 0..15 {
+        now += ms(100);
+        say(&mut core, FromClient::Heartbeat { counter: 0 }, now);
+        core.tick(now);
+    }
+    assert!(w.grabbed(k), "{:?}", core.take_output());
+    core.take_output();
+    // The helper fell behind and the kernel dropped what it held. Tab goes down after that, its
+    // press read with the rest, and comes up before the helper asks which keys are down.
+    w.overflow(k, &[]);
+    w.press(k, KEY_TAB);
+    flushed.lock().unwrap().insert(KEY_TAB);
+    core.keyboard_ready(k, now);
+    let tab = core
+        .take_output()
+        .into_iter()
+        .find_map(|o| match o {
+            Output::Send(_, ToClient::Key(key))
+                if key.code == KEY_TAB && key.value == KEY_PRESS =>
+            {
+                Some(key.seq)
+            }
+            _ => None,
+        })
+        .expect("Tab's press was sent to the client");
+    say(
+        &mut core,
+        FromClient::Verdict {
+            seq: tab,
+            keep: false,
+        },
+        now,
+    );
+    for _ in 0..10 {
+        now += ms(100);
+        say(&mut core, FromClient::Heartbeat { counter: 0 }, now);
+        core.tick(now);
+    }
+    assert!(
+        !w.virtual_down().contains(KEY_TAB),
+        "Tab, up on the keyboard for a second, is still down on the virtual keyboard, where the \
+         desktop repeats it: the helper put out its press, read before it asked which keys were \
+         down, and the kernel threw its release away with the queue as it answered"
+    );
+}
+
+/// A whole-process freeze is measured by the loop from the later of its poll's start and the
+/// deadline it polled for (frozen_for in server.rs), and with a press waiting that deadline is the
+/// press's bound: forgiving that much moves the bound to the very moment of the thaw, so the first
+/// turn after it passes the press on, before the client, thawed at the same moment, has answered.
+/// The freeze is forgiven and the press is not: a key read in the tenth of a second before a freeze
+/// that logind did not announce, an NVDA command among them, reaches the program as well as NVDA.
+/// The core's own test of a freeze credits the whole frozen time from the press, which the loop
+/// never does.
+#[test]
+#[ignore = "third review: a press read just before a forgiven freeze is passed on at the thaw"]
+fn fault_a_press_read_just_before_a_forgiven_freeze_is_not_passed_on_as_the_freeze_ends() {
+    let (mut t, k) = T::capturing();
+    t.press(k, KEY_INSERT);
+    let insert = t.last_seq();
+    // The loop polls until its next deadline, Insert's bound; every process stops a millisecond
+    // after the read and goes on three seconds later, when the poll comes back late by what
+    // Server::turn measures.
+    let deadline = t.core.next_wake().expect("a deadline");
+    let woke = t.now + Duration::from_secs(3);
+    assert!(
+        t.core.thawed(woke - deadline.max(t.now), woke),
+        "a first freeze is forgiven"
+    );
+    t.now = woke;
+    t.core.tick(t.now);
+    t.take();
+    // The client, thawed with the helper, keeps it a moment later.
+    t.now += ms(5);
+    t.verdict(insert, true);
+    assert!(
+        !t.w.emitted().contains(&(KEY_INSERT, 1)),
+        "Insert, read a millisecond before a freeze the helper forgave, was passed on at the thaw \
+         before the client, frozen too, could answer: {:?}",
+        t.w.emitted()
+    );
+}
