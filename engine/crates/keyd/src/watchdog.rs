@@ -416,4 +416,49 @@ mod tests {
         assert_eq!(&b[..len], b"READY=1");
         assert_eq!(n.next_feed(), None);
     }
+
+    // Found in the second review. Ignored, so that the package's checks still pass; fails with
+    // cargo test -p linda-keyd -- --ignored while the fault stands.
+
+    /// On waking, the unit's own timeout goes to systemd once, without waiting, and a send that
+    /// fails, as when systemd's queue is full in the rush of a resume, is logged and never tried
+    /// again: systemd's watchdog stays at SLEEP_WATCHDOG, ten minutes, while the helper holds the
+    /// keyboards again, until the machine next sleeps.
+    #[test]
+    #[ignore = "second review: fails while the fault stands"]
+    fn fault_the_units_watchdog_comes_back_after_sleep_though_the_first_word_is_lost() {
+        let dir = std::env::temp_dir().join(format!("keyd-notify-lost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("notify");
+        let systemd = UnixDatagram::bind(&path).unwrap();
+        systemd.set_nonblocking(true).unwrap();
+        let mut n = Notifier::connect(
+            path.as_os_str().as_encoded_bytes(),
+            Some(Duration::from_secs(2)),
+        )
+        .unwrap();
+        let t = Instant::now();
+        n.sleeping(true, t);
+        // systemd is slow to read as the machine wakes, and its queue is full.
+        while n.socket.send(b"X").is_ok() {}
+        let woke = t + Duration::from_secs(5);
+        n.sleeping(false, woke);
+        let mut b = [0u8; 64];
+        while systemd.recv(&mut b).is_ok() {}
+        // systemd reads again, and the helper goes on feeding it.
+        for i in 1..=20 {
+            n.feed(woke + Duration::from_millis(500) * i);
+        }
+        let mut got = Vec::new();
+        while let Ok(len) = systemd.recv(&mut b) {
+            got.push(String::from_utf8_lossy(&b[..len]).into_owned());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            got.iter().any(|m| m == "WATCHDOG_USEC=2000000"),
+            "systemd was never told the unit's own timeout again, and keeps ten minutes while the \
+             helper holds the keyboards: {got:?}"
+        );
+    }
 }

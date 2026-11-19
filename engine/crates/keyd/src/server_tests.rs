@@ -683,3 +683,76 @@ fn stalled_stderr_panic() {
     crate::end_on_panic();
     let _ = thread::spawn(|| panic!("on purpose")).join();
 }
+
+// Found in the second review. Ignored, so that the package's checks still pass; fails with cargo
+// test -p linda-keyd -- --ignored while the fault stands.
+
+/// Every poll that comes back more than WATCHDOG_FROZEN late is taken for a freeze of the whole
+/// process and given back in full to the client's silence, every time, with no limit on how much is
+/// given in all. A helper merely starved of the processor, as in a storm of swapping, wakes late at
+/// every turn, and a client that has hung outright keeps the keyboards for HEARTBEAT_TIMEOUT plus ten
+/// late wakes, since a turn while holding counts LOOP_TICK of the silence: 12 s when every wake is a
+/// second late, 52 s at five. Neither watchdog steps in: the watchdog thread forgives its own late
+/// wakes the same way, and systemd's is fed at every turn. This drives the core as Server::turn
+/// does, with its deadlines and frozen_for.
+#[test]
+#[ignore = "second review: fails while the fault stands"]
+fn fault_a_starved_helper_lets_go_of_a_silent_client_about_when_the_heartbeat_says() {
+    let w = World::new();
+    let k = w.plug("keyboard");
+    let mut core = Core::new(w.devices());
+    let client: ConnId = 1;
+    let mut now = Instant::now();
+    let front = Front::Session {
+        id: SESSION.into(),
+        uid: 1000,
+        vt: 7,
+    };
+    core.front_changed(front, now);
+    let peer = Peer {
+        pid: 4242,
+        uid: 1000,
+        gid: 100,
+    };
+    core.connected(client, peer, now);
+    let hello = FromClient::Hello {
+        version: PROTOCOL_VERSION,
+        features: 0,
+    };
+    core.received(client, &hello.encode(), now);
+    core.admitted(client, Ok(SESSION.into()), now);
+    core.received(client, &FromClient::Start.encode(), now);
+    now += VIRTUAL_SETTLE;
+    core.received(client, &FromClient::Heartbeat { counter: 0 }.encode(), now);
+    core.tick(now);
+    assert!(w.grabbed(k));
+    let _ = core.take_output();
+    // From here the client says nothing, and every wake of the loop comes a second late.
+    let late = Duration::from_secs(1);
+    let silent = now;
+    while w.grabbed(k) {
+        let began = now;
+        let mut deadline = core.next_wake();
+        if core.holding() {
+            let tick = began + LOOP_TICK;
+            deadline = Some(deadline.map_or(tick, |d| d.min(tick)));
+        }
+        let woke = deadline.expect("a deadline while holding").max(began) + late;
+        if let Some(frozen) = frozen_for(deadline, began, woke) {
+            core.thawed(frozen);
+        }
+        now = woke;
+        core.tick(now);
+        let _ = core.take_output();
+        assert!(now - silent < Duration::from_secs(120), "never let go");
+    }
+    let held = now - silent;
+    assert!(
+        held <= HEARTBEAT_TIMEOUT + 2 * late,
+        "a client silent since the keyboard was grabbed kept it {:.1} s, with every wake of the loop \
+         {:.1} s late, where the heartbeat allows {:.1} s",
+        held.as_secs_f32(),
+        late.as_secs_f32(),
+        HEARTBEAT_TIMEOUT.as_secs_f32()
+    );
+}

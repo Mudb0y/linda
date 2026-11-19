@@ -1863,3 +1863,103 @@ fn fault_the_chord_held_through_lost_events_lets_go() {
     );
     t.assert_let_go();
 }
+
+// Found in the second review. Each is ignored, so that the package's checks still pass, and fails
+// with cargo test -p linda-keyd -- --ignored while the fault it names stands.
+
+const KEY_TAB: u16 = 15;
+/// The desktop repeats a key held down longer than this: org.mate.peripherals-keyboard's delay in
+/// mate-settings-daemon 1.28, and GNOME's; a bare X server waits 660 ms.
+const DESKTOP_REPEAT_DELAY: Duration = Duration::from_millis(500);
+
+/// A press answered WAIT holds every key read after it for up to VERDICT_WAIT_TIMEOUT, releases
+/// included. A key that went out on the virtual keyboard before it and was let go of after it,
+/// as in any rolled keystroke, stays down there all that time, past the desktop's repeat delay, so
+/// the desktop repeats it: Tab pressed once moves the focus several times, Enter sends twice. Without
+/// WAIT a release waits at most VERDICT_TIMEOUT, well under any repeat delay.
+#[test]
+#[ignore = "second review: fails while the fault stands"]
+fn fault_a_key_let_go_of_is_not_held_down_past_the_repeat_delay_behind_a_wait() {
+    let (mut t, k) = T::waiting();
+    t.press(k, KEY_TAB);
+    let tab = t.last_seq();
+    t.verdict(tab, false);
+    assert!(t.w.virtual_down().contains(KEY_TAB));
+    let tab_out = t.now;
+    // The next key goes down before Tab comes up, and the client, following the focus Tab moved,
+    // answers it WAIT.
+    t.pass(ms(30));
+    t.press(k, KEY_A);
+    let a = t.last_seq();
+    t.wait(a);
+    t.pass(ms(20));
+    t.release(k, KEY_TAB);
+    let let_go = t.now;
+    t.pass(DESKTOP_REPEAT_DELAY - (let_go - tab_out));
+    assert!(
+        !t.w.virtual_down().contains(KEY_TAB),
+        "Tab, pressed once and let go of {} ms ago, has been held down on the virtual keyboard for \
+         {} ms behind a press held by WAIT, and the desktop repeats a key held down for {} ms",
+        (t.now - let_go).as_millis(),
+        (t.now - tab_out).as_millis(),
+        DESKTOP_REPEAT_DELAY.as_millis()
+    );
+}
+
+/// Before WAIT no press could still be in line once its own bound had passed, so a verdict after
+/// the bound was a verdict on a key already passed on. Behind a press held by WAIT a press stays in
+/// line long after its own VERDICT_TIMEOUT, and a verdict that comes for it then, while nothing has
+/// yet been done with it, is thrown away: the press is passed on when the held one is decided. A
+/// reader that answers keep for a command key it could not decide sooner, because it decides in
+/// order and the key before is waiting on the focus, runs the command and the application gets the
+/// key as well.
+#[test]
+#[ignore = "second review: fails while the fault stands"]
+fn fault_a_keep_for_a_press_still_in_line_behind_a_wait_is_not_thrown_away() {
+    let (mut t, k) = T::waiting();
+    t.press(k, KEY_A);
+    let a = t.last_seq();
+    t.wait(a);
+    t.pass(ms(10));
+    t.press(k, KEY_INSERT);
+    let insert = t.last_seq();
+    t.pass(VERDICT_TIMEOUT + ms(50));
+    assert!(t.w.emitted().is_empty(), "nothing has gone out yet");
+    // The command key is answered while A still holds the line, and then A.
+    t.verdict(insert, true);
+    assert!(t.w.emitted().is_empty(), "nothing has gone out yet");
+    t.verdict(a, false);
+    t.pass(VERDICT_WAIT_TIMEOUT);
+    assert!(
+        !t.w.emitted().contains(&(KEY_INSERT, 1)),
+        "the client answered keep for Insert while it still waited in line, before anything was done \
+         with it, and Insert went to the application all the same: {:?}",
+        t.w.emitted()
+    );
+}
+
+/// After a loss of events the helper reads the keys down at the report that ends the loss, but the
+/// events still queued behind that report are already in that state. A key pressed after the loss,
+/// whose press is among them, is taken for one that went down unseen, and its press and release are
+/// both thrown away although every event of it was read, in order: a stall shorter than the
+/// watchdog's limit, typed through, loses each key held at the moment the helper catches up, a
+/// Shift among them. A press read after the report cannot have been unseen: the kernel sends a
+/// press only as a key goes down.
+#[test]
+#[ignore = "second review: fails while the fault stands"]
+fn fault_a_key_pressed_after_a_loss_of_events_is_not_lost() {
+    let (mut t, k) = T::capturing();
+    t.w.overflow(k, &[]);
+    // Shift goes down after the loss, before the helper has caught up.
+    t.w.press(k, KEY_LEFTSHIFT);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    t.press(k, KEY_A);
+    t.release(k, KEY_A);
+    t.release(k, KEY_LEFTSHIFT);
+    let keys: Vec<(u16, u8)> = t.keys().iter().map(|k| (k.code, k.value)).collect();
+    assert!(
+        keys.contains(&(KEY_LEFTSHIFT, KEY_PRESS)),
+        "Shift, pressed after the loss and read in order, never reached the client: {keys:?}"
+    );
+}
