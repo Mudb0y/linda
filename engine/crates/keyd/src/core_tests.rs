@@ -3572,3 +3572,28 @@ fn fault_a_key_tapped_as_the_helper_lets_go_is_not_told_down_twice() {
         "A, told down and not told up, was told pressed again as a tap as the helper let go: {told:?}"
     );
 }
+
+// Found in the third pass of the sixth review. Ignored, so that the package's checks still pass,
+// and fails with cargo test -p linda-keyd -- --ignored fault_ while its fault stands.
+
+/// The emergency chord's last key goes among the keyboard's keys down before the chord is looked
+/// for, and when the chord lets go it is never told to the client. As the helper lets go, the
+/// release of every key among them read there is told, so this key's release is told too: a
+/// release of a key the client was never told was down.
+#[test]
+#[ignore = "sixth review: the release of the chord's last key, never told down, is told as the helper lets go"]
+fn fault_the_chords_last_key_is_not_told_up_without_being_told_down() {
+    let (mut t, k) = T::capturing();
+    for c in CHORD.map(|keys| keys[0]) {
+        t.w.press(k, c);
+    }
+    t.w.release(k, KEY_ENTER);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    let told: Vec<(u16, u8)> = t.keys().iter().map(|k| (k.code, k.value)).collect();
+    assert!(
+        told.contains(&(KEY_ENTER, KEY_PRESS)) || !told.contains(&(KEY_ENTER, KEY_RELEASE)),
+        "Enter completed the emergency chord and was never told down, and its release, read in the \
+         rest of the batch, was told: {told:?}"
+    );
+}
