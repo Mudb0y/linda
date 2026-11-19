@@ -4,8 +4,8 @@ helper stopped, being the reference for each:
   document's window again, before Linda's focus is back in it, is Linda's and never reaches the page,
   which on the kernel route needs a helper that grants WAIT;
 - one typed sooner, while marco has given the focus to Firefox's top-level window and Firefox has yet
-  to move it to the document's window inside, a hundred milliseconds here, reaches the page on both
-  routes, as no grab is on that window: a fault of both, expected to fail until it is mended;
+  to move it to the document's window inside, a hundred milliseconds here, is Linda's too: the focus
+  reaching that top-level window from outside it is the document's coming back;
 - a key typed in a new window of the document's own application, which Linda's focus does not
   follow, reaches that window.
 """
@@ -27,8 +27,6 @@ SECOND_HEADING = "Second heading"
 THIRD_HEADING = "Third heading"
 PROFILE = f"{GROUND}/firefox"
 DIALOG_TITLE = "Ground dialog"
-#: Seconds from Alt's release to H when it is typed at once.
-AT_ONCE = 0.03
 #: Run in the session with the ground tools' Python, from TYPER_PATH: waits until the X focus is on the
 #: window whose id is given, or in the one of the title given, then, when a process is given, makes that
 #: window that process's, and types H on the keyboard whose socket is given.
@@ -160,9 +158,13 @@ def toFirstHeading(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 
 
 def backIntoDocument(ground: "Ground", keyboard: "FakeKeyboard", route: str, *, atOnce: bool) -> None:
-	"""From the second heading, Alt+Tab to the test window and back, and H: at once, or once Firefox has
-	the focus on the document's window again. Linda moves to the third heading and the page has no H."""
+	"""From the second heading, Alt+Tab to the test window and back, and H: at once, as soon as marco has
+	given the focus to Firefox's top-level window, or once Firefox has it on the document's window again.
+	Linda moves to the third heading and the page has no H."""
 	documentWindow = ground.run(["xdotool", "getwindowfocus", "-f"]).stdout.strip()
+	# Without -f, the top-level window the focus is in, the one with WM_STATE.
+	topWindow = ground.run(["xdotool", "getwindowfocus"]).stdout.strip()
+	assert topWindow != documentWindow, (topWindow, documentWindow)
 	mark = ground.mark()
 	left = len(ground.lindaLogRecords(OFF_MODE))
 	keyboard.chord("KEY_LEFTALT", "KEY_TAB")
@@ -177,20 +179,18 @@ def backIntoDocument(ground: "Ground", keyboard: "FakeKeyboard", route: str, *, 
 		{"sleep": 0.03},
 		{"release": "KEY_LEFTALT"},
 	]
-	if atOnce:
-		keyboard.run(*steps, {"sleep": AT_ONCE}, {"tap": "KEY_H", "hold": 0.03})
-	else:
-		# Waiting already as Alt+Tab is typed, so that H follows the focus within milliseconds, well
-		# before Linda's focus does.
-		startTyper(ground, documentWindow)
-		ground.settle(0.5)
-		keyboard.run(*steps)
-		awaitTyper(ground)
+	# Waiting already as Alt+Tab is typed, so that H follows the focus within milliseconds, well before
+	# Linda's focus does, and at once before Firefox moves it on to the document's window.
+	startTyper(ground, topWindow if atOnce else documentWindow)
+	ground.settle(0.5)
+	keyboard.run(*steps)
+	awaitTyper(ground)
 	ground.settle(1.5)
 	how = "at once" if atOnce else "once Firefox has the focus on the document"
+	typed = ground.shell(f"cat {GROUND}/jobs/typer.err").strip()
 	ground.machine.log(
-		f"{route} route, H {how} after Alt+Tab back: Linda said {ground.speech(mark)}, the page had "
-		f"{pageKeys(ground)[before:]}"
+		f"{route} route, H {how} after Alt+Tab back, {typed}: Linda said {ground.speech(mark)}, the page "
+		f"had {pageKeys(ground)[before:]}"
 	)
 	assert pageKeys(ground)[before:] == [], (route, how, pageKeys(ground)[before:], ground.speech(mark))
 	assert spokenSince(ground, mark, THIRD_HEADING), (route, how, ground.speech(mark))
@@ -239,10 +239,7 @@ def everything(ground: "Ground", keyboard: "FakeKeyboard", route: str) -> None:
 
 	with ground.subtest(f"H at once after Alt+Tab back into the document, {route} route"):
 		toFirstHeading(ground, keyboard)
-		with ground.expectedFailure(
-			"before Firefox moves the focus from its top-level window to the document's, no grab takes a key"
-		):
-			backIntoDocument(ground, keyboard, route, atOnce=True)
+		backIntoDocument(ground, keyboard, route, atOnce=True)
 
 	with ground.subtest(f"H in a new window of the browser reaches it, {route} route"):
 		keyInNewWindow(ground, keyboard, route)

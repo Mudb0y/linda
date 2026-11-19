@@ -370,6 +370,93 @@ def test_releaseOvertakesAPressWaitingForItsVerdictUnlessAModifier(tmp_path: Pat
 	assert value["window"] == [[42, True], [45, True], [45, False], [42, False]], value
 
 
+#: A document in a window inside a top-level one, as GTK's programs and Firefox have it: the focus
+#: leaves for another application's window and comes back, from outside, to the top-level window, as
+#: the window manager gives it, and h is typed 30 ms after, before the program moves the focus to the
+#: document's window inside; then, NVDA's focus back in the document, the focus goes from the
+#: document's window to the top-level window, as to some other part of the program, and h is typed
+#: there: where each h went.
+TOP_LEVEL_CHILD = r"""
+other = root.create_window(0, 0, 100, 100, 0, app.screen().root_depth, event_mask=X.KeyPressMask)
+other.change_property(pidAtom, Xatom.CARDINAL, 32, [2])
+other.map()
+top = root.create_window(0, 0, 300, 300, 0, app.screen().root_depth, event_mask=X.KeyPressMask)
+top.change_property(pidAtom, Xatom.CARDINAL, 32, [1])
+wmState = app.intern_atom("WM_STATE")
+top.change_property(wmState, wmState, 32, [1, 0])
+top.map()
+page = top.create_window(-1, -1, 1, 1, 0, app.screen().root_depth, event_mask=X.KeyPressMask)
+page.map()
+app.sync()
+time.sleep(0.2)
+page.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+time.sleep(0.2)
+source = startSource(ROUTE)
+mode["now"] = "browse"
+source.setCapture("browse", 1)
+time.sleep(0.3)
+other.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+time.sleep(0.2)
+mode["now"] = "off"
+source.setCapture("off")
+time.sleep(0.3)
+windowKeys()
+delivered.clear()
+top.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+
+
+def follow():
+	time.sleep(0.15)
+	mode["now"] = "browse"
+	source.setCapture("browse", 1)
+
+
+threading.Thread(target=follow, daemon=True).start()
+time.sleep(0.03)
+keyboard.press("h", hold=0.03)
+time.sleep(0.05)
+page.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+time.sleep(0.6)
+back = {"window": [key for key in windowKeys() if key[1]], "nvda": [[e["captured"], e["reached"]] for e in presses(ord("H"))]}
+delivered.clear()
+keyboard.press("h", hold=0.03)
+time.sleep(0.4)
+inside = {"window": [key for key in windowKeys() if key[1]], "nvda": [[e["captured"], e["reached"]] for e in presses(ord("H"))]}
+delivered.clear()
+top.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+time.sleep(0.2)
+keyboard.press("h", hold=0.03)
+time.sleep(0.4)
+result = {
+	"kernel": source.isKernel,
+	"back": back,
+	"inside": inside,
+	"left": {"window": [key for key in windowKeys() if key[1]], "nvda": [[e["captured"], e["reached"]] for e in presses(ord("H"))]},
+}
+source.stop()
+keyboard.close()
+"""
+
+
+@pytest.mark.parametrize("route", ("x11", "auto"))
+def test_keyTypedAsTheFocusReachesTheDocumentsTopLevelWindowIsBrowseModes(tmp_path: Path, route: str):
+	value = runKernelChild(tmp_path, f"ROUTE = {route!r}\n" + TOP_LEVEL_CHILD)
+	assert value["kernel"] == (route == "auto")
+	assert value["back"] == {"window": [], "nvda": [[True, False]]}, (
+		f"on the {route} route h typed as the focus came back to the top-level window reached it: {value}"
+	)
+	assert value["inside"] == {"window": [], "nvda": [[True, False]]}, value
+	assert value["left"]["window"] == [[35, True]], (
+		f"on the {route} route h was taken from the top-level window the focus went to from the document's "
+		f"own: {value}"
+	)
+
+
 #: A second window of the document's own application takes the focus, as a file chooser opened with
 #: Control+O from Firefox does, and h is typed in it before NVDA's focus has followed: where h went.
 SAME_APPLICATION_WINDOW_CHILD = r"""

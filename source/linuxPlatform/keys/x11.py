@@ -412,6 +412,9 @@ class CaptureState(NamedTuple):
 	documentUntil: float | None
 	#: The process NVDA last said the document is of, when it said.
 	processID: int | None
+	#: The top-level window that window is inside, when it is another, 0 otherwise: the focus reaching
+	#: it from outside is the document's coming back, and its keys are grabbed there while it has it.
+	top: int = 0
 
 
 NO_CAPTURE = CaptureState(0, None, False, "off", None, None, None)
@@ -515,6 +518,7 @@ class X11KeySource:
 		self._slaveSeen: deque[tuple[float, int, bool, int]] = deque()
 		self._rulesAtom: int | None = None
 		self._pidAtom: int | None = None
+		self._wmStateAtom: int | None = None
 		self._activeWindowAtom: int | None = None
 		self._xkbOpcode: int | None = None
 		#: Key code: grab modifiers, for every key grabbed now; None means any modifiers.
@@ -559,6 +563,19 @@ class X11KeySource:
 		self._captureFocused = False
 		#: The mode of the document in that window as the focus left it; None while it has the focus.
 		self._dormantMode: CaptureMode | None = None
+		#: The top-level window the capture window is inside, the one the window manager gives the focus
+		#: to, while it is another window: GTK's programs, Firefox among them, keep the focus on a window
+		#: of their own inside it, and move it there only after the window manager has given it to the
+		#: top-level window, a tenth of a second later in the guests. None otherwise.
+		self._captureTop = None
+		#: Key code: the masks the captured keys are grabbed with on that top-level window. They are
+		#: grabbed there while the focus is outside it, where they take nothing, so as to take the first
+		#: key as the focus comes back to it, and while it has the focus itself, having come from outside;
+		#: never while a window inside it has the focus, where a grab on its parent would move the focus
+		#: for each key.
+		self._topGrabbed: dict[int, set[int]] = {}
+		#: Whether the focus is on that top-level window itself, having come there from outside it.
+		self._captureOnTop = False
 		#: Until when the keys grabbed now are those of a document NVDA's focus has not reached again;
 		#: None while they are not.
 		self._documentPending: float | None = None
@@ -708,6 +725,7 @@ class X11KeySource:
 			self._rulesAtom = self._display.intern_atom(RULES_NAMES_PROPERTY)
 			self._activeWindowAtom = self._display.intern_atom("_NET_ACTIVE_WINDOW")
 			self._pidAtom = self._display.intern_atom("_NET_WM_PID")
+			self._wmStateAtom = self._display.intern_atom("WM_STATE")
 			# Any resource of the connection names it to the X server; the guard needs one.
 			self._guardResource = root.create_pixmap(1, 1, self._display.screen().root_depth).id
 			self._findXtestDevices()
@@ -754,6 +772,9 @@ class X11KeySource:
 		self._captureWindow = None
 		self._captureFocused = False
 		self._dormantMode = None
+		self._captureTop = None
+		self._topGrabbed = {}
+		self._captureOnTop = False
 		self._grabKey = None
 		self._serverGrab = None
 		self._otherGrab = None
@@ -944,6 +965,7 @@ class X11KeySource:
 
 	def _publishCapture(self) -> None:
 		window = self._captureWindow
+		top = self._captureTop
 		state = CaptureState(
 			window.id if window is not None else 0,
 			self._captureWindowProcess if window is not None else None,
@@ -952,6 +974,7 @@ class X11KeySource:
 			self._dormantMode,
 			self._documentPending,
 			self._captureProcess,
+			top.id if window is not None and top is not None else 0,
 		)
 		if state != self._captureState:
 			self._captureState = state
@@ -1067,11 +1090,20 @@ class X11KeySource:
 			# grab moves the focus only for as long as it lasts.
 			moved = event.type == X.DestroyNotify or event.mode in (X.NotifyNormal, X.NotifyWhileGrabbed)
 			window = self._captureWindow
+			top = self._captureTop
 			if moved and window is not None and event.window.id == window.id:
 				if event.type == X.DestroyNotify:
 					self._dropCapture()
 				elif event.detail not in (X.NotifyInferior, X.NotifyPointer, X.NotifyPointerRoot):
 					self._focusCapture(event.type == X.FocusIn)
+			elif (
+				moved
+				and top is not None
+				and event.type != X.DestroyNotify
+				and event.window.id == top.id
+				and event.detail not in (X.NotifyPointer, X.NotifyPointerRoot)
+			):
+				self._topFocus(event.type == X.FocusIn, event.detail)
 			if moved:
 				self._followFocus()
 		elif event.type == X.MappingNotify:
@@ -1550,8 +1582,8 @@ class X11KeySource:
 			window.ungrab_key(X.AnyKey, X.AnyModifier, onerror=gone)
 			if self._captureWindow is not None and self._captureWindow.id == window.id:
 				self._dropCapture()
-		if window.id != self._display.screen().root.id and (
-			self._captureWindow is None or window.id != self._captureWindow.id
+		if window.id != self._display.screen().root.id and not any(
+			kept is not None and window.id == kept.id for kept in (self._captureWindow, self._captureTop)
 		):
 			window.change_attributes(event_mask=X.NoEventMask, onerror=gone)
 
@@ -1705,6 +1737,91 @@ class X11KeySource:
 			self._documentPending = time.monotonic() + DOCUMENT_GRACE
 		self._dormantMode = None
 
+	def _topFocus(self, focusIn: bool, detail: int) -> None:
+		"""Follow the focus reaching or leaving the top-level window the capture window is inside.
+
+		The window manager gives the focus to the top-level window, and the program moves it to its own
+		window inside a moment later; a key typed in between reaches the program, as no grab of the
+		capture window takes it. The focus coming to the top-level window from outside it is the
+		document's coming back, as the program has the focus nowhere else in it then; coming there from
+		a window inside it, it has left the document for something else in the same window.
+		"""
+		wasOnTop = self._captureOnTop
+		self._captureOnTop = False
+		if focusIn and detail in (X.NotifyNonlinear, X.NotifyAncestor):
+			self._grabTop()
+			self._captureOnTop = True
+			self._focusCapture(True)
+			return
+		if focusIn or detail == X.NotifyInferior:
+			# Inside the top-level window, where the capture window's own grabs and focus are what count.
+			self._ungrabTop()
+			if wasOnTop and not self._focusIsInCapture():
+				self._focusCapture(False)
+			return
+		self._grabTop()
+		if wasOnTop:
+			self._focusCapture(False)
+
+	def _focusIsInCapture(self) -> bool:
+		"""Whether the keyboard focus is on the capture window or a window inside it."""
+		window = self._captureWindow
+		if window is None:
+			return False
+		root = self._display.screen().root
+		try:
+			focus = self._display.get_input_focus().focus
+			for _level in range(16):
+				if isinstance(focus, int) or focus.id == root.id:
+					return False
+				if focus.id == window.id:
+					return True
+				focus = focus.query_tree().parent
+		except error.BadWindow:
+			return False
+		return False
+
+	def _topLevel(self, window):
+		"""The top-level window window is inside, the window manager's client window, which has
+		WM_STATE; None when that is window itself or cannot be told."""
+		root = self._display.screen().root
+		current = window
+		try:
+			for _level in range(16):
+				if current.get_full_property(self._wmStateAtom, X.AnyPropertyType) is not None:
+					break
+				parent = current.query_tree().parent
+				if isinstance(parent, int) or parent.id == root.id:
+					break
+				current = parent
+			else:
+				return None
+		except error.BadWindow:
+			return None
+		return None if current.id == window.id else current
+
+	def _grabTop(self) -> None:
+		top = self._captureTop
+		if top is None or self._topGrabbed or not self._captured:
+			return
+		# Another program's grab of the same key there, or the window gone, leaves that key ungrabbed.
+		catcher = error.CatchError(error.BadAccess, error.BadWindow)
+		for keycode, masks in self._captured.items():
+			for mask in masks:
+				top.grab_key(keycode, mask, False, X.GrabModeAsync, X.GrabModeSync, onerror=catcher)
+		self._topGrabbed = {keycode: set(masks) for keycode, masks in self._captured.items()}
+		self._display.flush()
+
+	def _ungrabTop(self) -> None:
+		top, grabbed, self._topGrabbed = self._captureTop, self._topGrabbed, {}
+		if top is None or not grabbed:
+			return
+		gone = error.CatchError(error.BadWindow)
+		for keycode, masks in grabbed.items():
+			for mask in masks:
+				top.ungrab_key(keycode, mask, onerror=gone)
+		self._display.flush()
+
 	def _modeIsStillAway(self, window, processID: int | None) -> bool:
 		"""Whether NVDA's mode may still be that of the document on window, which has lost the keyboard
 		focus to a window of another application.
@@ -1753,6 +1870,11 @@ class X11KeySource:
 
 	def _dropCapture(self) -> None:
 		"""Ungrab the captured keys, leaving the mode as it is."""
+		self._ungrabTop()
+		top, self._captureTop = self._captureTop, None
+		self._captureOnTop = False
+		if top is not None and (self._keysWindow is None or top.id != self._keysWindow.id):
+			top.change_attributes(event_mask=X.NoEventMask, onerror=error.CatchError(error.BadWindow))
 		window, self._captureWindow = self._captureWindow, None
 		if window is not None:
 			# The window may have gone, and its grabs with it.
@@ -1788,6 +1910,14 @@ class X11KeySource:
 		self._captureWindow = window
 		self._captureWindowProcess = self._windowPid(window)
 		self._captureFocused = True
+		self._captureTop = self._topLevel(window)
+		if self._captureTop is not None:
+			# As _focusWindow has the focus window's, so that the NVDA keys' grabs coming and going leave
+			# each window's events as they were.
+			self._captureTop.change_attributes(
+				event_mask=X.FocusChangeMask | X.StructureNotifyMask,
+				onerror=error.CatchError(error.BadWindow),
+			)
 		# The window has the focus, which the NVDA keys follow too, the more surely for a second look.
 		self._followFocus()
 		d.sync()

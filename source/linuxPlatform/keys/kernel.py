@@ -382,10 +382,13 @@ class KernelKeySource:
 		self._xkbOpcode: int | None = None
 		self._xkbEvent: int | None = None
 		self._rulesAtom: int | None = None
-		#: The window the layout's thread watches the focus of, the X source's capture window, and
-		#: (that window, whether it has the focus) as the last of its events said, replaced whole.
-		self._watchedWindow = 0
+		#: The windows the layout's thread watches the focus of: the X source's capture window, and the
+		#: top-level window it is inside when that is another; and (that window, whether it has the focus)
+		#: and (the top-level window, whether the focus came to it itself from outside) as the last of
+		#: their events said, each replaced whole.
+		self._watched: tuple[int, int] = (0, 0)
 		self._focusSeen: tuple[int, bool] = (0, False)
+		self._topSeen: tuple[int, bool] = (0, False)
 		#: Looks at the focus asked of the layout's thread, by the thread that answers keys, and the last
 		#: one it made: each a round trip to the X server, after which every focus event the X server sent
 		#: before it has been read.
@@ -733,12 +736,19 @@ class KernelKeySource:
 			self._loadKeymap()
 		elif (
 			event.type in (X.FocusIn, X.FocusOut)
-			and event.window.id == self._watchedWindow
-			# As the X source reads them: the focus moving within the window, or a grab's, moves none.
+			# As the X source reads them: a grab's moves no focus, nor does the pointer's.
 			and event.mode in (X.NotifyNormal, X.NotifyWhileGrabbed)
-			and event.detail not in (X.NotifyInferior, X.NotifyPointer, X.NotifyPointerRoot)
+			and event.detail not in (X.NotifyPointer, X.NotifyPointerRoot)
 		):
-			self._focusSeen = (event.window.id, event.type == X.FocusIn)
+			window, top = self._watched
+			if event.window.id == window and event.detail != X.NotifyInferior:
+				self._focusSeen = (window, event.type == X.FocusIn)
+			elif event.window.id == top:
+				# The focus on the top-level window itself, from outside it: the document's coming back.
+				self._topSeen = (
+					top,
+					event.type == X.FocusIn and event.detail in (X.NotifyNonlinear, X.NotifyAncestor),
+				)
 
 	def _watchCapture(self) -> None:
 		"""Watch the focus of the window the X source grabs a document's keys on, on this connection,
@@ -746,17 +756,27 @@ class KernelKeySource:
 		source's: that one makes and moves grabs as the focus moves, waiting on the X server each time,
 		and in the guests had the focus coming back to a document a tenth of a second after the X server
 		did, while the first key typed there was already being decided."""
-		window = self._captureState().window
-		if window == self._watchedWindow:
+		state = self._captureState()
+		wanted = (state.window, state.top if state.window else 0)
+		if wanted == self._watched:
 			return
 		d = self._events
 		gone = error.CatchError(error.BadWindow)
-		if self._watchedWindow:
-			d.create_resource_object("window", self._watchedWindow).change_attributes(
-				event_mask=X.NoEventMask, onerror=gone
-			)
-		self._watchedWindow = window
+		for old in self._watched:
+			if old and old not in wanted:
+				d.create_resource_object("window", old).change_attributes(
+					event_mask=X.NoEventMask, onerror=gone
+				)
+		self._watched = wanted
+		window, top = wanted
 		self._focusSeen = (0, False)
+		self._topSeen = (0, False)
+		if top:
+			d.create_resource_object("window", top).change_attributes(
+				event_mask=X.FocusChangeMask, onerror=gone
+			)
+			# Whether it came there from outside is not known; taken for not, so that no key is taken.
+			self._topSeen = (top, False)
 		if window:
 			watched = d.create_resource_object("window", window)
 			watched.change_attributes(event_mask=X.FocusChangeMask, onerror=gone)
@@ -786,7 +806,12 @@ class KernelKeySource:
 		focus coming back to the window, once it reads it, is made of it here as the X source makes it."""
 		state = self._captureState()
 		window, focused = self._focusSeen
-		if not state.window or window != state.window or focused == state.focused:
+		if not state.window or window != state.window:
+			return state
+		top, onTop = self._topSeen
+		if state.top and top == state.top:
+			focused = focused or onTop
+		if focused == state.focused:
 			return state
 		if not focused:
 			return state._replace(focused=False)
