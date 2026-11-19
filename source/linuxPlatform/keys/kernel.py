@@ -1179,6 +1179,9 @@ class KernelKeySource:
 			# Kept here, too late: the application has it all the same.
 			with press.lock:
 				press.passed = True
+			if not press.settled:
+				# Its verdict is yet to be acted on, which acts on it as passed now: once is all.
+				return
 			if press.follows is None:
 				self._passed(press)
 			if (
@@ -1628,6 +1631,12 @@ class KernelKeySource:
 					f"linda-keyd's key {press.seq} answered without NVDA: {'passed' if press.passed else 'kept'}"
 				)
 			if press.passed:
+				if press.looked is not None and not self._grabsTake(self._captureNow(time.monotonic())):
+					# Passed as the look at the focus came too late, and the focus not the document's: the
+					# program's key, which NVDA has as any, to echo it.
+					event = replace(event, captured=False, reachedApplication=True, nvdaKeyGrab=False)
+					self._call(event)
+					return event
 				# The application has had the key, as NVDA did not answer in time; NVDA acting on it as
 				# well would act twice.
 				return None

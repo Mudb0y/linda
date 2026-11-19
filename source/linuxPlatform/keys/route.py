@@ -189,10 +189,17 @@ class RoutedKeySource:
 			# display, and NVDA's advanced setting has it read keys from the X display alone.
 			self._say(_("NVDA is set to read keys from the X display"))
 			return
-		if self._isKernel:
+		kernel = self._kernel
+		if self._isKernel and getattr(kernel, "isHolding", True):
 			# Translators: Said on Linux when the user asks NVDA to take the keyboard back, and it already
 			# takes keys from the kernel.
 			self._say(_("NVDA has the keyboard already"))
+			return
+		if kernel is not None:
+			# Translators: Said on Linux when the user asks NVDA to take the keyboard back while linda-keyd,
+			# the program that takes the keyboard in the kernel, serves NVDA but holds no keyboard, as while
+			# another session is in front: it takes the keyboard by itself as soon as it may.
+			self._say(_("linda-keyd holds no keyboard now, and takes it for NVDA as soon as it may"))
 			return
 		self._letGo = False
 		self._blocked = None
@@ -265,7 +272,9 @@ class RoutedKeySource:
 
 	def keyState(self, vkCode: int) -> int:
 		x, kernel = self._x, self._kernel if self._isKernel else None
-		if kernel is None:
+		if kernel is None or not getattr(kernel, "isHolding", True):
+			# While the helper holds nothing, as while this session is not the one in front, the locks it
+			# last reported may be stale; the X display's are the keyboards'.
 			return x.keyState(vkCode) if x is not None else 0
 		# The locks as the kernel source has them, which knows a lock the helper passed before the X
 		# display does; a key down on any keyboard as the X display has it.
@@ -289,8 +298,9 @@ class RoutedKeySource:
 
 	# Keys.
 
-	def _isDecided(self) -> bool:
-		return time.monotonic() < self._decidedUntil
+	def _isDecided(self, when: float | None = None) -> bool:
+		""":param when: When the key happened, by time.monotonic(), when known; now otherwise."""
+		return (time.monotonic() if when is None else when) < self._decidedUntil
 
 	def _deliverFrom(self, source: KeySource, event: KeyEvent) -> bool:
 		with self._delivering:
@@ -375,7 +385,11 @@ class RoutedKeySource:
 		try:
 			kernel.start(partial(self._deliverFrom, kernel), self._modeNow)
 		except Exception as e:
-			log.warning(f"NVDA cannot take keys from linda-keyd: {e}", exc_info=True)
+			record = f"NVDA cannot take keys from linda-keyd: {e}"
+			# With its traceback once, not at every look two seconds apart.
+			if record != self._logged:
+				self._logged = record
+				log.warning(record, exc_info=True)
 			with self._lock:
 				self._kernel = None
 			kernel.stop()
@@ -542,9 +556,11 @@ class RoutedKeySource:
 				continue
 			if not self._dropKernel():
 				self._nextTry = time.monotonic() + RETRY_INTERVAL
-				log.info(
-					f"Keys stay with the X display: linda-keyd was given up before it held the keyboard: {why}"
-				)
+				record = f"Keys stay with the X display: linda-keyd was given up before it held the keyboard: {why}"
+				# Said once, not at every look two seconds apart.
+				if record != self._logged:
+					self._logged = record
+					log.info(record)
 				continue
 			self._nextTry = time.monotonic() + RETRY_INTERVAL
 			log.info(f"Keys are read from the X display: linda-keyd was given up: {why}")

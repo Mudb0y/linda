@@ -1198,3 +1198,38 @@ def test_helperUnsureOfTheSessionInFrontIsWaitedFor(tmp_path: Path):
 	)
 	assert value["meanwhile"] == ["a"] and value["after"] == ["b"], value
 	assert value["window"] == [[30, True], [48, True]], value
+
+
+#: The helper lets go as this session is no longer the one in front; Caps Lock is turned on meanwhile,
+#: here through XTEST, and the user asks NVDA to take the keyboard back: whether NVDA reports the lock
+#: as the X display has it, and what it says.
+BACKGROUND_CHILD = r"""
+from Xlib.ext import xtest
+source = startSource()
+keyboard.letGo(3)
+time.sleep(0.3)
+before = source.keyState(0x14) & 1
+caps = app.keysym_to_keycode(XK.XK_Caps_Lock)
+xtest.fake_input(app, X.KeyPress, caps)
+xtest.fake_input(app, X.KeyRelease, caps)
+app.sync()
+time.sleep(0.3)
+after = source.keyState(0x14) & 1
+source.takeBack()
+time.sleep(0.3)
+xtest.fake_input(app, X.KeyPress, caps)
+xtest.fake_input(app, X.KeyRelease, caps)
+app.sync()
+time.sleep(0.2)
+result = {"before": before, "after": after, "said": list(said), "kernel": source.isKernel}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_whileTheHelperHoldsNothingLocksAreTheXDisplaysAndTakingBackSaysSo(tmp_path: Path):
+	value = runKernelChild(tmp_path, BACKGROUND_CHILD)
+	assert (value["before"], value["after"]) == (0, 1), (
+		f"with the helper holding nothing, NVDA reported Caps Lock from the helper's last word: {value}"
+	)
+	assert value["said"] == ["linda-keyd holds no keyboard now, and takes it for NVDA as soon as it may"], value

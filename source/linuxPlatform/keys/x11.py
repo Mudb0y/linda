@@ -220,6 +220,8 @@ GENERIC_FOR = {
 	keyMap.VK["RMENU"]: keyMap.VK["MENU"],
 }
 
+#: Seconds an event's X server time may lie behind now and be taken for this machine's monotonic clock.
+EVENT_TIME_SPAN = 60.0
 #: Seconds the X server holds the keyboard on a grabbed press for NVDA's answer before this source
 #: answers it without NVDA.
 CAPTURE_TIMEOUT = 0.1
@@ -472,13 +474,14 @@ class X11KeySource:
 	def __init__(
 		self,
 		virtualKeyboard: str | None = None,
-		decided: Callable[[], bool] | None = None,
+		decided: Callable[[float | None], bool] | None = None,
 		onVirtualKeyboard: Callable[[], None] | None = None,
 	) -> None:
 		"""
 		:param virtualKeyboard: The name of linda-keyd's virtual keyboard among the X server's devices.
-		:param decided: Whether, at this moment, a press of that keyboard is one the helper's client has
-			decided, called on the X thread for each; a device of that name is only ever ignored for it.
+		:param decided: Whether a press of that keyboard at the moment given, when the X server's time
+			for it can be told, now otherwise, is one the helper's client has decided, called on the X
+			thread for each; a device of that name is only ever ignored for it.
 		:param onVirtualKeyboard: Called on the X thread whenever virtualKeyboardState changes.
 		"""
 		self._virtualName = virtualKeyboard
@@ -1113,7 +1116,9 @@ class X11KeySource:
 		X server's last word on its devices."""
 		return self._virtualState
 
-	def _isDecided(self, keycode: int, isUp: bool, repeat: bool, sourceid: int | None) -> bool:
+	def _isDecided(
+		self, keycode: int, isUp: bool, repeat: bool, sourceid: int | None, when: float | None = None
+	) -> bool:
 		"""Whether a key is one linda-keyd's client has decided already: a press of the virtual keyboard
 		while that client is served, and the repeats and release of such a press whenever they come,
 		as the helper releases what its virtual keyboard holds after it has let go."""
@@ -1128,7 +1133,9 @@ class X11KeySource:
 			if isUp:
 				self._decidedDown.discard(key)
 			return True
-		if sourceid in self._virtualDevices and self._decided is not None and self._decided():
+		# By when the press happened, not when this thread read it: a press passed just before the kernel
+		# source went, read late by a busy thread, was NVDA's from the kernel already.
+		if sourceid in self._virtualDevices and self._decided is not None and self._decided(when):
 			self._decidedDown.add(key)
 			return True
 		self._decidedDown.discard(key)
@@ -1253,7 +1260,27 @@ class X11KeySource:
 						return
 				# The server sends the raw event first, but nothing promises it.
 				self._slaveSeen.append((now, keycode, isUp, data.sourceid))
-		self._process(keycode, isUp, repeat, data.mods, data.groups, data.sourceid, now)
+		self._process(
+			keycode,
+			isUp,
+			repeat,
+			data.mods,
+			data.groups,
+			data.sourceid,
+			now,
+			when=self._eventTime(data.time, now),
+		)
+
+	@staticmethod
+	def _eventTime(serverTime: int, now: float) -> float | None:
+		"""When an event happened, by time.monotonic(), from the X server's time for it: its monotonic
+		clock in milliseconds, wrapping at 32 bits; None when the two clocks do not agree, as with an X
+		server on another machine."""
+		behind = ((int(now * 1000) & 0xFFFFFFFF) - serverTime) & 0xFFFFFFFF
+		if behind > 0xFFFFFFFF - 1000:
+			# A millisecond or so ahead, as a coarser clock reads.
+			return now
+		return now - behind / 1000 if behind < EVENT_TIME_SPAN * 1000 else None
 
 	def _onHeld(self, event) -> None:
 		"""A core key press, which comes only through a grab of this source, and holds the keyboard
@@ -1353,7 +1380,9 @@ class X11KeySource:
 					return True
 		return False
 
-	def _process(self, keycode, isUp, repeat, mods, groups, sourceid, arrival, ticket=None) -> None:
+	def _process(
+		self, keycode, isUp, repeat, mods, groups, sourceid, arrival, ticket=None, when=None
+	) -> None:
 		with self._lock:
 			translator = self._translator
 			state = translator.state
@@ -1400,7 +1429,7 @@ class X11KeySource:
 						self._down.discard(code)
 					else:
 						self._down.add(code)
-		decided = self._isDecided(keycode, isUp, repeat, sourceid)
+		decided = self._isDecided(keycode, isUp, repeat, sourceid, when)
 		underGrab = self._grabKey is not None
 		if (
 			ticket is None
