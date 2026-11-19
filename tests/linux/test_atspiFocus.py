@@ -294,10 +294,11 @@ def test_altTabHeldWhileListeningSpeaksOnlyTheWindows(desktop: DesktopSession, t
 		time.sleep(1.5)
 	finally:
 		subprocess.run(["xdotool", "keyup", "alt"], check=True)
-	desktop.expect(QT_TITLE, QT_TITLE, PRESS_ME_ANY, since=mark)
+	desktop.expect(QT_TITLE, PRESS_ME_ANY, since=mark)
 	_waitForQuiet(desktop)
+	# The title the switcher said is not said again as the window comes to the front.
 	spoken = desktop.spokenSince(mark)
-	assert len(spoken) == 3 and spoken[:2] == [QT_TITLE, QT_TITLE], spoken
+	assert len(spoken) == 2 and spoken[0] == QT_TITLE, spoken
 	probe.close()
 	_closeClean(desktop, nvda)
 

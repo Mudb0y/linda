@@ -464,8 +464,10 @@ def test_altTabNamesTheChoiceWithoutWaitingOnABusyProgram(tmp_path: Path):
 					time.sleep(0.5)
 				finally:
 					subprocess.run(["xdotool", "keyup", "alt"], check=True)
-				desktop.expect(chosen, chosen, since=mark)
 				time.sleep(1)
+				# The window the switcher named comes to the front without its title said again.
+				assert desktop.spokenSince(mark).count(chosen) == 1, desktop.spokenSince(mark)
+				assert desktopSession.activeTopLevelNames() == [chosen]
 			assert max(waits) < SWITCHER_BOUND, waits
 			assertQuitCleanly(desktop, nvda)
 	finally:
