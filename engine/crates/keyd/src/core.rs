@@ -135,6 +135,10 @@ struct Caller {
     since: Instant,
     /// Since when it has been waiting for logind and polkit, and the features it asked for.
     admitting: Option<(Instant, u32)>,
+    /// Its question has been put to logind and polkit. While the helper cannot tell which session
+    /// is in front, it is not: each question costs the admission thread several calls on the
+    /// system bus, and only a caller of the user in front can be admitted.
+    asked: bool,
 }
 
 pub struct Core<D: Devices> {
@@ -158,6 +162,9 @@ pub struct Core<D: Devices> {
     next_seq: u64,
     client: Option<Client>,
     callers: BTreeMap<ConnId, Caller>,
+    /// The connections whose questions to logind and polkit have not been answered yet, whether or
+    /// not the caller is still there: each counts against MAX_CALLERS until its answer comes.
+    asking: BTreeSet<ConnId>,
     front: Front,
     /// The console the kernel says is in front, N of ttyN in /sys/class/tty/tty0/active.
     console: Option<u32>,
@@ -194,6 +201,7 @@ impl<D: Devices> Core<D> {
             next_seq: 1,
             client: None,
             callers: BTreeMap::new(),
+            asking: BTreeSet::new(),
             front: Front::Unknown,
             console: None,
             front_console: None,
@@ -291,7 +299,12 @@ impl<D: Devices> Core<D> {
     }
 
     pub fn connected(&mut self, conn: ConnId, peer: Peer, now: Instant) {
-        if self.callers.len() >= MAX_CALLERS {
+        let gone_but_asking = self
+            .asking
+            .iter()
+            .filter(|c| !self.callers.contains_key(c))
+            .count();
+        if self.callers.len() + gone_but_asking >= MAX_CALLERS {
             self.refuse(
                 conn,
                 Goodbye::TooMany,
@@ -300,22 +313,9 @@ impl<D: Devices> Core<D> {
             );
             return;
         }
-        match &self.front {
-            Front::Session { uid, .. } if *uid != peer.uid => {
-                let why = format!("user {} is not the user of the session in front", peer.uid);
-                self.refuse(conn, Goodbye::NotInFront, why, now);
-                return;
-            }
-            Front::Nobody => {
-                self.refuse(
-                    conn,
-                    Goodbye::NotInFront,
-                    "no session is in front".into(),
-                    now,
-                );
-                return;
-            }
-            _ => {}
+        if let Some(why) = self.not_in_front(peer.uid) {
+            self.refuse(conn, Goodbye::NotInFront, why, now);
+            return;
         }
         self.callers.insert(
             conn,
@@ -323,8 +323,35 @@ impl<D: Devices> Core<D> {
                 peer,
                 since: now,
                 admitting: None,
+                asked: false,
             },
         );
+    }
+
+    /// Why a caller of this user cannot be admitted, when the helper can already tell.
+    fn not_in_front(&self, uid: u32) -> Option<String> {
+        match &self.front {
+            Front::Session { uid: u, .. } if *u != uid => Some(format!(
+                "user {uid} is not the user of the session in front"
+            )),
+            Front::Nobody => Some("no session is in front".into()),
+            _ => None,
+        }
+    }
+
+    /// Puts to logind and polkit the question of each caller that said HELLO and has not been
+    /// asked about, once the helper can tell which session is in front.
+    fn ask_waiting(&mut self) {
+        if self.front == Front::Unknown {
+            return;
+        }
+        for (conn, c) in &mut self.callers {
+            if c.admitting.is_some() && !c.asked {
+                c.asked = true;
+                self.asking.insert(*conn);
+                self.out.push(Output::Admit(*conn, c.peer));
+            }
+        }
     }
 
     /// One message from a connection.
@@ -363,6 +390,7 @@ impl<D: Devices> Core<D> {
 
     /// What logind and polkit said of a caller: its session, or why it is turned away.
     pub fn admitted(&mut self, conn: ConnId, result: Result<String, Refusal>, now: Instant) {
+        self.asking.remove(&conn);
         let Some(features) = self
             .callers
             .get(&conn)
@@ -422,6 +450,15 @@ impl<D: Devices> Core<D> {
             log!("in front on seat0: {front:?}");
             self.front = front;
         }
+        let away: Vec<(ConnId, String)> = self
+            .callers
+            .iter()
+            .filter_map(|(conn, c)| self.not_in_front(c.peer.uid).map(|why| (*conn, why)))
+            .collect();
+        for (conn, why) in away {
+            self.refuse(conn, Goodbye::NotInFront, why, now);
+        }
+        self.ask_waiting();
         self.settle(now);
     }
 
@@ -558,11 +595,10 @@ impl<D: Devices> Core<D> {
                     let why = "another client of the session in front is being served";
                     self.refuse(conn, Goodbye::Busy, why.into(), now);
                 } else {
-                    let peer = caller.peer;
                     if let Some(c) = self.callers.get_mut(&conn) {
                         c.admitting = Some((now, features));
                     }
-                    self.out.push(Output::Admit(conn, peer));
+                    self.ask_waiting();
                 }
             }
             (msg, _) => {

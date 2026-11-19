@@ -69,21 +69,28 @@ impl Notices {
     }
 }
 
+/// A caller for the admission thread to ask about, and whether it has gone since it was put in
+/// line.
+pub type Question = (ConnId, Peer, Arc<AtomicBool>);
+
 /// Starts the thread that asks logind and polkit about each caller with `decide`, one at a time,
-/// and posts each answer.
-pub fn spawn_admitter<F>(
-    notices: Arc<Notices>,
-    mut decide: F,
-) -> io::Result<mpsc::Sender<(ConnId, Peer)>>
+/// and posts each answer. A caller that has gone is not asked about, so that callers which hang
+/// up cannot keep the rightful one waiting behind their questions; its answer comes all the same,
+/// since a question counts against MAX_CALLERS until it does.
+pub fn spawn_admitter<F>(notices: Arc<Notices>, mut decide: F) -> io::Result<mpsc::Sender<Question>>
 where
     F: FnMut(&Peer) -> Result<String, Refusal> + Send + 'static,
 {
-    let (tx, rx) = mpsc::channel::<(ConnId, Peer)>();
+    let (tx, rx) = mpsc::channel::<Question>();
     thread::Builder::new()
         .name("admission".into())
         .spawn(move || {
-            for (conn, peer) in rx {
-                let answer = decide(&peer);
+            for (conn, peer, gone) in rx {
+                let answer = if gone.load(Relaxed) {
+                    Err((Goodbye::NotInFront, "the caller has gone".into()))
+                } else {
+                    decide(&peer)
+                };
                 notices.post(Notice::Admitted(conn, answer));
             }
         })?;
@@ -132,6 +139,14 @@ pub fn bind(path: &Path) -> io::Result<OwnedFd> {
 struct Conn {
     fd: OwnedFd,
     backlog: VecDeque<Vec<u8>>,
+    /// Raised when the connection goes, for the admission thread to skip its question.
+    gone: Arc<AtomicBool>,
+}
+
+impl Drop for Conn {
+    fn drop(&mut self) {
+        self.gone.store(true, Relaxed);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -148,7 +163,7 @@ pub struct Server<D: Devices> {
     conns: BTreeMap<ConnId, Conn>,
     next_conn: ConnId,
     notices: Arc<Notices>,
-    admit: mpsc::Sender<(ConnId, Peer)>,
+    admit: mpsc::Sender<Question>,
     progress: Arc<Progress>,
     notifier: Option<Notifier>,
     stop: Arc<AtomicBool>,
@@ -159,7 +174,7 @@ impl<D: Devices> Server<D> {
         core: Core<D>,
         listener: OwnedFd,
         notices: Arc<Notices>,
-        admit: mpsc::Sender<(ConnId, Peer)>,
+        admit: mpsc::Sender<Question>,
         progress: Arc<Progress>,
         notifier: Option<Notifier>,
     ) -> Self {
@@ -316,6 +331,7 @@ impl<D: Devices> Server<D> {
                 Conn {
                     fd,
                     backlog: VecDeque::new(),
+                    gone: Arc::new(AtomicBool::new(false)),
                 },
             );
             self.core.connected(id, peer, now);
@@ -400,7 +416,12 @@ impl<D: Devices> Server<D> {
                         }
                     }
                     Output::Admit(id, peer) => {
-                        if self.admit.send((id, peer)).is_err() {
+                        let Some(c) = self.conns.get(&id) else {
+                            let why = "the caller has gone".to_owned();
+                            self.core.admitted(id, Err((Goodbye::NotInFront, why)), now);
+                            continue;
+                        };
+                        if self.admit.send((id, peer, c.gone.clone())).is_err() {
                             let why = "the admission thread has gone".to_owned();
                             self.core.admitted(id, Err((Goodbye::NoAnswer, why)), now);
                         }

@@ -899,6 +899,76 @@ fn too_many_callers_at_once_are_turned_away() {
     assert_eq!(goodbye_reason(&t.sent_to(99)), Some(Goodbye::TooMany));
 }
 
+impl T {
+    fn asked(&mut self) -> Vec<ConnId> {
+        let (asked, rest): (Vec<Output>, Vec<Output>) = std::mem::take(&mut self.out)
+            .into_iter()
+            .partition(|o| matches!(o, Output::Admit(..)));
+        self.out = rest;
+        asked
+            .into_iter()
+            .map(|o| match o {
+                Output::Admit(c, _) => c,
+                _ => unreachable!(),
+            })
+            .collect()
+    }
+}
+
+#[test]
+fn a_question_counts_against_the_callers_waiting_until_its_answer_comes() {
+    let mut t = T::new();
+    for c in 0..1000 {
+        t.connect(100 + c, PEER);
+        t.hello(100 + c);
+        t.core.disconnected(100 + c, t.now);
+    }
+    let asked = t.asked();
+    assert_eq!(asked.len(), MAX_CALLERS);
+    t.out.clear();
+    t.connect(OTHER, PEER);
+    assert_eq!(goodbye_reason(&t.sent_to(OTHER)), Some(Goodbye::TooMany));
+    // Turned away for not answering in time, it still counts until the answer comes.
+    for c in &asked {
+        t.core
+            .admitted(*c, Err((Goodbye::NotInFront, "gone".into())), t.now);
+    }
+    t.take();
+    t.out.clear();
+    t.admit(CLIENT);
+}
+
+#[test]
+fn while_the_front_is_unknown_callers_wait_and_nobody_is_asked_about() {
+    let mut t = T::new();
+    t.logind(Front::Unknown);
+    let stranger = Peer {
+        pid: 5000,
+        uid: 1001,
+        gid: 1001,
+    };
+    t.connect(OTHER, stranger);
+    t.hello(OTHER);
+    t.connect(CLIENT, PEER);
+    t.hello(CLIENT);
+    assert!(t.asked().is_empty());
+    assert!(t.out.is_empty(), "{:?}", t.out);
+    t.logind(front(SESSION, 1000));
+    assert_eq!(t.asked(), vec![CLIENT]);
+    assert_eq!(goodbye_reason(&t.sent_to(OTHER)), Some(Goodbye::NotInFront));
+    t.core.admitted(CLIENT, Ok(SESSION.into()), t.now);
+    t.take();
+    assert!(matches!(t.sent()[0], ToClient::Welcome { .. }));
+    // Not asked at all when logind cannot be reached for the whole of ADMISSION_TIMEOUT.
+    t.core.disconnected(CLIENT, t.now);
+    t.logind(Front::Unknown);
+    t.connect(CLIENT, PEER);
+    t.hello(CLIENT);
+    t.pass(ADMISSION_TIMEOUT);
+    assert!(t.asked().is_empty());
+    assert_eq!(goodbye_reason(&t.sent()), Some(Goodbye::NoAnswer));
+}
+
 #[test]
 fn refusals_are_not_logged_one_line_each() {
     let mut t = T::new();

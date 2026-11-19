@@ -370,6 +370,39 @@ fn the_watchdog_lets_go_when_the_loop_hangs() {
     drop(c);
 }
 
+#[test]
+fn a_caller_that_has_gone_is_not_asked_about() {
+    let asked = Arc::new(AtomicUsize::new(0));
+    let a = asked.clone();
+    let h = Helper::start_with(move |_| {
+        a.fetch_add(1, Relaxed);
+        thread::sleep(Duration::from_millis(300));
+        Ok(SESSION.into())
+    });
+    for _ in 0..MAX_CALLERS {
+        let c = h.client();
+        c.send(&FromClient::Hello {
+            version: PROTOCOL_VERSION,
+            features: 0,
+        });
+        // Long enough for the loop to put the question in line before the caller hangs up.
+        thread::sleep(Duration::from_millis(20));
+    }
+    // The first was being asked about as the rest hung up; theirs are skipped, and the rightful
+    // client is admitted once the first answer is in. Until then it is turned away as one too
+    // many, and tries again.
+    let deadline = Instant::now() + Duration::from_millis(300) + MARGIN;
+    loop {
+        let c = h.client();
+        if let Got::Nothing = c.recv(Duration::from_millis(50)) {
+            assert!(matches!(c.hello(), ToClient::Welcome { .. }));
+            break;
+        }
+        assert!(Instant::now() < deadline, "not admitted in time");
+    }
+    assert_eq!(asked.load(Relaxed), 2);
+}
+
 /// Connections from any number of processes at once, each turned away.
 fn flood(h: &Helper) -> (Arc<AtomicBool>, Vec<JoinHandle<()>>) {
     let stop = Arc::new(AtomicBool::new(false));
