@@ -34,9 +34,10 @@ BLOCK_SECONDS = 5
 #: key source has it, and how much later a key may arrive than that.
 CAPTURE_TIMEOUT = 0.1
 ARRIVAL_SLACK = 0.15
-#: How Firefox's address bar is announced, as far as it is always the same: Firefox names the search
-#: engine in it, "Search with Google or enter address", only once it has loaded its search engines.
-ADDRESS_BAR = "combo box Search"
+#: How Firefox's address bar is announced, as far as it is always the same: its name comes first, and
+#: Firefox names the search engine in it, "Search with Google or enter address", only once it has
+#: loaded its search engines.
+ADDRESS_BAR = "Search"
 
 #: A global plugin for these tests only: a command that blocks NVDA's main thread, and, in place of
 #: Windows' default sound for a key browse mode traps, a log record.
