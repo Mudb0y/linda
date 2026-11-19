@@ -13,7 +13,8 @@
 //!   client has answered it WAIT, and is passed on without one. A key's release and repeats follow
 //!   what became of its press. No press goes out on the virtual keyboard before every press read
 //!   before it has been decided, nor the release of a modifier; any other release goes out as soon
-//!   as its press has, unless its own press, or a later press of the same key, still waits.
+//!   as its press has, unless a press of the same key, its own or an earlier one, is still in
+//!   line ahead of it.
 //! - Letting go, for any reason, ends with every key the virtual keyboard holds down released and
 //!   every keyboard closed, which the kernel takes as the end of the grab. It happens on STOP, on
 //!   the emergency chord, when the client goes, falls silent, breaks the protocol or leaves keys
@@ -530,7 +531,8 @@ impl<D: Devices> Core<D> {
     /// on by the time frozen would not do: the loop measures that from the deadline it waited for,
     /// so whatever that deadline belonged to, a press's bound or the client's silence, would fall due
     /// at the very moment of the thaw, before the client could say anything. This is done always
-    /// while logind has announced a sleep (until SLEEP_GRACE after it said the machine woke), and
+    /// while logind has announced a sleep (until SLEEP_GRACE after the core is told the machine
+    /// woke, which is once systemd has the unit's own watchdog timeout back), and
     /// otherwise once in FREEZE_FORGIVEN_EVERY, for a sleep that went round logind; never again and
     /// again, since a machine starved of the processor wakes the loop late at every turn, and a
     /// client that has hung must not keep the keyboards by it. Returns whether it was done.
@@ -1448,7 +1450,7 @@ impl<D: Devices> Core<D> {
     /// held down that long on the virtual keyboard is repeated by the desktop, and Tab pressed once
     /// moves the focus twice. A release overtaking another key's press changes nothing for a
     /// program, unless the key is one of the MODIFIERS, which keep their place. A release whose
-    /// own press, or a later press of the same key, is still in line waits for it.
+    /// own press, or an earlier press of the same key, is still in line ahead of it waits.
     fn release_early(&mut self) {
         let mut waiting: Vec<(u32, u16)> = Vec::new();
         let mut i = 0;

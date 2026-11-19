@@ -43,14 +43,17 @@
 //!    on its virtual keyboard only once every press read before it has been decided, so the client
 //!    may be sent several presses before it has answered the first, and answers them in any order.
 //!    A release waits behind the presses read before it, in the same way, if its key is one of the
-//!    modifiers (both Shifts, Controls, Alts and Supers, and Caps Lock), or if its own press, or a
-//!    later press of the same key, is still waiting; any other release goes out as soon as its
+//!    modifiers (both Shifts, Controls, Alts and Supers, and Caps Lock), or if its own press, or an
+//!    earlier press of the same key, is still waiting ahead of it; any other release goes out as soon as its
 //!    press has gone out, ahead of presses still waiting, so that a key let go of is not held down
 //!    long enough for the desktop to repeat it. A release overtaking another key's press changes
 //!    nothing for a program.
 //!    A press not answered within [`VERDICT_TIMEOUT`] of its reading is passed on, and EXPIRED
 //!    says so, once every press read before it has been decided: at its bound, or later, when a
-//!    press before it holds the line longer (with WAIT). Until EXPIRED, a verdict for it counts,
+//!    press before it holds the line longer (with WAIT). After a freeze of the whole helper that it
+//!    forgives, as across a suspend, the bound of every press still waiting runs afresh from the
+//!    thaw, the client having been frozen too, so EXPIRED may come well after the press's reading
+//!    plus its bound by the client's clock. Until EXPIRED, a verdict for it counts,
 //!    after its bound too; one that comes after EXPIRED is ignored. When the client fails to answer a run of
 //!    presses spanning [`UNANSWERED_SPAN`], the helper lets go and sends GOODBYE UNANSWERED; what
 //!    makes a run is given with that bound.
@@ -65,10 +68,18 @@
 //! Whenever the helper lets go, with RELEASED or as the connection ends, the presses still waiting
 //! for a verdict are passed on as if their bounds had come, each put on the virtual keyboard and
 //! released again with the rest, so that the application has had them; a verdict that comes for
-//! one later is ignored. Only after the emergency chord are they dropped instead: neither the
-//! virtual keyboard nor the application has them. Keys read from a keyboard as the helper lets go
-//! of it, too late for the client to be asked, go on to the application in the same way, and are
-//! not sent as KEY.
+//! one later is ignored. Only after the emergency chord are those dropped instead: neither the
+//! virtual keyboard nor the application has them. Keys the helper has not yet read when it lets go
+//! (the rest of what it read with the chord's last key, and what each keyboard has for it as it is
+//! let go of) go on to the application as taps, pressed and released at once, whatever the reason
+//! for letting go, the emergency chord included; they come too late for the client to be asked,
+//! and are not sent as KEY.
+//!
+//! After the kernel has dropped events for a keyboard, the helper deals with nothing more of what
+//! it read with the loss, asks the kernel which keys are down, and makes its picture the kernel's:
+//! a key it had down that is up gets its release, told with [`KEY_SYNTHETIC`]; a key down that it
+//! did not see go down is never told, nor put on the virtual keyboard, until it has been let go of
+//! and pressed again. A key typed during the loss, or held across it, is so lost.
 //!
 //! The emergency chord, Backspace, Escape and Enter (the main one or the numpad's) held down
 //! together on the keyboards the helper holds, is read by the helper itself before it does anything else with a key. It lets go of
