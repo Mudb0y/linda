@@ -1413,6 +1413,39 @@ fn a_key_typed_as_the_helper_lets_go_is_passed_on_and_nothing_left_down() {
 }
 
 #[test]
+fn letting_go_puts_out_what_was_typed_in_the_order_typed() {
+    let mut t = T::new();
+    let k = t.w.plug("keyboard");
+    let k2 = t.w.plug("second keyboard");
+    t.admit(CLIENT);
+    t.send(FromClient::Start);
+    t.pass(VIRTUAL_SETTLE);
+    assert!(t.w.grabbed(k) && t.w.grabbed(k2));
+    t.pressed_out(k, KEY_LEFTSHIFT);
+    // The chord on one keyboard, G after it in the same batch; H on the other, not yet read.
+    for c in CHORD.map(|keys| keys[0]) {
+        t.w.press(k, c);
+    }
+    t.w.press(k, KEY_G);
+    t.w.press(k2, KEY_H);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    assert!(t.sent().contains(&released(Released::Emergency)));
+    t.assert_let_go();
+    assert_eq!(
+        t.w.emitted(),
+        vec![
+            (KEY_LEFTSHIFT, 1),
+            (KEY_LEFTSHIFT, 0),
+            (KEY_G, 1),
+            (KEY_G, 0),
+            (KEY_H, 1),
+            (KEY_H, 0)
+        ]
+    );
+}
+
+#[test]
 fn keys_read_after_the_emergency_chord_in_the_same_batch_are_passed_on() {
     let (mut t, k) = T::capturing();
     for c in CHORD.map(|keys| keys[0]) {
@@ -2703,7 +2736,6 @@ impl Keyboard for ProbeKeyboard {
 /// ungrabbed stays down for the desktop until the last is, its release from the keyboard itself
 /// ignored as one of a key the desktop never had down from it.
 #[test]
-#[ignore = "fourth review: keys stay down on the virtual keyboard while every keyboard is ungrabbed"]
 fn fault_nothing_is_held_on_the_virtual_keyboard_while_the_keyboards_are_ungrabbed() {
     let w = World::new();
     let at_ungrab = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
