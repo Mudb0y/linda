@@ -17,7 +17,9 @@ A request is one JSON object, answered by one:
 - {"op": "start"}, {"op": "stop"}: START and STOP.
 - {"op": "verdicts", "default": RULE, "keys": {KEY: RULE}}: how to answer a press that asks for a
   verdict, for KEY by its evdev name or any other. A RULE is "pass", "keep", "never", or
-  {"after": SECONDS, "keep": BOOL} for an answer that late. At first every press is passed at once.
+  {"after": SECONDS, "keep": BOOL} for an answer that late; with "wait": true it answers WAIT at
+  once first (connect with FEATURE_WAIT in "features"), and without "after" nothing more. At first
+  every press is passed at once.
 - {"op": "heartbeats", "on": BOOL}: sends a HEARTBEAT every interval WELCOME gave, or stops.
 - {"op": "send", "hex": HEX}: sends those bytes as one message, rubbish or not.
 - {"op": "close"}: closes the connection.
@@ -41,6 +43,8 @@ SOCKET_PATH = "/run/linda-keyd/socket"
 MAX_MESSAGE = 256
 
 HELLO, START, STOP, VERDICT, HEARTBEAT = 0x01, 0x02, 0x03, 0x04, 0x05
+VERDICT_WAIT = 2
+FEATURE_WAIT = 2
 WELCOME, GOODBYE, KEY, EXPIRED, RELEASED, DEVICE, LOCKS, HEARTBEAT_ECHO = range(0x81, 0x89)
 KEY_ASK, KEY_SYNTHETIC, KEY_TYPED = 0x01, 0x02, 0x04
 RELEASED_REASONS = {
@@ -207,6 +211,13 @@ class Client:
 		if rule == "never":
 			return
 		if isinstance(rule, dict):
+			if rule.get("wait"):
+				self.send(
+					struct.pack("<BQB", VERDICT, key["seq"], VERDICT_WAIT),
+					{"type": "WAIT", "seq": key["seq"]},
+				)
+				if "after" not in rule:
+					return
 			keep = bool(rule.get("keep", False))
 			timer = threading.Timer(rule["after"], self.verdict, (key["seq"], keep))
 			timer.daemon = True
