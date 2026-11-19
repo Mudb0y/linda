@@ -74,7 +74,7 @@ ECHO_SLACK = 1.0
 CAPTURE_LOOK = 0.1
 #: Seconds past the time it asked to wake by after which the thread that answers keys takes it that
 #: every thread of NVDA's was stopped, as every process is around the machine's sleep, while the
-#: monotonic clock ran on: linda-keyd, stopped as well, was not silent, and no press waited on NVDA.
+#: monotonic clock ran on, and linda-keyd, stopped as well, was not silent.
 #: The helper's WATCHDOG_FROZEN, beyond any ordinary lateness of a thread that sleeps.
 FROZEN = 0.5
 #: Key code: its lock's light.
@@ -1028,18 +1028,18 @@ class KernelKeySource:
 			log.exception("Reporting that linda-keyd was lost")
 
 	def _thawed(self, frozen: float, now: float) -> None:
-		"""Count what is measured against the clock afresh from now, after every thread was stopped for
-		frozen seconds: the helper's silence, which a helper that has really stopped answering still
-		takes the whole bound from now to show; each press NVDA has yet to answer; and the next repeat of
-		a key held down, which comes once, not as a burst of those missed."""
+		"""Count the helper's silence afresh from now, after this thread was stopped for frozen seconds:
+		a helper that has really stopped answering still takes the whole bound from now to show. The next
+		repeat of a key held down comes once, not as a burst of those missed.
+
+		The presses NVDA has yet to answer keep their time: this thread cannot tell every process
+		frozen, which the helper allows for, from itself alone kept from running, which the helper does
+		not, and answered later than the helper's bound an NVDA key's chord would reach the application.
+		"""
 		log.debug(
 			f"The thread that answers keys was stopped for {frozen * 1000:.0f} ms; linda-keyd is not held to it"
 		)
 		self._lastEcho = max(self._lastEcho, now)
-		for press in self._pending:
-			press.arrival += frozen
-			if press.started is not None:
-				press.started += frozen
 		if self._nextRepeat is not None:
 			self._nextRepeat += frozen
 
