@@ -494,3 +494,49 @@ fn review_a_flood_of_connections_does_not_stop_the_loop() {
          watchdog ended the helper {stalled:?} into the flood"
     );
 }
+
+/// Found in review: fails while the fault stands. The socket is open to every local user, and
+/// Server::accept loops until no connection is waiting. Connections made as fast as it turns them
+/// away keep it accepting, so the loop reads no keyboard: the key typed meanwhile reaches nobody,
+/// and the watchdog lets go and ends the helper, which then cannot serve its client for as long as
+/// the connections keep coming.
+#[test]
+fn fault_a_stream_of_connections_keeps_the_loop_from_the_keyboard() {
+    let h = Helper::start();
+    let k = h.w.plug("keyboard");
+    let c = h.capturing(k);
+    c.send(&FromClient::Heartbeat { counter: 1 });
+    let flood = Duration::from_millis(1600);
+    let until = Instant::now() + flood;
+    let threads: Vec<JoinHandle<()>> = (0..32)
+        .map(|_| {
+            let s = h.socket.clone();
+            thread::spawn(move || {
+                while Instant::now() < until {
+                    let _ = Client::connect(&s);
+                }
+            })
+        })
+        .collect();
+    thread::sleep(Duration::from_millis(200));
+    let pressed = Instant::now();
+    h.w.press(k, KEY_A);
+    let mut reached = None;
+    while reached.is_none() && Instant::now() < until {
+        match c.recv(Duration::from_millis(50)) {
+            Got::Message(ToClient::Key(_)) => reached = Some(pressed.elapsed()),
+            Got::Closed => break,
+            _ => {}
+        }
+    }
+    let ended = h.ended.load(Relaxed);
+    // The loop is let back to its work before anything is judged, so that the helper can stop.
+    for t in threads {
+        t.join().unwrap();
+    }
+    assert!(
+        reached.is_some_and(|d| d < VERDICT_TIMEOUT + MARGIN) && !ended,
+        "while connections kept coming the key reached the client after {reached:?} (None: not in \
+         {flood:?}), and the watchdog ended the helper: {ended}"
+    );
+}

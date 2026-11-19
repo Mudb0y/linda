@@ -1476,3 +1476,30 @@ fn review_callers_that_hang_up_leave_no_admission_work_behind() {
          past ADMISSION_TIMEOUT"
     );
 }
+
+// Found in review: these fail while the fault they name stands.
+
+/// The resync after a loss of events puts in `down` no key that went down unseen, and the chord is
+/// looked for in `down` alone, so a chord whose first keys went down while the loop was behind is
+/// never seen however long all three are held: only letting go of them and pressing them again
+/// sets it off. A loop falls behind like this in a stall shorter than the watchdog's limit, which is
+/// when the chord is most wanted.
+#[test]
+fn fault_the_chord_held_through_lost_events_lets_go() {
+    let (mut t, k) = T::capturing();
+    // Backspace and Escape go down while the helper is behind, and the kernel's buffer overflows.
+    t.w.press(k, KEY_BACKSPACE);
+    t.w.press(k, KEY_ESC);
+    t.w.overflow(k, &[]);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    // Enter joins them, and all three are held.
+    t.press(k, KEY_ENTER);
+    t.pass(VERDICT_TIMEOUT * 5);
+    let sent = t.sent();
+    assert!(
+        sent.contains(&released(Released::Emergency)),
+        "Backspace, Escape and Enter are all held on a held keyboard, and the helper still holds it: {sent:?}"
+    );
+    t.assert_let_go();
+}
