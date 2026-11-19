@@ -1356,10 +1356,13 @@ filler = app.intern_atom("_LINDA_TEST_FILLER")
 
 
 def changeRootProperty(times):
+	# A thousand at a time, a tenth of a second apart: all at once, the X source's own thread took more
+	# than the guard's two seconds of silence to read their events, and the guard freed the keyboard.
 	for i in range(times):
 		root.change_property(filler, Xatom.CARDINAL, 32, [i])
-		if i % 500 == 0:
-			app.flush()
+		if i % 1000 == 999:
+			app.sync()
+			time.sleep(0.1)
 	app.sync()
 
 
@@ -1371,6 +1374,7 @@ def unread(pid):
 changeRootProperty(20000)
 time.sleep(1.0)
 idle = unread(guard)
+sameGuard = x._guard is not None and x._guard.pid == guard
 changeRootProperty(20000)
 connection = x._display
 x._beat = lambda now: None
@@ -1378,7 +1382,12 @@ silent = time.monotonic()
 deadline = silent + 10
 while x._display is connection and time.monotonic() < deadline:
 	time.sleep(0.01)
-result = {"idle": idle, "freedAfter": time.monotonic() - silent, "again": x._display is not connection}
+result = {
+	"sameGuard": sameGuard,
+	"idle": idle,
+	"freedAfter": time.monotonic() - silent,
+	"again": x._display is not connection,
+}
 root.delete_property(filler)
 app.sync()
 source.stop()
@@ -1388,6 +1397,7 @@ keyboard.close()
 
 def test_guardReadsWhatTheXServerSendsItAndFreesTheKeyboardInTime(tmp_path: Path):
 	value = runKernelChild(tmp_path, GUARD_UNREAD_CHILD)
+	assert value["sameGuard"], f"the guard freed the keyboard while the X source was answering: {value}"
 	assert value["idle"] and max(value["idle"]) == 0, (
 		f"the guard left on its sockets what the X server sent it: {value}"
 	)
