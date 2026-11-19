@@ -243,11 +243,13 @@ class Client:
 		elif op == "send":
 			self.send(bytes.fromhex(request["hex"]), {"type": "RAW", "hex": request["hex"]})
 		elif op == "close":
-			if self.sock is not None:
+			# Taken once: the shutdown ends the reading thread's recv, and that thread then clears
+			# self.sock, which may come before the close here.
+			sock, self.sock = self.sock, None
+			if sock is not None:
 				# The reading thread's recv keeps the socket open past close(); shutdown ends it.
-				self.sock.shutdown(socket.SHUT_RDWR)
-				self.sock.close()
-				self.sock = None
+				sock.shutdown(socket.SHUT_RDWR)
+				sock.close()
 		elif op == "die":
 			os._exit(9)
 		elif op != "state":
