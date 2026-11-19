@@ -59,9 +59,9 @@ def holdKept(ground: "Ground", keyboard: "FakeKeyboard", route: str) -> int:
 	"""Hold numpad 1, Linda's review key for the previous character, and answer how many characters it
 	spoke."""
 	mark = ground.mark()
-	keyboard.tap(*[keyFor(c) for c in LONG_WORD], hold=0.01, gap=0.01)
-	ground.expect(*LONG_WORD[-3:], since=mark)
-	ground.settle(1)
+	written = keyboard.tap(*[keyFor(c) for c in LONG_WORD], hold=0.01, gap=0.01)
+	ground.waitForKeys("app", [(r["key"], r["value"]) for r in written], mark)
+	ground.settle(1.5)
 	mark = ground.mark()
 	written = keyboard.run({"press": "KEY_KP1"}, {"sleep": HOLD}, {"release": "KEY_KP1"})
 	ground.settle(0.5)
