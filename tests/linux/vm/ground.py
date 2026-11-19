@@ -102,14 +102,18 @@ def keyEvents(records: list[dict]) -> list[tuple[str, int]]:
 
 
 def jsonLines(text: str) -> list[dict]:
-	"""Each record of a JSON Lines file read while it is written to, whose last line may be half written."""
-	lines = [line for line in text.splitlines() if line.strip()]
-	records = [json.loads(line) for line in lines[:-1]]
-	if lines:
-		try:
-			records.append(json.loads(lines[-1]))
-		except json.JSONDecodeError:
-			pass
+	"""Each record of a JSON Lines file read while it is written to, leaving out a line that does not
+	parse: the last may be half written, and now and then one read of a file the window writes to
+	comes back with a line in the middle run into the next, though the file itself had them apart
+	when its end was printed after the failure. A test that waits for records reads again; one that
+	asserts on them sees the record missing."""
+	records = []
+	for line in text.split("\n"):
+		if line.strip():
+			try:
+				records.append(json.loads(line))
+			except json.JSONDecodeError:
+				pass
 	return records
 
 
