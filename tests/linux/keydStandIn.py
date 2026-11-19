@@ -3,9 +3,11 @@
 It speaks the helper's protocol, as engine/crates/keyd/src/protocol.rs gives it, on a socket of its
 own, and is the keyboard as well: a test presses keys on it as a person would on a real one. While
 its client has it capture, each key goes to the client and in line, and what the client passes, or
-does not answer in time, goes on to the X display on the display's own keyboard device, as the
-helper's virtual keyboard would; the rest goes nowhere. While it does not capture, keys go straight
-to the X display, as they do from a keyboard nothing holds. It sends the lights of the locks as the X
+does not answer in time, goes on to the X display on the display's own keyboard device, which stands
+for the helper's virtual keyboard; the rest goes nowhere. While it does not capture, keys go straight
+to the X display through XTEST, the display's one other keyboard device, as they do from a keyboard
+nothing holds: Linda's X source tells the two apart by device, as it tells the virtual keyboard from
+the real keyboards, and a test names the first to Linda as the virtual keyboard. It sends the lights of the locks as the X
 display sets them, reads the emergency chord itself, lets go of everything when its client falls
 silent, and can be made to refuse, say goodbye, let go, lose its keyboard or vanish.
 
@@ -24,8 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
-from Xlib import XK, display
-from Xlib.ext import xinput
+from Xlib import XK, X, display
+from Xlib.ext import xinput, xtest
 from Xlib.protocol import rq
 
 HELLO, START, STOP, VERDICT, HEARTBEAT = 0x01, 0x02, 0x03, 0x04, 0x05
@@ -117,24 +119,41 @@ class _DeviceFakeInput(rq.Request):
 	)
 
 
+def _displayKeyboard(d: display.Display):
+	return next(
+		device
+		for device in d.xinput_query_device(xinput.AllDevices).devices
+		if device.use == xinput.SlaveKeyboard and "XTEST" not in str(device.name)
+	)
+
+
+def virtualKeyboardName() -> str:
+	"""The name of the X display's device the stand-in puts out passed keys on, which a test names to
+	Linda as the helper's virtual keyboard."""
+	d = display.Display()
+	try:
+		return str(_displayKeyboard(d).name)
+	finally:
+		d.close()
+
+
 class _XKeyboard:
-	"""The X display's own keyboard device, which keys reach the X display on: the real keyboard's
-	keys while nothing holds it, and the virtual keyboard's otherwise."""
+	"""The X display's keyboard devices, which keys reach the X display on: its own keyboard, which
+	stands for the helper's virtual keyboard, and XTEST, for the real keyboard while nothing holds it."""
 
 	def __init__(self) -> None:
 		self._display = display.Display()
-		devices = self._display.xinput_query_device(xinput.AllDevices).devices
-		self._device = next(
-			device.deviceid
-			for device in devices
-			if device.use == xinput.SlaveKeyboard and "XTEST" not in str(device.name)
-		)
+		self._device = _displayKeyboard(self._display).deviceid
 		self._firstEvent = self._display.query_extension("XInputExtension").first_event
 		self._xtest = self._display.query_extension("XTEST").major_opcode
 		self._lock = threading.Lock()
 
-	def send(self, evdev: int, down: bool) -> None:
+	def send(self, evdev: int, down: bool, virtual: bool) -> None:
 		with self._lock:
+			if not virtual:
+				xtest.fake_input(self._display, X.KeyPress if down else X.KeyRelease, evdev + 8)
+				self._display.flush()
+				return
 			_DeviceFakeInput(
 				display=self._display.display,
 				opcode=self._xtest,
@@ -270,7 +289,7 @@ class StandIn:
 			os.unlink(self.path)
 		if self._x is not None:
 			for evdev in sorted(self._down):
-				self._x.send(evdev, False)
+				self._x.send(evdev, False, virtual=False)
 			self._x.close()
 		os.close(self._wakeRead)
 		os.close(self._wakeWrite)
@@ -343,10 +362,10 @@ class StandIn:
 	def type(self, text: str) -> None:
 		self.press(*text)
 
-	def _toX(self, evdev: int, down: bool) -> None:
+	def _toX(self, evdev: int, down: bool, virtual: bool = False) -> None:
 		self._note("x", evdev, down)
 		if self._x is not None:
-			self._x.send(evdev, down)
+			self._x.send(evdev, down, virtual)
 
 	# What the stand-in does as the helper.
 
@@ -460,7 +479,7 @@ class StandIn:
 			self._virtualDown.add(evdev)
 		else:
 			self._virtualDown.discard(evdev)
-		self._toX(evdev, down)
+		self._toX(evdev, down, virtual=True)
 
 	def _letGo(self, reason: int | None, dropUndecided: bool) -> None:
 		if dropUndecided:

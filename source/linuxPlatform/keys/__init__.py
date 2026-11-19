@@ -26,6 +26,13 @@ MASK_TYPED_KEYS_IN_LOG: bool = True
 #: Set to "off" in the environment, no key source is started.
 SWITCH_VARIABLE = "LINDA_KEYS"
 
+#: The name linda-keyd gives its virtual keyboard, VIRTUAL_NAME in engine/crates/keyd/src/evdev.rs, by
+#: which the X source knows that keyboard's keys among the X display's devices.
+VIRTUAL_KEYBOARD = "Linda virtual keyboard"
+#: Names the X display's device a test's stand-in for linda-keyd puts out what NVDA passes on, honoured
+#: only beside the stand-in's socket.
+TEST_VIRTUAL_KEYBOARD_VARIABLE = "LINDA_TEST_KEYD_VIRTUAL"
+
 #: The scan code Windows' hook gives the left Control it reports with AltGr, before right Alt.
 ALTGR_CONTROL_SCAN = 0x21D
 
@@ -143,6 +150,15 @@ def helperSocketPath() -> str:
 	return testHooks.keydSocketPath() or keydClient.SOCKET_PATH
 
 
+def helperVirtualKeyboard() -> str:
+	"""The name of the virtual keyboard among the X display's devices, or of a test stand-in's."""
+	from linuxPlatform import testHooks
+
+	if testHooks.keydSocketPath() and (name := os.environ.get(TEST_VIRTUAL_KEYBOARD_VARIABLE)):
+		return name
+	return VIRTUAL_KEYBOARD
+
+
 def createSource(route: str = "auto", notify: Callable[[str], None] | None = None) -> KeySource | None:
 	"""The key source for this session, or None when there is none to watch.
 
@@ -154,4 +170,4 @@ def createSource(route: str = "auto", notify: Callable[[str], None] | None = Non
 		return None
 	from . import route as keyRoute
 
-	return keyRoute.RoutedKeySource(route, helperSocketPath(), notify)
+	return keyRoute.RoutedKeySource(route, helperSocketPath(), notify, helperVirtualKeyboard())

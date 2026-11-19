@@ -1,22 +1,28 @@
 """Which way keys come to NVDA: from the kernel through linda-keyd where it is installed and admits
-NVDA, from the X display otherwise, and the change from one to the other as the helper comes and goes.
+NVDA, from the X display always, and the kernel source coming and going on top of the X source.
 
-Either way NVDA sees one key source. Keys come from the X display from the start, as with no helper,
-while the helper is asked to capture; the X route goes only once the helper says it holds a keyboard,
-so that there is never a moment with no route that takes NVDA's commands from the applications. From
-that moment the keys of the helper's source are NVDA's and the X source's go nowhere: a key the
-helper passes on reaches the X display as well, and while the X source is being stopped it would come
-to NVDA a second time. Muted, the X source passes every key to the application, as the helper has
-decided it already.
+The X source reads the X display from start to end. Beside it, the kernel source takes the keys of
+every keyboard the helper holds, and the helper puts out on its virtual keyboard what NVDA passes.
+Those keys reach the X display too, decided already, and the X source gives them to no one: while
+the helper serves this NVDA, a press of the virtual keyboard is the kernel source's, and its release
+follows it whenever it comes. Every other key, from a keyboard the helper leaves alone, one made
+through uinput, or one another program sends through XTEST, is the X source's, as it is with no
+helper. Falling back is only the kernel source going away, so that there is never a moment with no
+route that takes NVDA's commands from the applications.
 
-On every change each key NVDA was told is down and was not told is up is released to it, and what
-NVDA asked of the keyboard, the NVDA keys, browse mode's keys and input help's hold, is asked again of
-the new source.
+NVDA has the keys of both as one stream, in the order they come to this, which is the order they
+were typed as far as the two can tell it. What NVDA asks of the keyboard, the NVDA keys, browse
+mode's keys and input help's hold, goes to both; what acts on the X display as a whole, sending keys
+and setting the locks, goes to the X source alone.
+
+As the kernel source goes, each key it gave NVDA the press and not the release of is released, and
+what NVDA asked of the keyboard is asked again of the next kernel source.
 
 After the emergency chord the helper lets go, and NVDA takes the keyboard back only when the user
 asks or NVDA starts again: the user pressed it because something was wrong.
 """
 
+import math
 import os
 import threading
 import time
@@ -26,7 +32,7 @@ from functools import partial
 
 from logHandler import log
 
-from . import CaptureMode, GestureKey, KeyEvent, KeySource, keydClient
+from . import VIRTUAL_KEYBOARD, CaptureMode, GestureKey, KeyEvent, KeySource, keydClient
 
 #: The routes the configuration names: the helper when it admits NVDA, and the X display otherwise; the
 #: X display alone.
@@ -36,31 +42,52 @@ RETRY_INTERVAL = 2.0
 #: Seconds the route's own thread waits for the helper's answer: beyond the five the helper allows
 #: logind and polkit before it says goodbye by itself.
 ADMISSION_WAIT = 7.0
+#: Seconds the virtual keyboard's presses stay decided after the kernel source has gone: a press NVDA
+#: passed just before may reach the X source after the kernel source has said it is lost. The helper
+#: puts out no other press until it serves the next one, seconds later; the real keyboards' keys reach
+#: the X source on their own devices at once, and are its own from the moment the helper lets go.
+DECIDED_GRACE = 0.3
 
 
 class RoutedKeySource:
-	"""A KeySource that is the kernel source or the X source, whichever the route gives."""
+	"""A KeySource that is the X source, with the kernel source on top of it whenever the route gives."""
 
-	def __init__(self, route: str, socketPath: str, notify: Callable[[str], None] | None = None) -> None:
+	def __init__(
+		self,
+		route: str,
+		socketPath: str,
+		notify: Callable[[str], None] | None = None,
+		virtualKeyboard: str = VIRTUAL_KEYBOARD,
+	) -> None:
 		"""
 		:param route: One of ROUTES.
 		:param notify: Says a message to the user, from any thread.
+		:param virtualKeyboard: The name of the helper's virtual keyboard among the X display's devices.
 		"""
 		self._route = route if route in ROUTES else "auto"
 		self._socketPath = socketPath
 		self._notify = notify
-		#: Held while the source changes and while what NVDA asked is recorded and passed on.
+		self._virtualKeyboard = virtualKeyboard
+		#: Held while the kernel source changes and while what NVDA asked is recorded and passed on.
 		self._lock = threading.RLock()
-		#: The source NVDA's questions about the keyboard go to.
-		self._active: KeySource | None = None
+		self._x: KeySource | None = None
+		#: The kernel source from its start until it is given up, whether or not the helper holds a
+		#: keyboard for it yet.
+		self._kernel: KeySource | None = None
+		self._kernelWhy = ""
+		#: Whether the helper has held a keyboard for that kernel source.
 		self._isKernel = False
-		#: A kernel source started, waiting for the helper to hold a keyboard, while the X source works.
-		self._pending: KeySource | None = None
-		self._pendingWhy = ""
-		#: The one source whose keys reach NVDA.
-		self._delivering: KeySource | None = None
+		#: The kernel source's taking the keyboard is yet to be logged.
+		self._heldNews = False
+		#: Until when a press of the virtual keyboard is the kernel source's: for ever while the helper
+		#: serves it, a little longer as it goes.
+		self._decidedUntil = 0.0
 		self._deliver: Callable[[KeyEvent], bool] | None = None
 		self._modeNow: Callable[[], CaptureMode | None] | None = None
+		#: Held while a key goes to NVDA, so that the two sources' threads give it one stream.
+		self._delivering = threading.Lock()
+		#: .source: the source whose key NVDA has on this thread, for what NVDA asks while it has it.
+		self._from = threading.local()
 		self._consumed: tuple[int, bool] | None = None
 		self._gestures: tuple[frozenset[GestureKey], frozenset[GestureKey]] | None = None
 		self._capture: tuple[CaptureMode, int | None] = ("off", None)
@@ -81,6 +108,7 @@ class RoutedKeySource:
 
 	@property
 	def isKernel(self) -> bool:
+		"""Whether the helper holds a keyboard for NVDA's kernel source."""
 		return self._isKernel
 
 	def start(
@@ -88,6 +116,9 @@ class RoutedKeySource:
 		deliver: Callable[[KeyEvent], bool],
 		modeNow: Callable[[], CaptureMode | None] | None = None,
 	) -> None:
+		"""
+		:raise Exception: When the X display cannot be read.
+		"""
 		self._deliver, self._modeNow = deliver, modeNow
 		if self._route == "x11":
 			why = "the key route is set to the X display"
@@ -96,7 +127,14 @@ class RoutedKeySource:
 			self._nextTry = time.monotonic() + RETRY_INTERVAL
 		else:
 			why = "until linda-keyd holds the keyboard"
-		self._useX(why)
+		from . import x11
+
+		source = x11.X11KeySource(self._virtualKeyboard, self._isDecided)
+		source.start(partial(self._deliverFrom, source), self._modeNow)
+		with self._lock:
+			self._x = source
+			self._replay(source)
+		log.info(f"Keys are read from the X display: {why}")
 		self._thread = threading.Thread(target=self._supervise, name="keyRoute", daemon=True)
 		self._thread.start()
 
@@ -108,9 +146,10 @@ class RoutedKeySource:
 			self._thread.join(1)
 			self._thread = None
 		with self._lock:
-			sources = [s for s in (self._pending, self._active) if s is not None]
-			self._pending = self._active = self._delivering = None
+			sources = [s for s in (self._kernel, self._x) if s is not None]
+			self._kernel = self._x = None
 			self._isKernel = False
+			self._decidedUntil = 0.0
 		for source in sources:
 			source.stop()
 
@@ -141,11 +180,10 @@ class RoutedKeySource:
 		self._nextTry = 0.0
 		self._wake.set()
 
-	# What NVDA asks of the keyboard, recorded to be asked again of the next source, and asked of a
-	# kernel source waiting for the helper too.
+	# What NVDA asks of the keyboard, recorded to be asked again of the next kernel source.
 
 	def _both(self) -> list[KeySource]:
-		return [s for s in (self._active, self._pending) if s is not None]
+		return [s for s in (self._x, self._kernel) if s is not None]
 
 	def setConsumed(self, nvdaModifierKeys: int, numpadReview: bool) -> None:
 		with self._lock:
@@ -171,74 +209,98 @@ class RoutedKeySource:
 			for source in self._both():
 				source.holdKeyboard(hold)
 
-	# The rest goes to the source NVDA's keys come from; during a fallback there is none.
+	# What acts on the X display as a whole is the X source's: a key sent through XTEST comes back to
+	# it, which knows its own, and to no other. The kernel source sends them only when there is no X
+	# source to.
+
+	def _sender(self) -> KeySource | None:
+		return self._x if self._x is not None else self._kernel if self._isKernel else None
 
 	def setCapsLock(self, on: bool) -> None:
-		if (source := self._active) is not None:
+		# Put back by the source the kept press came from: the X server locked as a key it had went down,
+		# and a key the kernel source kept never reached it.
+		source = getattr(self._from, "source", None) or self._sender()
+		if source is not None:
 			source.setCapsLock(on)
 
 	def inject(self, vkCode: int, scanCode: int, extended: bool, isUp: bool) -> None:
-		if (source := self._active) is not None:
+		if (source := self._sender()) is not None:
 			source.inject(vkCode, scanCode, extended, isUp)
 
 	def typeKey(self, vkCode: int, extended: bool, isUp: bool) -> None:
-		if (source := self._active) is not None:
+		if (source := self._sender()) is not None:
 			source.typeKey(vkCode, extended, isUp)
 
 	def releaseTypedKeys(self) -> None:
-		if (source := self._active) is not None:
+		if (source := self._sender()) is not None:
 			source.releaseTypedKeys()
 
 	def keyState(self, vkCode: int) -> int:
-		source = self._active
-		return source.keyState(vkCode) if source is not None else 0
+		x, kernel = self._x, self._kernel if self._isKernel else None
+		if kernel is None:
+			return x.keyState(vkCode) if x is not None else 0
+		# The locks as the kernel source has them, which knows a lock the helper passed before the X
+		# display does; a key down on any keyboard as the X display has it.
+		return kernel.keyState(vkCode) | (x.keyState(vkCode) & 0x8000 if x is not None else 0)
+
+	def _layout(self) -> KeySource | None:
+		return self._kernel if self._isKernel else self._x
 
 	def charForVk(self, vkCode: int) -> int:
-		source = self._active
+		source = self._layout()
 		return source.charForVk(vkCode) if source is not None else 0
 
 	def vkForChar(self, ch: str) -> tuple[int, int]:
-		if (source := self._active) is None:
+		if (source := self._layout()) is None:
 			raise LookupError(ch)
 		return source.vkForChar(ch)
 
 	def keyName(self, scanCode: int, extended: bool) -> str:
-		source = self._active
+		source = self._layout()
 		return source.keyName(scanCode, extended) if source is not None else ""
 
 	# Keys.
 
+	def _isDecided(self) -> bool:
+		return time.monotonic() < self._decidedUntil
+
 	def _deliverFrom(self, source: KeySource, event: KeyEvent) -> bool:
-		if source is not self._delivering:
-			# The X source while the helper holds the keyboard: the key came through the helper, which
-			# NVDA has had, and the application has it, whatever this source's grab held it for.
-			return True
-		down = self._keysDown.setdefault(source, {})
-		key = (event.scanCode, event.extended)
-		if event.isUp:
-			down.pop(key, None)
-		elif not event.repeat:
-			down[key] = event
-		return self._deliver(event)
+		with self._delivering:
+			key = (event.scanCode, event.extended)
+			if event.isUp:
+				if self._keysDown.setdefault(source, {}).pop(key, None) is None:
+					# Its press came from the other source.
+					for other, down in self._keysDown.items():
+						if other is not source and down.pop(key, None) is not None:
+							break
+			elif not event.repeat:
+				self._keysDown.setdefault(source, {})[key] = event
+			self._from.source = source
+			try:
+				return self._deliver(event)
+			finally:
+				self._from.source = None
 
 	def _releaseLeft(self, source: KeySource) -> None:
 		"""Release to NVDA each key source gave it the press and not the release of, now that it has gone:
-		the release would come to the next source, which never had the press, or to none, and NVDA would
+		the release would come to the other source, which never had the press, or to none, and NVDA would
 		take the key for held from then on, an NVDA key making every key a command."""
 		now = time.monotonic()
-		for press in list(self._keysDown.pop(source, {}).values()):
-			self._deliver(
-				replace(
-					press,
-					isUp=True,
-					repeat=False,
-					text="",
-					typing=False,
-					time=now,
-					captured=False,
-					nvdaKeyGrab=False,
-				),
-			)
+		with self._delivering:
+			left = list(self._keysDown.pop(source, {}).values())
+			for press in left:
+				self._deliver(
+					replace(
+						press,
+						isUp=True,
+						repeat=False,
+						text="",
+						typing=False,
+						time=now,
+						captured=False,
+						nvdaKeyGrab=False,
+					),
+				)
 
 	# Changing the route.
 
@@ -278,83 +340,47 @@ class RoutedKeySource:
 		"""Start a kernel source beside the X source, its keys NVDA's once the helper holds a keyboard."""
 		with self._lock:
 			self._replay(kernel)
-			self._pending, self._pendingWhy = kernel, why
+			self._kernel, self._kernelWhy = kernel, why
 		try:
 			kernel.start(partial(self._deliverFrom, kernel), self._modeNow)
 		except Exception as e:
 			log.warning(f"NVDA cannot take keys from linda-keyd: {e}", exc_info=True)
 			with self._lock:
-				self._pending = None
+				self._kernel = None
 			kernel.stop()
 			return False
 		return True
 
 	def _onKernelHeld(self, kernel: KeySource) -> None:
-		"""On the kernel source's own thread, before it reads any key the helper holds: from now on its
-		keys are NVDA's, and the X source's go nowhere."""
-		if kernel is self._pending:
-			self._delivering = kernel
-			self._wake.set()
-
-	def _switchToKernel(self) -> None:
-		with self._lock:
-			kernel, self._pending = self._pending, None
-			old, self._active = self._active, kernel
-			self._isKernel = True
-		if old is not None:
-			old.stop()
-			self._releaseLeft(old)
-		self._logged = None
-		log.info(f"Keys come from the kernel through linda-keyd: {self._pendingWhy} and holds the keyboard")
-		if self._takingBack:
-			self._takingBack = False
-			# Translators: Said on Linux when NVDA has taken the keyboard back through linda-keyd, the
-			# program that takes the keyboard in the kernel, as the user asked.
-			self._say(_("NVDA has the keyboard again"))
-
-	def _useX(self, why: str) -> None:
-		"""Read keys from the X display.
-
-		:raise Exception: When it cannot be read.
-		"""
-		from . import x11
-
-		source = x11.X11KeySource()
-		self._delivering = source
-		source.start(partial(self._deliverFrom, source), self._modeNow)
-		with self._lock:
-			self._active, self._isKernel = source, False
-			self._replay(source)
-		log.info(f"Keys are read from the X display: {why}")
-
-	def _fallBack(self, why: str) -> None:
-		try:
-			self._useX(why)
-		except Exception:
-			log.warning("NVDA cannot read the keyboard from the X display either", exc_info=True)
-
-	def _dropActive(self) -> None:
-		with self._lock:
-			source, self._active = self._active, None
-			self._isKernel = False
-		if source is not None:
-			source.stop()
-			self._releaseLeft(source)
-
-	def _dropPending(self) -> None:
-		with self._lock:
-			source, self._pending = self._pending, None
-			if self._delivering is source:
-				self._delivering = self._active
-		if source is not None:
-			source.stop()
+		"""On the kernel source's own thread, before it reads any key the helper holds: from now on the
+		virtual keyboard's presses are its own."""
+		if kernel is self._kernel:
+			self._decidedUntil = math.inf
+			if not self._isKernel:
+				self._isKernel = True
+				self._heldNews = True
+				self._wake.set()
 
 	def _onKernelLost(self, kernel: KeySource, why: str, emergency: bool) -> None:
+		if kernel is self._kernel:
+			self._decidedUntil = min(self._decidedUntil, time.monotonic() + DECIDED_GRACE)
 		self._lost.append((kernel, why, emergency))
 		self._wake.set()
 
+	def _dropKernel(self) -> bool:
+		"""Stop the kernel source; whether the helper had held a keyboard for it."""
+		with self._lock:
+			kernel, self._kernel = self._kernel, None
+			wasKernel, self._isKernel = self._isKernel, False
+			self._heldNews = False
+			self._decidedUntil = min(self._decidedUntil, time.monotonic() + DECIDED_GRACE)
+		if kernel is not None:
+			kernel.stop()
+			self._releaseLeft(kernel)
+		return wasKernel
+
 	def _wantsKernel(self) -> bool:
-		return self._route != "x11" and not self._letGo and not self._isKernel and self._pending is None
+		return self._route != "x11" and not self._letGo and self._kernel is None
 
 	def _supervise(self) -> None:
 		while not self._stopping:
@@ -371,39 +397,44 @@ class RoutedKeySource:
 				log.exception("Choosing the way keys come to NVDA")
 
 	def _turn(self) -> None:
-		if self._pending is not None and self._delivering is self._pending:
-			# Held, and lost a moment later or not: it is NVDA's route either way, and what follows its loss
-			# is the same as for any route NVDA had.
-			self._switchToKernel()
+		if self._heldNews:
+			self._heldNews = False
+			self._logged = None
+			log.info(
+				f"Keys come from the kernel through linda-keyd: {self._kernelWhy} and holds the keyboard"
+			)
+			if self._takingBack:
+				self._takingBack = False
+				# Translators: Said on Linux when NVDA has taken the keyboard back through linda-keyd, the
+				# program that takes the keyboard in the kernel, as the user asked.
+				self._say(_("NVDA has the keyboard again"))
 		while self._lost:
 			kernel, why, emergency = self._lost.pop(0)
-			if kernel is self._pending:
-				self._dropPending()
+			if kernel is not self._kernel:
+				continue
+			if not self._dropKernel():
 				self._nextTry = time.monotonic() + RETRY_INTERVAL
 				log.info(
 					f"Keys stay with the X display: linda-keyd was given up before it held the keyboard: {why}"
 				)
-			elif kernel is self._active:
-				self._dropActive()
-				if emergency:
-					self._letGo = True
-				self._fallBack(f"linda-keyd was given up: {why}")
-				self._nextTry = time.monotonic() + RETRY_INTERVAL
-				if emergency:
-					self._say(
-						# Translators: Said on Linux after the emergency chord, Backspace, Escape and Enter held
-						# together, made linda-keyd, the program that takes the keyboard in the kernel for NVDA, let
-						# go of it. NVDA then reads keys the way it does without that program.
-						_(
-							"NVDA has let go of the keyboard, and now reads keys from the X display. "
-							"Use the command to take the keyboard back when you want it to take them again",
-						),
-					)
+				continue
+			if emergency:
+				self._letGo = True
+			self._nextTry = time.monotonic() + RETRY_INTERVAL
+			log.info(f"Keys are read from the X display: linda-keyd was given up: {why}")
+			if emergency:
+				self._say(
+					# Translators: Said on Linux after the emergency chord, Backspace, Escape and Enter held
+					# together, made linda-keyd, the program that takes the keyboard in the kernel for NVDA, let
+					# go of it. NVDA then reads keys the way it does without that program.
+					_(
+						"NVDA has let go of the keyboard, and now reads keys from the X display. "
+						"Use the command to take the keyboard back when you want it to take them again",
+					),
+				)
 		if self._route == "x11":
-			self._dropPending()
-			if self._isKernel:
-				self._dropActive()
-				self._fallBack("the key route is set to the X display")
+			if self._kernel is not None and self._dropKernel():
+				log.info("Keys are read from the X display: the key route is set to the X display")
 			return
 		if not self._wantsKernel() or time.monotonic() < self._nextTry:
 			return
@@ -422,8 +453,3 @@ class RoutedKeySource:
 				# Translators: Said on Linux when the user asked NVDA to take the keyboard back and linda-keyd,
 				# the program that takes the keyboard in the kernel, is not running or does not let it.
 				self._say(_("NVDA cannot take the keyboard: linda-keyd is not running or does not let it"))
-			return
-		if self._active is None:
-			# The X display could not be read: better the helper's keys at once than none.
-			self._delivering = kernel
-			self._switchToKernel()

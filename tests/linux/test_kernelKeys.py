@@ -19,7 +19,7 @@ import pytest
 import test_browseKeys as browseKeys
 import webSession
 from desktopSession import PREFIX_MARK, DesktopSession
-from keydStandIn import StandIn, code
+from keydStandIn import StandIn, code, virtualKeyboardName
 from test_keys import ENTRY_TEXT, LAYOUTS, STARTUP_TIMEOUT, configText, entryState, transcript, waitForEntry
 
 #: Seconds within which the helper must have a verdict, which it passes a press on after.
@@ -39,7 +39,7 @@ import os, sys, tempfile, threading, time
 from pathlib import Path
 sys.path.insert(0, str(harness.HERE))
 from Xlib import X, XK, Xatom, display
-from keydStandIn import StandIn, code
+from keydStandIn import StandIn, code, virtualKeyboardName
 from linuxPlatform.keys import route, x11
 
 if SOCKET is None:
@@ -107,7 +107,7 @@ def presses(vk=None):
 
 
 def startSource(routeName="auto", consumed=x11.EXTENDED_INSERT | x11.CAPS_LOCK, waitForKernel=True):
-	source = route.RoutedKeySource(routeName, path, said.append)
+	source = route.RoutedKeySource(routeName, path, said.append, virtualKeyboardName())
 	source.start(deliver, lambda: mode["now"])
 	source.setConsumed(consumed, True)
 	if routeName != "x11" and waitForKernel:
@@ -236,7 +236,7 @@ source.setCapture("browse")
 mode["now"] = "browse"
 # When each press came to the client, and when its verdict left, as the client has them.
 import struct
-active = source._active
+active = source._kernel
 received, answered = {}, {}
 onKey, send = active._onKey, active._send
 
@@ -348,7 +348,7 @@ time.sleep(2.6)
 busy = len(keyboard.heartbeats)
 kernelThen = source.isKernel
 # Now the thread that answers keys hangs, while the decider is free.
-active = source._active
+active = source._kernel
 answer = active._answer
 hung = {"once": True}
 
@@ -468,7 +468,7 @@ first = source.isKernel
 # Another client of the session in front took this one's place.
 keyboard.goodbye(9, "replaced")
 deadline = time.monotonic() + 5
-while (source.isKernel or source._active is None) and time.monotonic() < deadline:
+while source.isKernel and time.monotonic() < deadline:
 	time.sleep(0.05)
 afterGoodbye = source.isKernel
 keyboard.press("Insert+t")
@@ -536,7 +536,7 @@ keyboard.down("Insert")
 time.sleep(0.2)
 keyboard.vanish()
 deadline = time.monotonic() + 5
-while (source.isKernel or source._active is None) and time.monotonic() < deadline:
+while source.isKernel and time.monotonic() < deadline:
 	time.sleep(0.05)
 time.sleep(0.5)
 insert = [[e["up"], e["reached"]] for e in delivered if e["vk"] == 0x2D]
@@ -592,7 +592,7 @@ time.sleep(0.5)
 for name in ("Return", "Escape", "BackSpace"):
 	keyboard.up(name)
 deadline = time.monotonic() + 5
-while (source.isKernel or source._active is None) and time.monotonic() < deadline:
+while source.isKernel and time.monotonic() < deadline:
 	time.sleep(0.05)
 time.sleep(3)
 afterChord = {"kernel": source.isKernel, "starts": keyboard.starts, "said": list(said)}
@@ -1048,7 +1048,7 @@ keyboard.down("Insert")
 time.sleep(0.2)
 source.setRoute("x11")
 deadline = time.monotonic() + 5
-while (source.isKernel or source._active is None) and time.monotonic() < deadline:
+while source.isKernel and time.monotonic() < deadline:
 	time.sleep(0.05)
 time.sleep(0.3)
 keyboard.up("Insert")
@@ -1094,7 +1094,7 @@ for _ in range(15):
 	keyboard.press("Insert", hold=0.02, gap=0.01)
 	time.sleep(0.05)
 deadline = time.monotonic() + 5
-while (source.isKernel or source._active is None) and time.monotonic() < deadline:
+while source.isKernel and time.monotonic() < deadline:
 	time.sleep(0.05)
 result = {"once": once, "goodbyes": [e[2] for e in keyboard.events if e[1] == "goodbye"], "kernel": source.isKernel}
 source.stop()
@@ -1123,6 +1123,52 @@ def test_pressesTheHelperPassedOnAreNotNVDAsToo(tmp_path: Path):
 	# Left unanswered for a second, the helper says goodbye, and NVDA reads keys from X.
 	assert value["goodbyes"] == [8]
 	assert not value["kernel"]
+
+
+#: The helper lets go, by saying goodbye, by the emergency chord or as the route is set to the X display,
+#: and Insert is pressed 50 ms later, as the user goes on typing: whether NVDA had it and whether it
+#: reached the application. From the independent review, which found it unheard while the kernel source
+#: stopped before the X source started.
+FALLBACK_GAP_CHILD = r"""
+source = startSource()
+kernelBefore = source.isKernel
+windowKeys()
+delivered.clear()
+if HOW == "goodbye":
+	keyboard.goodbye(8, "unanswered")
+elif HOW == "emergency":
+	for name in ("BackSpace", "Escape", "Return"):
+		keyboard.down(name)
+		time.sleep(0.02)
+else:
+	source.setRoute("x11")
+time.sleep(0.05)
+keyboard.press("Insert", hold=0.03)
+deadline = time.monotonic() + 3
+while source.isKernel and time.monotonic() < deadline:
+	time.sleep(0.01)
+time.sleep(0.3)
+for name in ("Return", "Escape", "BackSpace"):
+	keyboard.up(name)
+time.sleep(0.2)
+result = {
+	"kernelBefore": kernelBefore,
+	"kernelAfter": source.isKernel,
+	"window": [key for key in windowKeys() if key[1] and key[0] == 110],
+	"nvda": [e["vk"] for e in presses(0x2D)],
+}
+source.stop()
+keyboard.close()
+"""
+
+
+@pytest.mark.parametrize("how", ["goodbye", "emergency", "x11"])
+def test_noGapWithoutAKeySourceWhenTheHelperGoes(tmp_path: Path, how: str):
+	value = runKernelChild(tmp_path, f"HOW = {how!r}\n" + FALLBACK_GAP_CHILD)
+	assert value["kernelBefore"] and not value["kernelAfter"], value
+	assert value["window"] == [] and value["nvda"] == [0x2D], (
+		f"Insert typed 50 ms after the helper went reached the application, or NVDA did not have it: {value}"
+	)
 
 
 # NVDA itself, its keys taken from the stand-in, which is the keyboard: the X source's own tests in
@@ -1180,6 +1226,7 @@ class KernelSession:
 		environment = {
 			"LINDA_TEST_HOOKS_DIR": str(hooks),
 			"LINDA_TEST_KEYD_SOCKET": keyboard.path,
+			"LINDA_TEST_KEYD_VIRTUAL": virtualKeyboardName(),
 			**(env or {}),
 		}
 		desktop.startApp(desktop.fixture("gtkFixture"), title="Fixture window")

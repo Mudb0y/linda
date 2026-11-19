@@ -23,6 +23,11 @@ Should this whole process stop, no thread is left to answer, and
 the keyboard would stay held: a guard, a process of its own that this one feeds a heartbeat, then
 lets the keyboard go and closes this source's connection to the X server; the source connects again
 once it runs again.
+
+Beside the kernel source, the keys of linda-keyd's virtual keyboard are decided already: the kernel
+source gave each press to NVDA, and the helper put out only what NVDA passed. Such a press, its
+repeats and its release follow the X server's state here and go no further; one a grab of this
+source catches is replayed to the application at once, never held for NVDA.
 """
 
 import itertools
@@ -417,7 +422,18 @@ class _Ticket:
 class X11KeySource:
 	"""A KeySource reading the X display named by DISPLAY."""
 
-	def __init__(self) -> None:
+	def __init__(self, virtualKeyboard: str | None = None, decided: Callable[[], bool] | None = None) -> None:
+		"""
+		:param virtualKeyboard: The name of linda-keyd's virtual keyboard among the X server's devices.
+		:param decided: Whether, at this moment, a press of that keyboard is one the helper's client has
+			decided, called on the X thread for each; a device of that name is only ever ignored for it.
+		"""
+		self._virtualName = virtualKeyboard
+		self._decided = decided
+		#: Device IDs of the slave keyboards named as the virtual keyboard is.
+		self._virtualDevices: set[int] = set()
+		#: (device ID, key code) of each press decided already whose release has not come.
+		self._decidedDown: set[tuple[int, int]] = set()
 		self._lock = threading.Lock()
 		self._commands: deque[Callable[[], None]] = deque()
 		self._wakeRead, self._wakeWrite = os.pipe()
@@ -852,8 +868,42 @@ class X11KeySource:
 			self._wake()
 
 	def _findXtestDevices(self) -> None:
+		"""Find the XTEST devices and the virtual keyboard, after any change of the devices: one added
+		comes in its own event before any of its keys, and the X server numbers devices anew as they
+		come and go."""
 		devices = self._display.xinput_query_device(xinput.AllDevices).devices
 		self._xtestDevices = {device.deviceid for device in devices if "XTEST" in str(device.name)}
+		self._virtualDevices = {
+			device.deviceid
+			for device in devices
+			if self._virtualName is not None
+			and device.use == xinput.SlaveKeyboard
+			and str(device.name) == self._virtualName
+		}
+		# A device gone puts out no release more; its number may be the next device's.
+		present = {device.deviceid for device in devices}
+		self._decidedDown = {key for key in self._decidedDown if key[0] in present}
+
+	def _isDecided(self, keycode: int, isUp: bool, repeat: bool, sourceid: int | None) -> bool:
+		"""Whether a key is one linda-keyd's client has decided already: a press of the virtual keyboard
+		while that client is served, and the repeats and release of such a press whenever they come,
+		as the helper releases what its virtual keyboard holds after it has let go."""
+		if sourceid is None:
+			# A release made up as the connection came back, its device unknown.
+			key = next((key for key in self._decidedDown if key[1] == keycode), None) if isUp else None
+		else:
+			key = (sourceid, keycode)
+		if isUp or repeat:
+			if key not in self._decidedDown:
+				return False
+			if isUp:
+				self._decidedDown.discard(key)
+			return True
+		if sourceid in self._virtualDevices and self._decided is not None and self._decided():
+			self._decidedDown.add(key)
+			return True
+		self._decidedDown.discard(key)
+		return False
 
 	def _readRulesNames(self) -> tuple[str, ...]:
 		d = self._display
@@ -1095,6 +1145,7 @@ class X11KeySource:
 					self._down.discard(code)
 				else:
 					self._down.add(code)
+		decided = self._isDecided(keycode, isUp, repeat, sourceid)
 		underGrab = self._grabKey is not None
 		if (
 			ticket is None
@@ -1109,6 +1160,11 @@ class X11KeySource:
 		):
 			ticket = self._ticket(keycode, effective, arrival)
 		try:
+			if decided:
+				if ticket is not None:
+					# The X server holds it for a grab of this source; NVDA had it from the kernel and passed it.
+					ticket.verdict = True
+				return
 			# The keyboard's own events are never the echo of a key sent here, even when the same key was
 			# sent just now; a release taken for one would leave NVDA thinking it still down.
 			echo = sourceid in self._xtestDevices and self._isEcho(keycode, isUp, arrival)
