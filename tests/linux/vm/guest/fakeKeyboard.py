@@ -18,7 +18,8 @@ and the eight modifiers down at once, and records what the kernel sets its light
 serve makes the keyboard, writes its event node to DIRECTORY/NAME.ready, and takes requests on
 DIRECTORY/NAME.sock. A request is a list of steps, run in order: {"press": KEY}, {"release": KEY},
 {"tap": KEY, "hold": SECONDS}, {"chord": [KEY, ...], "hold": SECONDS}, which presses the keys in
-order and releases them in reverse, {"sleep": SECONDS}, and {"vanish": true}, which destroys the
+order and releases them in reverse, {"sleep": SECONDS}, {"signal": [PID, NAME]}, which sends a
+process a signal by its name, as SIGSTOP, between two keys, and {"vanish": true}, which destroys the
 keyboard at once, with whatever it holds down, and ends serve. KEY is an evdev name such as KEY_T.
 The answer lists every event written, with the monotonic time it was written at, and each one is
 also appended to DIRECTORY/NAME.jsonl.
@@ -29,6 +30,7 @@ It runs as root: /dev/uinput and /dev/uhid are root's alone.
 import glob
 import json
 import os
+import signal
 import socket
 import struct
 import sys
@@ -146,6 +148,10 @@ class Keyboard:
 					time.sleep(0.01)
 			elif "sleep" in step:
 				time.sleep(step["sleep"])
+			elif "signal" in step:
+				pid, name = step["signal"]
+				os.kill(pid, signal.Signals[name])
+				self.record({"t": time.monotonic(), "signal": name, "pid": pid})
 			elif step.get("vanish"):
 				self.destroy()
 				self.record({"t": time.monotonic(), "vanished": True})

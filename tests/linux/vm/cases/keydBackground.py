@@ -74,12 +74,14 @@ def run(ground: "Ground") -> None:
 			f"{logind - switched:+.3f} s after it began, and the client was told it was let go "
 			f"{released['t'] - switched:+.3f} s after it began"
 		)
+		# Let go as the kernel switched, not when logind said so. How long the switch itself takes from
+		# chvt is the X server's and the guest's, which a loaded host stretches.
 		assert released["t"] < logind, (released, logind)
-		# Every key typed once the switch was under way went to the console.
-		after = [r["key"][4:].lower() for r in presses if r["t"] > switched + 0.15]
+		assert released["t"] - kernel < 0.1, (released, kernel)
+		# Every key typed once the helper had let go went to the console, and none to the client.
+		after = [r["key"][4:].lower() for r in presses if r["t"] > released["t"]]
 		assert after and all(letter in console for letter in after), (after, console)
-		assert released["t"] - switched < 0.15, released
-		assert not [r for r in presses if r["key"] in heard and r["t"] > switched + 0.15]
+		assert not [r for r in presses if r["key"] in heard and r["t"] > released["t"]]
 
 	with ground.subtest("the switch back captures again by itself"):
 		mark = ground.mark()

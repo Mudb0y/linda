@@ -15,7 +15,8 @@ if TYPE_CHECKING:
 	from ground import Ground
 
 UHID = "Ground uhid keyboard"
-FLOOD = [f"KEY_{c}" for c in "QWERTYUIOPASDFGHJKLZXCVBNM"] * 12
+#: Some three hundred events, several times what the kernel keeps for a reader of a keyboard.
+FLOOD = [f"KEY_{c}" for c in "QWERTYUIOPASDFGHJKLZXCVBNM"] * 2
 
 
 def run(ground: "Ground") -> None:
@@ -29,12 +30,19 @@ def run(ground: "Ground") -> None:
 		mark = ground.mark()
 		keyboard.run({"press": "KEY_LEFTSHIFT"})
 		ground.waitForKeys("x", [("KEY_LEFTSHIFT", 1)], mark, device=VIRTUAL_KEYBOARD)
-		ground.shell(f"kill -STOP {pid}")
-		stopped = ground.now()
-		keyboard.run({"release": "KEY_LEFTSHIFT"}, *({"tap": key, "hold": 0} for key in FLOOD))
-		ground.shell(f"kill -CONT {pid}")
+		# Stopped and continued by the keyboard itself, between its keys, so that neither a loaded
+		# host's round trips nor a program starting keep it stopped past STALL_LIMIT, after which its
+		# watchdog thread rightly ends it.
+		since = ground.mark()
+		keyboard.run(
+			{"signal": [pid, "SIGSTOP"]},
+			{"release": "KEY_LEFTSHIFT"},
+			*({"tap": key, "hold": 0} for key in FLOOD),
+			{"signal": [pid, "SIGCONT"]},
+		)
+		stopped, continued = (r["t"] for r in keyboard.records(since) if "signal" in r)
 		ground.machine.log(
-			f"the helper was stopped {ground.now() - stopped:.3f} s, {len(FLOOD)} keys typed meanwhile"
+			f"the helper was stopped {continued - stopped:.3f} s, {len(FLOOD)} keys typed meanwhile"
 		)
 		shift = client.waitFor("KEY", mark, lambda r: r["key"] == "KEY_LEFTSHIFT" and r["value"] == 0)
 		assert shift["synthetic"], shift
@@ -51,6 +59,7 @@ def run(ground: "Ground") -> None:
 		for r in passed:
 			down[r["key"]] = down.get(r["key"], 0) + (1 if r["value"] else -1)
 		assert all(v == 0 for v in down.values()), down
+		assert continued - stopped < 0.8, "stopped too near STALL_LIMIT for the helper to be judged"
 		assert pid == ground.helperPid(), "the helper was ended"
 
 	with ground.subtest("typing goes on with nothing down"):
