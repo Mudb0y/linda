@@ -1944,7 +1944,6 @@ fn fault_a_keep_for_a_press_still_in_line_behind_a_wait_is_not_thrown_away() {
 /// Shift among them. A press read after the report cannot have been unseen: the kernel sends a
 /// press only as a key goes down.
 #[test]
-#[ignore = "second review: fails while the fault stands"]
 fn fault_a_key_pressed_after_a_loss_of_events_is_not_lost() {
     let (mut t, k) = T::capturing();
     t.w.overflow(k, &[]);

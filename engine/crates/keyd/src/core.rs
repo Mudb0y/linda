@@ -1269,11 +1269,17 @@ impl<D: Devices> Core<D> {
         if !is_virtual_key(code) {
             return;
         }
+        // The keys found down after a loss of events include those pressed after it, whose presses
+        // are still to be read: the kernel sends a press only as a key goes down, so a press read
+        // now is of such a key, and is an ordinary press. Only a key whose press was lost has its
+        // repeats and release go nowhere.
         if kbd.unseen.contains(code) {
-            if value == 0 {
+            if value != KEY_REPEAT.into() {
                 kbd.unseen.remove(code);
             }
-            return;
+            if value != KEY_PRESS.into() {
+                return;
+            }
         }
         match value {
             1 if !kbd.down.contains(code) => {
