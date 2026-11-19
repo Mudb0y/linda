@@ -232,7 +232,7 @@ impl<D: Devices> Server<D> {
         let ready = self.poll(deadline.map(|d| d.saturating_duration_since(now)))?;
         let woke = Instant::now();
         if let Some(frozen) = frozen_for(deadline, now, woke)
-            && self.core.thawed(frozen, woke)
+            && self.core.thawed(woke)
         {
             log!(
                 "every thread was stopped for {} ms; the client is not held to it",

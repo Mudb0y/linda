@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::os::fd::BorrowedFd;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::device::{Devices, Found, GrabError, InputEvent, Keyboard, ReadError, VirtualKeyboard};
 use crate::keys::{
@@ -518,15 +518,18 @@ impl<D: Devices> Core<D> {
         self.settle(now);
     }
 
-    /// The whole process was frozen for `frozen`, as while the machine suspended or resumed, which
-    /// the loop knows by a wait that came back that much later than it asked, at `now`. Neither the
-    /// client's silence nor a press's wait for its verdict counts that time, the client having been
-    /// frozen too: always while logind has announced a sleep (until SLEEP_GRACE after it said the
-    /// machine woke), and otherwise once in FREEZE_FORGIVEN_EVERY, for a sleep that went round
-    /// logind. Never again and again: a machine starved of the processor wakes the loop late at
-    /// every turn, and a client that has hung must not keep the keyboards by it. Returns whether the
-    /// time was forgiven.
-    pub fn thawed(&mut self, frozen: Duration, now: Instant) -> bool {
+    /// The whole process was frozen, as while the machine suspended or resumed, which the loop knows
+    /// by a wait that came back far later than it asked, at `now`. The client was frozen too, and is
+    /// given its bounds afresh from the thaw: it is heard as of now, every press still waiting for
+    /// its verdict is counted from now, and the run of unanswered presses starts again. Moving them
+    /// on by the time frozen would not do: the loop measures that from the deadline it waited for,
+    /// so whatever that deadline belonged to, a press's bound or the client's silence, would fall due
+    /// at the very moment of the thaw, before the client could say anything. This is done always
+    /// while logind has announced a sleep (until SLEEP_GRACE after it said the machine woke), and
+    /// otherwise once in FREEZE_FORGIVEN_EVERY, for a sleep that went round logind; never again and
+    /// again, since a machine starved of the processor wakes the loop late at every turn, and a
+    /// client that has hung must not keep the keyboards by it. Returns whether it was done.
+    pub fn thawed(&mut self, now: Instant) -> bool {
         let announced = self.asleep || self.woke.is_some_and(|w| now <= w + SLEEP_GRACE);
         if !announced {
             if self
@@ -538,21 +541,18 @@ impl<D: Devices> Core<D> {
             self.forgiven = Some(now);
         }
         if let Some(c) = self.client.as_mut() {
-            c.last_heard += frozen;
+            c.last_heard = c.last_heard.max(now);
         }
         for c in self.callers.values_mut() {
-            c.since += frozen;
+            c.since = c.since.max(now);
             if let Some((t, _)) = &mut c.admitting {
-                *t += frozen;
+                *t = (*t).max(now);
             }
         }
         for e in &mut self.line {
-            e.arrival += frozen;
+            e.arrival = e.arrival.max(now);
         }
-        if let Some((first, last)) = &mut self.unanswered {
-            *first += frozen;
-            *last += frozen;
-        }
+        self.unanswered = None;
         true
     }
 

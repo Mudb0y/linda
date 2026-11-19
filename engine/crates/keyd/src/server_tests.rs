@@ -808,8 +808,8 @@ fn fault_a_starved_helper_lets_go_of_a_silent_client_about_when_the_heartbeat_sa
             deadline = Some(deadline.map_or(tick, |d| d.min(tick)));
         }
         let woke = deadline.expect("a deadline while holding").max(began) + late;
-        if let Some(frozen) = frozen_for(deadline, began, woke) {
-            core.thawed(frozen, woke);
+        if frozen_for(deadline, began, woke).is_some() {
+            core.thawed(woke);
         }
         now = woke;
         core.tick(now);

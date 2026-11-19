@@ -1638,22 +1638,53 @@ fn waking_starts_the_clients_silence_afresh() {
 }
 
 #[test]
-fn a_frozen_stretch_counts_against_neither_the_heartbeat_nor_a_verdict() {
+fn a_forgiven_freeze_gives_the_client_and_a_waiting_press_their_bounds_afresh() {
     let (mut t, k) = T::capturing();
+    // The client last heard 1.9 s before, and a press read a millisecond before every process
+    // stops; the loop, waiting for the press's bound, wakes three seconds late, as Server::turn has
+    // it, and the first tick after the thaw comes at once.
+    t.send(FromClient::Heartbeat { counter: 0 });
+    t.now += HEARTBEAT_TIMEOUT - ms(100);
     t.press(k, KEY_A);
     let a = t.last_seq();
-    let frozen = Duration::from_secs(3);
-    t.now += frozen;
-    t.core.thawed(frozen, t.now);
+    t.now += Duration::from_secs(3);
+    assert!(t.core.thawed(t.now));
     t.core.tick(t.now);
     t.take();
-    assert!(!t.closed(CLIENT));
+    assert!(!t.closed(CLIENT), "dropped for the frozen time");
     assert!(t.w.emitted().is_empty(), "passed on for the frozen time");
+    // The press has its whole bound from the thaw.
+    t.now += VERDICT_TIMEOUT - ms(1);
+    t.core.tick(t.now);
+    t.take();
+    assert!(t.w.emitted().is_empty());
     t.verdict(a, false);
     assert_eq!(t.w.emitted(), vec![(KEY_A, 1)]);
-    // The bounds run again from the thaw.
-    t.press(k, KEY_T);
-    t.quiet(HEARTBEAT_TIMEOUT);
+    // And the client its whole silence: a hung one keeps the keyboard no longer than the frozen
+    // time and twice the heartbeat's bound from its last word.
+    let thaw = t.now - (VERDICT_TIMEOUT - ms(1));
+    t.quiet(HEARTBEAT_TIMEOUT - VERDICT_TIMEOUT);
+    assert!(!t.closed(CLIENT));
+    t.quiet(VERDICT_TIMEOUT);
+    assert_eq!(goodbye_reason(&t.sent()), Some(Goodbye::Silent));
+    t.assert_let_go();
+    // Its last word came 1.9 s and a freeze before the thaw, and it was dropped one bound after it.
+    assert!(
+        t.now - thaw <= HEARTBEAT_TIMEOUT + VERDICT_TIMEOUT,
+        "{:?}",
+        t.now - thaw
+    );
+}
+
+#[test]
+fn a_late_wake_that_is_not_forgiven_changes_nothing() {
+    let (mut t, k) = T::capturing();
+    assert!(t.core.thawed(t.now));
+    t.press(k, KEY_A);
+    t.now += Duration::from_secs(3);
+    assert!(!t.core.thawed(t.now), "forgiven twice within the minute");
+    t.core.tick(t.now);
+    t.take();
     assert_eq!(goodbye_reason(&t.sent()), Some(Goodbye::Silent));
     t.assert_let_go();
 }
@@ -1662,31 +1693,25 @@ fn a_frozen_stretch_counts_against_neither_the_heartbeat_nor_a_verdict() {
 fn a_freeze_logind_did_not_announce_is_forgiven_once_in_a_while_and_an_announced_one_always() {
     let (mut t, _k) = T::capturing();
     let s = Duration::from_secs;
-    assert!(t.core.thawed(s(3), t.now));
+    assert!(t.core.thawed(t.now));
     t.now += s(10);
-    assert!(
-        !t.core.thawed(s(3), t.now),
-        "forgiven again within the minute"
-    );
+    assert!(!t.core.thawed(t.now), "forgiven again within the minute");
     t.now += FREEZE_FORGIVEN_EVERY;
-    assert!(t.core.thawed(s(3), t.now));
+    assert!(t.core.thawed(t.now));
     t.core.sleeping(true, t.now);
     for _ in 0..5 {
         t.now += s(1);
-        assert!(
-            t.core.thawed(s(3), t.now),
-            "an announced sleep not forgiven"
-        );
+        assert!(t.core.thawed(t.now), "an announced sleep not forgiven");
     }
     t.core.sleeping(false, t.now);
     t.now += SLEEP_GRACE;
-    assert!(t.core.thawed(s(3), t.now));
+    assert!(t.core.thawed(t.now));
     t.now += s(1);
-    assert!(!t.core.thawed(s(3), t.now));
+    assert!(!t.core.thawed(t.now));
 }
 
 #[test]
-fn on_a_starved_machine_a_press_is_passed_on_within_its_bound_and_two_late_wakes() {
+fn on_a_starved_machine_a_press_is_passed_on_within_two_bounds_and_two_late_wakes() {
     let (mut t, k) = T::capturing();
     t.press(k, KEY_A);
     let read = t.now;
@@ -1695,14 +1720,14 @@ fn on_a_starved_machine_a_press_is_passed_on_within_its_bound_and_two_late_wakes
     while t.w.emitted().is_empty() {
         let next = t.core.next_wake().unwrap().min(t.now + LOOP_TICK);
         let woke = next.max(t.now) + late;
-        t.core.thawed(woke - next.max(t.now), woke);
+        t.core.thawed(woke);
         t.now = woke;
         t.send(FromClient::Heartbeat { counter: 0 });
         t.core.tick(t.now);
         t.take();
     }
     assert!(
-        t.now - read <= VERDICT_TIMEOUT + 2 * late,
+        t.now - read <= 2 * VERDICT_TIMEOUT + 2 * late,
         "{:?}",
         t.now - read
     );
@@ -2377,7 +2402,6 @@ fn fault_a_key_let_go_of_as_the_helper_catches_up_after_lost_events_does_not_sta
 /// The core's own test of a freeze credits the whole frozen time from the press, which the loop
 /// never does.
 #[test]
-#[ignore = "third review: a press read just before a forgiven freeze is passed on at the thaw"]
 fn fault_a_press_read_just_before_a_forgiven_freeze_is_not_passed_on_as_the_freeze_ends() {
     let (mut t, k) = T::capturing();
     t.press(k, KEY_INSERT);
@@ -2385,12 +2409,8 @@ fn fault_a_press_read_just_before_a_forgiven_freeze_is_not_passed_on_as_the_free
     // The loop polls until its next deadline, Insert's bound; every process stops a millisecond
     // after the read and goes on three seconds later, when the poll comes back late by what
     // Server::turn measures.
-    let deadline = t.core.next_wake().expect("a deadline");
     let woke = t.now + Duration::from_secs(3);
-    assert!(
-        t.core.thawed(woke - deadline.max(t.now), woke),
-        "a first freeze is forgiven"
-    );
+    assert!(t.core.thawed(woke), "a first freeze is forgiven");
     t.now = woke;
     t.core.tick(t.now);
     t.take();
