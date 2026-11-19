@@ -11,14 +11,16 @@ After=dbus.service
 # /dev/uinput would stand in uinput's way; the node is there once the module is loaded at boot, or
 # as kmod's static node before.
 ConditionPathExists=/dev/uinput
-# A helper that keeps being ended stays stopped, and Linda keeps taking keys through X: a fault that
-# came back at every capture would otherwise leave the keyboard dead for a second every few seconds
-# for as long as it lasted. A capture and an end take four seconds at the least, the virtual
-# keyboard's second and the watchdog's among them, so five starts in two minutes trip within half
-# a minute of such a fault, while a crash now and then, or a restart by hand, comes nowhere near.
-# systemctl reset-failed linda-keyd lets it be started again.
+# A helper that keeps being ended is left failed, and Linda takes keys through X: a fault that came
+# back at every capture would otherwise leave the keyboard dead for a second or more every few
+# seconds for as long as it lasted. Three starts within two minutes trip it, which a fault at every
+# capture does within about ten seconds, at a cost of up to three such dead moments, and a crash now
+# and then or a restart by hand does not. It is not stopped for good: once two minutes have passed,
+# any start starts it again, and a boot or a nixos-rebuild switch (which starts every target, and
+# with multi-user.target every unit it wants) is such a start. systemctl reset-failed linda-keyd
+# forgets the starts counted, so that it can be started again at once.
 StartLimitIntervalSec=120
-StartLimitBurst=5
+StartLimitBurst=3
 
 [Service]
 Type=notify
