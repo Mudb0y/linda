@@ -54,9 +54,7 @@ def _hooks(directory: Path) -> dict[str, str]:
 
 
 def _text(record: dict) -> str:
-	return " ".join(
-		item.strip() for item in record["data"] if isinstance(item, str) and item.strip()
-	)
+	return " ".join(item.strip() for item in record["data"] if isinstance(item, str) and item.strip())
 
 
 def test_lateEchoesDoNotCutACommandsSpeech(desktop: DesktopSession, tmp_path: Path):
@@ -83,9 +81,7 @@ def test_lateEchoesDoNotCutACommandsSpeech(desktop: DesktopSession, tmp_path: Pa
 		board._send("Insert", False)
 		waitForEntry("Aliceqw")
 		deadline = time.monotonic() + 5
-		while not any(
-			r["kind"] == "speak" and _text(r) == "w" for r in transcript(desktop.nvda)[before:]
-		):
+		while not any(r["kind"] == "speak" and _text(r) == "w" for r in transcript(desktop.nvda)[before:]):
 			assert time.monotonic() < deadline, f"w was never echoed: {transcript(desktop.nvda)[before:]}"
 			time.sleep(0.05)
 		time.sleep(1.5)
