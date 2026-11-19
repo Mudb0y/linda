@@ -422,16 +422,25 @@ class _Ticket:
 class X11KeySource:
 	"""A KeySource reading the X display named by DISPLAY."""
 
-	def __init__(self, virtualKeyboard: str | None = None, decided: Callable[[], bool] | None = None) -> None:
+	def __init__(
+		self,
+		virtualKeyboard: str | None = None,
+		decided: Callable[[], bool] | None = None,
+		onVirtualKeyboard: Callable[[], None] | None = None,
+	) -> None:
 		"""
 		:param virtualKeyboard: The name of linda-keyd's virtual keyboard among the X server's devices.
 		:param decided: Whether, at this moment, a press of that keyboard is one the helper's client has
 			decided, called on the X thread for each; a device of that name is only ever ignored for it.
+		:param onVirtualKeyboard: Called on the X thread whenever virtualKeyboardState changes.
 		"""
 		self._virtualName = virtualKeyboard
 		self._decided = decided
-		#: Device IDs of the slave keyboards named as the virtual keyboard is.
+		self._onVirtualKeyboard = onVirtualKeyboard
+		#: Device IDs of the devices named as the virtual keyboard is, whatever their state.
 		self._virtualDevices: set[int] = set()
+		#: Replaced whole on the X thread, read from any: see virtualKeyboardState.
+		self._virtualState: tuple[bool, bool] = (False, False)
 		#: (device ID, key code) of each press decided already whose release has not come.
 		self._decidedDown: set[tuple[int, int]] = set()
 		self._lock = threading.Lock()
@@ -873,16 +882,34 @@ class X11KeySource:
 		come and go."""
 		devices = self._display.xinput_query_device(xinput.AllDevices).devices
 		self._xtestDevices = {device.deviceid for device in devices if "XTEST" in str(device.name)}
-		self._virtualDevices = {
-			device.deviceid
+		# Floating or disabled, its keys may still come here, and are the helper's all the same.
+		virtual = [
+			device
 			for device in devices
-			if self._virtualName is not None
-			and device.use == xinput.SlaveKeyboard
-			and str(device.name) == self._virtualName
-		}
+			if self._virtualName is not None and str(device.name) == self._virtualName
+		]
+		self._virtualDevices = {device.deviceid for device in virtual}
 		# A device gone puts out no release more; its number may be the next device's.
 		present = {device.deviceid for device in devices}
 		self._decidedDown = {key for key in self._decidedDown if key[0] in present}
+		state = (
+			bool(virtual),
+			any(device.use == xinput.SlaveKeyboard and device.enabled for device in virtual),
+		)
+		if state != self._virtualState:
+			self._virtualState = state
+			if self._onVirtualKeyboard is not None:
+				try:
+					self._onVirtualKeyboard()
+				except Exception:  # noqa: BLE001
+					_logError("Reporting the virtual keyboard's state")
+
+	@property
+	def virtualKeyboardState(self) -> tuple[bool, bool]:
+		"""(whether the X server has a device named as linda-keyd's virtual keyboard, whether one is an
+		enabled keyboard attached to a master keyboard, whose keys reach the applications), as of the
+		X server's last word on its devices."""
+		return self._virtualState
 
 	def _isDecided(self, keycode: int, isUp: bool, repeat: bool, sourceid: int | None) -> bool:
 		"""Whether a key is one linda-keyd's client has decided already: a press of the virtual keyboard

@@ -47,6 +47,11 @@ ADMISSION_WAIT = 7.0
 #: puts out no other press until it serves the next one, seconds later; the real keyboards' keys reach
 #: the X source on their own devices at once, and are its own from the moment the helper lets go.
 DECIDED_GRACE = 0.3
+#: Seconds the X display may take to have the virtual keyboard as an enabled keyboard of a master once
+#: the helper holds a keyboard, or to have it again once it stops: keys the helper passes on meanwhile
+#: go nowhere. The helper makes it and lets the desktop take it up before it grabs anything, so it is
+#: there already as a rule.
+VIRTUAL_WAIT = 0.5
 
 
 class RoutedKeySource:
@@ -75,10 +80,19 @@ class RoutedKeySource:
 		#: keyboard for it yet.
 		self._kernel: KeySource | None = None
 		self._kernelWhy = ""
-		#: Whether the helper has held a keyboard for that kernel source.
+		#: Whether the helper holds a keyboard for that kernel source, and the X display takes what it
+		#: passes on.
 		self._isKernel = False
-		#: The kernel source's taking the keyboard is yet to be logged.
-		self._heldNews = False
+		#: When the helper first said it holds a keyboard for that kernel source, while the X display's
+		#: having the virtual keyboard is yet to be seen.
+		self._heldAt: float | None = None
+		#: Since when the X display has not had the virtual keyboard as a keyboard of a master, while the
+		#: helper holds keyboards for the kernel source NVDA uses.
+		self._unreadySince: float | None = None
+		#: The helper's socket as it was when NVDA gave the helper up because the X display did not take
+		#: up its virtual keyboard: NVDA asks again only once the X display has it, the helper's socket is
+		#: another, or the user asks, never at every look, which would take the keyboard each time.
+		self._blocked: tuple[int, int, int] | None = None
 		#: Until when a press of the virtual keyboard is the kernel source's: for ever while the helper
 		#: serves it, a little longer as it goes.
 		self._decidedUntil = 0.0
@@ -129,7 +143,7 @@ class RoutedKeySource:
 			why = "until linda-keyd holds the keyboard"
 		from . import x11
 
-		source = x11.X11KeySource(self._virtualKeyboard, self._isDecided)
+		source = x11.X11KeySource(self._virtualKeyboard, self._isDecided, self._wake.set)
 		source.start(partial(self._deliverFrom, source), self._modeNow)
 		with self._lock:
 			self._x = source
@@ -176,6 +190,7 @@ class RoutedKeySource:
 			self._say(_("NVDA has the keyboard already"))
 			return
 		self._letGo = False
+		self._blocked = None
 		self._takingBack = True
 		self._nextTry = 0.0
 		self._wake.set()
@@ -356,9 +371,8 @@ class RoutedKeySource:
 		virtual keyboard's presses are its own."""
 		if kernel is self._kernel:
 			self._decidedUntil = math.inf
-			if not self._isKernel:
-				self._isKernel = True
-				self._heldNews = True
+			if not self._isKernel and self._heldAt is None:
+				self._heldAt = time.monotonic()
 				self._wake.set()
 
 	def _onKernelLost(self, kernel: KeySource, why: str, emergency: bool) -> None:
@@ -367,26 +381,116 @@ class RoutedKeySource:
 		self._lost.append((kernel, why, emergency))
 		self._wake.set()
 
+	def _watchVirtual(self) -> None:
+		"""Take the kernel route once the X display has the virtual keyboard as a keyboard of a master,
+		and give the helper up when it has not had it for VIRTUAL_WAIT while the helper holds keyboards:
+		every key passed on would go nowhere, with the helper and NVDA both answering as they should."""
+		kernel = self._kernel
+		if kernel is None:
+			return
+		now = time.monotonic()
+		ready = self._virtualReady()
+		if not self._isKernel:
+			if self._heldAt is None:
+				return
+			if ready:
+				self._heldAt = None
+				self._isKernel = True
+				self._logged = None
+				log.info(
+					f"Keys come from the kernel through linda-keyd: {self._kernelWhy} and holds the keyboard"
+				)
+				if self._takingBack:
+					self._takingBack = False
+					# Translators: Said on Linux when NVDA has taken the keyboard back through linda-keyd, the
+					# program that takes the keyboard in the kernel, as the user asked.
+					self._say(_("NVDA has the keyboard again"))
+			elif now >= self._heldAt + VIRTUAL_WAIT:
+				self._giveUpVirtual(f"stay with the X display: {self._virtualProblem()}")
+			return
+		# Let go for a console switch, the helper holds nothing, and the X display may take its devices
+		# away meanwhile.
+		if ready or not getattr(kernel, "isHolding", True):
+			self._unreadySince = None
+		elif self._unreadySince is None:
+			self._unreadySince = now
+		elif now >= self._unreadySince + VIRTUAL_WAIT:
+			self._giveUpVirtual(
+				f"are read from the X display: linda-keyd was given up: {self._virtualProblem()}"
+			)
+
+	def _virtualProblem(self) -> str:
+		x = self._x
+		known = x is not None and x.virtualKeyboardState[0]
+		where = "is not an enabled keyboard of a master" if known else "is not among its devices"
+		return (
+			f"the X display's {self._virtualKeyboard!r}, which linda-keyd passes keys on through, {where}; "
+			"linda-keyd is asked again once the X display has it, linda-keyd starts again or the user asks"
+		)
+
+	def _giveUpVirtual(self, record: str) -> None:
+		self._blocked = self._socketIdentity()
+		self._takingBack = False
+		log.info(f"Keys {record}")
+		# Said before the kernel source has stopped, which takes up to half a second: the helper lets go
+		# as its connection closes, the first thing the stop does, and the X source reads on meanwhile.
+		self._sayFellBack()
+		self._dropKernel()
+
 	def _dropKernel(self) -> bool:
 		"""Stop the kernel source; whether the helper had held a keyboard for it."""
 		with self._lock:
 			kernel, self._kernel = self._kernel, None
 			wasKernel, self._isKernel = self._isKernel, False
-			self._heldNews = False
+			self._heldAt = self._unreadySince = None
 			self._decidedUntil = min(self._decidedUntil, time.monotonic() + DECIDED_GRACE)
 		if kernel is not None:
 			kernel.stop()
 			self._releaseLeft(kernel)
 		return wasKernel
 
+	def _socketIdentity(self) -> tuple[int, int, int] | None:
+		try:
+			info = os.stat(self._socketPath)
+		except OSError:
+			return None
+		return (info.st_dev, info.st_ino, info.st_mtime_ns)
+
+	def _virtualReady(self) -> bool:
+		x = self._x
+		return x is None or x.virtualKeyboardState[1]
+
+	def _isBlocked(self) -> bool:
+		if self._blocked is None:
+			return False
+		if self._virtualReady() or self._socketIdentity() not in (self._blocked, None):
+			self._blocked = None
+			self._nextTry = 0.0
+			return False
+		return True
+
 	def _wantsKernel(self) -> bool:
-		return self._route != "x11" and not self._letGo and self._kernel is None
+		return self._route != "x11" and not self._letGo and self._kernel is None and not self._isBlocked()
+
+	def _sayFellBack(self) -> None:
+		# Translators: Said on Linux when NVDA stops taking keys from linda-keyd, the program that takes
+		# the keyboard in the kernel, because that program went away or failed, and reads them from the X
+		# display instead.
+		self._say(_("NVDA now reads keys from the X display"))
 
 	def _supervise(self) -> None:
 		while not self._stopping:
-			wait = None
+			now = time.monotonic()
+			deadlines = []
 			if self._wantsKernel():
-				wait = max(0.0, self._nextTry - time.monotonic())
+				deadlines.append(self._nextTry)
+			elif self._blocked is not None:
+				# The socket is looked at, never connected to, until one of the reasons to ask again holds.
+				deadlines.append(now + RETRY_INTERVAL)
+			for since in (self._heldAt, self._unreadySince):
+				if since is not None:
+					deadlines.append(since + VIRTUAL_WAIT)
+			wait = max(0.0, min(deadlines) - now) if deadlines else None
 			self._wake.wait(wait)
 			self._wake.clear()
 			if self._stopping:
@@ -397,17 +501,7 @@ class RoutedKeySource:
 				log.exception("Choosing the way keys come to NVDA")
 
 	def _turn(self) -> None:
-		if self._heldNews:
-			self._heldNews = False
-			self._logged = None
-			log.info(
-				f"Keys come from the kernel through linda-keyd: {self._kernelWhy} and holds the keyboard"
-			)
-			if self._takingBack:
-				self._takingBack = False
-				# Translators: Said on Linux when NVDA has taken the keyboard back through linda-keyd, the
-				# program that takes the keyboard in the kernel, as the user asked.
-				self._say(_("NVDA has the keyboard again"))
+		self._watchVirtual()
 		while self._lost:
 			kernel, why, emergency = self._lost.pop(0)
 			if kernel is not self._kernel:
@@ -422,7 +516,9 @@ class RoutedKeySource:
 				self._letGo = True
 			self._nextTry = time.monotonic() + RETRY_INTERVAL
 			log.info(f"Keys are read from the X display: linda-keyd was given up: {why}")
-			if emergency:
+			if not emergency:
+				self._sayFellBack()
+			else:
 				self._say(
 					# Translators: Said on Linux after the emergency chord, Backspace, Escape and Enter held
 					# together, made linda-keyd, the program that takes the keyboard in the kernel for NVDA, let
@@ -437,6 +533,14 @@ class RoutedKeySource:
 				log.info("Keys are read from the X display: the key route is set to the X display")
 			return
 		if not self._wantsKernel() or time.monotonic() < self._nextTry:
+			return
+		x = self._x
+		if not self._takingBack and x is not None and x.virtualKeyboardState == (True, False):
+			# Known to go nowhere before asking: asked, the helper would take the keyboard for VIRTUAL_WAIT.
+			self._blocked = self._socketIdentity()
+			if (why := self._virtualProblem()) != self._logged:
+				self._logged = why
+				log.info(f"Keys stay with the X display: {why}")
 			return
 		kernel, why = self._admit(ADMISSION_WAIT)
 		if self._stopping:

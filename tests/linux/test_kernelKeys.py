@@ -1171,6 +1171,57 @@ def test_noGapWithoutAKeySourceWhenTheHelperGoes(tmp_path: Path, how: str):
 	)
 
 
+#: The X display has no device of the virtual keyboard's name, so the keys the helper would pass on
+#: would go nowhere: NVDA gives the helper up once it holds the keyboard, says so once, and asks again
+#: only once the helper's socket is another, never every few seconds.
+VIRTUAL_ABSENT_CHILD = r"""
+source = route.RoutedKeySource("auto", path, said.append, "No such keyboard")
+source.start(deliver, lambda: mode["now"])
+source.setConsumed(x11.EXTENDED_INSERT | x11.CAPS_LOCK, True)
+time.sleep(5)
+first = {
+	"kernel": source.isKernel,
+	"starts": keyboard.starts,
+	"capturing": keyboard.capturing,
+	"said": list(said),
+	"closed": len([e for e in keyboard.events if e[1] == "client closed"]),
+}
+windowKeys()
+delivered.clear()
+keyboard.press("Insert+t")
+keyboard.press("a")
+time.sleep(0.4)
+typed = {"nvda": [[e["vk"], e["nvda"]] for e in presses()], "window": [k for k in windowKeys() if k[1]]}
+keyboard.vanish()
+time.sleep(0.5)
+keyboard.comeBack()
+time.sleep(3)
+result = {
+	"first": first,
+	"typed": typed,
+	"startsAfter": keyboard.starts,
+	"kernelAfter": source.isKernel,
+	"said": said,
+}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_virtualKeyboardTheXDisplayLacksGivesTheHelperUp(tmp_path: Path):
+	value = runKernelChild(tmp_path, VIRTUAL_ABSENT_CHILD)
+	fell = "NVDA now reads keys from the X display"
+	assert value["first"] == {"kernel": False, "starts": 1, "capturing": False, "said": [fell], "closed": 1}
+	assert value["typed"] == {
+		"nvda": [[0x2D, True], [ord("T"), True], [ord("A"), False]],
+		"window": [[30, True]],
+	}
+	# A helper started again is asked once more, and given up once more.
+	assert value["startsAfter"] == 2
+	assert not value["kernelAfter"]
+	assert value["said"] == [fell, fell]
+
+
 # NVDA itself, its keys taken from the stand-in, which is the keyboard: the X source's own tests in
 # test_keys.py, held to the kernel source.
 
