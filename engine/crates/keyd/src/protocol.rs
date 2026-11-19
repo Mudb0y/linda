@@ -336,6 +336,12 @@ pub enum Released {
     /// logind has said what changed, so that nothing typed on another console, a password perhaps,
     /// comes to the client. It captures again by itself only once logind says the client's session
     /// is in front, never on the kernel's word alone.
+    ///
+    /// The same comes when logind says the machine is going to sleep, and the helper captures again
+    /// by itself once logind says it has woken, if the client's session is in front. Every process
+    /// may have been frozen for seconds in between, the client's among them, which the helper does
+    /// not hold against the client's heartbeat; a client should not hold it against the helper's
+    /// echoes either.
     Background = 3,
     /// The virtual keyboard could not be made, did not appear, or stopped taking keys. START tries
     /// to make it again.
