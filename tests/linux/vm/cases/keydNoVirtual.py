@@ -1,6 +1,9 @@
-"""The start order's first rule: when the virtual keyboard cannot be made, here because the helper has
-lost its access to /dev/uinput, nothing is grabbed at all; the client is told, and the keyboards stay
-the desktop's. With the access back, a new START makes it and captures.
+"""The start order's first rule: when the virtual keyboard cannot be made, here because the helper
+started without access to /dev/uinput, nothing is grabbed at all; the client is told, and the
+keyboards stay the desktop's. With the access back, a new START makes it and captures.
+
+The unit gives the helper its access as it starts, and the helper keeps /dev/uinput open from then
+on, so the helper is started again with the unit's setfacl taken out by a drop-in.
 """
 
 from typing import TYPE_CHECKING
@@ -15,13 +18,19 @@ UHID = "Ground uhid keyboard"
 
 def run(ground: "Ground") -> None:
 	ground.openWindow()
-	ground.waitForHelper()
+	pid = ground.waitForHelper()
+	ground.shell(
+		"mkdir -p /run/systemd/system/linda-keyd.service.d && "
+		"printf '[Service]\\nExecStartPre=\\n' > /run/systemd/system/linda-keyd.service.d/no-uinput.conf && "
+		"systemctl daemon-reload && setfacl -x u:linda-keyd /dev/uinput && systemctl restart linda-keyd"
+	)
+	ground.waitFor(lambda: ground.helperPid() not in (0, pid), "the helper to start again")
+	ground.waitForHelperLog("cannot open /dev/uinput")
 	keyboard = ground.uhidKeyboard(UHID)
 	client = ground.keydClient("main")
 	assert client.connect()["welcome"]
 
 	with ground.subtest("without the virtual keyboard nothing is grabbed"):
-		ground.shell("setfacl -x u:linda-keyd /dev/uinput")
 		mark = ground.mark()
 		client.start()
 		released = client.waitFor("RELEASED", mark)

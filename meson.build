@@ -87,7 +87,7 @@ else
 endif
 
 if get_option('keyd_service')
-  # Where systemd and udev look whatever the library directory, as their own packages install.
+  # Where systemd looks whatever the library directory, as its own packages install.
   systemd_lib = prefix / 'lib'
   setfacl = get_option('setfacl')
   if setfacl == ''
@@ -96,16 +96,9 @@ if get_option('keyd_service')
   configure_file(
     input: 'linux/keyd/linda-keyd.service.in',
     output: 'linda-keyd.service',
-    configuration: {'KEYD': pkglibdir / 'linda-keyd'},
+    configuration: {'KEYD': pkglibdir / 'linda-keyd', 'SETFACL': setfacl},
     install: true,
     install_dir: systemd_lib / 'systemd' / 'system',
-  )
-  configure_file(
-    input: 'linux/keyd/70-linda-keyd.rules.in',
-    output: '70-linda-keyd.rules',
-    configuration: {'SETFACL': setfacl},
-    install: true,
-    install_dir: systemd_lib / 'udev' / 'rules.d',
   )
   install_data('linux/keyd/linda-keyd.sysusers',
     rename: 'linda-keyd.conf',

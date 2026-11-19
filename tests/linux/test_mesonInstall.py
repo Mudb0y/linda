@@ -385,9 +385,9 @@ def test_configureNamesWhatIsMissing(tmp_path: Path, option: str, value: str, me
 	assert message in done.stdout, done.stdout[-3000:]
 
 
-def test_keydServiceInstallsTheHelpersUnitUserRuleAndAction(tmp_path: Path):
+def test_keydServiceInstallsTheHelpersUnitUserAndAction(tmp_path: Path):
 	"""With keyd_service, the libraries' build installs what runs the key capture helper as a system
-	service, where systemd, udev and polkit look under the prefix, naming the helper where it is
+	service, where systemd and polkit look under the prefix, naming the helper where it is
 	installed and the setfacl the option gives; without it, as the default, none of it."""
 	build, destDir = tmp_path / "build", tmp_path / "dest"
 	setfacl = "/usr/bin/setfacl"
@@ -411,7 +411,6 @@ def test_keydServiceInstallsTheHelpersUnitUserRuleAndAction(tmp_path: Path):
 	libDir = next(option["value"] for option in introspected if option["name"] == "libdir")
 	service = {
 		f"{PREFIX}/lib/systemd/system/linda-keyd.service",
-		f"{PREFIX}/lib/udev/rules.d/70-linda-keyd.rules",
 		f"{PREFIX}/lib/sysusers.d/linda-keyd.conf",
 		f"{PREFIX}/lib/modules-load.d/linda-keyd.conf",
 		f"{PREFIX}/share/polkit-1/actions/io.github.mudb0y.linda.keyd.policy",
@@ -430,10 +429,9 @@ def test_keydServiceInstallsTheHelpersUnitUserRuleAndAction(tmp_path: Path):
 		"SupplementaryGroups=input",
 		"WatchdogSec=2",
 		"Restart=always",
+		f"ExecStartPre=-+{setfacl} -m u:linda-keyd:rw /dev/uinput",
 	):
 		assert line in unit, line
-	rule = read(f"{PREFIX}/lib/udev/rules.d/70-linda-keyd.rules")
-	assert f'RUN+="{setfacl} -m u:linda-keyd:rw /dev/uinput"' in rule, rule
 	assert read(f"{PREFIX}/lib/sysusers.d/linda-keyd.conf").splitlines()[-1].startswith("u linda-keyd ")
 	assert read(f"{PREFIX}/lib/modules-load.d/linda-keyd.conf").splitlines()[-1] == "uinput"
 	policy = read(f"{PREFIX}/share/polkit-1/actions/io.github.mudb0y.linda.keyd.policy")

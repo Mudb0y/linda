@@ -190,6 +190,8 @@ pub struct Evdev {
     own: Option<u32>,
     inotify: Option<OwnedFd>,
     grabs: Arc<Grabs>,
+    /// /dev/uinput, opened as the helper starts and kept, on which every virtual keyboard is made.
+    uinput: Option<File>,
 }
 
 impl Evdev {
@@ -198,8 +200,28 @@ impl Evdev {
             own: None,
             inotify: None,
             grabs: Arc::new(Grabs::new()),
+            uinput: None,
         }
     }
+
+    /// Opens /dev/uinput now and keeps it for the helper's life. The helper's access to it is an
+    /// entry in the node's access list, which systemd sets as the service starts; but udev and
+    /// logind take every other user's entry off a node tagged for the user in front, as Steam's rules
+    /// tag /dev/uinput, at each pass over it, which comes whenever a session comes to the front. So
+    /// the node is opened while the entry is sure to be there, and every virtual keyboard is made on
+    /// that one open file: uinput makes a new device on it after the last is destroyed.
+    pub fn keep_uinput(&mut self) -> io::Result<()> {
+        self.uinput = Some(open_uinput()?);
+        Ok(())
+    }
+}
+
+fn open_uinput() -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(UINPUT)
 }
 
 impl Default for Evdev {
@@ -367,11 +389,12 @@ impl Devices for Evdev {
     }
 
     fn create_virtual(&mut self) -> io::Result<EvVirtual> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(UINPUT)?;
+        // A copy of the kept file is the same uinput device; destroying the virtual keyboard
+        // through it leaves the file open for the next.
+        let file = match &self.uinput {
+            Some(f) => f.try_clone()?,
+            None => open_uinput()?,
+        };
         let fd = file.as_raw_fd();
         for t in [EV_KEY, EV_LED, EV_REP] {
             ioctl_value(fd, UI_SET_EVBIT, t.into())?;

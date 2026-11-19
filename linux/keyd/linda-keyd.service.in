@@ -11,10 +11,17 @@ After=dbus.service
 [Service]
 Type=notify
 NotifyAccess=main
+# Its access to /dev/uinput: an entry in the node's access list, leaving the node's owner, group and
+# mode to whatever else sets them. Set by systemd with full privileges (the +) before each start,
+# since udev and logind take every other user's entry off a node tagged uaccess, as Steam's rules tag
+# this one, whenever a session comes to the front; the helper opens the node as it starts and keeps
+# it. A failure (the -) leaves the helper running, unable to make its virtual keyboard and so never
+# grabbing, which it says in the log.
+ExecStartPre=-+@SETFACL@ -m u:linda-keyd:rw /dev/uinput
 ExecStart=@KEYD@
 User=linda-keyd
 Group=linda-keyd
-# The keyboards' event nodes; /dev/uinput it reaches through the ACL its udev rule gives it.
+# The keyboards' event nodes.
 SupplementaryGroups=input
 RuntimeDirectory=linda-keyd
 # Every local user may connect: who becomes the client is decided by logind and polkit.

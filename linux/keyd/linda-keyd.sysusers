@@ -1,2 +1,3 @@
-# The system user linda-keyd runs as. Its unit adds the input group, and its udev rule /dev/uinput.
+# The system user linda-keyd runs as. Its unit adds the input group, and an entry for it in the
+# access list of /dev/uinput.
 u linda-keyd - "Linda's key capture helper" - -

@@ -36,7 +36,11 @@ fn run() -> io::Result<()> {
         ));
     }
     let listener = server::listener(Path::new(SOCKET_PATH))?;
-    let devices = Evdev::new();
+    let mut devices = Evdev::new();
+    if let Err(e) = devices.keep_uinput() {
+        // Tried again whenever a virtual keyboard is wanted; nothing is grabbed without one.
+        keyd::log_line(format_args!("cannot open /dev/uinput: {e}"));
+    }
     let guard = devices.guard();
     let notices = Notices::new()?;
     let progress = Progress::new();
