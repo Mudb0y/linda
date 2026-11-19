@@ -278,6 +278,39 @@ fn a_virtual_keyboard_that_cannot_be_made_means_nothing_is_grabbed() {
 }
 
 #[test]
+fn a_forgiven_freeze_gives_the_virtual_keyboard_its_time_afresh() {
+    let s = Duration::from_secs;
+    // Frozen while the virtual keyboard settles: not grabbed until it has settled from the thaw.
+    let mut t = T::new();
+    let k = t.w.plug("keyboard");
+    t.admit(CLIENT);
+    t.send(FromClient::Start);
+    t.pass(VIRTUAL_SETTLE / 2);
+    t.now += s(10);
+    assert!(t.core.thawed(t.now));
+    t.pass(VIRTUAL_SETTLE - ms(1));
+    assert!(
+        !t.w.grabbed(k),
+        "grabbed before the desktop could take it up"
+    );
+    t.pass(ms(1));
+    assert!(t.w.grabbed(k));
+    // Frozen while it has yet to appear: not given up for the frozen time.
+    let mut t = T::new();
+    let k = t.w.plug("keyboard");
+    t.w.never_appears(true);
+    t.admit(CLIENT);
+    t.send(FromClient::Start);
+    t.pass(VIRTUAL_APPEAR_TIMEOUT / 2);
+    t.now += s(10);
+    assert!(t.core.thawed(t.now));
+    t.w.never_appears(false);
+    t.pass(VIRTUAL_SETTLE + HEARTBEAT_INTERVAL);
+    assert!(!t.sent().contains(&released(Released::VirtualKeyboard)));
+    assert!(t.w.grabbed(k));
+}
+
+#[test]
 fn a_virtual_keyboard_that_never_appears_means_nothing_is_grabbed() {
     let mut t = T::new();
     let k = t.w.plug("keyboard");

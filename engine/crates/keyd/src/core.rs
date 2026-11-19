@@ -560,6 +560,21 @@ impl<D: Devices> Core<D> {
             e.arrival = e.arrival.max(now);
         }
         self.unanswered = None;
+        // The desktop, frozen too, has its time to take the virtual keyboard up afresh, and udev
+        // to make it appear.
+        if let Virt::Settling {
+            made,
+            appeared,
+            look,
+            ..
+        } = &mut self.virt
+        {
+            *made = (*made).max(now);
+            *look = (*look).max(now);
+            if let Some(a) = appeared {
+                *a = (*a).max(now);
+            }
+        }
         true
     }
 
