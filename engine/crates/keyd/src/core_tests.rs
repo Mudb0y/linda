@@ -3334,3 +3334,82 @@ fn fault_a_key_typed_under_the_nvda_key_held_across_a_loss_is_not_told_without_i
          browse mode takes for activatePosition, pressing whatever is at the cursor: {told:?}"
     );
 }
+
+// Found in the second pass of the sixth review. Each is ignored, so that the package's checks
+// still pass, and fails with cargo test -p linda-keyd -- --ignored fault_ while its fault stands.
+
+/// Insert and the numpad's Insert modify other keys only for the screen reader; to a program they
+/// are keys like any other. A made-up press of one that the client passes, as it does when Insert
+/// is not one of the user's NVDA keys, or for the numpad's with Num Lock on, where it is 0, is
+/// typed late on the virtual keyboard, after every made-up modifier, whichever went down first.
+/// The kernel's answer cannot tell Insert pressed before Shift from Insert pressed after it, so one
+/// of the two orders comes out wrong whatever order the helper chooses: Insert then Shift gives the
+/// program Shift+Insert, which pastes, and Control+Insert copies. The keys that are keys to a
+/// program stay unseen for this very reason; the enumeration exempts made-up presses from its
+/// ordering checks, and so cannot see it.
+#[test]
+#[ignore = "sixth review: a made-up Insert the client passes is typed late, under modifiers that went down after it"]
+fn fault_a_made_up_insert_is_not_typed_under_modifiers_it_did_not_go_down_under() {
+    for insert_first in [true, false] {
+        let (mut t, k) = T::capturing();
+        let (first, second) = if insert_first {
+            (KEY_INSERT, KEY_LEFTSHIFT)
+        } else {
+            (KEY_LEFTSHIFT, KEY_INSERT)
+        };
+        // Both go down while events are lost, and are held when the helper asks.
+        t.w.change_unread(k, first, true);
+        t.w.change_unread(k, second, true);
+        t.w.overflow(k, &[]);
+        t.core.keyboard_ready(k, t.now);
+        t.take();
+        // A client for which Insert is not an NVDA key passes both.
+        for key in t.keys() {
+            if key.value == KEY_PRESS {
+                t.verdict(key.seq, false);
+            }
+        }
+        let emitted = t.w.emitted();
+        let shift = emitted.iter().position(|e| *e == (KEY_LEFTSHIFT, 1));
+        if let Some(i) = emitted.iter().position(|e| *e == (KEY_INSERT, 1)) {
+            let under_shift = shift.is_some_and(|s| s < i);
+            assert_eq!(
+                under_shift,
+                !insert_first,
+                "Insert went down {} Shift while events were lost, both held when the helper asked, \
+                 and the client passed both; Insert went out on the virtual keyboard {} Shift, so \
+                 the program had {}: {emitted:?}",
+                if insert_first { "before" } else { "after" },
+                if under_shift { "under" } else { "without" },
+                if under_shift {
+                    "Shift+Insert, which pastes"
+                } else {
+                    "Insert alone, which toggles overwriting"
+                }
+            );
+        }
+    }
+}
+
+/// A key told down, let go of and pressed again in what its keyboard has for the helper as it lets
+/// go: the release is neither tapped nor told, and the second press is told as a tap, a press of a
+/// key the client was told is down and never told is up. Linda takes such a press for one of the
+/// key held on another keyboard, which reaches neither NVDA nor the program, so NVDA hears nothing
+/// of the very key the tap was told for.
+#[test]
+#[ignore = "sixth review: a key told down and tapped again as the helper lets go is told down twice"]
+fn fault_a_key_tapped_as_the_helper_lets_go_is_not_told_down_twice() {
+    let (mut t, k) = T::capturing();
+    t.pressed_out(k, KEY_A);
+    t.keys();
+    t.w.release(k, KEY_A);
+    t.w.press(k, KEY_A);
+    t.send(FromClient::Stop);
+    let told: Vec<(u16, u8)> = t.keys().iter().map(|k| (k.code, k.value)).collect();
+    let press = told.iter().position(|e| *e == (KEY_A, KEY_PRESS));
+    let release = told.iter().position(|e| *e == (KEY_A, KEY_RELEASE));
+    assert!(
+        press.is_none_or(|p| release.is_some_and(|r| r < p)),
+        "A, told down and not told up, was told pressed again as a tap as the helper let go: {told:?}"
+    );
+}
