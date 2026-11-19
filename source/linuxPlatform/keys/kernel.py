@@ -282,6 +282,12 @@ class _Press:
 	started: float | None = None
 	#: Whether the helper was asked to hold it longer.
 	waited: bool = False
+	#: The keyboard it came from, by the helper's number; None for a typed key.
+	device: int | None = None
+	#: For a press of a key already held down on another keyboard, the press NVDA was told of, whose
+	#: verdict this one shares: the helper's virtual keyboard holds the key down from the first press
+	#: passed to the last release, so the application had only that press.
+	follows: "_Press | None" = None
 	lock: threading.Lock = field(default_factory=threading.Lock)
 
 	def decide(self, passed: bool) -> bool:
@@ -371,9 +377,13 @@ class KernelKeySource:
 		self._focusSeen: tuple[int, bool] = (0, False)
 		#: Key codes down, the locks left out: what holds the modifiers down.
 		self._down: set[int] = set()
-		#: Key code: the press of each key down, from the keyboards and from typeKey.
+		#: Key code: the press of each key down, from the keyboards and from typeKey; of a key held on
+		#: more than one keyboard, the first, which NVDA was told of.
 		self._presses: dict[int, _Press] = {}
 		self._typed: dict[int, _Press] = {}
+		#: Key code: keyboard: its press, for each key down on a keyboard. A key is down until the last
+		#: keyboard that holds it lets it go, as the helper's virtual keyboard has it.
+		self._holders: dict[int, dict[int, _Press]] = {}
 		#: Sequence number: the press, while it is down.
 		self._bySeq: dict[int, _Press] = {}
 		#: Sequence number: the press, released while the helper may still pass it on; and when each
@@ -849,7 +859,27 @@ class KernelKeySource:
 			# The helper is not reading what this sends; it drops a client that does not read its own.
 			log.debugWarning("linda-keyd is not reading what NVDA sends")
 		except OSError as e:
+			# The helper says why before it closes, and a send that finds it closed comes before that is
+			# read: what it said is the reason, not the broken pipe.
+			self._readHelper(atEnd=False)
 			self._loseHelper(f"its connection failed: {e.strerror or e}")
+
+	def _receive(self) -> bytes | None:
+		"""The helper's next message, b"" once it has closed, or None while nothing more has come.
+
+		:raise OSError: When the connection failed.
+		"""
+		try:
+			return self._sock.recv(keydClient.MAX_MESSAGE)
+		except BlockingIOError:
+			return None
+		except ConnectionResetError:
+			# The kernel reports a peer that closed with something of ours unread once, ahead of what it
+			# had sent, which is still there to be read.
+			try:
+				return self._sock.recv(keydClient.MAX_MESSAGE)
+			except BlockingIOError:
+				return b""
 
 	def _run(self) -> None:
 		try:
@@ -891,17 +921,24 @@ class KernelKeySource:
 			if self._sock in readable:
 				self._readHelper()
 
-	def _readHelper(self) -> None:
+	def _readHelper(self, atEnd: bool = True) -> None:
+		"""Act on every message the helper has sent.
+
+		:param atEnd: Whether the connection ending, or failing, loses the helper here; without, the
+			caller does that with a reason of its own once the helper's own is read.
+		"""
 		while not self._lost:
 			try:
-				data = self._sock.recv(keydClient.MAX_MESSAGE)
-			except BlockingIOError:
-				return
+				data = self._receive()
 			except OSError as e:
-				self._loseHelper(f"its connection failed: {e.strerror or e}")
+				if atEnd:
+					self._loseHelper(f"its connection failed: {e.strerror or e}")
+				return
+			if data is None:
 				return
 			if not data:
-				self._loseHelper("it closed the connection")
+				if atEnd:
+					self._loseHelper("it closed the connection")
 				return
 			try:
 				message = keydClient.decode(data)
@@ -998,6 +1035,11 @@ class KernelKeySource:
 		due = None
 		first = True
 		for press in list(self._pending):
+			if self._lost:
+				# A verdict that could not be sent lost the helper, and every press with it.
+				return None
+			if press.passed is None and press.follows is not None and press.follows.passed is not None:
+				press.decide(press.follows.passed)
 			if press.passed is None:
 				if first and press.started is None:
 					press.started = now
@@ -1058,7 +1100,7 @@ class KernelKeySource:
 			if press.passed and self._keptModifiers:
 				self._putDownKeptModifiers()
 			self._send(keydClient.verdict(press.seq, keep=not press.passed))
-		if press.passed:
+		if press.passed and press.follows is None:
 			self._passed(press)
 		elif (
 			press.under
@@ -1096,7 +1138,8 @@ class KernelKeySource:
 			# Kept here, too late: the application has it all the same.
 			with press.lock:
 				press.passed = True
-			self._passed(press)
+			if press.follows is None:
+				self._passed(press)
 			if (
 				self._keptModifiers.get(press.keycode) is press
 				and press.keycode not in self._modifiersPutDown
@@ -1143,13 +1186,39 @@ class KernelKeySource:
 		if key.value == KEY_PRESS:
 			# Every press asks; one that does not was decided without NVDA, and NVDA has it after the
 			# application, as any key it does not take.
-			self._press(keycode, now, key.seq, typed=False, decided=not key.flags & keydClient.KEY_ASK)
+			decided = not key.flags & keydClient.KEY_ASK
+			holders = self._holders.setdefault(keycode, {})
+			if holders and keycode in self._presses:
+				holders[key.device] = self._follow(keycode, now, key.seq, key.device, decided)
+			else:
+				holders[key.device] = self._press(
+					keycode, now, key.seq, typed=False, decided=decided, device=key.device
+				)
 		elif key.value == KEY_RELEASE:
+			holders = self._holders.get(keycode)
+			if holders is not None:
+				press = holders.pop(key.device, None)
+				if holders:
+					# Still held on another keyboard, which the application has it held down by too.
+					if press is not None:
+						self._remember(press, now)
+					return
+				del self._holders[keycode]
+				if press is not None and press is not self._presses.get(keycode):
+					self._remember(press, now)
 			self._release(keycode, now, typed=False)
 		# The kernel's own repeats are ignored: they follow the kernel's rate, a quarter of a second to
 		# the first, where the X server, which repeats a key passed on, follows the desktop's setting.
 
-	def _press(self, keycode: int, now: float, seq: int, typed: bool, decided: bool = False) -> None:
+	def _press(
+		self,
+		keycode: int,
+		now: float,
+		seq: int,
+		typed: bool,
+		decided: bool = False,
+		device: int | None = None,
+	) -> _Press:
 		tables = self._tables
 		held = self._held
 		depressed = self._depressed(tables)
@@ -1176,7 +1245,7 @@ class KernelKeySource:
 			under = tuple(self._nvdaHeld.values())
 		else:
 			kind = own
-		press = _Press(seq, keycode, now, kind, own, effective, typed=typed, under=under)
+		press = _Press(seq, keycode, now, kind, own, effective, typed=typed, under=under, device=device)
 		if kind == CAPTURE_KIND and capture.documentUntil is not None and now < capture.documentUntil:
 			press.document = True
 		if own == NVDA_KIND and keycode in NVDA_KEYCODES and kind in (NVDA_KIND, HOLD_KIND):
@@ -1206,18 +1275,40 @@ class KernelKeySource:
 				self._pending.append(press)
 			else:
 				self._settle(press)
-		if levelShift and not held:
-			return
-		self._decisions.put(
-			_Item(keycode, KEY_PRESS, press, tables, depressed, locked, now, typed=typed, altGr=levelShift)
+		if not levelShift or held:
+			self._decisions.put(
+				_Item(
+					keycode, KEY_PRESS, press, tables, depressed, locked, now, typed=typed, altGr=levelShift
+				)
+			)
+		return press
+
+	def _follow(self, keycode: int, now: float, seq: int, device: int, decided: bool) -> _Press:
+		"""A press of a key already held down on another keyboard. It reaches neither NVDA nor the
+		application, whose virtual keyboard holds the key down already or not at all, as NVDA decided
+		the first press: the helper has its verdict from the first's."""
+		first = self._presses[keycode]
+		press = _Press(
+			seq, keycode, now, first.kind, first.own, first.effective, device=device, follows=first
 		)
+		self._bySeq[seq] = press
+		if decided:
+			press.decide(True)
+			press.settled = True
+		elif first.passed is not None:
+			press.decide(first.passed)
+			self._settle(press)
+		else:
+			self._pending.append(press)
+		return press
 
 	def _release(self, keycode: int, now: float, typed: bool) -> None:
 		tables = self._tables
 		held = self._held
 		depressed = self._depressed(tables)
 		locked = _lockedMods(self._locks)
-		self._down.discard(keycode)
+		if keycode not in (self._holders if typed else self._typed):
+			self._down.discard(keycode)
 		presses = self._typed if typed else self._presses
 		# None for a key down before the helper held the keyboard, whose press the application had.
 		press = presses.pop(keycode, None)
@@ -1240,12 +1331,16 @@ class KernelKeySource:
 
 	def _retire(self, press: _Press, now: float) -> None:
 		"""Forget a press released, by its number only once the helper can no longer pass it on."""
-		self._bySeq.pop(press.seq, None)
 		if self._keptModifiers.get(press.keycode) is press:
 			del self._keptModifiers[press.keycode]
 			if press.keycode in self._modifiersPutDown:
 				self._modifiersPutDown.discard(press.keycode)
 				self._sendToX([press.keycode], True)
+		self._remember(press, now)
+
+	def _remember(self, press: _Press, now: float) -> None:
+		"""Keep a press released by its number for a late EXPIRED, until the helper's bound is past."""
+		self._bySeq.pop(press.seq, None)
 		while self._forget and self._forget[0][0] <= now:
 			self._released.pop(self._forget.popleft()[1], None)
 		if not press.typed:
@@ -1295,6 +1390,7 @@ class KernelKeySource:
 			press.dropped = dropUndecided
 			press.decide(not dropUndecided)
 			press.settled = True
+		self._holders.clear()
 		if self._tables is not None:
 			for keycode in sorted(self._presses):
 				self._release(keycode, now, typed=False)

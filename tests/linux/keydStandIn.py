@@ -45,7 +45,7 @@ GOODBYE_BUSY, GOODBYE_SILENT, GOODBYE_UNANSWERED = 4, 6, 8
 DEVICE_HELD, DEVICE_GONE = 1, 4
 #: Backspace, Escape and Enter.
 CHORD = frozenset((14, 1, 28))
-#: The stand-in's keyboard, as the kernel would number it.
+#: The stand-in's keyboard, as the kernel would number it; a test may press keys on others too.
 DEVICE_NUMBER = 3
 DEVICE_NAME = "Stand-in keyboard"
 
@@ -195,6 +195,7 @@ class _Entry:
 	bound: float = 0.0
 	verdict: bool | None = None
 	waited: bool = False
+	device: int = DEVICE_NUMBER
 
 
 class StandIn:
@@ -247,11 +248,12 @@ class StandIn:
 		self._stopping = False
 		self._seq = 0
 		self._line: deque[_Entry] = deque()
-		#: Codes physically down, and of those, the ones whose press was kept, and those the virtual
-		#: keyboard holds down.
-		self._down: set[int] = set()
-		self._kept: set[int] = set()
-		self._virtualDown: set[int] = set()
+		#: (device, code) of the keys physically down, and of those, the ones whose press was kept; and
+		#: how many keyboards hold each code down on the virtual keyboard, which has it down from the
+		#: first to the last.
+		self._down: set[tuple[int, int]] = set()
+		self._kept: set[tuple[int, int]] = set()
+		self._virtualDown: dict[int, int] = {}
 		self._lastHeard = 0.0
 		#: (reading of the first press, reading of the last) of the run of unanswered presses.
 		self._run: tuple[float, float] | None = None
@@ -305,7 +307,7 @@ class StandIn:
 		if os.path.exists(self.path):
 			os.unlink(self.path)
 		if self._x is not None:
-			for evdev in sorted(self._down):
+			for evdev in sorted({evdev for _device, evdev in self._down}):
 				self._x.send(evdev, False, virtual=False)
 			self._x.close()
 		os.close(self._wakeRead)
@@ -328,41 +330,41 @@ class StandIn:
 
 	# The keyboard.
 
-	def down(self, name: str | int) -> None:
+	def down(self, name: str | int, device: int = DEVICE_NUMBER) -> None:
 		evdev = name if isinstance(name, int) else code(name)
 		with self._lock:
-			if evdev in self._down:
+			if (device, evdev) in self._down:
 				return
-			self._down.add(evdev)
+			self._down.add((device, evdev))
 			if not self.capturing:
 				self._toX(evdev, True)
 				return
-			if CHORD <= self._down:
+			if CHORD <= {held for _device, held in self._down}:
 				self._note("emergency")
 				self._letGo(RELEASED_EMERGENCY, dropUndecided=True)
 				return
-			self._enter(evdev, PRESS, KEY_ASK)
+			self._enter(evdev, PRESS, KEY_ASK, device)
 		self._wake()
 
-	def up(self, name: str | int) -> None:
+	def up(self, name: str | int, device: int = DEVICE_NUMBER) -> None:
 		evdev = name if isinstance(name, int) else code(name)
 		with self._lock:
-			if evdev not in self._down:
+			if (device, evdev) not in self._down:
 				return
-			self._down.discard(evdev)
+			self._down.discard((device, evdev))
 			if not self.capturing:
 				self._toX(evdev, False)
 				self._tryCapture(time.monotonic())
 				return
-			self._enter(evdev, RELEASE, 0)
+			self._enter(evdev, RELEASE, 0, device)
 		self._wake()
 
-	def repeat(self, name: str | int) -> None:
+	def repeat(self, name: str | int, device: int = DEVICE_NUMBER) -> None:
 		"""One repeat of a key held down, as the kernel's own repeat sends them."""
 		evdev = name if isinstance(name, int) else code(name)
 		with self._lock:
-			if evdev in self._down and self.capturing:
-				self._enter(evdev, REPEAT, 0)
+			if (device, evdev) in self._down and self.capturing:
+				self._enter(evdev, REPEAT, 0, device)
 
 	def press(self, *chords: str, hold: float = 0.1, gap: float = 0.03) -> None:
 		"""Press each chord in turn, as xdotool names them: its keys down in order, held, then up."""
@@ -386,13 +388,14 @@ class StandIn:
 
 	# What the stand-in does as the helper.
 
-	def keyboardGone(self) -> None:
+	def keyboardGone(self, device: int = DEVICE_NUMBER) -> None:
 		"""The keyboard vanishes with keys down: each gets a release made by the helper, in line."""
 		with self._lock:
-			for evdev in sorted(self._down):
-				self._enter(evdev, RELEASE, KEY_SYNTHETIC)
-			self._down.clear()
-			self._sendDevice(DEVICE_GONE)
+			for held, evdev in sorted(self._down):
+				if held == device:
+					self._enter(evdev, RELEASE, KEY_SYNTHETIC, device)
+					self._down.discard((device, evdev))
+			self._sendDevice(DEVICE_GONE, device)
 		self._wake()
 
 	def letGo(self, reason: int) -> None:
@@ -441,16 +444,18 @@ class StandIn:
 		if self._client is not None:
 			self._send(self._client, message)
 
-	def _sendDevice(self, status: int) -> None:
-		self._sendClient(struct.pack("<BIBB", DEVICE, DEVICE_NUMBER, status, 0) + DEVICE_NAME.encode())
+	def _sendDevice(self, status: int, device: int = DEVICE_NUMBER) -> None:
+		self._sendClient(struct.pack("<BIBB", DEVICE, device, status, 0) + DEVICE_NAME.encode())
 
-	def _enter(self, evdev: int, value: int, flags: int) -> None:
+	def _enter(self, evdev: int, value: int, flags: int, device: int = DEVICE_NUMBER) -> None:
 		self._seq += 1
 		now = time.monotonic()
 		if value != REPEAT:
-			self._line.append(_Entry(self._seq, evdev, value == PRESS, now, self.verdictTimeout))
+			self._line.append(
+				_Entry(self._seq, evdev, value == PRESS, now, self.verdictTimeout, device=device)
+			)
 		self._note("key", self._seq, evdev, value, flags)
-		self._sendClient(struct.pack("<BQIHBB", KEY, self._seq, DEVICE_NUMBER, evdev, value, flags))
+		self._sendClient(struct.pack("<BQIHBB", KEY, self._seq, device, evdev, value, flags))
 		self._advance(now)
 
 	def _advance(self, now: float) -> None:
@@ -478,25 +483,29 @@ class StandIn:
 				# Answered in time, which ends any run.
 				self._run = None
 			self._line.popleft()
+			held = (head.device, head.code)
 			if head.press:
 				if head.verdict:
-					self._kept.add(head.code)
+					self._kept.add(held)
 				else:
-					self._kept.discard(head.code)
+					self._kept.discard(held)
 					self._virtual(head.code, True)
-			elif head.code in self._kept:
-				self._kept.discard(head.code)
+			elif held in self._kept:
+				self._kept.discard(held)
 			else:
 				self._virtual(head.code, False)
 
 	def _virtual(self, evdev: int, down: bool) -> None:
-		if down == (evdev in self._virtualDown):
+		holders = self._virtualDown.get(evdev, 0)
+		if not down and not holders:
 			return
-		if down:
-			self._virtualDown.add(evdev)
+		holders += 1 if down else -1
+		if holders:
+			self._virtualDown[evdev] = holders
 		else:
-			self._virtualDown.discard(evdev)
-		self._toX(evdev, down, virtual=True)
+			del self._virtualDown[evdev]
+		if holders == (1 if down else 0):
+			self._toX(evdev, down, virtual=True)
 
 	def _letGo(self, reason: int | None, dropUndecided: bool) -> None:
 		if dropUndecided:
@@ -508,7 +517,8 @@ class StandIn:
 					entry.verdict = False
 			self._advance(time.monotonic())
 		for evdev in sorted(self._virtualDown):
-			self._virtual(evdev, False)
+			self._toX(evdev, False, virtual=True)
+		self._virtualDown.clear()
 		self._kept.clear()
 		self._run = None
 		self._startWaiting = False
