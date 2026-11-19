@@ -226,12 +226,12 @@ class RoutedKeySource:
 			for source in self._both():
 				source.holdKeyboard(hold)
 
-	# What acts on the X display as a whole is the X source's: a key sent through XTEST comes back to
-	# it, which knows its own, and to no other. The kernel source sends them only when there is no X
-	# source to.
+	# What acts on the X display as a whole is the X source's, which runs for NVDA's whole life: a key
+	# sent through XTEST comes back to it, which knows its own, and to no other. The kernel source sends
+	# none.
 
 	def _sender(self) -> KeySource | None:
-		return self._x if self._x is not None else self._kernel if self._isKernel else None
+		return self._x
 
 	def setCapsLock(self, on: bool) -> None:
 		# Put back by the source the kept press came from: the X server locked as a key it had went down,

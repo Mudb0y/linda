@@ -263,15 +263,13 @@ class _Press:
 	#: The kind it would be without the NVDA key held with it.
 	own: str
 	effective: int
-	#: Typed through typeKey, as Remote Access types: sent through XTEST, not the helper.
-	typed: bool = False
 	#: The presses of NVDA keys it was taken for NVDA's under, which were not yet decided.
 	under: tuple["_Press", ...] = ()
 	#: Its virtual-key code, once the decider has worked it out.
 	vk: int | None = None
 	#: True once it is passed to the application, False once kept; None until then.
 	passed: bool | None = None
-	#: Whether the helper has the verdict, or for a typed key, whether it was sent.
+	#: Whether the helper has the verdict.
 	settled: bool = False
 	#: Whether the helper passed it on before its verdict came.
 	expired: bool = False
@@ -279,15 +277,13 @@ class _Press:
 	defaulted: bool = False
 	#: Whether the helper dropped it undecided, as it does the keys of the emergency chord.
 	dropped: bool = False
-	#: A typed key released before its press was decided.
-	releasedEarly: bool = False
 	#: Whether it came while the X source held a document's keys for NVDA's focus to come back to it.
 	document: bool = False
 	#: When the presses before it were all decided, from which NVDA has its time for it; None until.
 	started: float | None = None
 	#: Whether the helper was asked to hold it longer.
 	waited: bool = False
-	#: The keyboard it came from, by the helper's number; None for a typed key.
+	#: The keyboard it came from, by the helper's number.
 	device: int | None = None
 	#: For a press of a key already held down on another keyboard, the press NVDA was told of, whose
 	#: verdict this one shares: the helper's virtual keyboard holds the key down from the first press
@@ -321,7 +317,6 @@ class _Item:
 	depressed: int
 	locked: int
 	time: float
-	typed: bool = False
 	#: AltGr while the keyboard is held, which Windows' hook reports with a left Control first.
 	altGr: bool = False
 
@@ -397,10 +392,9 @@ class KernelKeySource:
 		self._layoutWakeRead, self._layoutWakeWrite = os.pipe()
 		#: Key codes down, the locks left out: what holds the modifiers down.
 		self._down: set[int] = set()
-		#: Key code: the press of each key down, from the keyboards and from typeKey; of a key held on
+		#: Key code: the press of each key down on the keyboards; of a key held on
 		#: more than one keyboard, the first, which NVDA was told of.
 		self._presses: dict[int, _Press] = {}
-		self._typed: dict[int, _Press] = {}
 		#: Key code: keyboard: its press, for each key down on a keyboard. A key is down until the last
 		#: keyboard that holds it lets it go, as the helper's virtual keyboard has it.
 		self._holders: dict[int, dict[int, _Press]] = {}
@@ -427,8 +421,6 @@ class KernelKeySource:
 		self._gestureKeys: dict[str, frozenset[GestureKey]] = {"browse": frozenset(), "focus": frozenset()}
 		#: Mode: key code: the modifier masks it is captured with; both modes or none.
 		self._modeSets: dict[str, dict[int, set[int]]] = {}
-		#: Whether Num Lock was on before typeKey changed it for a numpad key; None while it has not.
-		self._numLockBefore: bool | None = None
 		self._beatCounter = 0
 		self._nextBeat = 0.0
 		self._lastEcho = 0.0
@@ -537,28 +529,10 @@ class KernelKeySource:
 		# key never reaches the X server, and the lock never changes.
 		pass
 
-	def inject(self, vkCode: int, scanCode: int, extended: bool, isUp: bool) -> None:
-		keycode = self._keycodeFor(vkCode, extended)
-		if keycode is None:
-			log.debugWarning(f"No key on this keyboard sends virtual key {vkCode:#x}")
-			return
-		# Straight to the X server: the helper never sees it, so it never comes back as a key.
-		self._xtest(keycode, isUp)
-
-	def typeKey(self, vkCode: int, extended: bool, isUp: bool) -> None:
-		keycode = self._keycodeFor(vkCode, extended)
-		if keycode is None:
-			log.debugWarning(f"No key on this keyboard sends virtual key {vkCode:#x}")
-			return
-		self._post(lambda: self._typeKey(keycode, vkCode, extended, isUp))
-
-	def releaseTypedKeys(self) -> None:
-		self._post(self._releaseTypedKeys)
-
 	def keyState(self, vkCode: int) -> int:
 		state = 0
-		# Copies made in one step each, as the thread that answers keys changes these as it goes.
-		for press in (*tuple(self._presses.values()), *tuple(self._typed.values())):
+		# A copy made in one step, as the thread that answers keys changes it as it goes.
+		for press in tuple(self._presses.values()):
 			# Down as the applications have it: a key NVDA kept never reached them, as on Windows a key
 			# the hook blocks is up to everyone else.
 			if press.passed and press.vk is not None and vkCode in (press.vk, x11.GENERIC_FOR.get(press.vk)):
@@ -582,10 +556,6 @@ class KernelKeySource:
 	def keyName(self, scanCode: int, extended: bool) -> str:
 		with self._queryLock:
 			return self._query.keyName(scanCode, extended) if self._query else ""
-
-	def _keycodeFor(self, vkCode: int, extended: bool) -> int | None:
-		with self._queryLock:
-			return self._query.keycodeFor(vkCode, extended) if self._query else None
 
 	def _post(self, command: Callable[[], None]) -> None:
 		self._commands.append(command)
@@ -879,36 +849,6 @@ class KernelKeySource:
 				return False
 		return True
 
-	def _xtest(self, keycode: int, isUp: bool) -> None:
-		with self._xLock:
-			if self._requests is None:
-				return
-			try:
-				xtest.fake_input(self._requests, X.KeyRelease if isUp else X.KeyPress, keycode)
-				self._requests.flush()
-			except (error.ConnectionClosedError, OSError):
-				log.debugWarning("Sending a key to the X display", exc_info=True)
-
-	def _setNumLock(self, on: bool) -> None:
-		with self._xLock:
-			if self._requests is None:
-				return
-			x11._XkbLatchLockState(
-				display=self._requests.display,
-				opcode=self._xkbOpcode,
-				deviceSpec=x11.XKB_CORE_KEYBOARD,
-				affectModLocks=x11.NUM_LOCK_MASK,
-				modLocks=x11.NUM_LOCK_MASK if on else 0,
-				lockGroup=False,
-				groupLock=0,
-				affectModLatches=0,
-				modLatches=0,
-				latchGroup=False,
-				groupLatch=0,
-			)
-			self._requests.flush()
-		self._locks = (self._locks & ~LOCK_NUM) | (LOCK_NUM if on else 0)
-
 	# The helper's connection, on the source's own thread.
 
 	def _send(self, message: bytes) -> None:
@@ -951,7 +891,6 @@ class KernelKeySource:
 		finally:
 			if not self._lost:
 				# Stopped by NVDA: the helper lets go as the connection closes.
-				self._releaseTypedKeys()
 				self._releaseAll()
 				self._lost = True
 			try:
@@ -1067,7 +1006,6 @@ class KernelKeySource:
 		"""Give the helper up: tell NVDA every key it holds is up, close the connection, and say so."""
 		if self._lost:
 			return
-		self._releaseTypedKeys()
 		self._releaseAll()
 		self._lost = True
 		self._holding = False
@@ -1180,18 +1118,13 @@ class KernelKeySource:
 		return press.arrival if press.document else press.arrival + self._answerWithin[NVDA_KIND]
 
 	def _settle(self, press: _Press) -> None:
-		"""Act on a press's verdict: tell the helper, or send a typed key, and follow what it changes."""
+		"""Act on a press's verdict: tell the helper, and follow what it changes."""
 		if press.settled:
 			return
 		press.settled = True
 		if press.looked is not None:
 			press.looked.set()
-		if press.typed:
-			if press.passed:
-				self._xtest(press.keycode, False)
-				if press.releasedEarly:
-					self._xtest(press.keycode, True)
-		elif not press.expired:
+		if not press.expired:
 			if press.passed and self._keptModifiers:
 				self._putDownKeptModifiers()
 			self._send(keydClient.verdict(press.seq, keep=not press.passed))
@@ -1211,7 +1144,7 @@ class KernelKeySource:
 			# The NVDA key pressed twice to pass it on: no chord comes of it.
 			del self._nvdaHeld[press.keycode]
 		light = LOCK_KEYCODES.get(press.keycode)
-		if light is not None and not press.typed:
+		if light is not None:
 			# The X server locks or unlocks as the key reaches it, and the light the helper reports
 			# follows a moment later; a key typed in between has it already.
 			self._locks ^= light
@@ -1330,9 +1263,7 @@ class KernelKeySource:
 			if holders and keycode in self._presses:
 				holders[key.device] = self._follow(keycode, now, key.seq, key.device, decided)
 			else:
-				holders[key.device] = self._press(
-					keycode, now, key.seq, typed=False, decided=decided, device=key.device
-				)
+				holders[key.device] = self._press(keycode, now, key.seq, decided=decided, device=key.device)
 		elif key.value == KEY_RELEASE:
 			holders = self._holders.get(keycode)
 			if holders is not None:
@@ -1345,7 +1276,7 @@ class KernelKeySource:
 				del self._holders[keycode]
 				if press is not None and press is not self._presses.get(keycode):
 					self._remember(press, now)
-			self._release(keycode, now, typed=False)
+			self._release(keycode, now)
 		# The kernel's own repeats are ignored: they follow the kernel's rate, a quarter of a second to
 		# the first, where the X server, which repeats a key passed on, follows the desktop's setting.
 
@@ -1354,7 +1285,6 @@ class KernelKeySource:
 		keycode: int,
 		now: float,
 		seq: int,
-		typed: bool,
 		decided: bool = False,
 		device: int | None = None,
 	) -> _Press:
@@ -1389,7 +1319,6 @@ class KernelKeySource:
 			not decided
 			and not held
 			and kind == own
-			and not typed
 			and own in (PASS_KIND, CAPTURE_KIND)
 			and self._layoutThread is not None
 			and self._layoutThread.is_alive()
@@ -1397,23 +1326,21 @@ class KernelKeySource:
 		)
 		if looks:
 			kind = own = CAPTURE_KIND
-		press = _Press(seq, keycode, now, kind, own, effective, typed=typed, under=under, device=device)
+		press = _Press(seq, keycode, now, kind, own, effective, under=under, device=device)
 		if kind == CAPTURE_KIND and capture.documentUntil is not None and now < capture.documentUntil:
 			press.document = True
 		if looks:
 			self._lookAtFocus(press, self._grabsTake(capture))
 		if own == NVDA_KIND and keycode in NVDA_KEYCODES and kind in (NVDA_KIND, HOLD_KIND):
 			self._nvdaHeld[keycode] = press
-		presses = self._typed if typed else self._presses
-		old = presses.get(keycode)
+		old = self._presses.get(keycode)
 		if old is not None:
 			self._bySeq.pop(old.seq, None)
-		presses[keycode] = press
-		if not typed:
-			self._bySeq[seq] = press
-			if self._repeatSettings.repeats(keycode):
-				self._repeating = press
-				self._nextRepeat = now + self._repeatSettings.delay
+		self._presses[keycode] = press
+		self._bySeq[seq] = press
+		if self._repeatSettings.repeats(keycode):
+			self._repeating = press
+			self._nextRepeat = now + self._repeatSettings.delay
 		if decided:
 			press.decide(True)
 			press.settled = True
@@ -1431,9 +1358,7 @@ class KernelKeySource:
 				self._settle(press)
 		if not levelShift or held:
 			self._decisions.put(
-				_Item(
-					keycode, KEY_PRESS, press, tables, depressed, locked, now, typed=typed, altGr=levelShift
-				)
+				_Item(keycode, KEY_PRESS, press, tables, depressed, locked, now, altGr=levelShift)
 			)
 		return press
 
@@ -1456,31 +1381,23 @@ class KernelKeySource:
 			self._pending.append(press)
 		return press
 
-	def _release(self, keycode: int, now: float, typed: bool) -> None:
+	def _release(self, keycode: int, now: float) -> None:
 		tables = self._tables
 		held = self._held
 		depressed = self._depressed(tables)
 		locked = _lockedMods(self._locks)
-		if keycode not in (self._holders if typed else self._typed):
-			self._down.discard(keycode)
-		presses = self._typed if typed else self._presses
+		self._down.discard(keycode)
 		# None for a key down before the helper held the keyboard, whose press the application had.
-		press = presses.pop(keycode, None)
+		press = self._presses.pop(keycode, None)
 		if press is not None:
 			self._retire(press, now)
 			if self._nvdaHeld.get(keycode) is press:
 				del self._nvdaHeld[keycode]
-			if typed:
-				if press.settled:
-					if press.passed:
-						self._xtest(keycode, True)
-				else:
-					press.releasedEarly = True
 		levelShift = keycode in tables.levelShift
 		if levelShift and not held:
 			return
 		self._decisions.put(
-			_Item(keycode, KEY_RELEASE, press, tables, depressed, locked, now, typed=typed, altGr=levelShift)
+			_Item(keycode, KEY_RELEASE, press, tables, depressed, locked, now, altGr=levelShift)
 		)
 
 	def _retire(self, press: _Press, now: float) -> None:
@@ -1497,9 +1414,8 @@ class KernelKeySource:
 		self._bySeq.pop(press.seq, None)
 		while self._forget and self._forget[0][0] <= now:
 			self._released.pop(self._forget.popleft()[1], None)
-		if not press.typed:
-			self._released[press.seq] = press
-			self._forget.append((press.arrival + self._bound + EXPIRY_SLACK, press.seq))
+		self._released[press.seq] = press
+		self._forget.append((press.arrival + self._bound + EXPIRY_SLACK, press.seq))
 
 	def _repeatNow(self, now: float) -> float | None:
 		"""Repeat the key held down that repeats, when it is due, as the X server repeats it: to NVDA alone,
@@ -1538,8 +1454,6 @@ class KernelKeySource:
 		"""
 		now = time.monotonic()
 		for press in list(self._pending):
-			if press.typed:
-				continue
 			self._pending.remove(press)
 			press.dropped = dropUndecided
 			press.decide(not dropUndecided)
@@ -1549,47 +1463,12 @@ class KernelKeySource:
 		self._holders.clear()
 		if self._tables is not None:
 			for keycode in sorted(self._presses):
-				self._release(keycode, now, typed=False)
+				self._release(keycode, now)
 		self._presses.clear()
 		self._down.clear()
 		self._bySeq.clear()
 		self._nvdaHeld.clear()
 		self._repeating = self._nextRepeat = None
-
-	def _typeKey(self, keycode: int, vkCode: int, extended: bool, isUp: bool) -> None:
-		"""Press or release a key as a keyboard would, so that NVDA has it as it has any key, and the
-		application has it unless NVDA takes it."""
-		if self._tables is None:
-			return
-		now = time.monotonic()
-		if isUp:
-			if keycode not in self._typed:
-				return
-			self._release(keycode, now, typed=True)
-			if self._numLockBefore is not None and not any(code - 8 in keyMap.NUMPAD for code in self._typed):
-				self._setNumLock(self._numLockBefore)
-				self._numLockBefore = None
-			return
-		numpad = keyMap.NUMPAD.get(keycode - 8)
-		if numpad is not None and not extended and vkCode in numpad[1:] and self._xkbOpcode is not None:
-			# The key has one code with Num Lock on and another with it off, and the X server picks by the
-			# lock; it is put back once no such key is held.
-			wanted = vkCode == numpad[1]
-			numLockOn = bool(self._locks & LOCK_NUM)
-			if self._numLockBefore is None and numLockOn != wanted:
-				self._numLockBefore = numLockOn
-			if self._numLockBefore is not None:
-				self._setNumLock(wanted)
-		self._press(keycode, now, 0, typed=True)
-
-	def _releaseTypedKeys(self) -> None:
-		now = time.monotonic()
-		if self._tables is not None:
-			for keycode in list(self._typed):
-				self._release(keycode, now, typed=True)
-		if self._numLockBefore is not None:
-			self._setNumLock(self._numLockBefore)
-			self._numLockBefore = None
 
 	# The decider: each key in NVDA's terms, and NVDA's answer.
 
@@ -1636,7 +1515,7 @@ class KernelKeySource:
 			vkCode=vk,
 			scanCode=scan,
 			extended=extended,
-			injected=item.typed,
+			injected=False,
 			isUp=isUp,
 			repeat=item.value == KEY_REPEAT,
 			reachedApplication=True,
