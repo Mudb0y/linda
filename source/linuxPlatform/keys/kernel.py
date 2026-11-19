@@ -1017,9 +1017,11 @@ class KernelKeySource:
 			self._sock.close()
 		except OSError:
 			pass
-		if self._stopping:
+		if self._stopping and not emergency:
 			return
 		try:
+			# The emergency chord is said even while the source is being stopped, as when NVDA gave the
+			# helper up at that moment: it is the user's word that nothing is to take the keyboard again.
 			if self._onLost is not None:
 				self._onLost(why, emergency)
 		except Exception:

@@ -8,7 +8,7 @@ fault is there. Run under the rig:
 from pathlib import Path
 
 import pytest
-from test_kernelKeys import runKernelChild
+from test_kernelKeys import LET_GO_MESSAGE, runKernelChild
 
 #: Reads the window's key events with the modifiers each came with.
 STATEFUL_KEYS = r"""
@@ -1081,3 +1081,31 @@ def test_documentsKeysAreTakenOnTheTopLevelWindowAfterAChordThere(tmp_path: Path
 		f"typed as the focus came back reached it: {value}"
 	)
 	assert value["nvda"] == [[True, False]], value
+
+
+#: The helper says it let go for the emergency chord just as NVDA is stopping the kernel source, as
+#: when NVDA gives the helper up at that moment: whether NVDA lets go until the user asks, and says so.
+EMERGENCY_WHILE_STOPPING_CHILD = r"""
+from linuxPlatform.keys import keydClient
+source = startSource()
+kernel = source._kernel
+
+
+def stoppingAsTheChordComes():
+	kernel._stopping = True
+	kernel._onReleased(keydClient.RELEASED_EMERGENCY)
+
+
+kernel._post(stoppingAsTheChordComes)
+time.sleep(3)
+result = {"kernel": source.isKernel, "starts": keyboard.starts, "said": list(said)}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_emergencyChordAsTheKernelSourceStopsIsHonoured(tmp_path: Path):
+	value = runKernelChild(tmp_path, EMERGENCY_WHILE_STOPPING_CHILD)
+	assert not value["kernel"], value
+	assert value["starts"] == 1, f"NVDA asked the helper to capture again after the emergency chord: {value}"
+	assert value["said"] == [LET_GO_MESSAGE], value

@@ -517,24 +517,17 @@ class RoutedKeySource:
 				log.exception("Choosing the way keys come to NVDA")
 
 	def _turn(self) -> None:
-		self._watchVirtual()
 		while self._lost:
 			kernel, why, emergency = self._lost.pop(0)
-			if kernel is not self._kernel:
-				continue
-			if not self._dropKernel():
-				self._nextTry = time.monotonic() + RETRY_INTERVAL
-				log.info(
-					f"Keys stay with the X display: linda-keyd was given up before it held the keyboard: {why}"
-				)
-				continue
 			if emergency:
+				# The user pressed it because something was wrong: whichever source the helper let go for,
+				# and whether or not NVDA had taken the route yet, nothing asks the helper again until the
+				# user does.
+				if kernel is self._kernel:
+					self._dropKernel()
 				self._letGo = True
-			self._nextTry = time.monotonic() + RETRY_INTERVAL
-			log.info(f"Keys are read from the X display: linda-keyd was given up: {why}")
-			if not emergency:
-				self._sayFellBack()
-			else:
+				self._takingBack = False
+				log.info(f"Keys are read from the X display: linda-keyd was given up: {why}")
 				self._say(
 					# Translators: Said on Linux after the emergency chord, Backspace, Escape and Enter held
 					# together, made linda-keyd, the program that takes the keyboard in the kernel for NVDA, let
@@ -544,6 +537,20 @@ class RoutedKeySource:
 						"Use the command to take the keyboard back when you want it to take them again",
 					),
 				)
+				continue
+			if kernel is not self._kernel:
+				continue
+			if not self._dropKernel():
+				self._nextTry = time.monotonic() + RETRY_INTERVAL
+				log.info(
+					f"Keys stay with the X display: linda-keyd was given up before it held the keyboard: {why}"
+				)
+				continue
+			self._nextTry = time.monotonic() + RETRY_INTERVAL
+			log.info(f"Keys are read from the X display: linda-keyd was given up: {why}")
+			self._sayFellBack()
+		# After what the lost sources said, so that an emergency chord is the last word on them.
+		self._watchVirtual()
 		if self._route == "x11":
 			if self._kernel is not None and self._dropKernel():
 				log.info("Keys are read from the X display: the key route is set to the X display")
