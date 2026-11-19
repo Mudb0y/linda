@@ -181,6 +181,195 @@ def test_firstKeyBackInADocumentIsBrowseModesBeforeNVDAReadsTheFocus(tmp_path: P
 	assert value["nvda"] == [[True, False]], value
 
 
+#: The focus leaves the document's window for another application's and comes back, and h is typed
+#: 10 ms after, which the helper holds for NVDA's focus to follow, 250 ms later; Insert goes down 20 ms
+#: after h, behind it in line, and h comes up. The stand-in's bound is 100 ms, and WELCOME gives
+#: whatever the test says.
+LINE_HELD_BY_A_DOCUMENT = r"""
+other = root.create_window(0, 0, 100, 100, 0, app.screen().root_depth, event_mask=X.KeyPressMask)
+other.change_property(pidAtom, Xatom.CARDINAL, 32, [2])
+other.map()
+app.sync()
+source = startSource()
+mode["now"] = "browse"
+source.setCapture("browse", 1)
+time.sleep(0.3)
+other.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+time.sleep(0.2)
+mode["now"] = "off"
+source.setCapture("off")
+time.sleep(0.3)
+windowKeys()
+delivered.clear()
+start = len(keyboard.events)
+window.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+
+
+def follow():
+	time.sleep(0.25)
+	mode["now"] = "browse"
+	source.setCapture("browse", 1)
+
+
+threading.Thread(target=follow, daemon=True).start()
+time.sleep(0.01)
+keyboard.down("h")
+time.sleep(0.02)
+keyboard.down("Insert")
+time.sleep(0.03)
+keyboard.up("h")
+
+
+def noted(kind, seq=None):
+	return [rest for _t, what, *rest in keyboard.events[start:] if what == kind and (seq is None or rest[0] == seq)]
+
+
+def pressSeq(evdev):
+	return next(seq for seq, code, value, _flags in noted("key") if code == evdev and value == 1)
+"""
+
+
+#: Insert is answered after its own bound has passed while h holds the line: WELCOME says 300 ms, so
+#: that NVDA asks the helper to wait 120 ms after the press and answers once h is decided.
+VERDICT_AFTER_BOUND_CHILD = (
+	LINE_HELD_BY_A_DOCUMENT
+	+ r"""
+time.sleep(0.03)
+keyboard.up("Insert")
+time.sleep(0.8)
+insert = pressSeq(110)
+result = {
+	"kernel": source.isKernel,
+	"window": [key for key in windowKeys() if key[1]],
+	"nvda": [[e["vk"], e["captured"], e["reached"]] for e in presses() if e["vk"] in (ord("H"), 0x2D)],
+	"waited": [delay for seq, delay in keyboard.waits if seq == insert],
+	"verdicts": [[keep, delay] for seq, keep, delay in keyboard.verdicts if seq == insert],
+	"expired": noted("expired", insert),
+}
+source.stop()
+keyboard.close()
+"""
+)
+
+
+def test_verdictAfterItsBoundCountsWhileAPressBeforeHoldsTheLine(tmp_path: Path):
+	value = runKernelChild(tmp_path, VERDICT_AFTER_BOUND_CHILD, standIn={"announcedVerdictTimeout": 0.3})
+	assert value["kernel"]
+	# What the test is about: both came after Insert's own bound, while it was still in line.
+	assert value["waited"] and value["waited"][0] > 0.1, value
+	assert value["verdicts"] and value["verdicts"][0][0] and value["verdicts"][0][1] > 0.1, value
+	assert value["expired"] == [], value
+	assert value["window"] == [], f"a key NVDA kept after its bound reached the application: {value}"
+	assert value["nvda"] == [[ord("H"), True, False], [0x2D, True, False]], value
+
+
+#: Insert is not answered before h is decided, after Insert's own bound: WELCOME says 900 ms, so that
+#: NVDA would ask the helper to wait only 360 ms after the press, and NVDA takes Insert only once the
+#: helper has said EXPIRED, which it does as it takes Insert out of line behind h. t is typed with
+#: Insert still down, then Insert comes up.
+LATE_EXPIRED_CHILD = (
+	LINE_HELD_BY_A_DOCUMENT
+	+ r"""
+
+
+def keepOnceExpired(event):
+	if event.vkCode == 0x2D:
+		deadline = time.monotonic() + 1
+		while not noted("expired") and time.monotonic() < deadline:
+			time.sleep(0.005)
+	return True
+
+
+keep = keepOnceExpired
+deadline = time.monotonic() + 2
+while not noted("expired") and time.monotonic() < deadline:
+	time.sleep(0.005)
+time.sleep(0.1)
+keyboard.press("t", hold=0.03)
+time.sleep(0.1)
+keyboard.up("Insert")
+time.sleep(0.5)
+insert = pressSeq(110)
+result = {
+	"kernel": source.isKernel,
+	"window": [key for key in windowKeys() if key[1]],
+	"expired": noted("expired"),
+	"insert": insert,
+	"late": noted("late verdict", insert),
+	"t": [[e["captured"], e["reached"], e["nvda"]] for e in presses(ord("T"))],
+	"h": [[e["captured"], e["reached"]] for e in presses(ord("H"))],
+}
+source.stop()
+keyboard.close()
+"""
+)
+
+
+def test_pressExpiredLaterThanItsBoundIsTheApplications(tmp_path: Path):
+	value = runKernelChild(tmp_path, LATE_EXPIRED_CHILD, standIn={"announcedVerdictTimeout": 0.9})
+	assert value["kernel"]
+	assert value["expired"] == [[value["insert"]]], value
+	assert value["h"] == [[True, False]], value
+	# The helper passed Insert on, and NVDA sent nothing for it after; t, typed with it still down, is
+	# browse mode's own and no chord with an NVDA key the application has.
+	assert value["window"] == [[110, True]], f"{value}"
+	assert value["late"] == [], value
+	assert value["t"] == [[True, False, False]], value
+
+
+#: Shift and x go down and out, then Insert, which NVDA takes 200 ms over; x and Shift come up
+#: meanwhile: when the X display had each, beside the verdict on Insert.
+RELEASE_OVERTAKES_CHILD = r"""
+source = startSource()
+start = len(keyboard.events)
+
+
+def slowInsert(event):
+	if event.vkCode == 0x2D:
+		time.sleep(0.2)
+	return True
+
+
+keep = slowInsert
+keyboard.down("Shift_L")
+time.sleep(0.05)
+keyboard.down("x")
+time.sleep(0.05)
+keyboard.down("Insert")
+time.sleep(0.03)
+keyboard.up("x")
+time.sleep(0.01)
+keyboard.up("Shift_L")
+time.sleep(0.4)
+keyboard.up("Insert")
+time.sleep(0.3)
+events = keyboard.events[start:]
+insert = next(rest[0] for _t, what, *rest in events if what == "key" and rest[1] == 110 and rest[2] == 1)
+verdict = next(t for t, what, *rest in events if what == "verdict" and rest[0] == insert)
+out = {f"{rest[0]} {'down' if rest[1] else 'up'}": t < verdict for t, what, *rest in events if what == "x"}
+order = [[e["vk"], e["up"]] for e in delivered if e["vk"] in (ord("X"), 0x2D)]
+result = {"kernel": source.isKernel, "beforeInsertsVerdict": out, "nvda": order, "window": windowKeys()}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_releaseOvertakesAPressWaitingForItsVerdictUnlessAModifier(tmp_path: Path):
+	value = runKernelChild(tmp_path, RELEASE_OVERTAKES_CHILD)
+	assert value["kernel"]
+	assert value["beforeInsertsVerdict"] == {
+		"42 down": True,
+		"45 down": True,
+		"45 up": True,
+		"42 up": False,
+	}, value
+	# NVDA has the keys in the order they were typed, whatever order the X display had them in.
+	assert value["nvda"] == [[ord("X"), False], [0x2D, False], [ord("X"), True], [0x2D, True]], value
+	assert value["window"] == [[42, True], [45, True], [45, False], [42, False]], value
+
+
 #: A second window of the document's own application takes the focus, as a file chooser opened with
 #: Control+O from Firefox does, and h is typed in it before NVDA's focus has followed: where h went.
 SAME_APPLICATION_WINDOW_CHILD = r"""

@@ -45,6 +45,9 @@ GOODBYE_BUSY, GOODBYE_SILENT, GOODBYE_UNANSWERED = 4, 6, 8
 DEVICE_HELD, DEVICE_GONE = 1, 4
 #: Backspace, Escape and Enter.
 CHORD = frozenset((14, 1, 28))
+#: The helper's MODIFIERS (engine/crates/keyd/src/keys.rs): the Controls, Shifts, Alts, Metas and Caps
+#: Lock, whose releases keep their place in line.
+MODIFIERS = frozenset((29, 42, 54, 56, 97, 100, 125, 126, 58))
 #: The stand-in's keyboard, as the kernel would number it; a test may press keys on others too.
 DEVICE_NUMBER = 3
 DEVICE_NAME = "Stand-in keyboard"
@@ -258,6 +261,8 @@ class StandIn:
 		#: first to the last.
 		self._down: set[tuple[int, int]] = set()
 		self._kept: set[tuple[int, int]] = set()
+		#: (device, code) of each key whose press went out passed and whose release has not.
+		self._passedOut: set[tuple[int, int]] = set()
 		self._virtualDown: dict[int, int] = {}
 		self._lastHeard = 0.0
 		#: (reading of the first press, reading of the last) of the run of unanswered presses.
@@ -464,7 +469,26 @@ class StandIn:
 		self._advance(now)
 
 	def _advance(self, now: float) -> None:
-		"""Put out every key at the head of the line that is decided or overdue."""
+		"""Put out every key at the head of the line that is decided or overdue, then every release
+		that may overtake the presses still waiting."""
+		self._advanceHead(now)
+		self._releaseEarly()
+
+	def _releaseEarly(self) -> None:
+		"""As the helper's release_early: a release whose press has gone out goes out at once, ahead of
+		presses still waiting for their verdict, unless its key is a modifier, or its own press or a later
+		press of the same key is still in line."""
+		waiting = set()
+		for entry in list(self._line):
+			key = (entry.device, entry.code)
+			if entry.press:
+				waiting.add(key)
+			elif key not in waiting and entry.code not in MODIFIERS and key in self._passedOut:
+				self._line.remove(entry)
+				self._passedOut.discard(key)
+				self._virtual(entry.code, False)
+
+	def _advanceHead(self, now: float) -> None:
 		while self._line:
 			head = self._line[0]
 			if head.press and head.verdict is None:
@@ -492,12 +516,15 @@ class StandIn:
 			if head.press:
 				if head.verdict:
 					self._kept.add(held)
+					self._passedOut.discard(held)
 				else:
 					self._kept.discard(held)
+					self._passedOut.add(held)
 					self._virtual(head.code, True)
 			elif held in self._kept:
 				self._kept.discard(held)
 			else:
+				self._passedOut.discard(held)
 				self._virtual(head.code, False)
 
 	def _virtual(self, evdev: int, down: bool) -> None:
@@ -525,6 +552,7 @@ class StandIn:
 			self._toX(evdev, False, virtual=True)
 		self._virtualDown.clear()
 		self._kept.clear()
+		self._passedOut.clear()
 		self._run = None
 		self._startWaiting = False
 		if self.capturing:
@@ -571,9 +599,10 @@ class StandIn:
 				if self._client is not None:
 					watched.append(self._client)
 				timeout = 0.02 if self._client is not None else 0.2
-				undecided = [e.arrival + e.bound for e in self._line if e.press and e.verdict is None]
-				if undecided:
-					timeout = max(0.0, min(timeout, min(undecided) - now))
+				# Only the head's bound puts anything out; a press behind it past its own waits for it.
+				head = self._line[0] if self._line else None
+				if head is not None and head.press and head.verdict is None:
+					timeout = max(0.0, min(timeout, head.arrival + head.bound - now))
 			readable, _w, _x = select.select(watched, [], [], timeout)
 			with self._lock:
 				if self._wakeRead in readable:
@@ -687,15 +716,11 @@ class StandIn:
 			)
 		):
 			_kind, seq, value = struct.unpack("<BQB", data)
-			self._advance(now)
 			for entry in self._line:
-				# Each press's own bound runs from its reading, wherever it is in line.
-				if (
-					entry.seq == seq
-					and entry.press
-					and entry.verdict is None
-					and now - entry.arrival < entry.bound
-				):
+				# A press waits for its verdict until it is taken out of line: at its bound, or later,
+				# behind a press before it that holds the line; until then a verdict counts, as the helper
+				# reads what came before it looks at the bounds.
+				if entry.seq == seq and entry.press and entry.verdict is None:
 					if value == VERDICT_WAIT:
 						# Only the first counts.
 						if not entry.waited:
