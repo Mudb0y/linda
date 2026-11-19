@@ -741,6 +741,7 @@ class X11KeySource:
 
 	def _reconnect(self) -> bool:
 		"""Connect again after the X server closed the connection, and take back every key taken."""
+		self._captureState = NO_CAPTURE
 		self._stopGuard()
 		try:
 			self._display.close()

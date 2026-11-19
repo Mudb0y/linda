@@ -419,6 +419,7 @@ class KernelKeySource:
 		"""
 		self._deliver = deliver
 		self._modeNow = modeNow
+		log.debug(f"linda-keyd {'holds' if self._canWait else 'cannot hold'} a press longer when asked")
 		if not os.environ.get("DISPLAY"):
 			raise RuntimeError("there is no X display to read the keyboard layout from")
 		self._connectX()
