@@ -6,6 +6,8 @@ LINDA_VBUF_ENGINE=ROOT/engine/target/release/libbre_vbuf.so \
 LINDA_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_topLevelGrabReview.py
 """
 
+import os
+import signal
 import subprocess
 import time
 from collections.abc import Iterator
@@ -76,4 +78,44 @@ def test_keyTakenOnTheTopLevelWindowLeavesThePagesFocusAlone(desktop: DesktopSes
 	assert atOnce["pageFocus"] == ["window-focus"], (
 		"h typed while marco had given the focus to Firefox's top-level window was Linda's, but the grab "
 		f"that took it made the page's window lose the focus and get it back: {atOnce['pageFocus']}; {found}"
+	)
+
+
+def test_guardFreesTheTopLevelWindowsGrabsToo(desktop: DesktopSession, tmp_path: Path):
+	"""Alt+Tab from the page to another program, which leaves browse mode's keys grabbed on Firefox's
+	top-level window; Linda stops; Alt+Tab back, and hxyz typed at once, as someone does who has not
+	yet noticed. Firefox moves the focus to its window inside the top-level one, where Linda, stopped,
+	cannot let go of the grabs on its parent: h is held there until the guard frees the keyboard,
+	which it does by letting go of the grabs on the windows the heartbeat names and replaying the held
+	press before it closes Linda's connection. None of the keys may be lost, as none was before the
+	top-level window was grabbed on."""
+	webSession.requireBrowseLibraries()
+	desktop.startApp(desktop.fixture("gtkFixture"), title="Fixture window")
+	desktopSession.activate("Fixture window")
+	nvda, page = startPage(desktop, tmp_path)
+	step(desktop, "control+Home", "heading level 1 Keys page")
+	step(desktop, "alt+Tab", "Fixture window" + PREFIX_MARK)
+	waitForCapture(nvda, "off")
+	time.sleep(SETTLE)
+	before = page.log()
+	os.kill(nvda.process.pid, signal.SIGSTOP)
+	try:
+		stopped = time.monotonic()
+		subprocess.run(["xdotool", "key", "alt+Tab"], check=True)
+		time.sleep(0.3)
+		subprocess.run(["xdotool", "type", "--delay", "40", "hxyz"], check=True)
+		typedBy = time.monotonic() - stopped
+		deadline = time.monotonic() + 6
+		while page.log()[len(before) :] != ["h", "x", "y", "z"] and time.monotonic() < deadline:
+			time.sleep(0.05)
+		reached = page.log()[len(before) :]
+	finally:
+		os.kill(nvda.process.pid, signal.SIGCONT)
+	nvda.waitForLog("Keys are read from the X display again", 10)
+	quitNVDA(desktop, nvda)
+	assert typedBy < 1.5, f"the keys were typed {typedBy:.2f} s after Linda stopped, after the guard"
+	assert reached == ["h", "x", "y", "z"], (
+		"with Linda stopped, hxyz typed in Firefox after Alt+Tab back: the guard let go of the grabs on "
+		"the windows its heartbeat names, not of those on Firefox's top-level window, and the keys held "
+		f"up behind h went with Linda's connection; the page had {reached}"
 	)
