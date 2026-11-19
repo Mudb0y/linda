@@ -301,6 +301,28 @@ def _topLevelOf(node: Node) -> Node | None:
 	return None
 
 
+def _inShadowTree(node: Node) -> bool:
+	"""Whether node is in a tree a toolkit keeps beside its application's own, under an application object
+	that is not the application's root, which holds none of it.
+
+	Firefox draws its windows in GTK widgets, and GTK makes accessibles of its own for them: a frame
+	named as the window, under GTK's application object, holding a grouping for the widget the page is
+	drawn in. GTK says that grouping has the focus whenever the window is activated, beside Firefox
+	saying where the focus is; taken for the focus, it would move NVDA's out of the page and back, each
+	time into a frame named as the window, whose title would be said again.
+	"""
+	c = client()
+	current = node
+	for _ in range(64):
+		parent = c.parent(current)
+		if parent is None or parent.path == ROOT_PATH:
+			return False
+		if c.role(parent) == "application":
+			return True
+		current = parent
+	return False
+
+
 def _ownsActiveWindow(node: Node) -> bool:
 	"""Whether node's application owns the window activated last and not deactivated since. Where the
 	tracking says no, the state of node's own top-level decides, and the tracking follows it."""
@@ -744,6 +766,11 @@ def _processFocus(event, mayRetry: bool = True) -> bool:
 			log.debug(f"AT-SPI focus: {event[0]} on {source} dropped; its application is not active")
 			return False
 		node = _focusCandidate(event)
+		if node is not None and _inShadowTree(node):
+			log.debug(
+				f"AT-SPI focus: {event[0]} on {source} dropped; it is in a tree beside its application's"
+			)
+			return False
 	except AppHung:
 		_deferWhileHung(event)
 		return True
