@@ -551,6 +551,11 @@ result = {
 	"nvda": [[e["captured"], e["reached"]] for e in presses(ord("H"))],
 }
 source.stop()
+# The pointer and the focus as the X server starts with them, for the tests after this one.
+screen = app.screen()
+root.warp_pointer(screen.width_in_pixels // 2, screen.height_in_pixels // 2)
+app.set_input_focus(X.PointerRoot, X.RevertToPointerRoot, X.CurrentTime)
+app.sync()
 keyboard.close()
 """
 
@@ -857,6 +862,16 @@ def deliver(event):
 	return not keep(event)
 
 
+xkb = app.query_extension("XKEYBOARD").major_opcode
+x11._XkbUseExtension(display=app.display, opcode=xkb, wantedMajor=1, wantedMinor=0)
+
+
+def locks():
+	locked = x11._XkbGetState(display=app.display, opcode=xkb, deviceSpec=x11.XKB_CORE_KEYBOARD).lockedMods
+	return locked & (X.LockMask | x11.NUM_LOCK_MASK), app.get_keyboard_control().led_mask & 4
+
+
+locksBefore = locks()
 subprocess.run(["setxkbmap", "pl"], check=True)
 time.sleep(0.3)
 source = startSource(ROUTE, consumed=x11.EXTENDED_INSERT | x11.CAPS_LOCK | x11.NUMPAD_INSERT)
@@ -921,6 +936,30 @@ for vk, scan, extended, up, repeat in told:
 		down[vk] = (scan, extended)
 result = {"kernel": source.isKernel, "stillDown": sorted(down), "unmatched": unmatched, "count": len(told)}
 source.stop()
+# The locks as they were, whatever the keys typed did: a lock key NVDA kept toggled nothing, so that
+# counting the presses does not tell, and the tests after this one share the display.
+result["locksLeft"] = locks()
+x11._XkbLatchLockState(
+	display=app.display,
+	opcode=xkb,
+	deviceSpec=x11.XKB_CORE_KEYBOARD,
+	affectModLocks=X.LockMask | x11.NUM_LOCK_MASK,
+	modLocks=locksBefore[0],
+	lockGroup=False,
+	groupLock=0,
+	affectModLatches=0,
+	modLatches=0,
+	latchGroup=False,
+	groupLatch=0,
+)
+if result["locksLeft"][1] != locksBefore[1]:
+	from Xlib.ext import xtest
+	code = app.keysym_to_keycode(XK.XK_Scroll_Lock)
+	xtest.fake_input(app, X.KeyPress, code)
+	xtest.fake_input(app, X.KeyRelease, code)
+app.sync()
+time.sleep(0.2)
+result["locksPutBack"] = locks() == locksBefore
 keyboard.close()
 """
 
@@ -934,6 +973,7 @@ def test_everyReleaseNVDAHasIsItsPresss(tmp_path: Path, route: str):
 	assert value["unmatched"] == [], (
 		f"on the {route} route releases came as other keys than their presses: {value}"
 	)
+	assert value["locksPutBack"], value
 
 
 #: As TOP_LEVEL_CHILD, with another program holding h on the top-level window; the focus comes back
