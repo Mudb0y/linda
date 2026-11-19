@@ -1232,4 +1232,72 @@ def test_whileTheHelperHoldsNothingLocksAreTheXDisplaysAndTakingBackSaysSo(tmp_p
 	assert (value["before"], value["after"]) == (0, 1), (
 		f"with the helper holding nothing, NVDA reported Caps Lock from the helper's last word: {value}"
 	)
-	assert value["said"] == ["linda-keyd holds no keyboard now, and takes it for NVDA as soon as it may"], value
+	assert value["said"] == ["linda-keyd holds no keyboard now, and takes it for NVDA as soon as it may"], (
+		value
+	)
+
+
+#: Insert, the NVDA key, is pressed and released, and its verdict never reaches the helper, which passes
+#: it on 2.5 s later, as after a freeze it forgives, where its bound runs afresh from the thaw; a key is
+#: typed meanwhile: whether NVDA still knows the press when the helper's EXPIRED comes.
+LATE_EXPIRED_AFTER_RELEASE_CHILD = r"""
+source = startSource()
+kernel = source._kernel
+send = kernel._send
+
+
+def losingVerdicts(message):
+	if message[0] == 0x04:
+		return False
+	return send(message)
+
+
+kernel._send = losingVerdicts
+keyboard.down("Insert")
+time.sleep(0.05)
+press = kernel._presses.get(110 + 8)
+keyboard.up("Insert")
+time.sleep(1.5)
+keyboard.press("a")
+deadline = time.monotonic() + 3
+while not any(what == "expired" for _t, what, *rest in keyboard.events) and time.monotonic() < deadline:
+	time.sleep(0.02)
+time.sleep(0.3)
+kernel._send = send
+result = {
+	"expired": [rest for _t, what, *rest in keyboard.events if what == "expired"],
+	"known": press is not None and press.expired and bool(press.passed),
+	"kept": len(kernel._released),
+}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_expiredLongAfterItsPressWasReleasedIsKnown(tmp_path: Path):
+	value = runKernelChild(
+		tmp_path,
+		LATE_EXPIRED_AFTER_RELEASE_CHILD,
+		standIn={"verdictTimeout": 2.5, "announcedVerdictTimeout": 0.1, "features": 0, "unansweredSpan": 10},
+	)
+	assert value["expired"], value
+	assert value["known"], f"NVDA had forgotten the press the helper said it passed on: {value}"
+
+
+#: Twenty keys typed, some NVDA's: how many released presses the kernel source still keeps for a late
+#: EXPIRED a second after, by when the helper has echoed heartbeats sent after every answer.
+NOTHING_KEPT_CHILD = r"""
+source = startSource()
+kernel = source._kernel
+keyboard.type("abcdefghij")
+keyboard.press("Insert+t", "Insert+z", "Shift_L+a", "b", "c")
+time.sleep(1.2)
+result = {"kept": len(kernel._released), "echoes": len(keyboard.heartbeats)}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_releasedPressesAreForgottenOnceTheHelperCanSayNothingOfThem(tmp_path: Path):
+	value = runKernelChild(tmp_path, NOTHING_KEPT_CHILD)
+	assert value["kept"] == 0, value

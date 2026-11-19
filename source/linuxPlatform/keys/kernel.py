@@ -115,10 +115,6 @@ XKB_REPEAT_KEYS = 1
 #: their own, which opens a menu.
 MODIFIERS_PASSED_UNDER_NVDA = X.ShiftMask | X.ControlMask
 MODIFIERS_KEPT_UNDER_NVDA = X.Mod1Mask | X.Mod4Mask
-#: Seconds beyond the helper's bound for a press that a press released is remembered for, by its number:
-#: the helper may say it passed the press on after the release has come.
-EXPIRY_SLACK = 1.0
-
 _DEPRESSED = xkb.StateComponent.XKB_STATE_MODS_DEPRESSED
 
 
@@ -275,6 +271,11 @@ class _Press:
 	expired: bool = False
 	#: Whether it was decided by this source's own thread, NVDA not having answered in time.
 	defaulted: bool = False
+	#: The first heartbeat whose echo comes after the helper read this source's verdict on it, once
+	#: sent.
+	answeredBefore: int | None = None
+	#: Whether the helper asked for a verdict on it, and so may say EXPIRED.
+	asked: bool = True
 	#: Whether the helper dropped it undecided, as it does the keys of the emergency chord.
 	dropped: bool = False
 	#: Whether it came while the X source held a document's keys for NVDA's focus to come back to it.
@@ -350,8 +351,6 @@ class KernelKeySource:
 		self._x = xSource
 		self._canWait = bool(welcome.features & keydClient.FEATURE_WAIT)
 		self._answerWithin = {kind: welcome.verdictTimeout * share for kind, share in ANSWER_SHARES.items()}
-		#: Seconds after which the helper passes on a press it was not answered about.
-		self._bound = keydClient.VERDICT_WAIT_TIMEOUT if self._canWait else welcome.verdictTimeout
 		self._wakeRead, self._wakeWrite = os.pipe()
 		self._commands: deque[Callable[[], None]] = deque()
 		self._stopping = False
@@ -402,10 +401,8 @@ class KernelKeySource:
 		self._holders: dict[int, dict[int, _Press]] = {}
 		#: Sequence number: the press, while it is down.
 		self._bySeq: dict[int, _Press] = {}
-		#: Sequence number: the press, released while the helper may still pass it on; and when each
-		#: is forgotten, in order.
+		#: Sequence number: the press, released while the helper may still say it passed it on.
 		self._released: dict[int, _Press] = {}
-		self._forget: deque[tuple[float, int]] = deque()
 		#: Key code: the press of each Alt or Super kept under the NVDA key and still held, which goes
 		#: down in the X display before a key passed on with it; and the key codes of those that have.
 		self._keptModifiers: dict[int, _Press] = {}
@@ -861,19 +858,23 @@ class KernelKeySource:
 
 	# The helper's connection, on the source's own thread.
 
-	def _send(self, message: bytes) -> None:
+	def _send(self, message: bytes) -> bool:
+		"""Send a message to the helper; whether it went."""
 		if self._lost:
-			return
+			return False
 		try:
 			self._sock.send(message)
 		except BlockingIOError:
 			# The helper is not reading what this sends; it drops a client that does not read its own.
 			log.debugWarning("linda-keyd is not reading what NVDA sends")
+			return False
 		except OSError as e:
 			# The helper says why before it closes, and a send that finds it closed comes before that is
 			# read: what it said is the reason, not the broken pipe.
 			self._readHelper(atEnd=False)
 			self._loseHelper(f"its connection failed: {e.strerror or e}")
+			return False
+		return True
 
 	def _receive(self) -> bytes | None:
 		"""The helper's next message, b"" once it has closed, or None while nothing more has come.
@@ -973,8 +974,9 @@ class KernelKeySource:
 		match message:
 			case keydClient.Key():
 				self._onKey(message, now)
-			case keydClient.HeartbeatEcho():
+			case keydClient.HeartbeatEcho(counter=counter):
 				self._lastEcho = now
+				self._forgetAnswered(counter)
 			case keydClient.Expired(seq=seq):
 				self._onExpired(seq)
 			case keydClient.Locks(leds=leds):
@@ -1140,7 +1142,8 @@ class KernelKeySource:
 		if not press.expired:
 			if press.passed and self._keptModifiers:
 				self._putDownKeptModifiers()
-			self._send(keydClient.verdict(press.seq, keep=not press.passed))
+			if self._send(keydClient.verdict(press.seq, keep=not press.passed)):
+				press.answeredBefore = self._beatCounter + 1
 		if press.passed and press.follows is None:
 			self._passed(press)
 		elif (
@@ -1167,7 +1170,7 @@ class KernelKeySource:
 		# answered too late for the helper.
 		log.debug(f"linda-keyd passed key {seq} on before NVDA answered it")
 		# Released already, the helper read the release before the press's bound came.
-		press = self._bySeq.get(seq) or self._released.get(seq)
+		press = self._bySeq.get(seq) or self._released.pop(seq, None)
 		if press is None:
 			return
 		press.expired = True
@@ -1342,7 +1345,7 @@ class KernelKeySource:
 		)
 		if looks:
 			kind = own = CAPTURE_KIND
-		press = _Press(seq, keycode, now, kind, own, effective, under=under, device=device)
+		press = _Press(seq, keycode, now, kind, own, effective, under=under, device=device, asked=not decided)
 		if kind == CAPTURE_KIND and capture.documentUntil is not None and now < capture.documentUntil:
 			press.document = True
 		if looks:
@@ -1395,7 +1398,15 @@ class KernelKeySource:
 		the first press: the helper has its verdict from the first's."""
 		first = self._presses[keycode]
 		press = _Press(
-			seq, keycode, now, first.kind, first.own, first.effective, device=device, follows=first
+			seq,
+			keycode,
+			now,
+			first.kind,
+			first.own,
+			first.effective,
+			device=device,
+			follows=first,
+			asked=not decided,
 		)
 		self._bySeq[seq] = press
 		if decided:
@@ -1445,12 +1456,26 @@ class KernelKeySource:
 		self._remember(press, now)
 
 	def _remember(self, press: _Press, now: float) -> None:
-		"""Keep a press released by its number for a late EXPIRED, until the helper's bound is past."""
+		"""Keep a press released by its number for a late EXPIRED, for as long as one can come.
+
+		Not for a time: the helper says EXPIRED as it takes a press out of line, which behind a press held
+		with WAIT, or after a freeze it forgives, from whose thaw every bound runs afresh, is later than
+		any bound of the press's own. It handles this client's messages in order, so one for a press
+		this source answered comes before its echo of a heartbeat sent after the answer: an answered
+		press is kept until that echo, one not answered until its EXPIRED or its answer. A press the
+		helper passed on without asking has none to come. Whatever is kept goes with the connection.
+		"""
 		self._bySeq.pop(press.seq, None)
-		while self._forget and self._forget[0][0] <= now:
-			self._released.pop(self._forget.popleft()[1], None)
+		if not press.asked or press.dropped or press.expired:
+			# Passed on by the helper without asking, dropped, or said EXPIRED already: none to come.
+			return
 		self._released[press.seq] = press
-		self._forget.append((press.arrival + self._bound + EXPIRY_SLACK, press.seq))
+
+	def _forgetAnswered(self, echoed: int) -> None:
+		"""Forget each press released whose answer the helper read before the heartbeat echoed."""
+		for seq, press in list(self._released.items()):
+			if press.answeredBefore is not None and echoed >= press.answeredBefore:
+				del self._released[seq]
 
 	def _repeatNow(self, now: float) -> float | None:
 		"""Repeat the key held down that repeats, when it is due, as the X server repeats it: to NVDA alone,
@@ -1509,6 +1534,8 @@ class KernelKeySource:
 		self._presses.clear()
 		self._down.clear()
 		self._bySeq.clear()
+		# Every press is decided now, as the helper has let go or gone: no EXPIRED is to come.
+		self._released.clear()
 		self._nvdaHeld.clear()
 		self._repeating = self._nextRepeat = None
 
