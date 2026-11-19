@@ -52,7 +52,7 @@ def run(ground: "Ground") -> None:
 			return active if ground.shell(f"loginctl show-session {active} -P User").strip() == "1000" else ""
 
 		session = ground.waitFor(textSession, "alice's text console session to be in front", 30)
-		ground.waitForHelperLog(f'Session {{ id: "{session}", uid: 1000 }}', mark)
+		ground.waitForHelperLog(f'Session {{ id: "{session}", uid: 1000, ', mark)
 		ground.machine.log(ground.shell("loginctl list-sessions --no-legend"))
 		goodbye = refused(ground, "inX", "session")
 		assert goodbye["reason"] == "NOT_IN_FRONT" and "is not in front" in goodbye["text"], goodbye
@@ -63,6 +63,6 @@ def run(ground: "Ground") -> None:
 	with ground.subtest("back in front, the session's process is welcomed"):
 		mark = ground.mark()
 		ground.shell(f"chvt {desktop}")
-		ground.waitForHelperLog(f'Session {{ id: "{xSession}", uid: 1000 }}', mark)
+		ground.waitForHelperLog(f'Session {{ id: "{xSession}", uid: 1000, ', mark)
 		client = ground.keydClient("again")
 		assert client.connect()["welcome"]
