@@ -42,8 +42,6 @@ def run(ground: "Ground") -> None:
 		finally:
 			ground.machine.succeed(f"rm -f {SLOW_KEYS_FILE}")
 		app = ground.keys("app", mark)
-		defaulted = len(ground.lindaLogRecords("answered without NVDA"))
-		ground.machine.log(f"Linda's own thread answered {defaulted} presses without NVDA")
 		if ground.lindaLogRecords(WAITS):
 			assert [(r["key"], r["value"]) for r in app] == [("KEY_INSERT", 1), ("KEY_INSERT", 0)], app
 		else:

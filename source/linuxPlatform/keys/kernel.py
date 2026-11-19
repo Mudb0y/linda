@@ -69,8 +69,9 @@ SWITCH_INTERVAL = 0.001
 #: Seconds after the last echo of a heartbeat, beyond the helper's own silence bound, after which the
 #: helper is taken for hung.
 ECHO_SLACK = 1.0
-#: Seconds the layout's thread waits for the X server before it looks whether to stop.
-LAYOUT_TICK = 0.5
+#: Seconds the layout's thread waits for the X server before it looks whether to stop, and whether the
+#: X source grabs a document's keys on another window, whose focus it then watches.
+CAPTURE_LOOK = 0.1
 #: Key code: its lock's light.
 LOCK_KEYCODES = {
 	x11.CAPS_LOCK_KEY + 8: LOCK_CAPS,
@@ -364,6 +365,10 @@ class KernelKeySource:
 		self._xkbOpcode: int | None = None
 		self._xkbEvent: int | None = None
 		self._rulesAtom: int | None = None
+		#: The window the layout's thread watches the focus of, the X source's capture window, and
+		#: (that window, whether it has the focus) as the last of its events said, replaced whole.
+		self._watchedWindow = 0
+		self._focusSeen: tuple[int, bool] = (0, False)
 		#: Key codes down, the locks left out: what holds the modifiers down.
 		self._down: set[int] = set()
 		#: Key code: the press of each key down, from the keyboards and from typeKey.
@@ -654,7 +659,8 @@ class KernelKeySource:
 		d = self._events
 		try:
 			while not self._stopping:
-				select.select([d.fileno()], [], [], LAYOUT_TICK)
+				self._watchCapture()
+				select.select([d.fileno()], [], [], CAPTURE_LOOK)
 				while d.pending_events():
 					self._onXEvent(d.next_event())
 		except (error.ConnectionClosedError, OSError):
@@ -679,6 +685,70 @@ class KernelKeySource:
 			self._loadKeymap()
 		elif event.type == X.PropertyNotify and event.atom == self._rulesAtom:
 			self._loadKeymap()
+		elif (
+			event.type in (X.FocusIn, X.FocusOut)
+			and event.window.id == self._watchedWindow
+			# As the X source reads them: the focus moving within the window, or a grab's, moves none.
+			and event.mode in (X.NotifyNormal, X.NotifyWhileGrabbed)
+			and event.detail not in (X.NotifyInferior, X.NotifyPointer, X.NotifyPointerRoot)
+		):
+			self._focusSeen = (event.window.id, event.type == X.FocusIn)
+
+	def _watchCapture(self) -> None:
+		"""Watch the focus of the window the X source grabs a document's keys on, on this connection,
+		whose thread does next to nothing else and so reads the X server's word sooner than the X
+		source's: that one makes and moves grabs as the focus moves, waiting on the X server each time,
+		and in the guests had the focus coming back to a document a tenth of a second after the X server
+		did, while the first key typed there was already being decided."""
+		window = self._captureState().window
+		if window == self._watchedWindow:
+			return
+		d = self._events
+		gone = error.CatchError(error.BadWindow)
+		if self._watchedWindow:
+			d.create_resource_object("window", self._watchedWindow).change_attributes(
+				event_mask=X.NoEventMask, onerror=gone
+			)
+		self._watchedWindow = window
+		self._focusSeen = (0, False)
+		if window:
+			watched = d.create_resource_object("window", window)
+			watched.change_attributes(event_mask=X.FocusChangeMask, onerror=gone)
+			# Asked once the window is watched, so that no change after it is missed.
+			self._focusSeen = (window, self._hasFocus(watched))
+		d.flush()
+
+	def _hasFocus(self, window) -> bool:
+		"""Whether the keyboard focus is on window or a window inside it."""
+		d = self._events
+		root = d.screen().root.id
+		try:
+			focus = d.get_input_focus().focus
+			for _level in range(16):
+				if isinstance(focus, int) or focus.id == root:
+					return False
+				if focus.id == window.id:
+					return True
+				focus = focus.query_tree().parent
+		except error.BadWindow:
+			return False
+		return False
+
+	def _captureNow(self, now: float) -> x11.CaptureState:
+		"""The X source's capture state, with the focus as this source's own watch has it where the two
+		differ, the watch being the sooner to read the X server's word: what the X source makes of the
+		focus coming back to the window, once it reads it, is made of it here as the X source makes it."""
+		state = self._captureState()
+		window, focused = self._focusSeen
+		if not state.window or window != state.window or focused == state.focused:
+			return state
+		if not focused:
+			return state._replace(focused=False)
+		if state.mode == "off" and state.dormant is not None:
+			return state._replace(
+				focused=True, mode=state.dormant, dormant=None, documentUntil=now + x11.DOCUMENT_GRACE
+			)
+		return state._replace(focused=True)
 
 	def _readRepeat(self) -> None:
 		controls = _XkbGetControls(
@@ -1088,7 +1158,7 @@ class KernelKeySource:
 		levelShift = keycode in tables.levelShift
 		if keycode not in LOCK_KEYCODES:
 			self._down.add(keycode)
-		capture = self._captureState()
+		capture = self._captureNow(now)
 		own = self._ownKind(keycode, effective, capture)
 		under: tuple[_Press, ...] = ()
 		mods = tables.keyMods.get(keycode, 0)
@@ -1419,4 +1489,4 @@ class KernelKeySource:
 			masks = self._modeSets.get(mode, {}).get(press.keycode)
 			if masks is None or press.effective & ~LOCK_MODS not in masks:
 				return False
-		return self._grabsTake(self._captureState())
+		return self._grabsTake(self._captureNow(time.monotonic()))
