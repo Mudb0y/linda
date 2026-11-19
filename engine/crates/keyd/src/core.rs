@@ -31,8 +31,8 @@ use std::time::Instant;
 
 use crate::device::{Devices, Found, GrabError, InputEvent, Keyboard, ReadError, VirtualKeyboard};
 use crate::keys::{
-    Assessment, CHORD, EV_KEY, EV_SYN, KEY_CNT, KeySet, MODIFIERS, SYN_DROPPED, is_virtual_key,
-    modifies,
+    Assessment, CHORD, EV_KEY, EV_SYN, KEY_CAPSLOCK, KEY_CNT, KEY_KP0, KeySet, LED_NUML, MODIFIERS,
+    READER_MODIFIERS, SYN_DROPPED, is_virtual_key, modifies,
 };
 use crate::protocol::*;
 
@@ -131,6 +131,8 @@ struct Entry {
     verdict: Option<bool>,
     /// The client answered the press WAIT.
     waited: bool,
+    /// A press the helper made up after a loss of events, of a key found down.
+    made_up: bool,
 }
 
 impl Entry {
@@ -181,6 +183,10 @@ pub struct Core<D: Devices> {
     line: VecDeque<Entry>,
     /// What became of each decided press until its release: true when it was passed on.
     passed: HashMap<(u32, u16), bool>,
+    /// Modifiers the helper made up after a loss of events and the client passed, which are not
+    /// yet on the virtual keyboard, in the order they were told: they go there, in that order, just
+    /// before the next press that goes out, and not at all if they are let go of first.
+    held_back: Vec<(u32, u16)>,
     /// How many keyboards hold each key down on the virtual keyboard: a key goes down there with
     /// the first and up with the last, so a Shift held on two keyboards stays down until both let
     /// it go.
@@ -234,6 +240,7 @@ impl<D: Devices> Core<D> {
             rescan_at: None,
             line: VecDeque::new(),
             passed: HashMap::new(),
+            held_back: Vec::new(),
             pressed: vec![0; KEY_CNT],
             leds: None,
             leds_by: None,
@@ -1299,8 +1306,11 @@ impl<D: Devices> Core<D> {
     /// it is told now as a press, after those releases, asking for its verdict like any other: it
     /// does nothing by itself, and every key it could change is read after the answer, under it,
     /// as typed; left out, they would go to the program and to the client as typed alone, Control+C
-    /// as C. Any other such key is kept among the unseen, neither told nor put out: told now, it
-    /// could be taken as typed under a modifier that was up when it went down. The unseen count
+    /// as C. Passed, a modifier but Caps Lock waits to go out until a key goes out under it, and
+    /// Insert never goes out, being a key to the program (see advance). Any other such key is kept
+    /// among the unseen, neither told nor put out: told now, it could be taken as typed under a
+    /// modifier that was up when it went down; so is the numpad's Insert with Num Lock on, when
+    /// it is 0. The unseen count
     /// towards the chord, which is looked for at once, since the person may be holding it for a way
     /// out of a helper that fell behind. From the answer on every key is read in order again, so
     /// whatever counts as down when a key is told really is, and was. A key tapped wholly within the
@@ -1317,13 +1327,15 @@ impl<D: Devices> Core<D> {
                 return;
             }
         };
+        // With Num Lock on, the numpad's Insert is 0, a key like any other.
+        let num_lock = self.leds.is_some_and(|l| l & (1 << LED_NUML) != 0);
         let mut unseen = KeySet::new();
         let mut found = Vec::new();
         for code in down
             .iter()
             .filter(|c| is_virtual_key(*c) && !kbd.down.contains(*c))
         {
-            if modifies(code) {
+            if modifies(code) && !(code == KEY_KP0 && num_lock) {
                 found.push(code);
             } else {
                 unseen.insert(code);
@@ -1423,6 +1435,7 @@ impl<D: Devices> Core<D> {
                 arrival: now,
                 verdict: None,
                 waited: false,
+                made_up: value == KEY_PRESS && flags & KEY_SYNTHETIC != 0,
             });
         }
         self.send_client(ToClient::Key(Key {
@@ -1462,14 +1475,27 @@ impl<D: Devices> Core<D> {
                     None => break,
                 };
                 self.line.pop_front();
-                self.passed.insert((e.device, e.code), !keep);
-                if !keep {
+                // A made-up Insert is the screen reader's to know of: to a program it is a key,
+                // which would come typed late, under whatever modifiers the answer found with it.
+                let out = !keep && !(e.made_up && READER_MODIFIERS.contains(&e.code));
+                self.passed.insert((e.device, e.code), out);
+                // Alone it would be a lone tap, Alt moving the focus to the menu bar, where the
+                // key typed with it was lost; Caps Lock's press is what toggles the lock.
+                if out && e.made_up && e.code != KEY_CAPSLOCK {
+                    self.held_back.push((e.device, e.code));
+                } else if out {
                     self.press_virtual(e.code);
                 }
             } else {
                 self.line.pop_front();
                 if self.passed.remove(&(e.device, e.code)) == Some(true) {
-                    self.release_virtual(e.code);
+                    let key = (e.device, e.code);
+                    match self.held_back.iter().position(|h| *h == key) {
+                        Some(i) => {
+                            self.held_back.remove(i);
+                        }
+                        None => self.release_virtual(e.code),
+                    }
                 }
             }
         }
@@ -1510,7 +1536,16 @@ impl<D: Devices> Core<D> {
         }
     }
 
+    /// Puts a press on the virtual keyboard, after the modifiers held back, which it goes out
+    /// under.
     fn press_virtual(&mut self, code: u16) {
+        for (_, m) in std::mem::take(&mut self.held_back) {
+            self.put_down(m);
+        }
+        self.put_down(code);
+    }
+
+    fn put_down(&mut self, code: u16) {
         let Virt::Ready(v) = &mut self.virt else {
             return;
         };
@@ -1575,6 +1610,8 @@ impl<D: Devices> Core<D> {
             }
         }
         self.passed.clear();
+        // Never on the virtual keyboard, they need no release, and must not go out as taps.
+        self.held_back.clear();
         let rest: Vec<InputEvent> = self.batch.drain(..).collect();
         self.tap(self.batch_from, &rest);
         let mut keyboards = std::mem::take(&mut self.keyboards);

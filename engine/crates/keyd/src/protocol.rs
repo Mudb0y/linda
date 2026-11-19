@@ -90,13 +90,28 @@
 //! - then for each key the kernel has down that was not told down and that modifies others, one
 //!   of [`MODIFIERS`](crate::keys::MODIFIERS) or
 //!   [`READER_MODIFIERS`](crate::keys::READER_MODIFIERS), in rising order of code, a press flagged
-//!   [`KEY_ASK`] and [`KEY_SYNTHETIC`]. It is a press like any other: it wants a verdict, which
-//!   [`VERDICT_TIMEOUT`], WAIT, EXPIRED and the run of unanswered presses govern as for any press,
-//!   it goes on the virtual keyboard when passed, and its release comes later as an ordinary
-//!   release, without flags, once read. It went down at a moment that cannot be known, perhaps
-//!   before keys now taken as down; every key read after it was typed under it, for as long as its
-//!   release has not come. Let go of after the answer, it is a press and a release with nothing
-//!   between;
+//!   [`KEY_ASK`] and [`KEY_SYNTHETIC`]; the numpad's Insert only while the Num Lock light is off,
+//!   since with it on the key is 0. Rising order of code is not the order the keys went down,
+//!   which cannot be known. Such a press wants a verdict, which [`VERDICT_TIMEOUT`], WAIT,
+//!   EXPIRED and the run of unanswered presses govern as for any press, and a press read after it
+//!   waits for it in line as behind any press. It went down at a moment that cannot be known,
+//!   perhaps before keys now taken as down; every key read after it was typed under it, for as
+//!   long as its release has not come. Its release comes as for any key: without flags once read,
+//!   or flagged [`KEY_SYNTHETIC`] alone if it is lost to a further loss of events or its keyboard
+//!   vanishes. Let go of after the answer, it is a press and a release with nothing between. What
+//!   reaches the virtual keyboard depends on the key:
+//!   - one of the [`MODIFIERS`](crate::keys::MODIFIERS) but Caps Lock, passed, is held back from
+//!     the virtual keyboard until a press goes out there, and goes there just before that press;
+//!     several held back go together, in the order told. Let go of before then, it never goes
+//!     there at all, nor its release, so that a modifier whose combination was lost with the
+//!     loss, Alt of Alt+F4, does not reach the program alone. Until then the client has it down
+//!     and the virtual keyboard has not; as the helper lets go it is simply dropped;
+//!   - Caps Lock, passed, goes on the virtual keyboard at once, as any press: its press is what
+//!     toggles the lock, as when it is typed by hand, and the light follows from the desktop;
+//!   - Insert and the numpad's Insert, modifiers to the screen reader alone and keys like any
+//!     other to a program, never go on the virtual keyboard, nor their release: the verdict on
+//!     such a press is taken, and changes nothing there, since typed late it would come under
+//!     whatever modifiers the answer found with it, Shift+Insert for Insert pressed first;
 //! - and nothing for any other key the kernel has down that was not told down: neither its
 //!   repeats nor its release are sent, and a later press of it is sent as any press.
 //!

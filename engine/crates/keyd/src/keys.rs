@@ -49,8 +49,10 @@ pub const MODIFIERS: [u16; 9] = [29, 42, 54, 56, 97, 100, 125, 126, KEY_CAPSLOCK
 /// Insert and the numpad's Insert, NVDA's own modifier keys, Caps Lock, its third, being among the
 /// MODIFIERS already. A key of either list the kernel has down after dropping events, which the
 /// helper had not told the client was down, is told as a press, so that a key typed under it is
-/// not taken for one typed alone. A layout can make further keys modifiers, a level shift on the
-/// key left of Z, say, which neither list knows: the same question, still open, as which keys
+/// not taken for one typed alone; the numpad's Insert only with Num Lock off, since with it on
+/// the key is 0. To a program these two are keys like any other, so made up they are told and
+/// never put on the virtual keyboard. A layout can make further keys modifiers, a level shift on
+/// the key left of Z, say, which neither list knows: the same question, still open, as which keys
 /// keep their place in line.
 pub const READER_MODIFIERS: [u16; 2] = [KEY_INSERT, KEY_KP0];
 

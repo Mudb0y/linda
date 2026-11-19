@@ -2223,6 +2223,7 @@ fn fault_the_chord_held_through_lost_events_lets_go() {
 // with cargo test -p linda-keyd -- --ignored while the fault it names stands.
 
 const KEY_TAB: u16 = 15;
+const KEY_LEFTALT: u16 = 56;
 /// The desktop repeats a key held down longer than this: org.mate.peripherals-keyboard's delay in
 /// mate-settings-daemon 1.28, and GNOME's; a bare X server waits 660 ms.
 const DESKTOP_REPEAT_DELAY: Duration = Duration::from_millis(500);
@@ -2378,7 +2379,133 @@ fn a_modifier_found_down_after_a_loss_is_told_after_the_releases_and_decided_lik
     );
 }
 
-/// A made-up press nobody answers is passed at its bound with EXPIRED, as any press.
+impl T {
+    /// After a loss with `keys` down and unread, the presses the helper made up, all passed.
+    fn made_up_and_passed(&mut self, k: u32, keys: &[u16]) -> Vec<Key> {
+        for c in keys {
+            self.w.change_unread(k, *c, true);
+        }
+        self.w.overflow(k, &[]);
+        self.core.keyboard_ready(k, self.now);
+        self.take();
+        let told = self.keys();
+        for key in &told {
+            self.verdict(key.seq, false);
+        }
+        told
+    }
+}
+
+/// Alt+F4 typed during a stall, F4 lost and Alt let go of after: the program gets no bare Alt,
+/// which would move the focus to the menu bar. The client is told both.
+#[test]
+fn a_made_up_modifier_let_go_of_before_anything_goes_out_under_it_never_goes_out() {
+    let (mut t, k) = T::capturing();
+    let told = t.made_up_and_passed(k, &[KEY_LEFTALT]);
+    assert_eq!(told.len(), 1);
+    t.release(k, KEY_LEFTALT);
+    let told: Vec<(u16, u8)> = t.keys().iter().map(|k| (k.code, k.value)).collect();
+    assert_eq!(told, vec![(KEY_LEFTALT, KEY_RELEASE)]);
+    t.pass(VERDICT_TIMEOUT);
+    assert_eq!(t.w.emitted(), vec![]);
+    let seq = {
+        t.press(k, KEY_A);
+        t.last_seq()
+    };
+    t.verdict(seq, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1)]);
+}
+
+/// Held back, Shift and Control go out in the order told, rising by code, just before the first
+/// press that goes out, and stay down for the keys after it; held back as the helper lets go,
+/// they never go out at all.
+#[test]
+fn made_up_modifiers_go_out_together_before_the_first_key_under_them() {
+    let (mut t, k) = T::capturing();
+    t.made_up_and_passed(k, &[KEY_LEFTSHIFT, KEY_LEFTCTRL]);
+    assert_eq!(t.w.emitted(), vec![]);
+    // A kept press sends out nothing, so they wait on.
+    t.press(k, KEY_G);
+    let g = t.last_seq();
+    t.verdict(g, true);
+    assert_eq!(t.w.emitted(), vec![]);
+    t.press(k, KEY_A);
+    let a = t.last_seq();
+    t.verdict(a, false);
+    t.press(k, KEY_C);
+    let c = t.last_seq();
+    t.verdict(c, false);
+    assert_eq!(
+        t.w.emitted(),
+        vec![
+            (KEY_LEFTCTRL, 1),
+            (KEY_LEFTSHIFT, 1),
+            (KEY_A, 1),
+            (KEY_C, 1)
+        ]
+    );
+
+    let (mut t, k) = T::capturing();
+    t.made_up_and_passed(k, &[KEY_LEFTALT]);
+    t.w.press(k, KEY_TAB);
+    t.send(FromClient::Stop);
+    t.assert_let_go();
+    assert_eq!(t.w.emitted(), vec![(KEY_TAB, 1), (KEY_TAB, 0)]);
+}
+
+/// Caps Lock found down goes out when passed, not held back: its press is what toggles the lock,
+/// which the light then follows from the desktop, as for a Caps Lock typed by hand.
+#[test]
+fn a_made_up_caps_lock_passed_goes_out_at_once() {
+    let (mut t, k) = T::capturing();
+    t.made_up_and_passed(k, &[KEY_CAPSLOCK]);
+    assert_eq!(t.w.emitted(), vec![(KEY_CAPSLOCK, 1)]);
+    t.release(k, KEY_CAPSLOCK);
+    assert_eq!(t.w.emitted(), vec![(KEY_CAPSLOCK, 1), (KEY_CAPSLOCK, 0)]);
+}
+
+/// Insert and the numpad's Insert found down are told, for the screen reader, and never put out,
+/// whatever the verdict, nor their release; with Num Lock on the numpad's is 0, and stays unseen.
+#[test]
+fn a_made_up_insert_is_told_and_never_put_out() {
+    let (mut t, k) = T::capturing();
+    let told: Vec<(u16, u8, u8)> = t
+        .made_up_and_passed(k, &[KEY_INSERT, KEY_KP0])
+        .iter()
+        .map(|k| (k.code, k.value, k.flags))
+        .collect();
+    assert_eq!(
+        told,
+        vec![
+            (KEY_KP0, KEY_PRESS, KEY_ASK | KEY_SYNTHETIC),
+            (KEY_INSERT, KEY_PRESS, KEY_ASK | KEY_SYNTHETIC),
+        ]
+    );
+    t.press(k, KEY_A);
+    let a = t.last_seq();
+    t.verdict(a, false);
+    t.release(k, KEY_INSERT);
+    t.release(k, KEY_KP0);
+    let told: Vec<(u16, u8)> = t.keys().iter().map(|k| (k.code, k.value)).collect();
+    assert_eq!(
+        told,
+        vec![(KEY_INSERT, KEY_RELEASE), (KEY_KP0, KEY_RELEASE)]
+    );
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1)]);
+
+    let (mut t, k) = T::capturing();
+    t.desktop_leds(LOCK_NUM);
+    t.sent();
+    let told: Vec<u16> = t
+        .made_up_and_passed(k, &[KEY_KP0, KEY_INSERT])
+        .iter()
+        .map(|k| k.code)
+        .collect();
+    assert_eq!(told, vec![KEY_INSERT]);
+}
+
+/// A made-up press nobody answers is passed at its bound with EXPIRED, as any press, and a
+/// made-up modifier so passed goes out with the first key under it.
 #[test]
 fn a_made_up_press_left_unanswered_is_expired_at_its_bound() {
     let (mut t, k) = T::capturing();
@@ -2391,7 +2518,10 @@ fn a_made_up_press_left_unanswered_is_expired_at_its_bound() {
     assert!(t.expired().is_empty());
     t.pass(ms(1));
     assert_eq!(t.expired(), vec![control]);
-    assert_eq!(t.w.emitted(), vec![(KEY_LEFTCTRL, 1)]);
+    t.press(k, KEY_C);
+    assert_eq!(t.w.emitted(), vec![]);
+    t.pass(VERDICT_TIMEOUT);
+    assert_eq!(t.w.emitted(), vec![(KEY_LEFTCTRL, 1), (KEY_C, 1)]);
 }
 
 #[test]
@@ -3068,6 +3198,8 @@ fn around_a_loss(seq: &[Phys], a: usize, b: usize, r: usize, q: usize) -> Result
     let mut told = KeySet::new();
     let mut made_up = KeySet::new();
     let mut out = KeySet::new();
+    // Keys out on the virtual keyboard that a press has gone out under since.
+    let mut under = KeySet::new();
     let mut emitted = 0;
     let mut fired = false;
     let mut look = |t: &mut T, p: Option<usize>| -> Result<(), String> {
@@ -3083,9 +3215,12 @@ fn around_a_loss(seq: &[Phys], a: usize, b: usize, r: usize, q: usize) -> Result
                             return Err(format!("{} told down twice", key.code));
                         }
                         let at = pressed_at(key.code, p)?;
+                        // When a made-up press went down, against the keys told down, cannot be
+                        // known; it is told as made up.
                         if key.flags & KEY_SYNTHETIC != 0 {
                             made_up.insert(key.code);
                         } else {
+                            made_up.remove(key.code);
                             for m in MODIFIERS
                                 .into_iter()
                                 .chain(READER_MODIFIERS)
@@ -3113,7 +3248,6 @@ fn around_a_loss(seq: &[Phys], a: usize, b: usize, r: usize, q: usize) -> Result
                             return Err(format!("{} told up, never told down", key.code));
                         }
                         told.remove(key.code);
-                        made_up.remove(key.code);
                     }
                     ToClient::Released {
                         reason: Released::Emergency,
@@ -3129,30 +3263,39 @@ fn around_a_loss(seq: &[Phys], a: usize, b: usize, r: usize, q: usize) -> Result
                     return Err(format!("{code} put out twice"));
                 }
                 let at = pressed_at(code, p)?;
-                if !made_up.contains(code) {
-                    for m in MODIFIERS
-                        .into_iter()
-                        .chain(READER_MODIFIERS)
-                        .filter(|m| *m != code)
-                    {
-                        if out.contains(m) && !at.contains(m) {
-                            return Err(format!(
-                                "{code} put out under {m}, which was up when it went down"
-                            ));
-                        }
-                        if !out.contains(m) && at.contains(m) {
-                            return Err(format!(
-                                "{code} put out without {m}, which was down when it went down"
-                            ));
-                        }
+                if made_up.contains(code) && READER_MODIFIERS.contains(&code) {
+                    return Err(format!("{code}, made up, put out"));
+                }
+                // To a program only the nine are modifiers. A made-up one goes out just before
+                // the first key under it, and is judged by that key.
+                for m in MODIFIERS
+                    .into_iter()
+                    .filter(|m| *m != code && !made_up.contains(code))
+                {
+                    if out.contains(m) && !at.contains(m) {
+                        return Err(format!(
+                            "{code} put out under {m}, which was up when it went down"
+                        ));
                     }
+                    if !out.contains(m) && at.contains(m) {
+                        return Err(format!(
+                            "{code} put out without {m}, which was down when it went down"
+                        ));
+                    }
+                }
+                for c in out.iter() {
+                    under.insert(c);
                 }
                 out.insert(code);
             } else {
                 if !out.contains(code) {
                     return Err(format!("{code} released, never put out"));
                 }
+                if made_up.contains(code) && !under.contains(code) && code != KEY_CAPSLOCK {
+                    return Err(format!("{code}, made up, put out alone"));
+                }
                 out.remove(code);
+                under.remove(code);
             }
         }
         emitted = all.len();
@@ -3229,6 +3372,24 @@ fn every_loss(seqs: &[Vec<Phys>], judge: impl Fn(&[Phys], usize, usize, Result<b
 #[test]
 fn no_key_goes_out_under_a_modifier_up_nor_without_one_down_in_any_order_around_a_loss_of_events() {
     let seqs = sequences(&[(KEY_LEFTCTRL, 2), (KEY_INSERT, 1), (KEY_A, 1)], 6);
+    every_loss(&seqs, |seq, _, _, r| {
+        if let Err(e) = r {
+            panic!("{seq:?}: {e}");
+        }
+    });
+}
+
+#[test]
+fn modifiers_found_down_after_a_loss_go_out_before_what_is_typed_under_them_and_never_alone() {
+    let seqs = sequences(
+        &[
+            (KEY_LEFTCTRL, 1),
+            (KEY_LEFTSHIFT, 1),
+            (KEY_INSERT, 1),
+            (KEY_A, 1),
+        ],
+        5,
+    );
     every_loss(&seqs, |seq, _, _, r| {
         if let Err(e) = r {
             panic!("{seq:?}: {e}");
@@ -3348,7 +3509,6 @@ fn fault_a_key_typed_under_the_nvda_key_held_across_a_loss_is_not_told_without_i
 /// program stay unseen for this very reason; the enumeration exempts made-up presses from its
 /// ordering checks, and so cannot see it.
 #[test]
-#[ignore = "sixth review: a made-up Insert the client passes is typed late, under modifiers that went down after it"]
 fn fault_a_made_up_insert_is_not_typed_under_modifiers_it_did_not_go_down_under() {
     for insert_first in [true, false] {
         let (mut t, k) = T::capturing();
