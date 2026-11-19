@@ -227,12 +227,13 @@ impl<D: Devices> Server<D> {
         }
         let ready = self.poll(deadline.map(|d| d.saturating_duration_since(now)))?;
         let woke = Instant::now();
-        if let Some(frozen) = frozen_for(deadline, now, woke) {
+        if let Some(frozen) = frozen_for(deadline, now, woke)
+            && self.core.thawed(frozen, woke)
+        {
             log!(
                 "every thread was stopped for {} ms; the client is not held to it",
                 frozen.as_millis()
             );
-            self.core.thawed(frozen);
         }
         let now = woke;
         // Before anything that could grab: the loop may have slept long while it held nothing,
@@ -297,6 +298,7 @@ impl<D: Devices> Server<D> {
                         Notice::Console(n) => self.core.console_changed(n, now),
                         Notice::Admitted(conn, r) => self.core.admitted(conn, r, now),
                         Notice::Sleep { asleep, inhibitor } => {
+                            self.progress.sleeping(asleep, now);
                             self.core.sleeping(asleep, now);
                             self.carry_out(now);
                             // Holding nothing while asleep, the helper cannot leave a keyboard dead
@@ -463,8 +465,8 @@ impl<D: Devices> Server<D> {
 /// `began`, came back at `woke` more than WATCHDOG_FROZEN late; as the watchdog thread judges its own
 /// sleep. A loop stalled in its own work gains nothing by this, since only the time spent waiting in
 /// poll is measured: poll comes back late only when the process is not run, frozen or starved of
-/// the processor, and then the client was not run either. The most it gives is a stretch that the
-/// watchdog thread, which judges the loop by its turns whatever this says, has let pass.
+/// the processor, and then the client was not run either. Whether the stretch is forgiven is the
+/// core's to say, by whether logind announced a sleep.
 fn frozen_for(deadline: Option<Instant>, began: Instant, woke: Instant) -> Option<Duration> {
     let late = woke.saturating_duration_since(deadline?.max(began));
     (late > WATCHDOG_FROZEN).then_some(late)

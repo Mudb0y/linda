@@ -204,6 +204,10 @@ pub struct Core<D: Devices> {
     virtual_broken: bool,
     /// logind has said the machine is going to sleep, and has not said it woke.
     asleep: bool,
+    /// When logind last said the machine had woken.
+    woke: Option<Instant>,
+    /// When a freeze logind had not announced was last forgiven, as FREEZE_FORGIVEN_EVERY allows.
+    forgiven: Option<Instant>,
     /// Since when refusals have been counted for the log, how many it has a line for, and how many
     /// more there were, as REFUSALS_LOGGED has it.
     refusals: Option<(Instant, usize, usize)>,
@@ -236,6 +240,8 @@ impl<D: Devices> Core<D> {
             drop_pending: None,
             virtual_broken: false,
             asleep: false,
+            woke: None,
+            forgiven: None,
             refusals: None,
             out: Vec::new(),
         }
@@ -503,16 +509,34 @@ impl<D: Devices> Core<D> {
             }
         );
         self.asleep = asleep;
-        if !asleep && let Some(c) = self.client.as_mut() {
-            c.last_heard = now;
+        if !asleep {
+            self.woke = Some(now);
+            if let Some(c) = self.client.as_mut() {
+                c.last_heard = now;
+            }
         }
         self.settle(now);
     }
 
     /// The whole process was frozen for `frozen`, as while the machine suspended or resumed, which
-    /// the loop knows by a wait that came back that much later than it asked. Neither the client's
-    /// silence nor a press's wait for its verdict counts that time: the client was frozen too.
-    pub fn thawed(&mut self, frozen: Duration) {
+    /// the loop knows by a wait that came back that much later than it asked, at `now`. Neither the
+    /// client's silence nor a press's wait for its verdict counts that time, the client having been
+    /// frozen too: always while logind has announced a sleep (until SLEEP_GRACE after it said the
+    /// machine woke), and otherwise once in FREEZE_FORGIVEN_EVERY, for a sleep that went round
+    /// logind. Never again and again: a machine starved of the processor wakes the loop late at
+    /// every turn, and a client that has hung must not keep the keyboards by it. Returns whether the
+    /// time was forgiven.
+    pub fn thawed(&mut self, frozen: Duration, now: Instant) -> bool {
+        let announced = self.asleep || self.woke.is_some_and(|w| now <= w + SLEEP_GRACE);
+        if !announced {
+            if self
+                .forgiven
+                .is_some_and(|f| now < f + FREEZE_FORGIVEN_EVERY)
+            {
+                return false;
+            }
+            self.forgiven = Some(now);
+        }
         if let Some(c) = self.client.as_mut() {
             c.last_heard += frozen;
         }
@@ -529,6 +553,7 @@ impl<D: Devices> Core<D> {
             *first += frozen;
             *last += frozen;
         }
+        true
     }
 
     /// The kernel has put console `n` in front. A console other than that of the session logind

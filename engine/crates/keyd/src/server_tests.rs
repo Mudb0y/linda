@@ -697,7 +697,6 @@ fn stalled_stderr_panic() {
 /// within its two seconds until a turn takes longer. This drives the core as Server::turn does, with
 /// its deadlines and frozen_for.
 #[test]
-#[ignore = "second review: fails while the fault stands"]
 fn fault_a_starved_helper_lets_go_of_a_silent_client_about_when_the_heartbeat_says() {
     let w = World::new();
     let k = w.plug("keyboard");
@@ -740,7 +739,7 @@ fn fault_a_starved_helper_lets_go_of_a_silent_client_about_when_the_heartbeat_sa
         }
         let woke = deadline.expect("a deadline while holding").max(began) + late;
         if let Some(frozen) = frozen_for(deadline, began, woke) {
-            core.thawed(frozen);
+            core.thawed(frozen, woke);
         }
         now = woke;
         core.tick(now);

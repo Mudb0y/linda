@@ -1622,7 +1622,7 @@ fn a_frozen_stretch_counts_against_neither_the_heartbeat_nor_a_verdict() {
     let a = t.last_seq();
     let frozen = Duration::from_secs(3);
     t.now += frozen;
-    t.core.thawed(frozen);
+    t.core.thawed(frozen, t.now);
     t.core.tick(t.now);
     t.take();
     assert!(!t.closed(CLIENT));
@@ -1634,6 +1634,56 @@ fn a_frozen_stretch_counts_against_neither_the_heartbeat_nor_a_verdict() {
     t.quiet(HEARTBEAT_TIMEOUT);
     assert_eq!(goodbye_reason(&t.sent()), Some(Goodbye::Silent));
     t.assert_let_go();
+}
+
+#[test]
+fn a_freeze_logind_did_not_announce_is_forgiven_once_in_a_while_and_an_announced_one_always() {
+    let (mut t, _k) = T::capturing();
+    let s = Duration::from_secs;
+    assert!(t.core.thawed(s(3), t.now));
+    t.now += s(10);
+    assert!(
+        !t.core.thawed(s(3), t.now),
+        "forgiven again within the minute"
+    );
+    t.now += FREEZE_FORGIVEN_EVERY;
+    assert!(t.core.thawed(s(3), t.now));
+    t.core.sleeping(true, t.now);
+    for _ in 0..5 {
+        t.now += s(1);
+        assert!(
+            t.core.thawed(s(3), t.now),
+            "an announced sleep not forgiven"
+        );
+    }
+    t.core.sleeping(false, t.now);
+    t.now += SLEEP_GRACE;
+    assert!(t.core.thawed(s(3), t.now));
+    t.now += s(1);
+    assert!(!t.core.thawed(s(3), t.now));
+}
+
+#[test]
+fn on_a_starved_machine_a_press_is_passed_on_within_its_bound_and_two_late_wakes() {
+    let (mut t, k) = T::capturing();
+    t.press(k, KEY_A);
+    let read = t.now;
+    let late = Duration::from_secs(1);
+    // Every wake of the loop a second late, each taken for a freeze as Server::turn does.
+    while t.w.emitted().is_empty() {
+        let next = t.core.next_wake().unwrap().min(t.now + LOOP_TICK);
+        let woke = next.max(t.now) + late;
+        t.core.thawed(woke - next.max(t.now), woke);
+        t.now = woke;
+        t.send(FromClient::Heartbeat { counter: 0 });
+        t.core.tick(t.now);
+        t.take();
+    }
+    assert!(
+        t.now - read <= VERDICT_TIMEOUT + 2 * late,
+        "{:?}",
+        t.now - read
+    );
 }
 
 // The virtual keyboard failing while in use, other grabbers, and stopping.

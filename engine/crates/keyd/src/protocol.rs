@@ -220,6 +220,14 @@ pub const LOOP_TICK: Duration = Duration::from_millis(200);
 /// scheduler under load is not taken for a hung one; well short of the systemd watchdog, which
 /// covers the watchdog thread itself.
 pub const STALL_LIMIT: Duration = Duration::from_secs(1);
+/// How long after logind has said the machine woke a late wake is still taken for the sleep's: the
+/// processes thaw before logind says so, and the loop may be woken late once more after it.
+pub const SLEEP_GRACE: Duration = Duration::from_secs(2);
+/// How often a freeze of the whole process that logind did not announce is forgiven: once, so that
+/// a sleep that went round logind does not count against the client or make the watchdog thread end
+/// the helper, and not again within this, so that a machine starved of the processor, which wakes
+/// every thread late at every turn, gains a hung client a single late wake and no more.
+pub const FREEZE_FORGIVEN_EVERY: Duration = Duration::from_secs(60);
 /// systemd's watchdog timeout while the machine sleeps, set before sleep and put back on waking,
 /// when the helper holds nothing. Ten minutes: the processes are frozen only while devices suspend
 /// and resume, seconds and not minutes, and a helper that hangs meanwhile is still caught.

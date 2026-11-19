@@ -8,13 +8,14 @@ use std::fmt;
 use std::io;
 use std::os::unix::net::UnixDatagram;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::device::Guard;
 use crate::protocol::{
-    SLEEP_WATCHDOG, STALL_LIMIT, VERDICT_TIMEOUT, WATCHDOG_CHECK, WATCHDOG_FROZEN,
+    FREEZE_FORGIVEN_EVERY, SLEEP_GRACE, SLEEP_WATCHDOG, STALL_LIMIT, VERDICT_TIMEOUT,
+    WATCHDOG_CHECK, WATCHDOG_FROZEN,
 };
 
 const NONE: u64 = u64::MAX;
@@ -24,6 +25,9 @@ pub struct Progress {
     start: Instant,
     turned: AtomicU64,
     oldest: AtomicU64,
+    /// Whether logind has announced a sleep, and when it last said the machine woke.
+    asleep: AtomicBool,
+    woke: AtomicU64,
 }
 
 impl Progress {
@@ -32,6 +36,8 @@ impl Progress {
             start: Instant::now(),
             turned: AtomicU64::new(0),
             oldest: AtomicU64::new(NONE),
+            asleep: AtomicBool::new(false),
+            woke: AtomicU64::new(NONE),
         })
     }
 
@@ -44,6 +50,21 @@ impl Progress {
         self.turned.store(self.ms(now), Relaxed);
         self.oldest
             .store(oldest.map_or(NONE, |t| self.ms(t)), Relaxed);
+    }
+
+    /// logind says the machine is going to sleep, or has woken, at `now`.
+    pub fn sleeping(&self, asleep: bool, now: Instant) {
+        if !asleep {
+            self.woke.store(self.ms(now), Relaxed);
+        }
+        self.asleep.store(asleep, Relaxed);
+    }
+
+    /// Whether logind has announced a sleep around `now`.
+    fn announced(&self, now: Instant) -> bool {
+        let woke = self.woke.load(Relaxed);
+        self.asleep.load(Relaxed)
+            || (woke != NONE && self.ms(now) <= woke + SLEEP_GRACE.as_millis() as u64)
     }
 
     /// What is wrong at `now`, if anything.
@@ -73,14 +94,32 @@ impl Progress {
 struct Rounds {
     last: Instant,
     /// When the thread last woke from a sleep far longer than it asked for, as WATCHDOG_FROZEN
-    /// says: the loop is judged from then on, not before.
+    /// says, and forgave it: the loop is judged from then on, not before.
     fresh: Option<Instant>,
+    /// When it last forgave one that logind had not announced, as FREEZE_FORGIVEN_EVERY allows.
+    forgiven: Option<Instant>,
 }
 
 impl Rounds {
+    fn new(now: Instant) -> Rounds {
+        Rounds {
+            last: now,
+            fresh: None,
+            forgiven: None,
+        }
+    }
+
     fn judge(&mut self, progress: &Progress, now: Instant) -> Option<Stall> {
         if now.saturating_duration_since(self.last) > WATCHDOG_FROZEN {
-            self.fresh = Some(now);
+            if progress.announced(now) {
+                self.fresh = Some(now);
+            } else if self
+                .forgiven
+                .is_none_or(|f| now >= f + FREEZE_FORGIVEN_EVERY)
+            {
+                self.forgiven = Some(now);
+                self.fresh = Some(now);
+            }
         }
         self.last = now;
         progress.stalled_after(now, self.fresh)
@@ -114,10 +153,7 @@ pub fn spawn(
     thread::Builder::new()
         .name("watchdog".into())
         .spawn(move || {
-            let mut rounds = Rounds {
-                last: Instant::now(),
-                fresh: None,
-            };
+            let mut rounds = Rounds::new(Instant::now());
             loop {
                 thread::sleep(WATCHDOG_CHECK);
                 let stall = rounds.judge(&progress, Instant::now());
@@ -285,10 +321,7 @@ mod tests {
         // A loop stalled while the watchdog thread wakes on time is caught within STALL_LIMIT.
         let p = Progress::new();
         p.turned(t, Some(t));
-        let mut r = Rounds {
-            last: t,
-            fresh: None,
-        };
+        let mut r = Rounds::new(t);
         let after = caught(&p, &mut r, t) - t;
         assert!(
             after > STALL_LIMIT && after <= STALL_LIMIT + WATCHDOG_CHECK,
@@ -297,10 +330,7 @@ mod tests {
         // Every thread frozen for three seconds, as across a suspend: the watchdog thread wakes to
         // a sleep that took them all, and the loop's last turn and oldest key are not held against
         // it; a loop that still does not turn is caught as it would have been from the thaw.
-        let mut r = Rounds {
-            last: t,
-            fresh: None,
-        };
+        let mut r = Rounds::new(t);
         let thawed = t + Duration::from_secs(3);
         assert_eq!(r.judge(&p, thawed), None);
         let after = caught(&p, &mut r, thawed) - thawed;
@@ -308,6 +338,39 @@ mod tests {
             after > STALL_LIMIT && after <= STALL_LIMIT + WATCHDOG_CHECK,
             "{after:?}"
         );
+    }
+
+    #[test]
+    fn on_a_starved_machine_the_watchdog_forgives_one_late_wake_and_no_more() {
+        let t = Instant::now();
+        let late = Duration::from_secs(1);
+        let p = Progress::new();
+        p.turned(t, None);
+        let mut r = Rounds::new(t);
+        // A loop that has stopped, and every round of the watchdog thread a second late.
+        let mut at = t;
+        let caught = loop {
+            at += WATCHDOG_CHECK + late;
+            if r.judge(&p, at).is_some() {
+                break at - t;
+            }
+            assert!(at - t < Duration::from_secs(30), "never caught");
+        };
+        assert!(caught <= 2 * (WATCHDOG_CHECK + late), "{caught:?}");
+        // While logind has announced a sleep, every late wake is forgiven, and after it the loop is
+        // judged from the last.
+        let p = Progress::new();
+        p.turned(t, None);
+        let mut r = Rounds::new(t);
+        p.sleeping(true, t);
+        let mut at = t;
+        for _ in 0..10 {
+            at += WATCHDOG_CHECK + late;
+            assert_eq!(r.judge(&p, at), None);
+        }
+        p.sleeping(false, at);
+        p.turned(at, None);
+        assert_eq!(r.judge(&p, at + WATCHDOG_CHECK), None);
     }
 
     #[test]
