@@ -215,6 +215,7 @@ class StandIn:
 		settle: float = 0.0,
 		features: int = FEATURE_WAIT,
 		waitTimeout: float = 0.6,
+		announcedHeartbeatTimeout: float | None = None,
 	) -> None:
 		"""
 		:param toX: Whether keys go on to the X display; without, they go nowhere, and only what the
@@ -223,12 +224,16 @@ class StandIn:
 			kept, as for a client that cannot keep it.
 		:param features: Those it grants of the features a client asks for.
 		:param waitTimeout: The bound of a press the client answered with WAIT.
+		:param announcedHeartbeatTimeout: The silence WELCOME says the stand-in lets go after, when it is
+			to be another than the one kept, as for a stand-in frozen with its client, which has no
+			means of its own to tell that it was.
 		"""
 		self.features = features
 		self.waitTimeout = waitTimeout
 		#: The features granted to the client served now.
 		self.granted = 0
 		self.announcedVerdictTimeout = announcedVerdictTimeout
+		self.announcedHeartbeatTimeout = announcedHeartbeatTimeout
 		#: Seconds from the first START to the first grab, as the helper's virtual keyboard settles.
 		self.settle = settle
 		self._captureAt = 0.0
@@ -624,7 +629,7 @@ class StandIn:
 			for x in (
 				self.announcedVerdictTimeout or self.verdictTimeout,
 				self.heartbeatInterval,
-				self.heartbeatTimeout,
+				self.announcedHeartbeatTimeout or self.heartbeatTimeout,
 				self.unansweredSpan,
 			)
 		]

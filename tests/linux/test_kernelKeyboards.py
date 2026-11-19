@@ -200,3 +200,57 @@ keyboard.close()
 def test_helperLostOnASendGivesTheHelpersReason(tmp_path: Path):
 	value = runKernelChild(tmp_path, LOST_CHILD)
 	assert value["lost"] == ["it said goodbye: NVDA left keys unanswered (presses went unanswered)"]
+
+
+#: Every thread of the child, the stand-in's among them, stopped for FROZEN_FOR seconds, as every
+#: process is around the machine's sleep while the monotonic clock runs on. The stand-in says it lets
+#: go after two seconds of silence and keeps to thirty, as the helper takes its own freeze into account.
+FROZEN_FOR = 5
+FROZEN_STAND_IN = {"heartbeatTimeout": 30.0, "announcedHeartbeatTimeout": 2.0}
+FREEZE_CHILD = r"""
+import signal, subprocess
+
+
+def freeze():
+	subprocess.Popen(["sh", "-c", f"sleep {FROZEN_FOR}; kill -CONT {os.getpid()}"])
+	os.kill(os.getpid(), signal.SIGSTOP)
+	return time.monotonic()
+
+
+source = startSource()
+kernelBefore = source.isKernel
+said.clear()
+freeze()
+time.sleep(2)
+afterFreeze = {"kernel": source.isKernel, "said": list(said)}
+delivered.clear()
+windowKeys()
+keyboard.press("Insert+t")
+time.sleep(0.3)
+chord = {"nvda": [[e["vk"], e["nvda"]] for e in presses()], "window": [key for key in windowKeys() if key[1]]}
+# Now the helper falls silent, and stays so after another freeze: it is given up within its bound and
+# the slack, counted from the wake.
+keyboard._sendClient = lambda message: None
+thawed = freeze()
+while source.isKernel and time.monotonic() < thawed + 10:
+	time.sleep(0.02)
+result = {
+	"kernelBefore": kernelBefore,
+	"afterFreeze": afterFreeze,
+	"chord": chord,
+	"givenUpAfter": time.monotonic() - thawed,
+}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_freezeOfEveryThreadIsNoSilenceOfTheHelpers(tmp_path: Path):
+	value = runKernelChild(
+		tmp_path, f"FROZEN_FOR = {FROZEN_FOR}\n" + FREEZE_CHILD, standIn=FROZEN_STAND_IN, timeout=120
+	)
+	assert value["kernelBefore"]
+	assert value["afterFreeze"] == {"kernel": True, "said": []}
+	assert value["chord"] == {"nvda": [[0x2D, True], [ord("T"), True]], "window": []}
+	# The helper's two seconds and the second of slack, with the half second the beat takes to look.
+	assert 2.5 <= value["givenUpAfter"] <= 4.0, value["givenUpAfter"]

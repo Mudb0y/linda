@@ -72,6 +72,11 @@ ECHO_SLACK = 1.0
 #: Seconds the layout's thread waits for the X server before it looks whether to stop, and whether the
 #: X source grabs a document's keys on another window, whose focus it then watches.
 CAPTURE_LOOK = 0.1
+#: Seconds past the time it asked to wake by after which the thread that answers keys takes it that
+#: every thread of NVDA's was stopped, as every process is around the machine's sleep, while the
+#: monotonic clock ran on: linda-keyd, stopped as well, was not silent, and no press waited on NVDA.
+#: The helper's WATCHDOG_FROZEN, beyond any ordinary lateness of a thread that sleeps.
+FROZEN = 0.5
 #: Key code: its lock's light.
 LOCK_KEYCODES = {
 	x11.CAPS_LOCK_KEY + 8: LOCK_CAPS,
@@ -899,6 +904,7 @@ class KernelKeySource:
 				pass
 
 	def _serve(self) -> None:
+		woke = time.monotonic()
 		while not self._stopping and not self._lost:
 			while self._commands:
 				try:
@@ -906,16 +912,24 @@ class KernelKeySource:
 				except Exception:
 					log.exception("Acting on a request to the kernel key source")
 			now = time.monotonic()
+			if now - woke > FROZEN:
+				# Stopped between two waits, as the commands above take next to nothing.
+				self._thawed(now - woke, now)
 			deadlines = [self._answer(now), self._beat(now), self._repeatNow(now)]
 			if self._lost:
 				return
 			due = min((t for t in deadlines if t is not None), default=None)
+			began = time.monotonic()
 			readable, _w, _x = select.select(
 				[self._sock, self._wakeRead],
 				[],
 				[],
-				None if due is None else max(0.0, due - time.monotonic()),
+				None if due is None else max(0.0, due - began),
 			)
+			woke = time.monotonic()
+			# There is always a heartbeat due, so a wait never runs open.
+			if due is not None and woke - max(due, began) > FROZEN:
+				self._thawed(woke - max(due, began), woke)
 			if self._wakeRead in readable:
 				os.read(self._wakeRead, 4096)
 			if self._sock in readable:
@@ -1012,6 +1026,22 @@ class KernelKeySource:
 				self._onLost(why, emergency)
 		except Exception:
 			log.exception("Reporting that linda-keyd was lost")
+
+	def _thawed(self, frozen: float, now: float) -> None:
+		"""Count what is measured against the clock afresh from now, after every thread was stopped for
+		frozen seconds: the helper's silence, which a helper that has really stopped answering still
+		takes the whole bound from now to show; each press NVDA has yet to answer; and the next repeat of
+		a key held down, which comes once, not as a burst of those missed."""
+		log.debug(
+			f"The thread that answers keys was stopped for {frozen * 1000:.0f} ms; linda-keyd is not held to it"
+		)
+		self._lastEcho = max(self._lastEcho, now)
+		for press in self._pending:
+			press.arrival += frozen
+			if press.started is not None:
+				press.started += frozen
+		if self._nextRepeat is not None:
+			self._nextRepeat += frozen
 
 	def _beat(self, now: float) -> float | None:
 		"""Send the heartbeat when it is due, and notice a helper that stopped echoing it.

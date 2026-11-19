@@ -50,15 +50,7 @@ def run(ground: "Ground") -> None:
 		mark = ground.mark()
 		before = len(ground.lindaLogRecords(X_ROUTE))
 		ground.shell("systemctl suspend --no-block")
-		with ground.expectedFailure(
-			"Linda's echo check on the helper (kernel.py, _beat) times the helper's silence on the "
-			"monotonic clock, which runs on while every process is frozen, so on thawing Linda gives "
-			"the helper up as having stopped answering, falls back to X and says so"
-		):
+		try:
 			afterwards(ground, keyboard, mark, before)
-		ground.shell("echo none > /sys/power/pm_test")
-		# Whatever Linda did, the keyboard works: the Linda key with T reads the title.
-		ground.settle(4)
-		typed = ground.mark()
-		keyboard.chord(*CHORD_KEYS)
-		ground.expect(WINDOW_TITLE, since=typed)
+		finally:
+			ground.shell("echo none > /sys/power/pm_test")
