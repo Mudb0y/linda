@@ -274,3 +274,37 @@ def test_fault_emergencyChordBeforeTheRouteIsTakenIsNotHonoured(tmp_path: Path):
 		f"two seconds later: {value}"
 	)
 	assert value["said"] == [LET_GO_MESSAGE], value
+
+
+# The second pass, over the fixes.
+
+#: As linda-keyd now does as it lets go: what it read last of a keyboard goes to the program as a tap,
+#: pressed and released at once on the virtual keyboard, and is not sent to the client as KEY. Here the
+#: last key read is Insert, the NVDA key, and the helper lets go as it cannot tell which session is in
+#: front, the person's own still being: whether NVDA heard of Insert, and whether the program had it.
+TAP_AS_THE_HELPER_LETS_GO_CHILD = r"""
+from keydStandIn import RELEASED_SESSION_UNKNOWN
+source = startSource()
+windowKeys()
+delivered.clear()
+with keyboard._lock:
+	keyboard._toX(code("Insert"), True, virtual=True)
+	keyboard._toX(code("Insert"), False, virtual=True)
+	keyboard.letGo(RELEASED_SESSION_UNKNOWN)
+time.sleep(0.5)
+result = {
+	"nvda": [[e["vk"], e["up"]] for e in delivered if e["vk"] == 0x2D],
+	"window": [key for key in windowKeys() if key[0] == 110],
+}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_fault_keyTheHelperTapsAsItLetsGoReachesTheProgramAndNotNVDA(tmp_path: Path):
+	value = runKernelChild(tmp_path, TAP_AS_THE_HELPER_LETS_GO_CHILD)
+	assert value["nvda"] == [[0x2D, False], [0x2D, True]] and value["window"] == [], (
+		"Insert, read by the helper as it let go and put out on the virtual keyboard as a tap without a KEY, "
+		"was taken by the X source for a key the kernel source had decided and given to nobody: NVDA never "
+		f"heard of it and the program had it: {value}"
+	)
