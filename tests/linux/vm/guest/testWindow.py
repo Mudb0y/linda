@@ -1,6 +1,6 @@
 """A GTK 3 window for Linda to read in the guest, which records every key that reaches it.
 
-	testWindow.py OUT [TITLE]
+	testWindow.py OUT [TITLE [grab]]
 
 The window has a menu bar (File with Open and Quit, Help with About) and a text field named Name,
 which has the focus once the window is shown. Every key event GDK hands the program, for any of its
@@ -8,6 +8,10 @@ windows and the menus' among them, is written to OUT before GTK sees it, in the 
 uses, with "t" when GDK handed it over, "serverTime" the X server's time of the event, "window" the title of the window it came to or
 "menu" for a menu's, and "keyval", GDK's name for the key. Records of kind "menu" say a menu was
 shown or hidden, and a first record of kind "ready" says the window is shown and its field focused.
+
+With grab, the window then takes the keyboard for itself, as a password prompt or a screen locker
+does, and a record of kind "grab" says with what status; every key then comes to it, whichever
+window has the focus, until it ends.
 """
 
 import json
@@ -62,7 +66,14 @@ class Recorder:
 		Gtk.main_do_event(event)
 
 
-def build(record: Recorder, title: str) -> Gtk.Window:
+def grabKeyboard(record: Recorder, window: Gtk.Window) -> bool:
+	seat = Gdk.Display.get_default().get_default_seat()
+	status = seat.grab(window.get_window(), Gdk.SeatCapabilities.KEYBOARD, False, None, None, None, None)
+	record("grab", status=status.value_nick)
+	return False
+
+
+def build(record: Recorder, title: str, grab: bool = False) -> Gtk.Window:
 	window = Gtk.Window(title=title)
 	window.set_default_size(400, 200)
 	window.connect("destroy", Gtk.main_quit)
@@ -91,6 +102,8 @@ def build(record: Recorder, title: str) -> Gtk.Window:
 
 	def ready() -> bool:
 		record("ready")
+		if grab:
+			grabKeyboard(record, window)
 		return False
 
 	def onFocusIn(*_args: object) -> bool:
@@ -108,7 +121,7 @@ def build(record: Recorder, title: str) -> Gtk.Window:
 def main() -> None:
 	record = Recorder(sys.argv[1])
 	Gdk.Event.handler_set(record.onEvent, None)
-	build(record, sys.argv[2] if len(sys.argv) > 2 else "Ground window")
+	build(record, sys.argv[2] if len(sys.argv) > 2 else "Ground window", sys.argv[3:4] == ["grab"])
 	Gtk.main()
 
 

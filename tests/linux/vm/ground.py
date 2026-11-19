@@ -26,6 +26,7 @@ reader of each keyboard node (what the X server's libinput reads), "x" what the 
 
 import importlib.util
 import json
+import re
 import shlex
 import subprocess
 import time
@@ -62,6 +63,11 @@ BASE_SETTINGS = {
 }
 #: Ends an expected text that need only start a speak record, as in tests/linux/desktopSession.py.
 PREFIX_MARK = "\N{HORIZONTAL ELLIPSIS}"
+#: The first line of each record of Linda's log, as tests/linux/harness.py reads it.
+LOG_HEADER = re.compile(r"^[A-Z_]+ - .+? \((?P<time>\d\d:\d\d:\d\d\.\d{3})\) - .*:$", re.MULTILINE)
+#: What Linda logs as it moves to the kernel route, and back to the X display.
+KERNEL_ROUTE = "Keys come from the kernel through linda-keyd"
+X_ROUTE = "Keys are read from the X display"
 
 
 @dataclass(frozen=True)
@@ -360,19 +366,32 @@ class Ground:
 
 	# The test window.
 
-	def openWindow(self, title: str = WINDOW_TITLE) -> None:
-		"""Start the test window, guest/testWindow.py, and wait until its text field has the focus."""
-		self.start("window", ["ground-window", LOGS["app"], title])
-		self.waitFor(lambda: any(r["kind"] == "ready" for r in self.records("app")), "the test window", 30)
+	def openWindow(self, title: str = WINDOW_TITLE, *, name: str = "window", grab: bool = False) -> None:
+		"""Start a test window, guest/testWindow.py, as the session's program name, and wait until its
+		text field has the focus, and with grab, until it has taken the keyboard for itself."""
+		mark = Mark(0, self.now())
+		self.start(name, ["ground-window", LOGS["app"], title, *(["grab"] if grab else [])])
+		self.waitFor(
+			lambda: any(r["kind"] == "ready" for r in self.records("app", mark)), "the test window", 30
+		)
+		if grab:
+			grabbed = self.waitFor(
+				lambda: [r for r in self.records("app", mark) if r["kind"] == "grab"], "the keyboard grab"
+			)
+			assert grabbed[0]["status"] == "success", grabbed
 
 	# Linda.
 
 	def startLinda(
-		self, settings: dict[str, dict[str, str]] | None = None, *, speaks: str = WINDOW_TITLE
+		self,
+		settings: dict[str, dict[str, str]] | None = None,
+		*,
+		speaks: str = WINDOW_TITLE,
+		gestures: str = "",
 	) -> None:
 		"""Start Linda in the session with the transcript synth and wait until it speaks speaks.
 
-		settings are nvda.ini sections over BASE_SETTINGS.
+		settings are nvda.ini sections over BASE_SETTINGS; gestures, if given, is its gestures.ini.
 		"""
 		merged = {section: dict(values) for section, values in BASE_SETTINGS.items()}
 		for section, values in (settings or {}).items():
@@ -387,6 +406,11 @@ class Ground:
 			f"echo {shlex.quote(chr(10).join(lines))} > {config}/nvda.ini",
 			f"chown {USER} {config}/nvda.ini",
 		)
+		if gestures:
+			self.machine.succeed(
+				f"echo {shlex.quote(gestures)} > {config}/gestures.ini",
+				f"chown {USER} {config}/gestures.ini",
+			)
 		self.start(
 			"linda",
 			[f"{self.linda}/bin/linda", "-c", config, "-f", f"{LINDA_DIRECTORY}/nvda.log", "--debug-logging"],
@@ -403,11 +427,68 @@ class Ground:
 		self.session({"op": "signal", "name": "linda", "signal": "SIGTERM"})
 		self.waitFor(lambda: not self.running("linda"), "Linda to exit", 30)
 
+	def signalLinda(self, signal: str) -> None:
+		"""Send Linda a signal by its name, as "SIGSTOP"."""
+		self.session({"op": "signal", "name": "linda", "signal": signal})
+
+	def _transcript(self) -> list[dict]:
+		text = self.shell(f"cat {TRANSCRIPT} 2>/dev/null || true")
+		return [json.loads(line) for line in text.splitlines() if line.strip()]
+
 	def spoken(self) -> list[str]:
 		"""The text of each of Linda's speak records so far."""
-		text = self.shell(f"cat {TRANSCRIPT} 2>/dev/null || true")
-		records = [json.loads(line) for line in text.splitlines() if line.strip()]
-		return self.transcriptRecords.spokenTexts(records)
+		return self.transcriptRecords.spokenTexts(self._transcript())
+
+	def speech(self, since: Mark) -> list[tuple[float, str]]:
+		"""Each of Linda's speak records after since, with the moment the synth was given it, on the
+		guest's clock."""
+		speak = [r for r in self._transcript() if r["kind"] == "speak"][since.spoken :]
+		return [(r["t"], self.transcriptRecords.spokenText(r)) for r in speak]
+
+	def waitForSpeech(self, expected: str, since: Mark, timeout: float = 10) -> float:
+		"""The moment of the first speak record after since that is expected, once there is one."""
+		found: list[float] = []
+
+		def arrived() -> bool:
+			found[:] = [t for t, text in self.speech(since) if _matches(expected, text)]
+			return bool(found)
+
+		try:
+			self.waitFor(arrived, f"Linda to speak {expected!r}", timeout)
+		except AssertionError as e:
+			raise AssertionError(f"{e}; it spoke {self.speech(since)}\n{self.lindaLogTail()}") from None
+		return found[0]
+
+	def lindaLog(self) -> str:
+		return self.shell(f"cat {LINDA_DIRECTORY}/nvda.log 2>/dev/null || true")
+
+	def lindaLogRecords(self, text: str) -> list[tuple[float, str]]:
+		"""Each record of Linda's log that holds text, with its time of day in seconds, as the log
+		stamps it, to the millisecond."""
+		log = self.lindaLog()
+		headers = list(LOG_HEADER.finditer(log))
+		found = []
+		for index, header in enumerate(headers):
+			end = headers[index + 1].start() if index + 1 < len(headers) else len(log)
+			record = log[header.start() : end]
+			if text in record:
+				hours, minutes, seconds = header.group("time").split(":")
+				found.append((int(hours) * 3600 + int(minutes) * 60 + float(seconds), record.strip()))
+		return found
+
+	def waitForLindaLog(self, text: str, count: int = 1, timeout: float = 10) -> tuple[float, str]:
+		"""The count-th record of Linda's log that holds text, once there is one."""
+		found: list[tuple[float, str]] = []
+
+		def arrived() -> bool:
+			found[:] = self.lindaLogRecords(text)
+			return len(found) >= count
+
+		try:
+			self.waitFor(arrived, f"Linda to log {text!r} {count} times", timeout)
+		except AssertionError as e:
+			raise AssertionError(f"{e}; it logged it {len(found)} times\n{self.lindaLogTail()}") from None
+		return found[count - 1]
 
 	def expect(self, *texts: str, since: Mark, timeout: float = 10) -> None:
 		"""Wait until Linda has spoken texts, in this order, after since.
