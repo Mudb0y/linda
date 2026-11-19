@@ -1360,8 +1360,8 @@ class KernelKeySource:
 				press.decide(False)
 			if press.passed is None:
 				self._pending.append(press)
-			else:
-				self._settle(press)
+		# Queued for NVDA before its verdict is sent: a send that finds the connection gone releases
+		# every key NVDA was told is down, this one among them, which must come after its press.
 		self._decisions.put(
 			_Item(
 				keycode,
@@ -1375,6 +1375,8 @@ class KernelKeySource:
 				silent=levelShift and not held,
 			)
 		)
+		if not decided and press.passed is not None:
+			self._settle(press)
 		return press
 
 	def _follow(self, keycode: int, now: float, seq: int, device: int, decided: bool) -> _Press:
