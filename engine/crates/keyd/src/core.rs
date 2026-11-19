@@ -30,8 +30,7 @@ use std::time::Instant;
 
 use crate::device::{Devices, Found, GrabError, InputEvent, Keyboard, ReadError, VirtualKeyboard};
 use crate::keys::{
-    Assessment, CHORD, EV_KEY, EV_SYN, KEY_CNT, KeySet, MODIFIERS, SYN_DROPPED, SYN_REPORT,
-    is_virtual_key,
+    Assessment, CHORD, EV_KEY, EV_SYN, KEY_CNT, KeySet, MODIFIERS, SYN_DROPPED, is_virtual_key,
 };
 use crate::protocol::*;
 
@@ -109,14 +108,12 @@ struct Kbd<K> {
     reported: Option<DeviceStatus>,
     /// The keys whose press has been read and put in line, and whose release has not.
     down: KeySet,
-    /// Keys the kernel had down after it dropped events, whose press was never read: never sent to
-    /// the client nor passed on. They count towards the emergency chord, and their repeats and
-    /// release go nowhere.
+    /// Keys the kernel had down after it dropped events, which the helper did not see go down:
+    /// never sent to the client nor passed on. They count towards the emergency chord, and their
+    /// repeats and release go nowhere.
     unseen: KeySet,
-    /// The kernel dropped events: what comes until the next report is discarded.
-    dropping: bool,
-    /// The report that ends a loss of events has been read: the keys down are to be asked for once
-    /// everything read with it has been dealt with.
+    /// The kernel dropped events: the rest of what was read with the loss is not dealt with, and
+    /// the kernel is asked which keys are down once it has all been read.
     resync_due: bool,
 }
 
@@ -600,13 +597,19 @@ impl<D: Devices> Core<D> {
         match state {
             KState::Held => {
                 let mut read = 0;
-                while read < events.len() && self.capturing && self.keyboards.contains_key(&n) {
+                while read < events.len()
+                    && self.capturing
+                    && self.keyboards.get(&n).is_some_and(|k| !k.resync_due)
+                {
                     self.event(n, events[read], now);
                     read += 1;
                 }
                 if !self.capturing {
                     self.pass_after_letting_go(&events[read..]);
                 }
+                // What was read after the loss is left alone: the kernel's answer is its state
+                // after all of it, and nothing read before the answer may be dealt with after it,
+                // or against the picture from before the loss.
                 if let Some(kbd) = self.keyboards.get_mut(&n)
                     && std::mem::take(&mut kbd.resync_due)
                 {
@@ -1076,7 +1079,6 @@ impl<D: Devices> Core<D> {
                         reported: None,
                         down: KeySet::new(),
                         unseen: KeySet::new(),
-                        dropping: false,
                         resync_due: false,
                     },
                 );
@@ -1257,27 +1259,25 @@ impl<D: Devices> Core<D> {
         let Some(kbd) = self.keyboards.get_mut(&n) else {
             return;
         };
-        if kbd.dropping {
-            if ev.kind == EV_SYN && ev.code == SYN_REPORT {
-                kbd.dropping = false;
-                kbd.resync_due = true;
-            }
-            return;
-        }
         match ev.kind {
-            EV_SYN if ev.code == SYN_DROPPED => kbd.dropping = true,
+            EV_SYN if ev.code == SYN_DROPPED => kbd.resync_due = true,
             EV_KEY => self.key(n, ev.code, ev.value, now),
             _ => {}
         }
     }
 
-    /// After the kernel dropped events, once everything read with the report that ended the loss
-    /// has been dealt with: the kernel's answer to which keys are down is its state after all of
-    /// that, and asking also throws away every key event it had queued and not yet given, so the
-    /// answer is reconciled with what was read, never followed by more of it. A key the helper has
-    /// down that the kernel has up was released unseen, and gets its release now. A key that went
-    /// down unseen has no press in line; it is kept among the unseen, which the chord is looked for
-    /// in at once, since the person may be holding it for a way out of a helper that fell behind.
+    /// After the kernel dropped events, as libevdev does: what was read after the loss has been
+    /// left alone, and only the kernel's answer to which keys are down is believed, its state after
+    /// all of that; asking also throws away every key event queued and not yet read. The helper's
+    /// picture is made the kernel's from the difference. A key the helper has down that the kernel
+    /// has up was released unseen, and gets its release now, in line before any key read after.
+    /// A key the kernel has down that the helper did not see go down is kept among the unseen, never
+    /// told nor put out, since when it went down, and under which modifiers, cannot be known: told
+    /// now, it could be taken as typed under a modifier that was up when it went down. The unseen
+    /// count towards the chord, which is looked for at once, since the person may be holding it for
+    /// a way out of a helper that fell behind. From the answer on every key is read in order again,
+    /// so whatever counts as down when a key is told really is. A key tapped wholly within the loss,
+    /// or after it in the same batch, is lost, at a moment when keys are lost anyway.
     fn resync(&mut self, n: u32, now: Instant) {
         let Some(kbd) = self.keyboards.get_mut(&n) else {
             return;
@@ -1319,10 +1319,8 @@ impl<D: Devices> Core<D> {
         if !is_virtual_key(code) {
             return;
         }
-        // The keys found down after a loss of events include those pressed after it, whose presses
-        // are still to be read: the kernel sends a press only as a key goes down, so a press read
-        // now is of such a key, and is an ordinary press. Only a key whose press was lost has its
-        // repeats and release go nowhere.
+        // An unseen key's repeats and release go nowhere. A press of it, which can come only after
+        // its release has been read, is an ordinary one.
         if kbd.unseen.contains(code) {
             if value != KEY_REPEAT.into() {
                 kbd.unseen.remove(code);
@@ -1528,10 +1526,13 @@ impl<D: Devices> Core<D> {
                 let _ = kbd.k.read(&mut events);
             }
             kbd.k.ungrab();
-            if !kbd.dropping {
-                for ev in events.iter().filter(|e| e.kind == EV_KEY) {
-                    self.pass_last(*n, kbd, ev.code, ev.value);
-                }
+            // What follows a loss stands against a picture the helper no longer has.
+            let lost = events
+                .iter()
+                .position(|e| e.kind == EV_SYN && e.code == SYN_DROPPED);
+            events.truncate(lost.unwrap_or(events.len()));
+            for ev in events.iter().filter(|e| e.kind == EV_KEY) {
+                self.pass_last(*n, kbd, ev.code, ev.value);
             }
         }
         for code in 0..KEY_CNT {

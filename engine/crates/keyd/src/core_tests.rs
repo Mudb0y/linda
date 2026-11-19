@@ -1475,10 +1475,10 @@ fn a_key_read_after_a_loss_and_let_go_of_before_the_question_is_not_left_down() 
     t.w.change_unread(k, KEY_A, false);
     t.core.keyboard_ready(k, t.now);
     t.take();
-    let keys: Vec<(u16, u8)> = t.keys().iter().map(|k| (k.code, k.value)).collect();
-    assert_eq!(keys, vec![(KEY_A, KEY_PRESS), (KEY_A, KEY_RELEASE)]);
+    // Read after the loss, its press is left alone, and the kernel has it up: it is lost whole.
+    assert!(t.keys().is_empty());
     t.pass(VERDICT_TIMEOUT);
-    assert_eq!(t.w.emitted(), vec![(KEY_A, 1), (KEY_A, 0)]);
+    assert!(t.w.emitted().is_empty());
     assert!(t.w.virtual_down().is_empty());
 }
 
@@ -2151,15 +2151,13 @@ fn fault_a_keep_for_a_press_still_in_line_behind_a_wait_is_not_thrown_away() {
     );
 }
 
-/// After a loss of events the helper reads the keys down at the report that ends the loss, but the
-/// events still queued behind that report are already in that state. A key pressed after the loss,
-/// whose press is among them, is taken for one that went down unseen, and its press and release are
-/// both thrown away although every event of it was read, in order: a stall shorter than the
-/// watchdog's limit, typed through, loses each key held at the moment the helper catches up, a
-/// Shift among them. A press read after the report cannot have been unseen: the kernel sends a
-/// press only as a key goes down.
+/// The second review's test of a Shift pressed after a loss of events, whose expectation the fifth
+/// wave's rule reverses. Shift, its press read with the loss and so left alone, is down by the
+/// kernel's answer and not seen to go down: it is unseen, and not told, since when it went down
+/// cannot be known. The letter typed next is told and put out without it; once Shift has been let
+/// go of and pressed again, it is an ordinary key.
 #[test]
-fn fault_a_key_pressed_after_a_loss_of_events_is_not_lost() {
+fn a_key_held_across_a_loss_of_events_is_seen_once_pressed_again() {
     let (mut t, k) = T::capturing();
     t.w.overflow(k, &[]);
     // Shift goes down after the loss, before the helper has caught up.
@@ -2170,10 +2168,10 @@ fn fault_a_key_pressed_after_a_loss_of_events_is_not_lost() {
     t.release(k, KEY_A);
     t.release(k, KEY_LEFTSHIFT);
     let keys: Vec<(u16, u8)> = t.keys().iter().map(|k| (k.code, k.value)).collect();
-    assert!(
-        keys.contains(&(KEY_LEFTSHIFT, KEY_PRESS)),
-        "Shift, pressed after the loss and read in order, never reached the client: {keys:?}"
-    );
+    assert_eq!(keys, vec![(KEY_A, KEY_PRESS), (KEY_A, KEY_RELEASE)]);
+    t.press(k, KEY_LEFTSHIFT);
+    let keys: Vec<(u16, u8)> = t.keys().iter().map(|k| (k.code, k.value)).collect();
+    assert_eq!(keys, vec![(KEY_LEFTSHIFT, KEY_PRESS)]);
 }
 
 #[test]
@@ -2477,26 +2475,23 @@ fn fault_a_key_let_go_of_as_the_helper_catches_up_after_lost_events_does_not_sta
     w.press(k, KEY_TAB);
     flushed.lock().unwrap().insert(KEY_TAB);
     core.keyboard_ready(k, now);
-    let tab = core
-        .take_output()
-        .into_iter()
-        .find_map(|o| match o {
-            Output::Send(_, ToClient::Key(key))
-                if key.code == KEY_TAB && key.value == KEY_PRESS =>
-            {
-                Some(key.seq)
-            }
-            _ => None,
-        })
-        .expect("Tab's press was sent to the client");
-    say(
-        &mut core,
-        FromClient::Verdict {
-            seq: tab,
-            keep: false,
-        },
-        now,
-    );
+    let tab = core.take_output().into_iter().find_map(|o| match o {
+        Output::Send(_, ToClient::Key(key)) if key.code == KEY_TAB && key.value == KEY_PRESS => {
+            Some(key.seq)
+        }
+        _ => None,
+    });
+    // Since the fifth wave, what is read after a loss is left alone, Tab's press with it.
+    if let Some(tab) = tab {
+        say(
+            &mut core,
+            FromClient::Verdict {
+                seq: tab,
+                keep: false,
+            },
+            now,
+        );
+    }
     for _ in 0..10 {
         now += ms(100);
         say(&mut core, FromClient::Heartbeat { counter: 0 }, now);
@@ -2558,7 +2553,6 @@ const KEY_W: u16 = 17;
 /// needs the helper not to read for the time the kernel's 64 events take to fill, under a second
 /// with a key repeating, as on a machine starved of the processor or across a forgiven freeze.
 #[test]
-#[ignore = "fourth review: keys read after a loss of events go out under a modifier let go of in the loss"]
 fn fault_a_modifier_let_go_of_while_events_were_lost_is_up_before_the_keys_read_after_the_loss() {
     let (mut t, k) = T::capturing();
     t.pressed_out(k, KEY_LEFTCTRL);
@@ -2571,25 +2565,27 @@ fn fault_a_modifier_let_go_of_while_events_were_lost_is_up_before_the_keys_read_
     t.take();
     let keys = t.keys();
     let told: Vec<(u16, u8)> = keys.iter().map(|k| (k.code, k.value)).collect();
-    let w = keys
+    // Since the fifth wave W, read with the loss and held when the kernel is asked, is unseen and
+    // lost; it must not be told or put out under Control in any case.
+    if let Some(w) = keys
         .iter()
         .find(|k| k.code == KEY_W && k.value == KEY_PRESS)
-        .expect("W's press was sent to the client")
-        .seq;
-    t.verdict(w, false);
+    {
+        t.verdict(w.seq, false);
+    }
     t.pass(VERDICT_TIMEOUT);
     let emitted = t.w.emitted();
     let up = emitted.iter().position(|e| *e == (KEY_LEFTCTRL, 0));
     let down = emitted.iter().position(|e| *e == (KEY_W, 1));
     assert!(
-        matches!((up, down), (Some(up), Some(down)) if up < down),
+        matches!((up, down), (Some(up), down) if down.is_none_or(|d| up < d)),
         "Control, let go of while events were lost, was still down on the virtual keyboard when W, \
          pressed after it, went out, so the program had Control+W: {emitted:?}"
     );
     assert_eq!(
-        told,
-        vec![(KEY_LEFTCTRL, KEY_RELEASE), (KEY_W, KEY_PRESS)],
-        "the client was told of W's press while Control was still down for it"
+        told.first(),
+        Some(&(KEY_LEFTCTRL, KEY_RELEASE)),
+        "the client was told of W's press while Control was still down for it: {told:?}"
     );
 }
 
@@ -2598,7 +2594,6 @@ fn fault_a_modifier_let_go_of_while_events_were_lost_is_up_before_the_keys_read_
 /// every keyboard and drop the keys waiting, though Backspace has been up all the while. Kernel
 /// capture stays off until the user asks for it again.
 #[test]
-#[ignore = "fourth review: a key let go of while events were lost still counts towards the emergency chord"]
 fn fault_a_key_let_go_of_while_events_were_lost_does_not_complete_the_emergency_chord() {
     let (mut t, k) = T::capturing();
     t.pressed_out(k, KEY_BACKSPACE);
@@ -2767,4 +2762,254 @@ fn fault_nothing_is_held_on_the_virtual_keyboard_while_the_keyboards_are_ungrabb
         "Backspace, passed to the program, was still down on the virtual keyboard as the keyboard \
          was ungrabbed, where the desktop repeats it for as long as the ungrabs take: {held:?}"
     );
+}
+
+// Every order of keys around a loss of events, against the mock, which keeps the kernel's queue
+// and throws it away as the kernel does when asked which keys are down.
+
+#[derive(Clone, Copy, Debug)]
+enum Phys {
+    Down(u16),
+    Up(u16),
+}
+
+/// Every sequence of up to `len` presses and releases of the keys, from all of them up, each key
+/// going down at most the number of times given with it.
+fn sequences(keys: &[(u16, usize)], len: usize) -> Vec<Vec<Phys>> {
+    fn grow(
+        keys: &[(u16, usize)],
+        len: usize,
+        down: &mut KeySet,
+        pressed: &mut Vec<usize>,
+        seq: &mut Vec<Phys>,
+        out: &mut Vec<Vec<Phys>>,
+    ) {
+        out.push(seq.clone());
+        if seq.len() == len {
+            return;
+        }
+        for (i, &(code, most)) in keys.iter().enumerate() {
+            if down.contains(code) {
+                down.remove(code);
+                seq.push(Phys::Up(code));
+                grow(keys, len, down, pressed, seq, out);
+                seq.pop();
+                down.insert(code);
+            } else if pressed[i] < most {
+                pressed[i] += 1;
+                down.insert(code);
+                seq.push(Phys::Down(code));
+                grow(keys, len, down, pressed, seq, out);
+                seq.pop();
+                down.remove(code);
+                pressed[i] -= 1;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    grow(
+        keys,
+        len,
+        &mut KeySet::new(),
+        &mut vec![0; keys.len()],
+        &mut Vec::new(),
+        &mut out,
+    );
+    out
+}
+
+/// One sequence of physical key events with a loss: events before `a` read one at a time, those
+/// from `a` to `b` lost, the loss marked, those from `b` to `r` read with the mark, those from `r`
+/// to `q` coming after that read and before the helper asks which keys are down, which throws them
+/// away, and those from `q` on read one at a time; then every key still down let go of. The client
+/// passes every press at once. Returns whether the emergency chord let go, or what went wrong.
+fn around_a_loss(seq: &[Phys], a: usize, b: usize, r: usize, q: usize) -> Result<bool, String> {
+    let mut states = Vec::new();
+    let mut s = KeySet::new();
+    for e in seq {
+        match e {
+            Phys::Down(c) => s.insert(*c),
+            Phys::Up(c) => s.remove(*c),
+        }
+        states.push(s.clone());
+    }
+    // The keys physically down just after `code` last went down, at or before event `p`.
+    let pressed_at = |code: u16, p: Option<usize>| -> Result<KeySet, String> {
+        let p = p.ok_or(format!("{code} out before any key went down"))?;
+        (0..=p)
+            .rev()
+            .find(|j| matches!(seq[*j], Phys::Down(c) if c == code))
+            .map(|j| states[j].clone())
+            .ok_or(format!("{code} out though it never went down"))
+    };
+    let (mut t, k) = T::capturing();
+    let mut told = KeySet::new();
+    let mut out = KeySet::new();
+    let mut emitted = 0;
+    let mut fired = false;
+    let mut look = |t: &mut T, p: Option<usize>| -> Result<(), String> {
+        loop {
+            let sent = t.sent();
+            if sent.is_empty() {
+                break;
+            }
+            for m in sent {
+                match m {
+                    ToClient::Key(key) if key.value == KEY_PRESS => {
+                        let at = pressed_at(key.code, p)?;
+                        for m in MODIFIERS {
+                            if m != key.code && told.contains(m) && !at.contains(m) {
+                                return Err(format!(
+                                    "{} told under {m}, which was up when it went down",
+                                    key.code
+                                ));
+                            }
+                        }
+                        told.insert(key.code);
+                        t.verdict(key.seq, false);
+                    }
+                    ToClient::Key(key) if key.value == KEY_RELEASE => told.remove(key.code),
+                    ToClient::Released {
+                        reason: Released::Emergency,
+                    } => fired = true,
+                    _ => {}
+                }
+            }
+        }
+        let all = t.w.emitted();
+        for &(code, value) in &all[emitted..] {
+            if value == 1 {
+                if out.contains(code) {
+                    return Err(format!("{code} put out twice"));
+                }
+                let at = pressed_at(code, p)?;
+                for m in MODIFIERS {
+                    if m != code && out.contains(m) && !at.contains(m) {
+                        return Err(format!(
+                            "{code} put out under {m}, which was up when it went down"
+                        ));
+                    }
+                }
+                out.insert(code);
+            } else {
+                if !out.contains(code) {
+                    return Err(format!("{code} released, never put out"));
+                }
+                out.remove(code);
+            }
+        }
+        emitted = all.len();
+        Ok(())
+    };
+    let read = |t: &mut T, e: Phys| {
+        match e {
+            Phys::Down(c) => t.w.press(k, c),
+            Phys::Up(c) => t.w.release(k, c),
+        }
+        t.core.keyboard_ready(k, t.now);
+        t.take();
+    };
+    for (i, e) in seq.iter().enumerate().take(a) {
+        read(&mut t, *e);
+        look(&mut t, Some(i))?;
+    }
+    let unread = |t: &mut T, e: Phys| match e {
+        Phys::Down(c) => t.w.change_unread(k, c, true),
+        Phys::Up(c) => t.w.change_unread(k, c, false),
+    };
+    for e in &seq[a..b] {
+        unread(&mut t, *e);
+    }
+    t.w.overflow(k, &[]);
+    for e in &seq[b..r] {
+        match e {
+            Phys::Down(c) => t.w.press(k, *c),
+            Phys::Up(c) => t.w.release(k, *c),
+        }
+    }
+    for e in &seq[r..q] {
+        unread(&mut t, *e);
+    }
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    look(&mut t, q.checked_sub(1))?;
+    for (i, e) in seq.iter().enumerate().skip(q) {
+        read(&mut t, *e);
+        look(&mut t, Some(i))?;
+    }
+    let last = seq.len().checked_sub(1);
+    for code in s.iter() {
+        read(&mut t, Phys::Up(code));
+        look(&mut t, last)?;
+    }
+    t.pass(VERDICT_TIMEOUT * 2);
+    look(&mut t, last)?;
+    if !t.w.virtual_down().is_empty() {
+        return Err(format!(
+            "every key up, and {:?} still down on the virtual keyboard",
+            t.w.virtual_down()
+        ));
+    }
+    Ok(fired)
+}
+
+/// Every placement of a loss, of the end of the read and of the question in each sequence.
+fn every_loss(seqs: &[Vec<Phys>], judge: impl Fn(&[Phys], usize, usize, Result<bool, String>)) {
+    for seq in seqs {
+        let n = seq.len();
+        for a in 0..=n {
+            for b in a..=n {
+                for r in b..=n {
+                    for q in r..=n {
+                        judge(seq, a, q, around_a_loss(seq, a, b, r, q));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn no_key_goes_out_under_a_modifier_let_go_of_in_any_order_around_a_loss_of_events() {
+    let seqs = sequences(&[(KEY_LEFTCTRL, 2), (KEY_A, 1), (KEY_T, 1)], 6);
+    every_loss(&seqs, |seq, _, _, r| {
+        if let Err(e) = r {
+            panic!("{seq:?}: {e}");
+        }
+    });
+}
+
+#[test]
+fn the_chord_lets_go_in_any_order_around_a_loss_of_events_when_and_only_when_it_was_held() {
+    let chord = CHORD.map(|keys| keys[0]);
+    let seqs = sequences(&chord.map(|c| (c, 1)), 6);
+    every_loss(&seqs, |seq, a, q, r| {
+        let fired = match r {
+            Ok(fired) => fired,
+            Err(e) => panic!("{seq:?}: {e}"),
+        };
+        let mut s = KeySet::new();
+        let together: Vec<bool> = seq
+            .iter()
+            .map(|e| {
+                match e {
+                    Phys::Down(c) => s.insert(*c),
+                    Phys::Up(c) => s.remove(*c),
+                }
+                chord.iter().all(|c| s.contains(*c))
+            })
+            .collect();
+        let must = together[..a].iter().any(|t| *t)
+            || q.checked_sub(1).is_some_and(|j| together[j])
+            || together[q..].iter().any(|t| *t);
+        let never = !together.iter().any(|t| *t);
+        assert!(
+            !must || fired,
+            "{seq:?} lost from {a}, asked at {q}: the chord did not let go"
+        );
+        assert!(
+            !never || !fired,
+            "{seq:?} lost from {a}, asked at {q}: the chord let go, never held"
+        );
+    });
 }

@@ -1,7 +1,8 @@
 """Lost events: while the helper cannot read, a keyboard sends far more than the kernel keeps for it,
 Shift's release among them, so the kernel drops what it holds and says so. The helper looks at what
 the kernel has down, releases Shift on the virtual keyboard, telling the client of the release, made
-by the helper, and goes on with what follows.
+by the helper, before anything read after the loss could go out under it, and goes on with what
+follows.
 
 The helper cannot read because it is stopped with SIGSTOP, for less time than either watchdog
 allows.
@@ -15,8 +16,10 @@ if TYPE_CHECKING:
 	from ground import Ground
 
 UHID = "Ground uhid keyboard"
-#: Some three hundred events, several times what the kernel keeps for a reader of a keyboard.
-FLOOD = [f"KEY_{c}" for c in "QWERTYUIOPASDFGHJKLZXCVBNM"] * 2
+#: Some two hundred events, several times what the kernel keeps for a reader of a keyboard. Forty
+#: seven taps leave five presses after the last loss, read with it; fifty two left none, so that
+#: nothing showed what becomes of them.
+FLOOD = [f"KEY_{c}" for c in "QWERTYUIOPASDFGHJKLZXCVBNM" * 2][:47]
 
 
 def run(ground: "Ground") -> None:
@@ -49,6 +52,9 @@ def run(ground: "Ground") -> None:
 		release = ground.waitForKeys(
 			"x", [("KEY_LEFTSHIFT", 1), ("KEY_LEFTSHIFT", 0)], mark, device=VIRTUAL_KEYBOARD
 		)
+		events = [(r["key"], r["value"]) for r in ground.keys("x", mark, device=VIRTUAL_KEYBOARD)]
+		under = [key for key, value in events[: events.index(("KEY_LEFTSHIFT", 0))] if value == 1]
+		assert under == ["KEY_LEFTSHIFT"], f"keys went out under a Shift let go of in the loss: {under}"
 		passed = [r for r in ground.keys("x", mark, device=VIRTUAL_KEYBOARD) if r["key"] != "KEY_LEFTSHIFT"]
 		ground.machine.log(
 			f"Shift released at {release[1]['t']:.3f}; of the keys typed meanwhile, {len(passed)} events went on: "
