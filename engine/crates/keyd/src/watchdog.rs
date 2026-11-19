@@ -4,6 +4,7 @@
 //! destroys the virtual keyboard and with it every key it held down. Outside, systemd's watchdog
 //! kills a helper whose loop stops feeding it, which covers the thread itself.
 
+use std::fmt;
 use std::io;
 use std::os::unix::net::UnixDatagram;
 use std::sync::Arc;
@@ -44,25 +45,36 @@ impl Progress {
     }
 
     /// What is wrong at `now`, if anything.
-    pub fn stalled(&self, now: Instant) -> Option<String> {
+    pub fn stalled(&self, now: Instant) -> Option<Stall> {
         let now = self.ms(now);
         let turned = self.turned.load(Relaxed);
         let limit = STALL_LIMIT.as_millis() as u64;
         if now.saturating_sub(turned) > limit {
-            return Some(format!(
-                "the loop has not turned for {} ms",
-                now.saturating_sub(turned)
-            ));
+            return Some(Stall::Loop(now.saturating_sub(turned)));
         }
         let oldest = self.oldest.load(Relaxed);
         let bound = limit + VERDICT_TIMEOUT.as_millis() as u64;
         if oldest != NONE && now.saturating_sub(oldest) > bound {
-            return Some(format!(
-                "a key has been waiting for {} ms",
-                now.saturating_sub(oldest)
-            ));
+            return Some(Stall::Key(now.saturating_sub(oldest)));
         }
         None
+    }
+}
+
+/// Why the watchdog lets go, in milliseconds; put in words only as it is logged, so that nothing
+/// is allocated on the way to letting go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stall {
+    Loop(u64),
+    Key(u64),
+}
+
+impl fmt::Display for Stall {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Stall::Loop(ms) => write!(f, "the loop has not turned for {ms} ms"),
+            Stall::Key(ms) => write!(f, "a key has been waiting for {ms} ms"),
+        }
     }
 }
 
@@ -207,7 +219,7 @@ mod tests {
         );
         p.turned(t + STALL_LIMIT, Some(t));
         let why = p.stalled(t + STALL_LIMIT + VERDICT_TIMEOUT + Duration::from_millis(2));
-        assert!(why.unwrap().contains("a key has been waiting"));
+        assert!(matches!(why, Some(Stall::Key(_))));
     }
 
     #[test]

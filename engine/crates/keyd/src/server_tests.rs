@@ -8,7 +8,7 @@ use std::thread::JoinHandle;
 
 use super::*;
 use crate::client::{Client, Got};
-use crate::keys::{KEY_A, KEY_LEFTSHIFT};
+use crate::keys::{KEY_A, KEY_BACKSPACE, KEY_ENTER, KEY_ESC, KEY_LEFTSHIFT};
 use crate::mock::World;
 use crate::protocol::*;
 use crate::watchdog;
@@ -395,60 +395,25 @@ fn a_caller_that_has_gone_is_not_asked_about() {
     let deadline = Instant::now() + Duration::from_millis(300) + MARGIN;
     loop {
         let c = h.client();
-        if let Got::Nothing = c.recv(Duration::from_millis(50)) {
-            assert!(matches!(c.hello(), ToClient::Welcome { .. }));
-            break;
+        let hello = FromClient::Hello {
+            version: PROTOCOL_VERSION,
+            features: 0,
+        };
+        if c.try_send(&hello) {
+            match c.recv(MARGIN) {
+                Got::Message(ToClient::Welcome { .. }) => break,
+                Got::Message(ToClient::Goodbye {
+                    reason: Goodbye::TooMany,
+                    ..
+                })
+                | Got::Closed => {}
+                other => panic!("{other:?}"),
+            }
         }
         assert!(Instant::now() < deadline, "not admitted in time");
+        thread::sleep(Duration::from_millis(50));
     }
     assert_eq!(asked.load(Relaxed), 2);
-}
-
-/// Connections from any number of processes at once, each turned away.
-fn flood(h: &Helper) -> (Arc<AtomicBool>, Vec<JoinHandle<()>>) {
-    let stop = Arc::new(AtomicBool::new(false));
-    let flooders = (0..8)
-        .map(|_| {
-            let stop = stop.clone();
-            let socket = h.socket.clone();
-            thread::spawn(move || {
-                while !stop.load(Relaxed) {
-                    let _ = Client::connect(&socket);
-                }
-            })
-        })
-        .collect();
-    (stop, flooders)
-}
-
-#[test]
-fn keys_go_round_in_time_through_a_flood_of_connections() {
-    let h = Helper::start();
-    let k = h.w.plug("keyboard");
-    let c = h.capturing(k);
-    let (stop, flooders) = flood(&h);
-    let mut took = Vec::new();
-    for _ in 0..10 {
-        let pressed = Instant::now();
-        h.w.press(k, KEY_A);
-        let got = c.until(MARGIN, |m| key(m).is_some());
-        c.send(&FromClient::Verdict {
-            seq: key(got.last().unwrap()).unwrap().seq,
-            keep: false,
-        });
-        eventually(MARGIN, "the key out", || h.w.virtual_down().contains(KEY_A));
-        took.push(pressed.elapsed());
-        h.w.release(k, KEY_A);
-        c.until(MARGIN, |m| key(m).is_some_and(|k| k.value == KEY_RELEASE));
-        eventually(MARGIN, "the release out", || h.w.virtual_down().is_empty());
-    }
-    stop.store(true, Relaxed);
-    for f in flooders {
-        let _ = f.join();
-    }
-    assert!(!h.ended.load(Relaxed));
-    took.sort();
-    assert!(took[took.len() / 2] < VERDICT_TIMEOUT, "{took:?}");
 }
 
 // Found in the security review of admission. It fails on purpose and says in its message what goes
@@ -539,4 +504,133 @@ fn fault_a_stream_of_connections_keeps_the_loop_from_the_keyboard() {
         "while connections kept coming the key reached the client after {reached:?} (None: not in \
          {flood:?}), and the watchdog ended the helper: {ended}"
     );
+}
+
+// Standard error that does not take what is written to it: under systemd it is a socket to the
+// journal, which stops reading when journald does. Each of these runs a test of this binary in a
+// process of its own whose standard error is such a socket, filled first, so that any write to it
+// that waits waits for ever.
+
+/// The test named run by itself with standard error stalled; its exit status, or None when it had
+/// not ended within `within`.
+fn with_stalled_stderr(test: &str, within: Duration) -> Option<i32> {
+    use std::process::{Command, Stdio};
+    let (ours, theirs) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    for chunk in [&[b'x'; 4096][..], b"x"] {
+        while rustix::net::send(&theirs, chunk, SendFlags::DONTWAIT).is_ok() {}
+    }
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            test,
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(STALLED_STDERR, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(theirs))
+        .spawn()
+        .unwrap();
+    let end = Instant::now() + within;
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s.code();
+        }
+        if Instant::now() > end {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    drop(ours);
+    status
+}
+
+const STALLED_STDERR: &str = "KEYD_TEST_STALLED_STDERR";
+
+/// Whether this is the process with_stalled_stderr started, which then writes as the helper does.
+fn stalled_stderr() -> bool {
+    let ours = std::env::var_os(STALLED_STDERR).is_some();
+    crate::RAW_STDERR.store(ours, Relaxed);
+    ours
+}
+
+#[test]
+fn with_standard_error_stalled_the_chord_still_lets_go() {
+    let status = with_stalled_stderr(
+        "server::tests::stalled_stderr_chord",
+        VIRTUAL_SETTLE + MARGIN * 4,
+    );
+    assert_eq!(status, Some(0));
+}
+
+#[test]
+#[ignore = "run by with_standard_error_stalled_the_chord_still_lets_go"]
+fn stalled_stderr_chord() {
+    if !stalled_stderr() {
+        return;
+    }
+    let h = Helper::start();
+    let k = h.w.plug("keyboard");
+    let c = h.capturing(k);
+    for code in [KEY_BACKSPACE, KEY_ESC, KEY_ENTER] {
+        h.w.press(k, code);
+    }
+    c.until(MARGIN, |m| {
+        *m == ToClient::Released {
+            reason: Released::Emergency,
+        }
+    });
+    eventually(MARGIN, "the emergency chord", || !h.w.any_grabbed());
+}
+
+#[test]
+fn with_standard_error_stalled_the_watchdog_still_lets_go() {
+    let status = with_stalled_stderr(
+        "server::tests::stalled_stderr_watchdog",
+        VIRTUAL_SETTLE + STALL_LIMIT + MARGIN * 4,
+    );
+    assert_eq!(status, Some(0));
+}
+
+#[test]
+#[ignore = "run by with_standard_error_stalled_the_watchdog_still_lets_go"]
+fn stalled_stderr_watchdog() {
+    if !stalled_stderr() {
+        return;
+    }
+    let h = Helper::start();
+    let k = h.w.plug("keyboard");
+    let _c = h.capturing(k);
+    h.w.hang_next_read(STALL_LIMIT * 3);
+    h.w.press(k, KEY_A);
+    eventually(STALL_LIMIT + MARGIN, "the watchdog", || {
+        h.ended.load(Relaxed)
+    });
+    assert!(h.w.released_by_guard());
+}
+
+#[test]
+fn with_standard_error_stalled_a_panic_still_ends_the_process() {
+    let status = with_stalled_stderr("server::tests::stalled_stderr_panic", MARGIN * 2);
+    assert_eq!(status, Some(crate::PANIC_EXIT));
+}
+
+#[test]
+#[ignore = "run by with_standard_error_stalled_a_panic_still_ends_the_process"]
+fn stalled_stderr_panic() {
+    if !stalled_stderr() {
+        return;
+    }
+    crate::end_on_panic();
+    let _ = thread::spawn(|| panic!("on purpose")).join();
 }

@@ -14,24 +14,16 @@ use keyd::watchdog::{self, Notifier, Progress};
 
 /// The exit status when the watchdog ends the helper.
 const WATCHDOG_EXIT: i32 = 70;
-/// The exit status after a panic on any thread.
-const PANIC_EXIT: i32 = 101;
 
 fn main() {
-    // A thread that panicked would leave its part undone while the rest went on, the watchdog
-    // among them; the whole helper ends instead, and the kernel lets go of what it held. No core
-    // dump: it would hold keys typed.
-    std::panic::set_hook(Box::new(|info| {
-        eprintln!("linda-keyd: {info}");
-        // SAFETY: ends the process at once, which is all that is wanted here.
-        unsafe { libc::_exit(PANIC_EXIT) };
-    }));
+    // With _exit rather than an abort, so that no core dump holds keys typed.
+    keyd::end_on_panic();
     if std::env::args().nth(1).as_deref() == Some("--version") {
         println!("linda-keyd {}", env!("CARGO_PKG_VERSION"));
         return;
     }
     if let Err(e) = run() {
-        eprintln!("linda-keyd: error: {e}");
+        keyd::log_line(format_args!("error: {e}"));
         std::process::exit(1);
     }
 }
@@ -71,6 +63,6 @@ fn run() -> io::Result<()> {
         progress,
         Notifier::from_env(),
     );
-    eprintln!("linda-keyd: listening on {SOCKET_PATH}");
+    keyd::log_line(format_args!("listening on {SOCKET_PATH}"));
     server.run()
 }

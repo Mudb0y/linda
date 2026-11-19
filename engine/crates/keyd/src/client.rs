@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags, Timespec};
-use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketAddrUnix, SocketType};
+use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketAddrUnix, SocketFlags, SocketType};
 
 use crate::protocol::{FromClient, MAX_MESSAGE, PROTOCOL_VERSION, ToClient};
 
@@ -24,7 +24,14 @@ pub enum Got {
 
 impl Client {
     pub fn connect(path: &Path) -> io::Result<Client> {
-        let fd = rustix::net::socket(AddressFamily::UNIX, SocketType::SEQPACKET, None)?;
+        // Not inherited by the processes some tests start, which would keep it open after the test
+        // has hung up.
+        let fd = rustix::net::socket_with(
+            AddressFamily::UNIX,
+            SocketType::SEQPACKET,
+            SocketFlags::CLOEXEC,
+            None,
+        )?;
         rustix::net::connect(&fd, &SocketAddrUnix::new(path)?)?;
         Ok(Client { fd })
     }

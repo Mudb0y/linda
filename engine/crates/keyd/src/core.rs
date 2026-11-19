@@ -1215,11 +1215,11 @@ impl<D: Devices> Core<D> {
     }
 
     fn emergency(&mut self, now: Instant) {
-        log!("the emergency chord: letting go of every keyboard");
         if let Some(c) = self.client.as_mut() {
             c.wants = false;
         }
         self.let_go(Some(Released::Emergency), true, now);
+        log!("the emergency chord: let go of every keyboard");
     }
 
     /// Tells the client of a key, and puts a press or release in line. Repeats go to the client
