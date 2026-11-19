@@ -418,6 +418,24 @@ class CaptureState(NamedTuple):
 
 
 NO_CAPTURE = CaptureState(0, None, False, "off", None, None, None)
+#: How the decider gives NVDA a key: as it is; as AltGr while the keyboard is held, after a left
+#: Control; or not at all, as AltGr while it is not, which is nothing to NVDA but the level the next key
+#: comes in.
+PLAIN, ALTGR, SILENT = "plain", "altGr", "silent"
+
+
+def altGrControl(event: KeyEvent) -> KeyEvent:
+	"""Held for input help or for another computer, AltGr is what Windows' hook reports for it: a left
+	Control of its own scan code, then right Alt, so that it types on a Windows computer that the keys
+	are sent to."""
+	return replace(
+		event,
+		vkCode=keyMap.VK["LCONTROL"],
+		scanCode=ALTGR_CONTROL_SCAN,
+		extended=False,
+		text="",
+		reachedApplication=False,
+	)
 
 
 @dataclass
@@ -482,8 +500,9 @@ class X11KeySource:
 		self._stopping = False
 		self._thread: threading.Thread | None = None
 		self._decider: threading.Thread | None = None
-		#: (event, ticket, key code, modifiers) for the decider, in the order the keys came; None ends it.
-		self._decisions: queue.SimpleQueue[tuple[KeyEvent, _Ticket | None, int, int] | None] = (
+		#: (event, ticket, key code, modifiers, how) for the decider, in the order the keys came, how being
+		#: PLAIN, ALTGR or SILENT; None ends it.
+		self._decisions: queue.SimpleQueue[tuple[KeyEvent, _Ticket | None, int, int, str] | None] = (
 			queue.SimpleQueue()
 		)
 		self._deliver: Callable[[KeyEvent], bool] | None = None
@@ -590,8 +609,12 @@ class X11KeySource:
 		self._captureState = NO_CAPTURE
 		#: Presses under a grab not yet answered, in the order they came.
 		self._tickets: deque[_Ticket] = deque()
-		#: Key code: (vk, scan) a press was delivered as when it was not the key's own, for its release.
-		self._pressedAs: dict[int, tuple[int, int]] = {}
+		#: Key code: what the decider told NVDA of the press of each key down, (vk, scan, extended,
+		#: whether a left Control went before it as before AltGr, whether it was told at all), which its
+		#: repeats and release are, whatever has changed since: NVDA counts the keys held by these.
+		self._told: dict[int, tuple[int, int, bool, bool, bool]] = {}
+		#: Key code: the virtual-key code each key down went down as, for keyState.
+		self._downAs: dict[int, int] = {}
 		self._guard: subprocess.Popen | None = None
 		#: The guard's standard input, written without blocking.
 		self._guardInput: int | None = None
@@ -904,7 +927,64 @@ class X11KeySource:
 			except Exception:  # noqa: BLE001
 				_logError("Deciding a key")
 
-	def _decideKey(self, event: KeyEvent, ticket: _Ticket | None, keycode: int, modifiers: int) -> None:
+	def _decideKey(
+		self, event: KeyEvent, ticket: _Ticket | None, keycode: int, modifiers: int, how: str
+	) -> None:
+		if event.repeat:
+			told = self._told.get(keycode)
+			if told is None:
+				told = (event.vkCode, event.scanCode, event.extended, how == ALTGR, how != SILENT)
+			vk, scan, extended, control, main = told
+			if not main:
+				if ticket is not None:
+					# Its press went to the application alone, and so does each repeat of it.
+					ticket.verdict = True
+					self._wake()
+				return
+			event = replace(event, vkCode=vk, scanCode=scan, extended=extended)
+			if control:
+				self._call(altGrControl(event))
+			if ticket is not None:
+				# Held by a grab as its press was: NVDA's to decide again, as on Windows.
+				self._decidePress(event, ticket, keycode, modifiers)
+			else:
+				self._call(event)
+			return
+		if event.isUp:
+			told = self._told.pop(keycode, None)
+			if told is None:
+				# A key down before this source read the keyboard, or one whose press it never saw.
+				told = (event.vkCode, event.scanCode, event.extended, how == ALTGR, how != SILENT)
+			vk, scan, extended, control, main = told
+			event = replace(event, vkCode=vk, scanCode=scan, extended=extended)
+			if control:
+				self._call(altGrControl(event))
+			if main:
+				self._call(event)
+			return
+		if how == SILENT:
+			self._told[keycode] = (event.vkCode, event.scanCode, event.extended, False, False)
+			return
+		if how == ALTGR:
+			self._call(altGrControl(event))
+		told = self._decidePress(event, ticket, keycode, modifiers)
+		self._told[keycode] = (
+			event.vkCode,
+			event.scanCode,
+			event.extended,
+			how == ALTGR,
+			told,
+		)
+
+	def _call(self, event: KeyEvent) -> bool:
+		try:
+			return self._deliver(event)
+		except Exception:  # noqa: BLE001
+			_logError("Delivering a key")
+			return True
+
+	def _decidePress(self, event: KeyEvent, ticket: _Ticket | None, keycode: int, modifiers: int) -> bool:
+		"""Give NVDA a press, and the X server NVDA's verdict on it; whether NVDA was told of it."""
 		kept = False
 		if ticket is not None:
 			# Taken for held from the grabs as they were; whether the server held it decides.
@@ -917,7 +997,7 @@ class X11KeySource:
 				if ticket.replayed:
 					# The application has had the key, as NVDA did not answer in time; NVDA acting on it
 					# as well would act twice.
-					return
+					return False
 				# Kept for NVDA without its answer, as the NVDA key's chords are: NVDA's still.
 				ticket = None
 			elif event.vkCode in KEPT_UNDER_GRAB:
@@ -933,15 +1013,12 @@ class X11KeySource:
 				self._wake()
 				event = replace(event, captured=False, reachedApplication=True)
 				ticket = None
-		try:
-			passed = self._deliver(event)
-		except Exception:  # noqa: BLE001
-			_logError("Delivering a key")
-			passed = True
+		passed = self._call(event)
 		if ticket is not None:
 			# The Windows hook passes a key its callback does not block, whatever else is held.
 			ticket.verdict = passed is not False and not kept
 			self._wake()
+		return True
 
 	def _findXtestDevices(self) -> None:
 		"""Find the XTEST devices and the virtual keyboard, after any change of the devices: one added
@@ -1302,21 +1379,22 @@ class X11KeySource:
 				if isUp:
 					self._keycodesDown.discard(keycode)
 					devices.discard(keycode)
-					self._locksHeld.pop(vk, None)
+					downAs = self._downAs.pop(keycode, vk)
+					self._locksHeld.pop(downAs, None)
 				else:
 					self._keycodesDown.add(keycode)
 					devices.add(keycode)
+					downAs = self._downAs[keycode] = vk
 					if vk in LOCK_MASKS:
 						self._locksHeld[vk] = bool(lockedBefore & LOCK_MASKS[vk])
 				self._noteElsewhere(keycode, isUp, sourceid)
-			generic = GENERIC_FOR.get(vk)
-			for code in (vk, generic):
-				if code is None:
-					continue
-				if isUp:
-					self._down.discard(code)
-				else:
-					self._down.add(code)
+				for code in (downAs, GENERIC_FOR.get(downAs)):
+					if code is None:
+						continue
+					if isUp:
+						self._down.discard(code)
+					else:
+						self._down.add(code)
 		decided = self._isDecided(keycode, isUp, repeat, sourceid)
 		underGrab = self._grabKey is not None
 		if (
@@ -1340,19 +1418,21 @@ class X11KeySource:
 			# The keyboard's own events are never the echo of a key sent here, even when the same key was
 			# sent just now; a release taken for one would leave NVDA thinking it still down.
 			echo = sourceid in self._xtestDevices and self._isEcho(keycode, isUp, arrival)
-			if echo or (levelShift and not self._held):
+			if echo:
 				if ticket is not None:
-					# NVDA sent it to the application, where it goes at once; AltGr changes only the level
-					# the next key comes in, and is kept under a grab with the other modifiers.
-					ticket.verdict = echo
+					# NVDA sent it to the application, where it goes at once.
+					ticket.verdict = True
 				return
+			how = PLAIN if not levelShift else ALTGR if self._held else SILENT
+			if how == SILENT and ticket is not None:
+				# AltGr changes only the level the next key comes in, and is kept under a grab with the
+				# other modifiers.
+				ticket.verdict = False
+				ticket = None
 			if ticket is not None and text and len(text) == 1 and text.isprintable() and level >= 2:
 				# AltGr is not a modifier to NVDA, so the key would be taken for its letter alone, and
 				# run that letter's quick navigation; as the character it types, it is trapped.
 				vk, scan, extended = keyMap.VK["PACKET"], ord(text), False
-				self._pressedAs[keycode] = (vk, scan)
-			elif isUp and keycode in self._pressedAs:
-				vk, scan = self._pressedAs.pop(keycode)
 			event = KeyEvent(
 				vkCode=vk,
 				scanCode=scan,
@@ -1368,21 +1448,7 @@ class X11KeySource:
 				capsLockWasOn=capsLockWasOn,
 				nvdaKeyGrab=ticket is not None and ticket.kind == NVDA_GRAB,
 			)
-			if levelShift:
-				# Held for input help or for another computer, AltGr is what Windows' hook reports for it: a
-				# left Control of its own scan code, then right Alt, so that it types on a Windows computer
-				# that the keys are sent to.
-				self._decisions.put(
-					(
-						replace(
-							event, vkCode=keyMap.VK["LCONTROL"], scanCode=ALTGR_CONTROL_SCAN, extended=False
-						),
-						None,
-						keycode,
-						effective,
-					)
-				)
-			self._decisions.put((event, ticket, keycode, effective))
+			self._decisions.put((event, ticket, keycode, effective, how))
 		finally:
 			if isUp and keycode == self._grabKey:
 				# The X server ends a grab as the key that made it active is released.

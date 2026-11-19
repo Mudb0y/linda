@@ -319,6 +319,8 @@ class _Item:
 	time: float
 	#: AltGr while the keyboard is held, which Windows' hook reports with a left Control first.
 	altGr: bool = False
+	#: AltGr while it is not, which is nothing to NVDA but the level the next key comes in.
+	silent: bool = False
 
 
 class KernelKeySource:
@@ -413,8 +415,10 @@ class KernelKeySource:
 		#: Key code: the press of each NVDA key down that was not passed on, which makes every press
 		#: NVDA's while it lasts.
 		self._nvdaHeld: dict[int, _Press] = {}
-		#: Key code: (vk, scan) a press was delivered as when it was not the key's own, for its release.
-		self._pressedAs: dict[int, tuple[int, int]] = {}
+		#: Key code: what the decider told NVDA of the press of each key down, (vk, scan, extended,
+		#: whether a left Control went before it as before AltGr, whether it was told at all), which its
+		#: repeats and release are, whatever has changed since: NVDA counts the keys held by these.
+		self._told: dict[int, tuple[int, int, bool, bool, bool]] = {}
 		# What NVDA asked, each replaced whole, as the thread that answers keys reads them without a lock.
 		self._consumed = (0, False)
 		self._held = False
@@ -1356,10 +1360,19 @@ class KernelKeySource:
 				self._pending.append(press)
 			else:
 				self._settle(press)
-		if not levelShift or held:
-			self._decisions.put(
-				_Item(keycode, KEY_PRESS, press, tables, depressed, locked, now, altGr=levelShift)
+		self._decisions.put(
+			_Item(
+				keycode,
+				KEY_PRESS,
+				press,
+				tables,
+				depressed,
+				locked,
+				now,
+				altGr=levelShift and held,
+				silent=levelShift and not held,
 			)
+		)
 		return press
 
 	def _follow(self, keycode: int, now: float, seq: int, device: int, decided: bool) -> _Press:
@@ -1394,10 +1407,18 @@ class KernelKeySource:
 			if self._nvdaHeld.get(keycode) is press:
 				del self._nvdaHeld[keycode]
 		levelShift = keycode in tables.levelShift
-		if levelShift and not held:
-			return
 		self._decisions.put(
-			_Item(keycode, KEY_RELEASE, press, tables, depressed, locked, now, altGr=levelShift)
+			_Item(
+				keycode,
+				KEY_RELEASE,
+				press,
+				tables,
+				depressed,
+				locked,
+				now,
+				altGr=levelShift and held,
+				silent=levelShift and not held,
+			)
 		)
 
 	def _retire(self, press: _Press, now: float) -> None:
@@ -1439,11 +1460,18 @@ class KernelKeySource:
 
 	def _repeat(self, keycode: int, now: float) -> None:
 		tables = self._tables
-		if keycode in tables.levelShift and not self._held:
-			return
 		press = self._presses.get(keycode)
 		self._decisions.put(
-			_Item(keycode, KEY_REPEAT, press, tables, self._depressed(tables), _lockedMods(self._locks), now)
+			_Item(
+				keycode,
+				KEY_REPEAT,
+				press,
+				tables,
+				self._depressed(tables),
+				_lockedMods(self._locks),
+				now,
+				silent=keycode in tables.levelShift and not self._held,
+			)
 		)
 
 	def _releaseAll(self, dropUndecided: bool = False) -> None:
@@ -1506,10 +1534,6 @@ class KernelKeySource:
 				# AltGr is not a modifier to NVDA, so the key would be taken for its letter alone, and run
 				# that letter's quick navigation; as the character it types, it is trapped.
 				vk, scan, extended = keyMap.VK["PACKET"], ord(text), False
-				self._pressedAs[keycode] = (vk, scan)
-		elif keycode in self._pressedAs:
-			vk, scan = self._pressedAs.pop(keycode) if isUp else self._pressedAs[keycode]
-			extended = False
 		effective = item.depressed | item.locked
 		return KeyEvent(
 			vkCode=vk,
@@ -1532,15 +1556,14 @@ class KernelKeySource:
 			# itself within the press's bound.
 			press.looked.wait(x11.DOCUMENT_WAIT)
 		event = self._event(item)
-		if item.altGr:
-			# Held for input help or for another computer, AltGr is what Windows' hook reports for it: a
-			# left Control of its own scan code, then right Alt, so that it types on a Windows computer
-			# that the keys are sent to.
-			control = replace(
-				event, vkCode=keyMap.VK["LCONTROL"], scanCode=x11.ALTGR_CONTROL_SCAN, extended=False, text=""
-			)
-			self._call(replace(control, reachedApplication=False))
+		keycode = item.keycode
 		if item.value != KEY_PRESS:
+			told = self._told.pop(keycode, None) if item.value == KEY_RELEASE else self._told.get(keycode)
+			if told is None:
+				# A key down before this source had the keyboard, whose press NVDA had from elsewhere.
+				told = (event.vkCode, event.scanCode, event.extended, item.altGr, not item.silent)
+			vk, scan, extended, control, main = told
+			event = replace(event, vkCode=vk, scanCode=scan, extended=extended)
 			if press is not None:
 				# Its press came before it, and is decided by now.
 				reached = bool(press.passed) or press.expired
@@ -1549,10 +1572,29 @@ class KernelKeySource:
 					reachedApplication=reached,
 					nvdaKeyGrab=item.value == KEY_REPEAT and press.kind == NVDA_KIND and not reached,
 				)
-			self._call(event)
+			if control:
+				self._call(x11.altGrControl(event))
+			if main:
+				self._call(event)
 			return
+		if item.silent:
+			self._told[keycode] = (event.vkCode, event.scanCode, event.extended, False, False)
+			return
+		if item.altGr:
+			self._call(x11.altGrControl(event))
+		told = self._decidePress(press, event)
+		self._told[keycode] = (
+			told.vkCode if told else event.vkCode,
+			told.scanCode if told else event.scanCode,
+			told.extended if told else event.extended,
+			item.altGr,
+			told is not None,
+		)
+
+	def _decidePress(self, press: _Press | None, event: KeyEvent) -> KeyEvent | None:
+		"""Give NVDA a press, and the helper NVDA's verdict on it; the event NVDA was told, or None."""
 		if press is None or press.dropped:
-			return
+			return None
 		kind = press.kind
 		if kind == NVDA_KIND and press.under and all(p.passed for p in press.under):
 			# Taken for a chord with an NVDA key, which NVDA passed on: no chord.
@@ -1567,7 +1609,7 @@ class KernelKeySource:
 		)
 		if kind not in (NVDA_KIND, CAPTURE_KIND):
 			self._call(event)
-			return
+			return event
 		if press.passed is not None:
 			if press.defaulted:
 				# By number, as which key it was is the user's typing.
@@ -1577,19 +1619,21 @@ class KernelKeySource:
 			if press.passed:
 				# The application has had the key, as NVDA did not answer in time; NVDA acting on it as
 				# well would act twice.
-				return
+				return None
 			# Kept for NVDA without its answer, as the NVDA key's chords are: NVDA's still.
 			self._call(event)
-			return
+			return event
 		kept = event.vkCode in KEPT_MODIFIERS
 		if kind == CAPTURE_KIND and not kept and not self._capturedNow(press):
 			if press.decide(True):
 				self._wake()
-			self._call(replace(event, captured=False, reachedApplication=True))
-			return
+			event = replace(event, captured=False, reachedApplication=True)
+			self._call(event)
+			return event
 		passed = self._call(event)
 		if press.decide(passed is not False and not kept):
 			self._wake()
+		return event
 
 	def _call(self, event: KeyEvent) -> bool:
 		try:

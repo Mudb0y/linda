@@ -839,3 +839,98 @@ def test_keyTypedAsInputHelpEndsReachesTheApplicationWhole(tmp_path: Path):
 	assert value["window"] == [[48, True], [48, False]], (
 		f"the press went to the X source's grab of the keyboard, still there: {value}"
 	)
+
+
+#: Every kind of key, pressed and released with what decides its virtual-key code changing between the
+#: two where it can: plain, modifiers, AltGr in and out of a hold, numpad keys across Num Lock, the
+#: locks, the NVDA key by each of its keys, keys typed by NVDA, and keys of a mode that gives them back.
+#: Whether each release NVDA had is its press's, and what NVDA is left believing is down.
+EVERY_KEY_CHILD = r"""
+import subprocess
+told = []
+
+
+def deliver(event):
+	told.append([event.vkCode, event.scanCode, event.extended, event.isUp, event.repeat])
+	if event.isUp or not event.captured:
+		return True
+	return not keep(event)
+
+
+subprocess.run(["setxkbmap", "pl"], check=True)
+time.sleep(0.3)
+source = startSource(ROUTE, consumed=x11.EXTENDED_INSERT | x11.CAPS_LOCK | x11.NUMPAD_INSERT)
+keyboard.press("a", "Shift_L+a", "Control_L+a")
+keyboard.down(97)
+keyboard.press("a")
+keyboard.up(97)
+keyboard.press("ISO_Level3_Shift+e")
+keyboard.down("ISO_Level3_Shift")
+source.holdKeyboard(True)
+time.sleep(0.2)
+keyboard.press("e")
+keyboard.up("ISO_Level3_Shift")
+time.sleep(0.1)
+keyboard.down("ISO_Level3_Shift")
+source.holdKeyboard(False)
+time.sleep(0.2)
+keyboard.up("ISO_Level3_Shift")
+keyboard.press("KP_Up")
+keyboard.down("KP_Up")
+keyboard.press("Num_Lock")
+keyboard.up("KP_Up")
+keyboard.press("KP_Up")
+keyboard.down("KP_Up")
+keyboard.press("Num_Lock")
+keyboard.up("KP_Up")
+keyboard.down("KP_Insert")
+keyboard.press("Num_Lock")
+keyboard.up("KP_Insert")
+keyboard.press("Num_Lock")
+keyboard.press("Insert+t", "Caps_Lock+t", "KP_Insert+t")
+keyboard.press("Caps_Lock")
+time.sleep(0.15)
+keyboard.press("Caps_Lock")
+keyboard.press("Scroll_Lock", "Scroll_Lock")
+source.typeKey(ord("B"), False, False)
+source.typeKey(ord("B"), False, True)
+source.typeKey(0xA0, False, False)
+source.typeKey(ord("C"), False, False)
+source.typeKey(ord("C"), False, True)
+source.typeKey(0xA0, False, True)
+mode["now"] = "browse"
+source.setCapture("browse", 1)
+time.sleep(0.3)
+mode["now"] = "off"
+keyboard.press("h", "Shift_L+h", "Down")
+time.sleep(0.5)
+source.setCapture("off")
+subprocess.run(["setxkbmap", "us"], check=True)
+down = {}
+unmatched = []
+for vk, scan, extended, up, repeat in told:
+	if repeat:
+		continue
+	if up:
+		if vk in down:
+			if down.pop(vk) != (scan, extended):
+				unmatched.append([vk, scan, extended])
+		else:
+			unmatched.append([vk, scan, extended])
+	else:
+		down[vk] = (scan, extended)
+result = {"kernel": source.isKernel, "stillDown": sorted(down), "unmatched": unmatched, "count": len(told)}
+source.stop()
+keyboard.close()
+"""
+
+
+@pytest.mark.parametrize("route", ("x11", "auto"))
+def test_everyReleaseNVDAHasIsItsPresss(tmp_path: Path, route: str):
+	value = runKernelChild(tmp_path, f"ROUTE = {route!r}\n" + EVERY_KEY_CHILD)
+	assert value["kernel"] == (route == "auto")
+	assert value["count"] > 60, value
+	assert value["stillDown"] == [], f"on the {route} route NVDA is left believing keys are down: {value}"
+	assert value["unmatched"] == [], (
+		f"on the {route} route releases came as other keys than their presses: {value}"
+	)
