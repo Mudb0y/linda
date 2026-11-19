@@ -3078,3 +3078,69 @@ fn the_chord_lets_go_in_any_order_around_a_loss_of_events_when_and_only_when_it_
         );
     });
 }
+
+// Found in the fifth review. Each is ignored, so that the package's checks still pass, and fails
+// with cargo test -p linda-keyd -- --ignored fault_ while the fault it names stands.
+
+const KEY_SPACE: u16 = 57;
+
+/// A modifier that goes down while events are lost, and is still held once the helper has caught
+/// up, is unseen: never told nor put out. The keys typed under it next are ordinary presses, told
+/// to the client and put out on the virtual keyboard without it, so the program has another key
+/// than the one typed, not merely none. Control held across the stall and C typed under it gives
+/// the program a bare C, which replaces whatever text is selected, where the person meant to copy
+/// it; Shift with Enter, a new line in a Discord message, sends the message half written. The
+/// enumeration checks that no key goes out under a modifier that was up when it went down; this is
+/// the other half, a key going out without a modifier that was down.
+#[test]
+#[ignore = "fifth review: a key typed under a modifier held across a loss of events goes out without it"]
+fn fault_a_key_typed_under_a_modifier_held_across_a_loss_does_not_go_out_without_it() {
+    let (mut t, k) = T::capturing();
+    // The helper falls behind and the kernel drops what it held; Control goes down at the end of
+    // the stall and is read with the loss.
+    t.w.overflow(k, &[]);
+    t.w.press(k, KEY_LEFTCTRL);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    // Caught up, with Control still held, the person types C to copy.
+    t.press(k, KEY_C);
+    for key in t.keys() {
+        if key.value == KEY_PRESS {
+            t.verdict(key.seq, false);
+        }
+    }
+    t.pass(VERDICT_TIMEOUT);
+    let emitted = t.w.emitted();
+    let c = emitted.iter().position(|e| *e == (KEY_C, 1));
+    let control = emitted.iter().position(|e| *e == (KEY_LEFTCTRL, 1));
+    assert!(
+        c.is_none_or(|c| control.is_some_and(|x| x < c)),
+        "Control, held since it went down while events were lost, was up on the virtual keyboard \
+         when C, typed under it, went out, so the program had C alone where the person typed \
+         Control+C: {emitted:?}"
+    );
+}
+
+/// The same for the NVDA key: Insert held across a loss of events is never told to the client, so
+/// the key typed under it comes to Linda alone. NVDA+Space, which switches browse mode to focus
+/// mode, comes as Space, which browse mode binds to activatePosition: it presses the button or
+/// follows the link at the cursor. NVDA+Tab, which says where the focus is, moves it instead.
+#[test]
+#[ignore = "fifth review: the NVDA key held across a loss of events is never told, and the key under it comes alone"]
+fn fault_a_key_typed_under_the_nvda_key_held_across_a_loss_is_not_told_without_it() {
+    let (mut t, k) = T::capturing();
+    t.w.overflow(k, &[]);
+    t.w.press(k, KEY_INSERT);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    t.press(k, KEY_SPACE);
+    let told: Vec<(u16, u8)> = t.keys().iter().map(|k| (k.code, k.value)).collect();
+    let space = told.iter().position(|e| *e == (KEY_SPACE, KEY_PRESS));
+    let insert = told.iter().position(|e| *e == (KEY_INSERT, KEY_PRESS));
+    assert!(
+        space.is_none_or(|s| insert.is_some_and(|i| i < s)),
+        "Insert, the NVDA key, held since it went down while events were lost, was never told to \
+         the client, and Space, pressed under it for NVDA+Space, was told alone, which Linda's \
+         browse mode takes for activatePosition, pressing whatever is at the cursor: {told:?}"
+    );
+}
