@@ -2065,9 +2065,13 @@ class X11KeySource:
 		"""The window to grab captured keys and the NVDA keys on, watched for the focus leaving it; None
 		when there is none to grab them on.
 
-		A grab on the window that has the keyboard focus moves no focus as it activates; one on any
-		other window, the root included, takes the focus from the application for as long as the key
-		is held, and Firefox then reports its window inactive and active again for every key. A window
+		A grab on the window that has the keyboard focus still has the X server send that window a
+		focus-out and a focus-in of the grab's as it activates and ends. GTK ignores them on the small
+		window of its own inside a top-level window, which has the focus as a rule, but counts them on
+		the top-level window itself: a key the grabs on a document's top-level window take, in the moment
+		after the window manager gives it the focus, makes Firefox and the page see a blur and a focus.
+		One on any other window, the root included, takes the focus from the application for as long as
+		the key is held, and Firefox then reports its window inactive and active again for every key. A window
 		of NVDA's own is never grabbed on: it has the focus only until NVDA's focus follows, and a grab
 		there while it opens left wxGTK's modal dialogs crashing as they closed.
 		"""
