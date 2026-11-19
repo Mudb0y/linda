@@ -692,9 +692,10 @@ fn stalled_stderr_panic() {
 /// given in all. A helper merely starved of the processor, as in a storm of swapping, wakes late at
 /// every turn, and a client that has hung outright keeps the keyboards for HEARTBEAT_TIMEOUT plus ten
 /// late wakes, since a turn while holding counts LOOP_TICK of the silence: 12 s when every wake is a
-/// second late, 52 s at five. Neither watchdog steps in: the watchdog thread forgives its own late
-/// wakes the same way, and systemd's is fed at every turn. This drives the core as Server::turn
-/// does, with its deadlines and frozen_for.
+/// second late, about 20 s just under 1.8 s late. Neither watchdog steps in below that: the watchdog
+/// thread forgives its own late wakes the same way, and systemd's is fed at every turn, which comes
+/// within its two seconds until a turn takes longer. This drives the core as Server::turn does, with
+/// its deadlines and frozen_for.
 #[test]
 #[ignore = "second review: fails while the fault stands"]
 fn fault_a_starved_helper_lets_go_of_a_silent_client_about_when_the_heartbeat_says() {
