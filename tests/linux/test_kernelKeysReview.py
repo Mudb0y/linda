@@ -1394,3 +1394,95 @@ def test_guardReadsWhatTheXServerSendsItAndFreesTheKeyboardInTime(tmp_path: Path
 	# Its silence of two seconds after the last heartbeat, half a second apart, and its wait for the X
 	# server of up to one.
 	assert value["again"] and value["freedAfter"] < 3.5, value
+
+
+#: The helper lets go for each reason it taps keys for, with a typed as it does, and, in the second
+#: case, a told down before, as the helper does today when a key told down is released and pressed
+#: again in its last read: a second press with no release between. What NVDA heard of a, what it is
+#: left believing is down, and what the window had.
+TAPS_CHILD = r"""
+from keydStandIn import RELEASED_BACKGROUND, RELEASED_EMERGENCY, RELEASED_STOPPED
+source = startSource()
+windowKeys()
+delivered.clear()
+if DOWN_BEFORE:
+	keyboard.down("a")
+	time.sleep(0.2)
+	with keyboard._lock:
+		# The helper's last read held its release, which it tells as no KEY.
+		keyboard._down.discard((3, code("a")))
+keyboard.letGo({"background": RELEASED_BACKGROUND, "emergency": RELEASED_EMERGENCY, "stopped": RELEASED_STOPPED}[REASON], taps=("a",))
+time.sleep(0.6)
+down = {}
+for e in delivered:
+	if not e["repeat"]:
+		if e["up"]:
+			down.pop(e["vk"], None)
+		else:
+			down[e["vk"]] = True
+result = {
+	"nvda": [[e["up"], e["reached"], e["captured"]] for e in delivered if e["vk"] == ord("A") and not e["repeat"]],
+	"stillDown": sorted(down),
+	"window": [key for key in windowKeys() if key[0] == 30],
+}
+source.stop()
+keyboard.close()
+"""
+
+
+@pytest.mark.parametrize("reason", ("background", "emergency", "stopped"))
+def test_keyTheHelperTapsAsItLetsGoReachesNVDAOnce(tmp_path: Path, reason: str):
+	value = runKernelChild(tmp_path, f"REASON = {reason!r}\nDOWN_BEFORE = False\n" + TAPS_CHILD)
+	assert value["nvda"] == [[False, True, False], [True, True, False]], (
+		f"a, tapped as the helper let go for {reason}, did not reach NVDA once as the program's: {value}"
+	)
+	assert value["stillDown"] == [] and value["window"] == [[30, True], [30, False]], value
+
+
+def test_keyTappedWhileToldDownLeavesNothingDown(tmp_path: Path):
+	value = runKernelChild(tmp_path, "REASON = 'background'\nDOWN_BEFORE = True\n" + TAPS_CHILD)
+	assert value["stillDown"] == [], f"NVDA is left believing a is down: {value}"
+	assert value["nvda"][0][0] is False and value["nvda"][-1][0] is True, value
+
+
+#: After a loss of key events, a modifier the kernel has down that the helper did not see go down comes
+#: as a press flagged ASK and SYNTHETIC; then a is typed, and the modifier is let go of: whether NVDA
+#: decided the made-up press as a real one, and whether a came with it.
+MADE_UP_CHILD = r"""
+source = startSource()
+windowKeys()
+delivered.clear()
+start = len(keyboard.events)
+keyboard.madeUpPress(KEY)
+time.sleep(0.2)
+keyboard.press("a")
+time.sleep(0.2)
+keyboard.up(KEY)
+time.sleep(0.3)
+seq = next(rest[0] for _t, what, *rest in keyboard.events[start:] if what == "key" and rest[2] == 1)
+result = {
+	"verdict": [keep for s, keep, _delay in keyboard.verdicts if s == seq],
+	"a": [[e["text"], e["nvda"], e["reached"]] for e in presses(ord("A"))],
+	"stillDown": sorted({e["vk"] for e in delivered if not e["up"]} - {e["vk"] for e in delivered if e["up"]}),
+}
+source.stop()
+keyboard.close()
+"""
+
+
+@pytest.mark.parametrize(
+	("key", "verdict", "a"),
+	(
+		# Shift passed on, and a typed under it as A.
+		("Shift_L", [False], [["A", False, True]]),
+		# Control passed on, and a a command with it, the control character.
+		("Control_L", [False], [["\x01", False, True]]),
+		# Insert, the NVDA key, kept, and a a chord with it, NVDA's.
+		("Insert", [True], [["a", True, False]]),
+	),
+)
+def test_madeUpModifierPressIsDecidedAsARealOne(tmp_path: Path, key: str, verdict: list, a: list):
+	value = runKernelChild(tmp_path, f"KEY = {key!r}\n" + MADE_UP_CHILD)
+	assert value["verdict"] == verdict, value
+	assert value["a"] == a, value
+	assert value["stillDown"] == [], value

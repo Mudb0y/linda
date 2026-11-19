@@ -1303,7 +1303,12 @@ class KernelKeySource:
 		own = self._ownKind(keycode, effective, capture)
 		under: tuple[_Press, ...] = ()
 		mods = tables.keyMods.get(keycode, 0)
-		if held:
+		if decided:
+			# Put out by the helper without asking, as the keys it taps to the application as it lets go:
+			# the application's, which NVDA has after it, as any key it does not take; an NVDA key so
+			# tapped is no NVDA key held, nor is any key after it a chord with it.
+			kind = own = PASS_KIND
+		elif held:
 			kind = HOLD_KIND
 		elif own == NVDA_KIND:
 			kind = NVDA_KIND

@@ -278,23 +278,25 @@ def test_fault_emergencyChordBeforeTheRouteIsTakenIsNotHonoured(tmp_path: Path):
 
 # The second pass, over the fixes.
 
-#: As linda-keyd now does as it lets go: what it read last of a keyboard goes to the program as a tap,
-#: pressed and released at once on the virtual keyboard, and is not sent to the client as KEY. Here the
-#: last key read is Insert, the NVDA key, and the helper lets go as it cannot tell which session is in
-#: front, the person's own still being: whether NVDA heard of Insert, and whether the program had it.
+#: As linda-keyd does as it lets go since its sixth wave: what it read last of a keyboard goes to the
+#: program as a tap, pressed and released at once on the virtual keyboard, and is sent to the client as
+#: a KEY press and a KEY release without flags before RELEASED. Here the last key read is Insert, the
+#: NVDA key, and the helper lets go for a sleep, the person's own session in front; t is typed after,
+#: which reaches the X display straight: what NVDA heard of Insert, whether the program had it, and
+#: whether t was taken for a chord with it.
 TAP_AS_THE_HELPER_LETS_GO_CHILD = r"""
-from keydStandIn import RELEASED_SESSION_UNKNOWN
+from keydStandIn import RELEASED_BACKGROUND
 source = startSource()
 windowKeys()
 delivered.clear()
-with keyboard._lock:
-	keyboard._toX(code("Insert"), True, virtual=True)
-	keyboard._toX(code("Insert"), False, virtual=True)
-	keyboard.letGo(RELEASED_SESSION_UNKNOWN)
+keyboard.letGo(RELEASED_BACKGROUND, taps=("Insert",))
 time.sleep(0.5)
+keyboard.press("t")
+time.sleep(0.3)
 result = {
-	"nvda": [[e["vk"], e["up"]] for e in delivered if e["vk"] == 0x2D],
+	"nvda": [[e["vk"], e["up"], e["reached"], e["nvda"]] for e in delivered if e["vk"] == 0x2D],
 	"window": [key for key in windowKeys() if key[0] == 110],
+	"t": [e["nvda"] for e in presses(ord("T"))],
 }
 source.stop()
 keyboard.close()
@@ -303,8 +305,9 @@ keyboard.close()
 
 def test_fault_keyTheHelperTapsAsItLetsGoReachesTheProgramAndNotNVDA(tmp_path: Path):
 	value = runKernelChild(tmp_path, TAP_AS_THE_HELPER_LETS_GO_CHILD)
-	assert value["nvda"] == [[0x2D, False], [0x2D, True]] and value["window"] == [], (
-		"Insert, read by the helper as it let go and put out on the virtual keyboard as a tap without a KEY, "
-		"was taken by the X source for a key the kernel source had decided and given to nobody: NVDA never "
-		f"heard of it and the program had it: {value}"
+	assert value["nvda"] == [[0x2D, False, True, False], [0x2D, True, True, False]], (
+		"Insert, tapped by the helper as it let go and told as a KEY press and release without flags, did "
+		f"not reach NVDA once, as a key the program has had: {value}"
 	)
+	assert value["window"] == [[110, True], [110, False]], value
+	assert value["t"] == [False], f"t typed after the tapped Insert was taken for a chord with it: {value}"

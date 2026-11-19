@@ -408,9 +408,25 @@ class StandIn:
 			self._sendDevice(DEVICE_GONE, device)
 		self._wake()
 
-	def letGo(self, reason: int) -> None:
+	def letGo(self, reason: int, taps: tuple[str | int, ...] = (), device: int = DEVICE_NUMBER) -> None:
+		"""Let go, as the helper does for reason.
+
+		:param taps: Keys read too late for the client to be asked, which the helper puts out on its
+			virtual keyboard as taps as it lets go, after the presses waiting for a verdict; it tells
+			the client of each as a KEY press and a KEY release without flags, before RELEASED, on
+			STOPPED, EMERGENCY and BACKGROUND for a sleep, and of none for any other reason.
+		"""
 		with self._lock:
-			self._letGo(reason, dropUndecided=False)
+			self._letGo(reason, dropUndecided=reason == RELEASED_EMERGENCY, taps=taps, device=device)
+
+	def madeUpPress(self, name: str | int, device: int = DEVICE_NUMBER) -> None:
+		"""A modifier the kernel has down after a loss of events that the helper did not see go down: a
+		press flagged ASK and SYNTHETIC, decided as any press is, whose release comes as an ordinary one."""
+		evdev = name if isinstance(name, int) else code(name)
+		with self._lock:
+			self._down.add((device, evdev))
+			self._enter(evdev, PRESS, KEY_ASK | KEY_SYNTHETIC, device)
+		self._wake()
 
 	def goodbye(self, reason: int, text: str = "") -> None:
 		with self._lock:
@@ -539,7 +555,13 @@ class StandIn:
 		if holders == (1 if down else 0):
 			self._toX(evdev, down, virtual=True)
 
-	def _letGo(self, reason: int | None, dropUndecided: bool) -> None:
+	def _letGo(
+		self,
+		reason: int | None,
+		dropUndecided: bool,
+		taps: tuple[str | int, ...] = (),
+		device: int = DEVICE_NUMBER,
+	) -> None:
 		if dropUndecided:
 			self._line.clear()
 		else:
@@ -548,6 +570,15 @@ class StandIn:
 					# Passed on, as no verdict is coming.
 					entry.verdict = False
 			self._advance(time.monotonic())
+		told = reason in (RELEASED_STOPPED, RELEASED_EMERGENCY, RELEASED_BACKGROUND)
+		for name in taps:
+			evdev = name if isinstance(name, int) else code(name)
+			for value in (PRESS, RELEASE):
+				self._toX(evdev, value == PRESS, virtual=True)
+				if told:
+					self._seq += 1
+					self._note("tap", self._seq, evdev, value)
+					self._sendClient(struct.pack("<BQIHBB", KEY, self._seq, device, evdev, value, 0))
 		for evdev in sorted(self._virtualDown):
 			self._toX(evdev, False, virtual=True)
 		self._virtualDown.clear()
