@@ -10,12 +10,12 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::mem::size_of;
+use std::mem::{ManuallyDrop, size_of};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -190,8 +190,9 @@ pub struct Evdev {
     own: Option<u32>,
     inotify: Option<OwnedFd>,
     grabs: Arc<Grabs>,
-    /// /dev/uinput, opened as the helper starts and kept, on which every virtual keyboard is made.
-    uinput: Option<File>,
+    /// /dev/uinput, opened as the helper starts and kept, on which every virtual keyboard is made;
+    /// given up when a virtual keyboard cannot be destroyed, so that closing it destroys that one.
+    uinput: Arc<Mutex<Option<File>>>,
 }
 
 impl Evdev {
@@ -200,7 +201,7 @@ impl Evdev {
             own: None,
             inotify: None,
             grabs: Arc::new(Grabs::new()),
-            uinput: None,
+            uinput: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -211,7 +212,7 @@ impl Evdev {
     /// the node is opened while the entry is sure to be there, and every virtual keyboard is made on
     /// that one open file: uinput makes a new device on it after the last is destroyed.
     pub fn keep_uinput(&mut self) -> io::Result<()> {
-        self.uinput = Some(open_uinput()?);
+        *self.uinput.lock().unwrap_or_else(|e| e.into_inner()) = Some(open_uinput()?);
         Ok(())
     }
 }
@@ -381,7 +382,7 @@ impl Devices for Evdev {
         ioctl_read(file.as_fd(), eviocgbit(EV_LED, leds.len()), &mut leds)?;
         let leds = bits16(&leds);
         Ok(EvKeyboard {
-            file,
+            file: ManuallyDrop::new(file),
             grabs: self.grabs.clone(),
             slot: None,
             leds,
@@ -391,7 +392,7 @@ impl Devices for Evdev {
     fn create_virtual(&mut self) -> io::Result<EvVirtual> {
         // A copy of the kept file is the same uinput device; destroying the virtual keyboard
         // through it leaves the file open for the next.
-        let file = match &self.uinput {
+        let file = match &*self.uinput.lock().unwrap_or_else(|e| e.into_inner()) {
             Some(f) => f.try_clone()?,
             None => open_uinput()?,
         };
@@ -424,6 +425,7 @@ impl Devices for Evdev {
         // From here the device exists, and dropping the file destroys it.
         let mut v = EvVirtual {
             file,
+            kept: self.uinput.clone(),
             dir: PathBuf::new(),
             leds: 0,
         };
@@ -534,7 +536,8 @@ fn read_events(mut file: &File, out: &mut Vec<InputEvent>) -> Result<(), ReadErr
 }
 
 pub struct EvKeyboard {
-    file: File,
+    /// Closed by hand as the keyboard is dropped, before its place in the grab table is given up.
+    file: ManuallyDrop<File>,
     grabs: Arc<Grabs>,
     /// Its place in the grab table while grabbed.
     slot: Option<usize>,
@@ -582,11 +585,18 @@ impl Keyboard for EvKeyboard {
         }
     }
 
-    fn ungrab(&mut self) {
-        if let Some(slot) = self.slot.take() {
-            let _ = ioctl_value(self.file.as_raw_fd(), EVIOCGRAB, 0);
-            self.grabs.unregister(slot);
+    /// The keyboard keeps its place in the grab table, for the watchdog to revoke, until the
+    /// kernel has let go.
+    fn ungrab(&mut self) -> bool {
+        let Some(slot) = self.slot else {
+            return true;
+        };
+        if ioctl_value(self.file.as_raw_fd(), EVIOCGRAB, 0).is_err() {
+            return false;
         }
+        self.slot = None;
+        self.grabs.unregister(slot);
+        true
     }
 
     fn leds(&self) -> io::Result<u16> {
@@ -607,19 +617,27 @@ impl Keyboard for EvKeyboard {
             return Ok(());
         }
         events.push((EV_SYN, SYN_REPORT, 0));
-        (&self.file).write_all(&event_bytes(&events))
+        (&*self.file).write_all(&event_bytes(&events))
     }
 }
 
 impl Drop for EvKeyboard {
-    /// The grab is let go of explicitly, then the file is closed, which would end it anyway.
+    /// The grab is let go of explicitly, then the file is closed, which ends it whatever came of
+    /// that, and only then is its place in the grab table given up.
     fn drop(&mut self) {
         self.ungrab();
+        // SAFETY: the file is not used again.
+        unsafe { ManuallyDrop::drop(&mut self.file) };
+        if let Some(slot) = self.slot.take() {
+            self.grabs.unregister(slot);
+        }
     }
 }
 
 pub struct EvVirtual {
     file: File,
+    /// The kept /dev/uinput this is a copy of.
+    kept: Arc<Mutex<Option<File>>>,
     /// Its directory in sysfs, inputN.
     dir: PathBuf,
     /// The lights as the desktop set them, from which the kernel sends only changes.
@@ -684,9 +702,13 @@ impl VirtualKeyboard for EvVirtual {
 }
 
 impl Drop for EvVirtual {
-    /// The kernel releases every key the device still holds down as it destroys it.
+    /// The kernel releases every key the device still holds down as it destroys it. When it will
+    /// not destroy it on request, the kept file goes too, and closing the last copy destroys it.
     fn drop(&mut self) {
-        let _ = ioctl_value(self.file.as_raw_fd(), UI_DEV_DESTROY, 0);
+        if ioctl_value(self.file.as_raw_fd(), UI_DEV_DESTROY, 0).is_err() {
+            log!("the virtual keyboard would not be destroyed, so /dev/uinput is closed");
+            drop(self.kept.lock().unwrap_or_else(|e| e.into_inner()).take());
+        }
     }
 }
 

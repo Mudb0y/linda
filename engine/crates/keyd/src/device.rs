@@ -73,7 +73,9 @@ pub trait Keyboard {
     fn keys_down(&self) -> io::Result<KeySet>;
     fn grab(&mut self) -> Result<(), GrabError>;
     /// Lets go. Dropping the keyboard lets go too, as closing the device does.
-    fn ungrab(&mut self);
+    /// False when the kernel would not let go, as when the call is interrupted; the keyboard is
+    /// then still grabbed, and closing it is what lets go.
+    fn ungrab(&mut self) -> bool;
     /// The lock lights that are on, as bits of the LED codes.
     fn leds(&self) -> io::Result<u16>;
     fn set_leds(&mut self, leds: u16) -> io::Result<()>;

@@ -344,6 +344,28 @@ fn a_key_that_goes_down_as_the_grab_is_taken_undoes_the_grab() {
     assert!(t.keys().is_empty());
 }
 
+#[test]
+fn a_keyboard_that_will_not_be_let_go_of_is_closed_and_found_again() {
+    let mut t = T::new();
+    let k = t.w.plug("keyboard");
+    t.w.press_at_grab(k, KEY_A);
+    t.w.fail_ungrab(k, true);
+    t.admit(CLIENT);
+    t.send(FromClient::Start);
+    t.pass(VIRTUAL_SETTLE);
+    assert_eq!(t.w.grabs(k), 1);
+    assert!(
+        !t.w.grabbed(k),
+        "left grabbed by a file nobody reads or revokes"
+    );
+    t.w.fail_ungrab(k, false);
+    t.pass(KEYS_UP_RETRY);
+    assert!(t.w.is_open(k), "not found again");
+    t.release(k, KEY_A);
+    t.pass(KEYS_UP_RETRY);
+    assert!(t.w.grabbed(k));
+}
+
 // The ordinary path.
 
 #[test]

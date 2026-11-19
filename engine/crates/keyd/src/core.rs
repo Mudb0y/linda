@@ -1086,6 +1086,8 @@ impl<D: Devices> Core<D> {
             Waiting,
             Busy,
             Lost(String),
+            /// Still grabbed, the kernel having refused to let go.
+            Reopen,
         }
         let Some(kbd) = self.keyboards.get_mut(&n) else {
             return;
@@ -1108,8 +1110,8 @@ impl<D: Devices> Core<D> {
                     }
                     Ok(()) => match kbd.k.keys_down() {
                         Ok(down) if down.is_empty() => Outcome::Held,
+                        Ok(_) if !kbd.k.ungrab() => Outcome::Reopen,
                         Ok(_) => {
-                            kbd.k.ungrab();
                             let _ = kbd.k.read(&mut stale);
                             Outcome::Waiting
                         }
@@ -1131,6 +1133,14 @@ impl<D: Devices> Core<D> {
             Outcome::Lost(why) => {
                 log!("keyboard {n} cannot be used: {why}");
                 self.vanish(n, now);
+            }
+            Outcome::Reopen => {
+                // Closed, which lets go in the kernel, and opened again at once as a new one, its
+                // events and the chord read on it no more meanwhile.
+                log!("keyboard {n} would not be let go of, so it is closed and opened again");
+                self.keyboards.remove(&n);
+                self.known.remove(&n);
+                self.rescan_at = Some(now);
             }
         }
     }

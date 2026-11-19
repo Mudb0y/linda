@@ -50,6 +50,8 @@ struct Dev {
     leds: u16,
     /// A key that goes down at the moment the helper grabs.
     down_at_grab: Option<u16>,
+    /// Letting go fails, as when the call is interrupted.
+    ungrab_fails: bool,
     grabs: usize,
     wake: Arc<Wake>,
 }
@@ -124,6 +126,7 @@ impl World {
                 gone: false,
                 leds: 0,
                 down_at_grab: None,
+                ungrab_fails: false,
                 grabs: 0,
                 wake: Arc::new(Wake::new()),
             },
@@ -219,6 +222,11 @@ impl World {
 
     pub fn set_busy(&self, n: u32, busy: bool) {
         self.lock().devices.get_mut(&n).unwrap().busy = busy;
+    }
+
+    /// Whether letting go of the keyboard fails, as the kernel's does when it is interrupted.
+    pub fn fail_ungrab(&self, n: u32, fails: bool) {
+        self.lock().devices.get_mut(&n).unwrap().ungrab_fails = fails;
     }
 
     pub fn grabbed(&self, n: u32) -> bool {
@@ -427,8 +435,14 @@ impl Keyboard for MockKeyboard {
         }
     }
 
-    fn ungrab(&mut self) {
-        self.world.lock().devices.get_mut(&self.n).unwrap().grabbed = false;
+    fn ungrab(&mut self) -> bool {
+        let mut s = self.world.lock();
+        let d = s.devices.get_mut(&self.n).unwrap();
+        if d.ungrab_fails {
+            return false;
+        }
+        d.grabbed = false;
+        true
     }
 
     fn leds(&self) -> io::Result<u16> {
