@@ -135,6 +135,109 @@ def test_fault_rightAltHeldAcrossAGroupChangeStaysDownForNVDA(tmp_path: Path, ro
 	)
 
 
+#: Numpad Insert is the NVDA key, Num Lock is off, and numpad Insert goes down; Num Lock is turned on
+#: while it is held, as by another keyboard or a program, and it comes up: which keys NVDA is left
+#: believing are down.
+NUMPAD_INSERT_ACROSS_NUM_LOCK_CHILD = (
+	STILL_DOWN
+	+ r"""
+info = app.query_extension("XKEYBOARD")
+x11._XkbUseExtension(display=app.display, opcode=info.major_opcode, wantedMajor=1, wantedMinor=0)
+
+
+def numLock(on):
+	x11._XkbLatchLockState(
+		display=app.display,
+		opcode=info.major_opcode,
+		deviceSpec=x11.XKB_CORE_KEYBOARD,
+		affectModLocks=x11.NUM_LOCK_MASK,
+		modLocks=x11.NUM_LOCK_MASK if on else 0,
+		lockGroup=False,
+		groupLock=0,
+		affectModLatches=0,
+		modLatches=0,
+		latchGroup=False,
+		groupLatch=0,
+	)
+	app.sync()
+	time.sleep(0.3)
+
+
+numLock(False)
+source = startSource(ROUTE, consumed=x11.NUMPAD_INSERT)
+delivered.clear()
+keyboard.down("KP_Insert")
+time.sleep(0.1)
+numLock(True)
+keyboard.up("KP_Insert")
+time.sleep(0.3)
+left = stillDown()
+numLock(False)
+result = {
+	"kernel": source.isKernel,
+	"events": [[e["vk"], e["up"], e["nvda"]] for e in delivered if not e["repeat"]],
+	"stillDown": left,
+}
+source.stop()
+keyboard.close()
+"""
+)
+
+
+@pytest.mark.parametrize("route", ("x11", "auto"))
+def test_fault_numpadInsertHeldAcrossNumLockStaysTheNVDAKeyForNVDA(tmp_path: Path, route: str):
+	value = runKernelChild(tmp_path, f"ROUTE = {route!r}\n" + NUMPAD_INSERT_ACROSS_NUM_LOCK_CHILD)
+	assert value["kernel"] == (route == "auto")
+	assert [0x2D, False, True] in value["events"], value
+	assert value["stillDown"] == [], (
+		f"on the {route} route numpad Insert, the NVDA key, went down as Insert with Num Lock off and came up "
+		f"as numpad 0 with it on: NVDA was never told the NVDA key it holds went up, and takes every key "
+		f"after for a command: {value}"
+	)
+
+
+#: The thread that answers keys is held up while Shift goes down and the helper says goodbye and
+#: closes, so that the verdict on Shift, sent as its press is read, finds the connection closed: in
+#: what order NVDA is told of Shift going down and up.
+PRESS_AFTER_LOSS_CHILD = r"""
+source = startSource()
+kernel = source._kernel
+held = threading.Event()
+kernel._post(lambda: held.wait(5))
+time.sleep(0.05)
+delivered.clear()
+keyboard.down("Shift_L")
+time.sleep(0.05)
+keyboard.goodbye(8, "presses went unanswered")
+time.sleep(0.2)
+held.set()
+deadline = time.monotonic() + 5
+while source.isKernel and time.monotonic() < deadline:
+	time.sleep(0.02)
+time.sleep(0.5)
+keyboard.up("Shift_L")
+time.sleep(0.2)
+shift = [[e["up"], e["t"]] for e in delivered if e["vk"] == 0xA0 and not e["repeat"]]
+result = {
+	"kernelAfter": source.isKernel,
+	"shift": [up for up, _t in shift],
+	"downFor": next((shift[i + 1][1] - t for i, (up, t) in enumerate(shift[:-1]) if not up), None),
+}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_fault_pressReadAsTheConnectionFailsReachesNVDAAfterItsRelease(tmp_path: Path):
+	value = runKernelChild(tmp_path, PRESS_AFTER_LOSS_CHILD)
+	assert not value["kernelAfter"], value
+	assert value["shift"] == [False, True], (
+		"Shift's verdict found the connection closed: the release the loss gives every key down went to NVDA "
+		"before the press itself, and NVDA took Shift for held until the route released what the kernel "
+		f"source had left, {value['downFor']} s later: {value}"
+	)
+
+
 #: The X display does not have the virtual keyboard, so the route waits half a second after the
 #: helper holds the keyboard before it takes the kernel route or gives the helper up. The emergency
 #: chord is pressed in that half second: whether NVDA lets go until the user asks, as the chord
