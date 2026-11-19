@@ -388,9 +388,8 @@ def test_configureNamesWhatIsMissing(tmp_path: Path, option: str, value: str, me
 def test_keydServiceInstallsTheHelpersUnitUserAndAction(tmp_path: Path):
 	"""With keyd_service, the libraries' build installs what runs the key capture helper as a system
 	service, where systemd and polkit look under the prefix, naming the helper where it is
-	installed and the setfacl the option gives; without it, as the default, none of it."""
+	installed; without it, as the default, none of it."""
 	build, destDir = tmp_path / "build", tmp_path / "dest"
-	setfacl = "/usr/bin/setfacl"
 	steps = [
 		(
 			"setup",
@@ -399,7 +398,6 @@ def test_keydServiceInstallsTheHelpersUnitUserAndAction(tmp_path: Path):
 			f"--prefix={PREFIX}",
 			"-Dprogram=false",
 			"-Dkeyd_service=true",
-			f"-Dsetfacl={setfacl}",
 			*options(tmp_path)[:1],
 		),
 		("install", "-C", str(build), "--destdir", str(destDir)),
@@ -429,7 +427,9 @@ def test_keydServiceInstallsTheHelpersUnitUserAndAction(tmp_path: Path):
 		"SupplementaryGroups=input",
 		"WatchdogSec=2",
 		"Restart=always",
-		f"ExecStartPre=-+{setfacl} -m u:linda-keyd:rw /dev/uinput",
+		"StandardInput=file:/dev/uinput",
+		"StandardOutput=file:/dev/uinput",
+		"StandardError=journal",
 	):
 		assert line in unit, line
 	assert read(f"{PREFIX}/lib/sysusers.d/linda-keyd.conf").splitlines()[-1].startswith("u linda-keyd ")

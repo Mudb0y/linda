@@ -2,8 +2,8 @@
 started without access to /dev/uinput, nothing is grabbed at all; the client is told, and the
 keyboards stay the desktop's. With the access back, a new START makes it and captures.
 
-The unit gives the helper its access as it starts, and the helper keeps /dev/uinput open from then
-on, so the helper is started again with the unit's setfacl taken out by a drop-in.
+The unit has systemd hand the helper /dev/uinput opened, so the helper is started again with a
+drop-in that hands it nothing, and it opens the node itself, which its user may not.
 """
 
 from typing import TYPE_CHECKING
@@ -21,8 +21,9 @@ def run(ground: "Ground") -> None:
 	pid = ground.waitForHelper()
 	ground.shell(
 		"mkdir -p /run/systemd/system/linda-keyd.service.d && "
-		"printf '[Service]\\nExecStartPre=\\n' > /run/systemd/system/linda-keyd.service.d/no-uinput.conf && "
-		"systemctl daemon-reload && setfacl -x u:linda-keyd /dev/uinput && systemctl restart linda-keyd"
+		"printf '[Service]\\nStandardInput=null\\nStandardOutput=journal\\n' "
+		"> /run/systemd/system/linda-keyd.service.d/no-uinput.conf && "
+		"systemctl daemon-reload && systemctl restart linda-keyd"
 	)
 	ground.waitFor(lambda: ground.helperPid() not in (0, pid), "the helper to start again")
 	ground.waitForHelperLog("cannot open /dev/uinput")

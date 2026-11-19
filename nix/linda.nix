@@ -26,7 +26,6 @@
   strace,
   desktop-file-utils,
   appstream,
-  acl,
   python,
   cargoVendorDir,
   louisTables ? null,
@@ -148,7 +147,6 @@ stdenv.mkDerivation {
       (lib.mesonBool "program" (!librariesOnly))
       (lib.mesonBool "keyd_service" keydService)
     ]
-    ++ lib.optional keydService (lib.mesonOption "setfacl" (lib.getExe' acl "setfacl"))
     ++ lib.optional buildsLibraries (lib.mesonOption "cargo_vendor_dir" "${cargoVendorDir}")
     ++ lib.optional (!buildsLibraries) (lib.mesonOption "prebuilt_libraries" "${libraries}/lib/linda")
     ++ lib.optionals (!librariesOnly) [

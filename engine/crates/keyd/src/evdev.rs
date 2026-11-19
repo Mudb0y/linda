@@ -130,7 +130,6 @@ impl Grabs {
     fn unregister(&self, slot: usize) {
         self.slots[slot].store(-1, SeqCst);
     }
-
     /// Revokes every device in the table, each on a thread of its own, and waits for them at most
     /// `within`. A revoke waits for the device's lock in the kernel, which the loop holds while it
     /// is in a call on that keyboard; a loop stuck in one must keep the watchdog from that keyboard
@@ -205,17 +204,56 @@ impl Evdev {
         }
     }
 
-    /// Opens /dev/uinput now and keeps it for the helper's life. The helper's access to it is an
-    /// entry in the node's access list, which systemd sets as the service starts; but udev and
-    /// logind take every other user's entry off a node tagged for the user in front, as Steam's rules
-    /// tag /dev/uinput, at each pass over it, which comes whenever a session comes to the front. So
-    /// the node is opened while the entry is sure to be there, and every virtual keyboard is made on
-    /// that one open file: uinput makes a new device on it after the last is destroyed.
+    /// Takes /dev/uinput now and keeps it for the helper's life, every virtual keyboard being made
+    /// on that one open file: uinput makes a new device on it after the last is destroyed. The unit
+    /// has systemd open it as root and hand it over as standard input, so that the helper's user
+    /// needs no access of its own, which udev and logind would take away whenever they pass over a
+    /// node tagged for the user in front, as Steam's rules tag this one; started any other way, the
+    /// helper opens it itself.
     pub fn keep_uinput(&mut self) -> io::Result<()> {
-        *self.uinput.lock().unwrap_or_else(|e| e.into_inner()) = Some(open_uinput()?);
+        let file = match handed_over()? {
+            Some(f) => f,
+            None => open_uinput()?,
+        };
+        *self.uinput.lock().unwrap_or_else(|e| e.into_inner()) = Some(file);
         Ok(())
     }
 }
+
+/// /dev/uinput, when it is standard input, moved to a descriptor of its own; standard input and
+/// output, which systemd also made it, become /dev/null, so that nothing written or read by mistake
+/// reaches the device.
+fn handed_over() -> io::Result<Option<File>> {
+    // SAFETY: descriptor 0 is open for the whole of the process's life.
+    let stdin = unsafe { BorrowedFd::borrow_raw(0) };
+    let Ok(st) = rustix::fs::fstat(stdin) else {
+        return Ok(None);
+    };
+    let uinput = libc::makedev(UINPUT_MAJOR, UINPUT_MINOR);
+    if st.st_mode & libc::S_IFMT != libc::S_IFCHR || st.st_rdev != uinput {
+        return Ok(None);
+    }
+    let file = File::from(rustix::io::fcntl_dupfd_cloexec(stdin, 3)?);
+    rustix::fs::fcntl_setfl(
+        &file,
+        rustix::fs::fcntl_getfl(&file)? | rustix::fs::OFlags::NONBLOCK,
+    )?;
+    let null = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")?;
+    for fd in [0, 1] {
+        // SAFETY: both stay open, now on /dev/null.
+        if unsafe { libc::dup2(null.as_raw_fd(), fd) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(Some(file))
+}
+
+/// The misc device uinput is, as the kernel numbers it (UINPUT_MINOR in linux/miscdevice.h).
+const UINPUT_MAJOR: u32 = 10;
+const UINPUT_MINOR: u32 = 223;
 
 fn open_uinput() -> io::Result<File> {
     OpenOptions::new()

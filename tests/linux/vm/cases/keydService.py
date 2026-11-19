@@ -62,10 +62,12 @@ def run(ground: "Ground") -> None:
 		primaryGid = ground.shell("id -g linda-keyd").strip()
 		assert sorted(status["Groups"].split()) == sorted([inputGid, primaryGid]), status["Groups"]
 		assert int(status["CapEff"], 16) == 0 and int(status["CapPrm"], 16) == 0, status["CapEff"]
-		assert (
-			ground.shell("getfacl -cp /dev/uinput | grep '^user:linda-keyd:'").strip()
-			== "user:linda-keyd:rw-"
-		)
+		# /dev/uinput it has from systemd, opened, with no access of its own; its standard input and
+		# output are /dev/null after it has taken the device to a descriptor of its own.
+		held = ground.shell(f"ls -l /proc/{pid}/fd | grep -c ' -> /dev/uinput$' || true").strip()
+		assert held == "1", ground.shell(f"ls -l /proc/{pid}/fd")
+		assert ground.shell(f"readlink /proc/{pid}/fd/0 /proc/{pid}/fd/1").split() == ["/dev/null"] * 2
+		assert "linda-keyd" not in ground.shell("getfacl -cp /dev/uinput")
 		socket = ground.shell("stat -c '%A %U' /run/linda-keyd/socket /run/linda-keyd").splitlines()
 		ground.machine.log(f"the socket and its directory: {socket}")
 		assert socket == ["srw-rw-rw- linda-keyd", "drwxr-xr-x linda-keyd"], socket

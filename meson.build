@@ -89,14 +89,10 @@ endif
 if get_option('keyd_service')
   # Where systemd looks whatever the library directory, as its own packages install.
   systemd_lib = prefix / 'lib'
-  setfacl = get_option('setfacl')
-  if setfacl == ''
-    setfacl = find_program('setfacl').full_path()
-  endif
   configure_file(
     input: 'linux/keyd/linda-keyd.service.in',
     output: 'linda-keyd.service',
-    configuration: {'KEYD': pkglibdir / 'linda-keyd', 'SETFACL': setfacl},
+    configuration: {'KEYD': pkglibdir / 'linda-keyd'},
     install: true,
     install_dir: systemd_lib / 'systemd' / 'system',
   )
