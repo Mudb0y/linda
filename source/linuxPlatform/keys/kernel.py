@@ -1306,9 +1306,14 @@ class KernelKeySource:
 		press.looked.set()
 
 	def _depressed(self, tables: _Tables) -> int:
+		"""The modifiers held down: on the keyboards the helper holds, as this source has them, and on
+		any other, as the X source has them, which the X server has in force for a key passed on."""
 		mods = 0
 		for keycode in self._down:
 			mods |= tables.keyMods.get(keycode, 0)
+		if self._x is not None:
+			for keycode in self._x.keysDownElsewhere:
+				mods |= tables.keyMods.get(keycode, 0)
 		return mods
 
 	def _onKey(self, key: keydClient.Key, now: float) -> None:

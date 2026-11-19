@@ -5,7 +5,8 @@ passed on and the Linda key kept, leaves no key held, to the X server or to Lind
 A keyboard the helper leaves alone, as it leaves one made through uinput by a remapper, one that is
 also a pointer, and one another program holds, reaches the X server straight, where Linda reads it as
 on the X route beside the kernel route: its Linda key is Linda's, and what is typed on it is echoed
-once.
+once. A modifier held on it counts for a key typed on a keyboard the helper holds, as the X server
+has it in force for that key.
 """
 
 from typing import TYPE_CHECKING
@@ -106,4 +107,20 @@ def run(ground: "Ground") -> None:
 		ground.settle(0.5)
 		spoken = [text for _t, text in ground.speech(mark)]
 		assert spoken.count("r") == 1 and spoken.count("e") == 1, spoken
+		assert len(ground.lindaLogRecords(X_ROUTE)) == 1, "Linda left the kernel route"
+
+	with ground.subtest("Shift held on a keyboard the helper leaves alone counts for a key of one it holds"):
+		ground.settle(APART)
+		mark = ground.mark()
+		keyboard.chord("KEY_INSERT", "KEY_1")
+		ground.expect("input help on…", since=mark)
+		mark = ground.mark()
+		remapped.run({"press": "KEY_LEFTSHIFT"}, {"sleep": 0.1})
+		keyboard.tap("KEY_T")
+		remapped.run({"sleep": 0.1}, {"release": "KEY_LEFTSHIFT"})
+		# Input help says the gesture; without the Shift the X server had, it said t.
+		ground.expect("shift plus t", since=mark)
+		mark = ground.mark()
+		keyboard.chord("KEY_INSERT", "KEY_1")
+		ground.expect("input help off", since=mark)
 		assert len(ground.lindaLogRecords(X_ROUTE)) == 1, "Linda left the kernel route"

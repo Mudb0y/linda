@@ -61,6 +61,46 @@ def test_modifierHeldUnderTheNVDAKeyReachesTheApplication(tmp_path: Path, route:
 	)
 
 
+#: Shift held on a keyboard the helper leaves alone, here another program's XTEST, as on a remapper's
+#: keyboard or one that is also a pointer, and a typed on the keyboard the helper holds: what the window
+#: had, and what NVDA was told.
+SHIFT_ELSEWHERE_CHILD = (
+	STATEFUL_KEYS
+	+ r"""
+from Xlib.ext import xtest
+source = startSource(ROUTE)
+shift = app.keysym_to_keycode(XK.XK_Shift_L)
+xtest.fake_input(app, X.KeyPress, shift)
+app.sync()
+time.sleep(0.2)
+keysWithState()
+delivered.clear()
+keyboard.press("a", hold=0.03)
+time.sleep(0.3)
+xtest.fake_input(app, X.KeyRelease, shift)
+app.sync()
+time.sleep(0.2)
+result = {
+	"kernel": source.isKernel,
+	"window": [[evdev, shift] for evdev, down, shift in keysWithState() if down and evdev == 30],
+	"nvda": [e["text"] for e in presses(ord("A"))],
+}
+source.stop()
+keyboard.close()
+"""
+)
+
+
+@pytest.mark.parametrize("route", ("x11", "auto"))
+def test_modifierHeldOnAKeyboardTheHelperLeavesAloneCountsForItsKeys(tmp_path: Path, route: str):
+	value = runKernelChild(tmp_path, f"ROUTE = {route!r}\n" + SHIFT_ELSEWHERE_CHILD)
+	assert value["kernel"] == (route == "auto")
+	assert value["window"] == [[30, True]], value
+	assert value["nvda"] == ["A"], (
+		f"on the {route} route NVDA was told a while the application typed A: {value}"
+	)
+
+
 #: The focus leaves the document's window for another application's and comes back, and h, browse
 #: mode's next heading, is typed 50 ms after it is back, while NVDA's focus takes 150 ms to follow, as
 #: Firefox's focus event takes: where h went.

@@ -472,6 +472,10 @@ class X11KeySource:
 		self._virtualState: tuple[bool, bool] = (False, False)
 		#: (device ID, key code) of each press decided already whose release has not come.
 		self._decidedDown: set[tuple[int, int]] = set()
+		#: (device ID, key code) of each key down on a device other than the virtual keyboard, as its
+		#: events came, and their key codes, replaced whole: see keysDownElsewhere.
+		self._elsewhere: set[tuple[int, int]] = set()
+		self._elsewhereKeys: frozenset[int] = frozenset()
 		self._lock = threading.Lock()
 		self._commands: deque[Callable[[], None]] = deque()
 		self._wakeRead, self._wakeWrite = os.pipe()
@@ -783,6 +787,8 @@ class X11KeySource:
 		self._held = False
 		self._holdRetry = None
 		self._unsent.clear()
+		self._elsewhere.clear()
+		self._elsewhereKeys = frozenset()
 		self._modifiersFor.clear()
 		for ticket in self._tickets:
 			ticket.answered = True
@@ -946,6 +952,10 @@ class X11KeySource:
 		# A device gone puts out no release more; its number may be the next device's.
 		present = {device.deviceid for device in devices}
 		self._decidedDown = {key for key in self._decidedDown if key[0] in present}
+		elsewhere = {key for key in self._elsewhere if key[0] in present - self._virtualDevices}
+		if elsewhere != self._elsewhere:
+			self._elsewhere = elsewhere
+			self._elsewhereKeys = frozenset(keycode for _device, keycode in elsewhere)
 		state = (
 			bool(virtual),
 			any(device.use == xinput.SlaveKeyboard and device.enabled for device in virtual),
@@ -984,6 +994,28 @@ class X11KeySource:
 		one; from any thread, before the key is sent."""
 		with self._lock:
 			self._echoes.append((time.monotonic(), keycode, isUp))
+
+	@property
+	def keysDownElsewhere(self) -> frozenset[int]:
+		"""Key codes down on the X server's keyboards other than linda-keyd's virtual keyboard: those the
+		helper leaves alone, a keyboard that is also a pointer or a remapper's, and keys other programs
+		send through XTEST. The X server has their modifiers in force for a key the helper passes on,
+		which the kernel source never reads. As of the X thread's last event, from any thread."""
+		return self._elsewhereKeys
+
+	def _noteElsewhere(self, keycode: int, isUp: bool, sourceid: int | None) -> None:
+		if sourceid is None:
+			# A release made up as the connection came back, its device unknown.
+			held = {key for key in self._elsewhere if key[1] != keycode} if isUp else self._elsewhere
+		elif sourceid in self._virtualDevices:
+			return
+		elif isUp:
+			held = self._elsewhere - {(sourceid, keycode)}
+		else:
+			held = self._elsewhere | {(sourceid, keycode)}
+		if held != self._elsewhere:
+			self._elsewhere = held
+			self._elsewhereKeys = frozenset(code for _device, code in held)
 
 	@property
 	def virtualKeyboardState(self) -> tuple[bool, bool]:
@@ -1254,6 +1286,7 @@ class X11KeySource:
 					devices.add(keycode)
 					if vk in LOCK_MASKS:
 						self._locksHeld[vk] = bool(lockedBefore & LOCK_MASKS[vk])
+				self._noteElsewhere(keycode, isUp, sourceid)
 			generic = GENERIC_FOR.get(vk)
 			for code in (vk, generic):
 				if code is None:
