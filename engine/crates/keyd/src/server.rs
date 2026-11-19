@@ -394,7 +394,9 @@ impl<D: Devices> Server<D> {
                     }
                     Output::Close(id) => {
                         self.flush(id, now);
-                        self.conns.remove(&id);
+                        if let Some(c) = self.conns.remove(&id) {
+                            discard_unread(&c.fd);
+                        }
                     }
                     Output::Admit(id, peer) => {
                         if self.admit.send((id, peer)).is_err() {
@@ -404,6 +406,21 @@ impl<D: Devices> Server<D> {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Reads and drops what a connection about to be closed sent that was not read. Closed with messages
+/// of its unread, a Unix socket makes the other end's next read fail with ECONNRESET ahead of what
+/// was sent to it, so a client would lose the GOODBYE that says why. Shut for reading first, so that
+/// nothing more comes between the last read and the close.
+fn discard_unread(fd: &OwnedFd) {
+    let _ = rustix::net::shutdown(fd, rustix::net::Shutdown::Read);
+    let mut buf = [0u8; MAX_MESSAGE + 1];
+    for _ in 0..OUTBOX_LIMIT {
+        match rustix::net::recv(fd, &mut buf, RecvFlags::DONTWAIT) {
+            Ok((_, 0)) | Err(_) => return,
+            Ok(_) => {}
         }
     }
 }

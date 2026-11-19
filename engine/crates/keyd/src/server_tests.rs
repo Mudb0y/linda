@@ -249,6 +249,32 @@ fn rubbish_on_the_socket_ends_the_connection() {
 }
 
 #[test]
+fn goodbye_reaches_a_client_whose_last_messages_were_not_read() {
+    // The kernel answers a read with ECONNRESET, before the GOODBYE still queued for it, when the
+    // other end closed with messages of the reader's unread.
+    for _ in 0..20 {
+        let h = Helper::start();
+        let k = h.w.plug("keyboard");
+        let c = h.capturing(k);
+        c.send_raw(&[0x42, 1, 2, 3]);
+        for counter in 0..8 {
+            c.try_send(&FromClient::Heartbeat { counter });
+        }
+        let got = c.until_closed(MARGIN);
+        assert!(
+            got.iter().any(|m| matches!(
+                m,
+                ToClient::Goodbye {
+                    reason: Goodbye::Malformed,
+                    ..
+                }
+            )),
+            "{got:?}"
+        );
+    }
+}
+
+#[test]
 fn a_second_client_is_turned_away_and_the_first_kept() {
     let h = Helper::start();
     let k = h.w.plug("keyboard");
