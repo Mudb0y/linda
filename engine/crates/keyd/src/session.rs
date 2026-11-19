@@ -62,9 +62,16 @@ pub trait Login {
 /// Decides whether a peer may be the client: it must be a process of the session in front on
 /// seat0, a local session of the peer's own user, and polkit must allow it the action. A process
 /// outside any session, as a program started by a desktop through systemd's user manager is, is
-/// taken as belonging to its user's graphical session, as polkit itself takes it. The process's
-/// start time is read before and after, so that a process that ended meanwhile, whose number
-/// another may have taken, is not admitted in its place. Returns the session's ID.
+/// taken as belonging to its user's graphical session, as polkit itself takes it. Returns the
+/// session's ID.
+///
+/// The peer's process, user and group IDs are what the kernel gave on the socket at connect, but
+/// the process is looked up by its ID only here, which can be seconds later. Its start time is read
+/// before and after the questions, so a process that ends while it is being asked about is turned
+/// away; but a process that ended between connect and the first reading, whose ID another process
+/// took meanwhile, is judged in its place. That cannot cross users: the session must be of the
+/// user ID from connect, and polkit is asked about that user ID. Judging the very process that
+/// connected needs a pidfd taken at connect (SO_PEERPIDFD, Linux 6.5).
 pub fn admit(
     login: &mut dyn Login,
     peer: &Peer,
