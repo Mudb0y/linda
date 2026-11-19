@@ -12,11 +12,13 @@ character, whatever the field holds.
 
 import ctypes
 import time
+from collections.abc import Callable
 from difflib import SequenceMatcher
 from typing import Literal
 
 import inputCore
 import textUtils
+from speech.extensions import pre_speech
 
 from .textSource import toolkitOf, unitFor
 
@@ -56,6 +58,10 @@ echoedKeyTime: float | None = None
 _lastTypingKey = None
 #: The last key whose character was echoed, which a later insert is not.
 _echoedKey = None
+#: Whether an echo of typing is being spoken, and whether the last speech was one: a typed character,
+#: the word it ended or what a deletion removed.
+_echoing = False
+_echoSpokenLast = False
 
 
 def _noteTypingKey(pressed: bool) -> bool:
@@ -71,6 +77,53 @@ def _noteTypingKey(pressed: bool) -> bool:
 
 
 inputCore.decide_handleRawKey.register(_noteTypingKey)
+
+
+def _noteSpeech(**_kwargs) -> None:
+	global _echoSpokenLast
+	_echoSpokenLast = _echoing
+
+
+pre_speech.register(_noteSpeech)
+
+
+def _beginEcho(interrupt: bool) -> None:
+	"""Before an echo of typing: cut the echo before it when the key that typed this one interrupts
+	speech.
+
+	On Windows a key's echo comes with the key, so the key's interrupt cuts the echo of the key before
+	it and its own is spoken at once. Here the echo comes once the application has inserted the text,
+	often after the next key has gone down: two echoes then come together, the second waits for the
+	synth to finish the first, and the next key's interrupt throws it away unspoken. Cutting the first
+	gives the second the synth at once, as the key that typed it did on Windows.
+	"""
+	global _echoing
+	if interrupt and _echoSpokenLast:
+		import speech
+
+		speech.cancelSpeech()
+	_echoing = True
+
+
+def _endEcho() -> None:
+	global _echoing
+	_echoing = False
+
+
+def _queueEcho(interrupt: bool, queue: Callable[[], None]) -> None:
+	"""Queue an echo of typing, which queue puts on NVDA's event queue, between _beginEcho and
+	_endEcho."""
+	import queueHandler
+
+	queueHandler.queueFunction(queueHandler.eventQueue, _beginEcho, interrupt)
+	queue()
+	queueHandler.queueFunction(queueHandler.eventQueue, _endEcho)
+
+
+def _interruptsForCharacters() -> bool:
+	import config
+
+	return bool(config.conf["keyboard"]["speechInterruptForCharacters"])
 
 
 def claimEcho(keyTime: float | None) -> bool:
@@ -279,11 +332,15 @@ def handleTextChange(
 
 			if focus.isProtected:
 				text = None
-			queueHandler.queueFunction(
-				queueHandler.eventQueue,
-				focus.echoDeletion,
-				key.vkCode == VK_BACK,
-				text,
+			# Backspace and Delete interrupt speech whatever the setting for characters.
+			_queueEcho(
+				True,
+				lambda: queueHandler.queueFunction(
+					queueHandler.eventQueue,
+					focus.echoDeletion,
+					key.vkCode == VK_BACK,
+					text,
+				),
 			)
 		return
 	if kind != "insert":
@@ -314,4 +371,7 @@ def handleTextChange(
 	if inside and not claimEcho(key.time):
 		return
 	_echoedKey = key
-	eventHandler.queueEvent("typedCharacter", focus, ch=character)
+	_queueEcho(
+		_interruptsForCharacters(),
+		lambda: eventHandler.queueEvent("typedCharacter", focus, ch=character),
+	)
