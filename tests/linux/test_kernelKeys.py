@@ -414,6 +414,73 @@ def test_busyHelperIsAskedAgain(tmp_path: Path):
 	assert value == {"first": False, "throughX": 1, "after": True, "refused": [4], "starts": 1}
 
 
+GOODBYE_CHILD = r"""
+source = startSource()
+first = source.isKernel
+# Another client of the session in front took this one's place.
+keyboard.goodbye(9, "replaced")
+deadline = time.monotonic() + 5
+while (source.isKernel or source._active is None) and time.monotonic() < deadline:
+	time.sleep(0.05)
+afterGoodbye = source.isKernel
+keyboard.press("Insert+t")
+time.sleep(0.4)
+throughX = [[e["vk"], e["nvda"]] for e in presses()]
+deadline = time.monotonic() + 6
+while not (source.isKernel and keyboard.capturing) and time.monotonic() < deadline:
+	time.sleep(0.05)
+result = {"first": first, "afterGoodbye": afterGoodbye, "throughX": throughX, "back": source.isKernel}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_goodbyeFallsBackToXAndTheHelperIsAskedAgain(tmp_path: Path):
+	value = runKernelChild(tmp_path, GOODBYE_CHILD)
+	assert value == {
+		"first": True,
+		"afterGoodbye": False,
+		# Read from the X display, Insert is still the NVDA key.
+		"throughX": [[0x2D, True], [ord("T"), True]],
+		"back": True,
+	}
+
+
+NUMPAD_INSERT_CHILD = r"""
+source = startSource(consumed=x11.NUMPAD_INSERT)
+result = {}
+for modifier in ("Control_L", "Alt_L", "Super_L"):
+	windowKeys()
+	keyboard.down(modifier)
+	keyboard.down("KP_Insert")
+	keyboard.press("f")
+	keyboard.up("KP_Insert")
+	keyboard.up(modifier)
+	time.sleep(0.3)
+	result[modifier] = [key for key in windowKeys() if key[1]]
+delivered.clear()
+keyboard.press("Num_Lock")
+time.sleep(0.2)
+windowKeys()
+keyboard.press("KP_Insert")
+time.sleep(0.3)
+result["numLock"] = {"window": windowKeys(), "nvda": [e["nvda"] for e in presses(0x60)]}
+keyboard.press("Num_Lock")
+source.stop()
+keyboard.close()
+"""
+
+
+def test_numpadInsertAfterAModifierIsNVDAs(tmp_path: Path):
+	value = runKernelChild(tmp_path, NUMPAD_INSERT_CHILD)
+	# Only the modifier reaches the window, neither numpad Insert nor f.
+	assert value["Control_L"] == [[29, True]]
+	assert value["Alt_L"] == [[56, True]]
+	assert value["Super_L"] == [[125, True]]
+	# With Num Lock on the key is 0, the application's.
+	assert value["numLock"] == {"window": [[82, True], [82, False]], "nvda": [False]}
+
+
 VANISH_CHILD = r"""
 source = startSource()
 kernelBefore = source.isKernel
