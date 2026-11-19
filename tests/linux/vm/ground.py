@@ -101,6 +101,18 @@ def keyEvents(records: list[dict]) -> list[tuple[str, int]]:
 	return [(r["key"], r["value"]) for r in records if r["kind"] == "key" and r["value"] != 2]
 
 
+def jsonLines(text: str) -> list[dict]:
+	"""Each record of a JSON Lines file read while it is written to, whose last line may be half written."""
+	lines = [line for line in text.splitlines() if line.strip()]
+	records = [json.loads(line) for line in lines[:-1]]
+	if lines:
+		try:
+			records.append(json.loads(lines[-1]))
+		except json.JSONDecodeError:
+			pass
+	return records
+
+
 def unitName(prefix: str, name: str) -> str:
 	return prefix + "".join(c if c.isalnum() else "-" for c in name)
 
@@ -150,7 +162,7 @@ class FakeKeyboard:
 		"""What the keyboard wrote, and for a uhid one what the kernel set its lights to."""
 		path = shlex.quote(f"{GROUND}/keyboards/{self.name}.jsonl")
 		text = self.ground.shell(f"cat {path} 2>/dev/null || true")
-		records = [json.loads(line) for line in text.splitlines() if line.strip()]
+		records = jsonLines(text)
 		return [r for r in records if since is None or r["t"] >= since.t]
 
 
@@ -222,7 +234,7 @@ class KeydClient:
 		"""What the client got from the helper and sent it, as guest/keydClient.py records it."""
 		path = shlex.quote(f"{KEYD_DIRECTORY}/{self.name}.jsonl")
 		text = self.ground.shell(f"cat {path} 2>/dev/null || true")
-		records = [json.loads(line) for line in text.splitlines() if line.strip()]
+		records = jsonLines(text)
 		return [
 			r for r in records if (since is None or r["t"] >= since.t) and (type is None or r["type"] == type)
 		]
@@ -433,7 +445,7 @@ class Ground:
 
 	def _transcript(self) -> list[dict]:
 		text = self.shell(f"cat {TRANSCRIPT} 2>/dev/null || true")
-		return [json.loads(line) for line in text.splitlines() if line.strip()]
+		return jsonLines(text)
 
 	def spoken(self) -> list[str]:
 		"""The text of each of Linda's speak records so far."""
@@ -607,7 +619,7 @@ class Ground:
 	def records(self, source: str, since: Mark | None = None) -> list[dict]:
 		"""Every record of source ("evdev", "x" or "app") read after since."""
 		text = self.shell(f"cat {LOGS[source]} 2>/dev/null || true")
-		records = [json.loads(line) for line in text.splitlines() if line.strip()]
+		records = jsonLines(text)
 		return [r for r in records if since is None or r["received"] >= since.t]
 
 	def keys(self, source: str, since: Mark, *, device: str | None = None) -> list[dict]:
