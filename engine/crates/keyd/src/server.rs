@@ -26,6 +26,8 @@ use crate::watchdog::{Notifier, Progress};
 #[derive(Debug)]
 pub enum Notice {
     Front(Front),
+    /// The kernel put this console in front.
+    Console(u32),
     Admitted(ConnId, Result<String, Refusal>),
     /// Nothing but a wake, as when the loop is to stop.
     Wake,
@@ -260,6 +262,7 @@ impl<D: Devices> Server<D> {
                 for n in self.notices.drain() {
                     match n {
                         Notice::Front(f) => self.core.front_changed(f, now),
+                        Notice::Console(n) => self.core.console_changed(n, now),
                         Notice::Admitted(conn, r) => self.core.admitted(conn, r, now),
                         Notice::Wake => {}
                     }

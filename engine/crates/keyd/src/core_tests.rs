@@ -1097,6 +1097,71 @@ fn the_session_leaving_the_front_lets_go_and_its_return_grabs_again() {
     assert!(t.w.grabbed(k));
 }
 
+impl T {
+    fn console(&mut self, n: u32) {
+        self.core.console_changed(n, self.now);
+        self.take();
+    }
+
+    fn logind(&mut self, f: Front) {
+        self.core.front_changed(f, self.now);
+        self.take();
+    }
+}
+
+#[test]
+fn a_switch_of_consoles_lets_go_before_logind_says_so_and_only_logind_grabs_again() {
+    let (mut t, k) = T::capturing();
+    t.console(1);
+    assert!(t.w.grabbed(k));
+    t.press(k, KEY_LEFTSHIFT);
+    let seq = t.last_seq();
+    t.verdict(seq, false);
+    t.keys();
+    // The kernel switches to console 3, and the helper lets go at once.
+    t.console(3);
+    assert_eq!(t.sent(), vec![released(Released::Background)]);
+    t.assert_let_go();
+    // logind, not yet aware, still names the session it named before: nothing is grabbed.
+    t.logind(front(SESSION, 1000));
+    t.pass(Duration::from_secs(1));
+    assert!(!t.w.is_open(k));
+    // logind catches up: nobody is in front on console 3.
+    t.logind(Front::Nobody);
+    assert!(!t.w.is_open(k));
+    // The kernel switches back: not enough on its own.
+    t.console(1);
+    t.pass(Duration::from_secs(1));
+    assert!(!t.w.is_open(k), "grabbed again on the kernel's word alone");
+    t.w.release(k, KEY_LEFTSHIFT);
+    t.logind(front(SESSION, 1000));
+    assert!(t.w.grabbed(k));
+}
+
+#[test]
+fn a_switch_away_and_back_before_logind_speaks_grabs_again_when_it_does() {
+    let (mut t, k) = T::capturing();
+    t.console(1);
+    t.console(3);
+    t.assert_let_go();
+    t.console(1);
+    assert!(!t.w.is_open(k));
+    // logind, asked again, names the client's session, which the kernel agrees is in front.
+    t.logind(front(SESSION, 1000));
+    assert!(t.w.grabbed(k));
+}
+
+#[test]
+fn without_consoles_logind_alone_says_what_is_in_front() {
+    let (mut t, k) = T::capturing();
+    t.logind(front(SESSION, 1000));
+    assert!(t.w.grabbed(k));
+    t.logind(front("c1", 1000));
+    t.assert_let_go();
+    t.logind(front(SESSION, 1000));
+    assert!(t.w.grabbed(k));
+}
+
 #[test]
 fn not_knowing_which_session_is_in_front_lets_go() {
     let (mut t, k) = T::capturing();

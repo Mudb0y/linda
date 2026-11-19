@@ -166,7 +166,11 @@ class Client:
 		sock.connect(SOCKET_PATH)
 		self.sock = sock
 		threading.Thread(target=self.read, args=(sock,), daemon=True).start()
-		if hello:
+		# The helper turns a caller of the wrong user away as it connects. A HELLO that reaches it
+		# after that, unread as it closes, makes the kernel answer the next read here with
+		# ECONNRESET instead of the GOODBYE waiting for it; so a moment is left for that GOODBYE.
+		self.answered.wait(0.1)
+		if hello and self.goodbye is None:
 			self.send(struct.pack("<BHI", HELLO, version, features), {"type": "HELLO", "version": version})
 		self.answered.wait(10)
 		return {"welcome": self.welcome, "goodbye": self.goodbye}

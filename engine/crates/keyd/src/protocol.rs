@@ -264,8 +264,11 @@ pub enum Released {
     Stopped = 1,
     /// The emergency chord.
     Emergency = 2,
-    /// The client's session is no longer the one in front. The helper captures again by itself
-    /// when it is.
+    /// The client's session is no longer the one in front. The helper lets go the moment the
+    /// kernel switches consoles away from the one that was in front when logind last spoke, before
+    /// logind has said what changed, so that nothing typed on another console, a password perhaps,
+    /// comes to the client. It captures again by itself only once logind says the client's session
+    /// is in front, never on the kernel's word alone.
     Background = 3,
     /// The virtual keyboard could not be made, did not appear, or stopped taking keys. START tries
     /// to make it again.

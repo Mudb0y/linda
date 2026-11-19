@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use futures_util::future::{Either, select};
+use rustix::event::{PollFd, PollFlags};
 use zbus::message::Type;
 use zbus::{Connection, MatchRule, MessageStream, OwnedObjectPath, OwnedVariant, Variant};
 
@@ -315,14 +316,15 @@ fn error_name(e: &zbus::Error) -> Option<&str> {
     }
 }
 
-/// Starts the thread that follows which session is in front on seat0 and posts each change. While
-/// the system bus or logind cannot be reached it posts [`Front::Unknown`], which makes the helper
-/// let go, and tries again every DBUS_RETRY.
+/// Starts the thread that follows which session is in front on seat0 and posts what logind says
+/// each time it is asked, on each change it tells of and every SESSION_RECHECK, the same answer
+/// again included: after the kernel has switched consoles, the helper waits for logind to say
+/// anything at all. While the system bus or logind cannot be reached it posts [`Front::Unknown`],
+/// which makes the helper let go, and tries again every DBUS_RETRY.
 pub fn watch_front(post: impl Fn(Front) + Send + 'static) -> io::Result<thread::JoinHandle<()>> {
     thread::Builder::new().name("logind".into()).spawn(move || {
         loop {
-            let mut last = None;
-            let e = zbus::block_on(follow(&post, &mut last));
+            let e = zbus::block_on(follow(&post));
             log!("lost track of the session in front: {e}");
             post(Front::Unknown);
             thread::sleep(DBUS_RETRY);
@@ -330,7 +332,7 @@ pub fn watch_front(post: impl Fn(Front) + Send + 'static) -> io::Result<thread::
     })
 }
 
-async fn follow(post: &dyn Fn(Front), last: &mut Option<Front>) -> zbus::Error {
+async fn follow(post: &dyn Fn(Front)) -> zbus::Error {
     let r: zbus::Result<()> = async {
         let conn = within(DBUS_CALL_TIMEOUT, connect()).await??;
         let rule = MatchRule::builder()
@@ -343,11 +345,7 @@ async fn follow(post: &dyn Fn(Front), last: &mut Option<Front>) -> zbus::Error {
         // Subscribed before the first look, so that no change between the two is missed.
         let mut changes = MessageStream::for_match_rule(rule, &conn, NonZeroUsize::new(16)).await?;
         loop {
-            let now = within(DBUS_CALL_TIMEOUT, front(&conn)).await??;
-            if last.as_ref() != Some(&now) {
-                post(now.clone());
-                *last = Some(now);
-            }
+            post(within(DBUS_CALL_TIMEOUT, front(&conn)).await??);
             let timer = zruntime::SharedRuntime::current()?.sleep(SESSION_RECHECK);
             if let Either::Left((None, _)) = select(changes.next(), timer).await {
                 return Err(zbus::Error::Failure("the bus connection closed".into()));
@@ -359,6 +357,62 @@ async fn follow(post: &dyn Fn(Front), last: &mut Option<Front>) -> zbus::Error {
         Err(e) => e,
         Ok(()) => zbus::Error::Failure("stopped".into()),
     }
+}
+
+/// The file naming the console in front, whose pollers the kernel notifies at every switch.
+const ACTIVE_CONSOLE: &str = "/sys/class/tty/tty0/active";
+
+/// Starts the thread that posts the number of the console in front each time the kernel switches
+/// consoles, the moment it does, which is before logind has told anyone. Where there are no
+/// consoles it starts nothing, and logind alone says what is in front.
+pub fn watch_console(post: impl Fn(u32) + Send + 'static) -> io::Result<()> {
+    let file = match std::fs::File::open(ACTIVE_CONSOLE) {
+        Ok(f) => f,
+        Err(e) => {
+            log!("cannot follow the console in front, {ACTIVE_CONSOLE}: {e}");
+            return Ok(());
+        }
+    };
+    thread::Builder::new().name("console".into()).spawn(move || {
+        use std::os::unix::fs::FileExt;
+        let mut last = None;
+        let mut buf = [0u8; 32];
+        loop {
+            // sysfs notifies a poller only of changes after its last read of the file.
+            let n = match file.read_at(&mut buf, 0) {
+                Ok(n) => n,
+                Err(e) => {
+                    log!("cannot read {ACTIVE_CONSOLE}, so the console in front is not followed: {e}");
+                    return;
+                }
+            };
+            let console = parse_console(&buf[..n]);
+            if let Some(c) = console
+                && console != last
+            {
+                last = console;
+                post(c);
+            }
+            let mut fds = [PollFd::new(&file, PollFlags::PRI | PollFlags::ERR)];
+            if let Err(e) = rustix::event::poll(&mut fds, None)
+                && e != rustix::io::Errno::INTR
+            {
+                log!("cannot wait on {ACTIVE_CONSOLE}, so the console in front is not followed: {e}");
+                return;
+            }
+        }
+    })?;
+    Ok(())
+}
+
+/// N of the "ttyN" the file holds.
+fn parse_console(text: &[u8]) -> Option<u32> {
+    std::str::from_utf8(text)
+        .ok()?
+        .trim()
+        .strip_prefix("tty")?
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]
@@ -528,6 +582,14 @@ mod tests {
         };
         let e = admit(&mut f, &PEER, &changing).unwrap_err();
         assert!(e.1.contains("ended while"), "{}", e.1);
+    }
+
+    #[test]
+    fn the_console_in_front_is_read_as_the_kernel_writes_it() {
+        assert_eq!(parse_console(b"tty7\n"), Some(7));
+        assert_eq!(parse_console(b"tty12"), Some(12));
+        assert_eq!(parse_console(b"ttyS0\n"), None);
+        assert_eq!(parse_console(b""), None);
     }
 
     #[test]

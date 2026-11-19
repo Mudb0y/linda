@@ -80,6 +80,11 @@ def run(ground: "Ground") -> None:
 			"active:",
 			"yes",
 		]
+		# The sandbox lets it follow the console in front, which it says when it cannot.
+		threads = ground.shell(f"cat /proc/{pid}/task/*/comm").split()
+		ground.machine.log(f"its threads: {threads}")
+		assert "console" in threads, threads
+		assert not [line for _t, line in ground.helperLog() if "the console in front" in line]
 
 	with ground.subtest("the helper refuses to run as root"):
 		program = ground.shell(

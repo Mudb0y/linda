@@ -16,7 +16,8 @@
 //!   every keyboard closed, which the kernel takes as the end of the grab. It happens on STOP, on
 //!   the emergency chord, when the client goes, falls silent, breaks the protocol or leaves keys
 //!   unanswered, when its session leaves the front or the helper cannot tell which session is in
-//!   front, and when the virtual keyboard fails.
+//!   front, and when the virtual keyboard fails. A switch of consoles counts as the session leaving
+//!   the front from the moment the kernel makes it; only logind's word captures again.
 //! - The emergency chord is looked for on each key as it is read, before the key goes anywhere.
 //! - A keyboard that vanishes has a release put in line for every key it held down.
 //! - A virtual keyboard that fails is destroyed, and the kernel releases what it held.
@@ -158,6 +159,13 @@ pub struct Core<D: Devices> {
     client: Option<Client>,
     callers: BTreeMap<ConnId, Caller>,
     front: Front,
+    /// The console the kernel says is in front, N of ttyN in /sys/class/tty/tty0/active.
+    console: Option<u32>,
+    /// The console that was in front when logind last said which session is.
+    front_console: Option<u32>,
+    /// The kernel has put another console in front since logind last said which session is, and
+    /// logind has said nothing since that agrees with the kernel. Nothing is captured meanwhile.
+    console_moved: bool,
     /// The run of unanswered presses, by when its first and its last press were read, as
     /// UNANSWERED_SPAN in the protocol defines it.
     unanswered: Option<(Instant, Instant)>,
@@ -184,6 +192,9 @@ impl<D: Devices> Core<D> {
             client: None,
             callers: BTreeMap::new(),
             front: Front::Unknown,
+            console: None,
+            front_console: None,
+            console_moved: false,
             unanswered: None,
             drop_pending: None,
             virtual_broken: false,
@@ -382,10 +393,34 @@ impl<D: Devices> Core<D> {
         self.settle(now);
     }
 
+    /// What logind says is in front, each time it is asked or tells of a change.
     pub fn front_changed(&mut self, front: Front, now: Instant) {
+        // logind learns of a switch of consoles after the kernel has made it: an answer naming the
+        // session it named before, while another console is in front, is from before the switch.
+        let stale = self.console_moved && front == self.front && self.console != self.front_console;
+        if !stale {
+            self.console_moved = false;
+            self.front_console = self.console;
+        }
         if front != self.front {
             log!("in front on seat0: {front:?}");
             self.front = front;
+        }
+        self.settle(now);
+    }
+
+    /// The kernel has put console `n` in front. A console other than the one logind last spoke of
+    /// means the session in front has changed, whatever logind has yet to say: the helper lets go
+    /// at once, and captures again only once logind says which session is in front.
+    pub fn console_changed(&mut self, n: u32, now: Instant) {
+        self.console = Some(n);
+        match self.front_console {
+            None => self.front_console = Some(n),
+            Some(c) if c != n && !self.console_moved => {
+                log!("console {n} is in front, before logind has said so");
+                self.console_moved = true;
+            }
+            _ => {}
         }
         self.settle(now);
     }
@@ -657,6 +692,7 @@ impl<D: Devices> Core<D> {
     fn reconcile(&mut self, now: Instant) {
         let wanted = self.client.as_ref().is_some_and(|c| c.wants);
         let in_front = wanted
+            && !self.console_moved
             && self.client.as_ref().is_some_and(
                 |c| matches!(&self.front, Front::Session { id, .. } if *id == c.session),
             );
@@ -664,7 +700,7 @@ impl<D: Devices> Core<D> {
             if self.capturing {
                 let why = if !wanted {
                     Released::Stopped
-                } else if self.front == Front::Unknown {
+                } else if self.front == Front::Unknown && !self.console_moved {
                     Released::SessionUnknown
                 } else {
                     Released::Background
