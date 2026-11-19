@@ -1244,10 +1244,6 @@ def keyboard(desktop: DesktopSession) -> Iterator[StandIn]:
 		shutil.rmtree(socketDir, ignore_errors=True)
 
 
-#: A command bound to the one with no gesture of its own that takes the keyboard back.
-TAKE_BACK_GESTURES = "[globalCommands.GlobalCommands]\n\ttakeKeyboardBack = kb:NVDA+shift+f12\n"
-
-
 class KernelSession:
 	"""The GTK fixture with its text field focused, and NVDA started beside it, taking its keys from
 	the stand-in."""
@@ -1260,7 +1256,6 @@ class KernelSession:
 		layoutName: str,
 		*,
 		config: str = "",
-		gestures: str = "",
 		env: dict | None = None,
 	) -> None:
 		self.desktop = desktop
@@ -1271,8 +1266,6 @@ class KernelSession:
 		(configDir / "nvda.ini").write_text(
 			configText(self.layout, nvdaKey).replace("[keyboard]\n", "[keyboard]\n" + config)
 		)
-		if gestures:
-			(configDir / "gestures.ini").write_text(gestures)
 		hooks = tmpPath / "hooks"
 		(hooks / "globalPlugins").mkdir(parents=True)
 		(hooks / "synthDrivers").symlink_to(harness.HERE / "synthDrivers")
@@ -1524,7 +1517,7 @@ def test_kernelSleepModePassesEveryKey(desktop: DesktopSession, keyboard: StandI
 
 
 def test_kernelEmergencyChordLeavesAWorkingReader(desktop: DesktopSession, keyboard: StandIn, tmp_path: Path):
-	keys = KernelSession(desktop, keyboard, tmp_path, "desktop", gestures=TAKE_BACK_GESTURES)
+	keys = KernelSession(desktop, keyboard, tmp_path, "desktop")
 	launch = keys.launch
 	mark = desktop.mark()
 	for key in ("BackSpace", "Escape", "Return"):

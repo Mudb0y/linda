@@ -405,11 +405,10 @@ class Ground:
 		settings: dict[str, dict[str, str]] | None = None,
 		*,
 		speaks: str = WINDOW_TITLE,
-		gestures: str = "",
 	) -> None:
 		"""Start Linda in the session with the transcript synth and wait until it speaks speaks.
 
-		settings are nvda.ini sections over BASE_SETTINGS; gestures, if given, is its gestures.ini.
+		settings are nvda.ini sections over BASE_SETTINGS.
 		"""
 		merged = {section: dict(values) for section, values in BASE_SETTINGS.items()}
 		for section, values in (settings or {}).items():
@@ -424,11 +423,6 @@ class Ground:
 			f"echo {shlex.quote(chr(10).join(lines))} > {config}/nvda.ini",
 			f"chown {USER} {config}/nvda.ini",
 		)
-		if gestures:
-			self.machine.succeed(
-				f"echo {shlex.quote(gestures)} > {config}/gestures.ini",
-				f"chown {USER} {config}/gestures.ini",
-			)
 		self.start(
 			"linda",
 			[f"{self.linda}/bin/linda", "-c", config, "-f", f"{LINDA_DIRECTORY}/nvda.log", "--debug-logging"],

@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 UHID = "Ground uhid keyboard"
 CHORD_KEYS = ("KEY_INSERT", "KEY_T")
 APART = 0.8
-GESTURES = "[globalCommands.GlobalCommands]\n\ttakeKeyboardBack = kb:NVDA+shift+f12\n"
 FELL_BACK = "Linda now reads keys from the X display"
 #: Seconds from the X server's change to Linda's word that it reads keys from the X display: the half
 #: second Linda allows the X server, and Linda's own turn.
@@ -85,7 +84,7 @@ def run(ground: "Ground") -> None:
 	ground.openWindow()
 	ground.waitForHelper()
 	keyboard = ground.uhidKeyboard(UHID)
-	ground.startLinda(gestures=GESTURES)
+	ground.startLinda()
 	ground.waitForLindaLog(KERNEL_ROUTE, timeout=30)
 
 	with ground.subtest("how long the X server takes to have the virtual keyboard"):

@@ -3450,6 +3450,9 @@ class GlobalCommands(ScriptableObject):
 				"Takes the keyboard back after the emergency chord let it go",
 			),
 			category=SCRCAT_INPUT,
+			# Bound from the start: whoever has just needed the emergency chord must not have to find the
+			# Input Gestures dialog first.
+			gesture="kb:NVDA+shift+f12",
 		)
 		def script_takeKeyboardBack(self, gesture: inputCore.InputGesture) -> None:
 			from linuxPlatform import inputHook

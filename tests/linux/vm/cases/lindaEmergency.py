@@ -13,8 +13,6 @@ if TYPE_CHECKING:
 UHID = "Ground uhid keyboard"
 CHORD_KEYS = ("KEY_INSERT", "KEY_T")
 APART = 0.8
-#: The command has no gesture of its own; the owner would give it one.
-GESTURES = "[globalCommands.GlobalCommands]\n\ttakeKeyboardBack = kb:NVDA+shift+f12\n"
 LET_GO = "Linda has let go of the keyboard\N{HORIZONTAL ELLIPSIS}"
 
 
@@ -32,7 +30,7 @@ def run(ground: "Ground") -> None:
 	ground.openWindow()
 	ground.waitForHelper()
 	keyboard = ground.uhidKeyboard(UHID)
-	ground.startLinda(gestures=GESTURES)
+	ground.startLinda()
 	ground.waitForLindaLog(KERNEL_ROUTE, timeout=30)
 	lindaKeyWorks(ground, keyboard)
 
