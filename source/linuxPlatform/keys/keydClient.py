@@ -30,6 +30,13 @@ _DEVICE = struct.Struct("<BIBB")
 _LOCKS = struct.Struct("<BH")
 
 KEY_RELEASE, KEY_PRESS, KEY_REPEAT = 0, 1, 2
+#: HELLO's and WELCOME's feature: VERDICT may hold a press for longer, up to VERDICT_WAIT_TIMEOUT.
+FEATURE_WAIT = 2
+#: The value of VERDICT that holds a press longer, with FEATURE_WAIT.
+VERDICT_WAIT = 2
+#: Seconds from the helper's reading of a press held by VERDICT_WAIT after which it passes the key on;
+#: protocol.rs's own, as WELCOME does not carry it.
+VERDICT_WAIT_TIMEOUT = 0.6
 #: KEY's flags: the press wants a verdict; the helper made the event, as the release of a key held on
 #: a keyboard that vanished; the client typed the key.
 KEY_ASK, KEY_SYNTHETIC, KEY_TYPED = 0x01, 0x02, 0x04
@@ -225,6 +232,10 @@ def verdict(seq: int, keep: bool) -> bytes:
 	return _VERDICT.pack(VERDICT, seq, int(keep))
 
 
+def wait(seq: int) -> bytes:
+	return _VERDICT.pack(VERDICT, seq, VERDICT_WAIT)
+
+
 def heartbeat(counter: int) -> bytes:
 	return _HEARTBEAT.pack(HEARTBEAT, counter & 0xFFFFFFFF)
 
@@ -241,7 +252,7 @@ def connect(path: str, timeout: float) -> tuple[socket.socket, Welcome]:
 		try:
 			sock.settimeout(timeout)
 			sock.connect(path)
-			sock.send(hello())
+			sock.send(hello(FEATURE_WAIT))
 			deadline = time.monotonic() + timeout
 			while True:
 				sock.settimeout(max(0.001, deadline - time.monotonic()))

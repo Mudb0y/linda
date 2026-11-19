@@ -9,7 +9,8 @@ to the X display through XTEST, the display's one other keyboard device, as they
 nothing holds: Linda's X source tells the two apart by device, as it tells the virtual keyboard from
 the real keyboards, and a test names the first to Linda as the virtual keyboard. It sends the lights of the locks as the X
 display sets them, reads the emergency chord itself, lets go of everything when its client falls
-silent, and can be made to refuse, say goodbye, let go, lose its keyboard or vanish.
+silent, and can be made to refuse, say goodbye, let go, lose its keyboard or vanish. It grants the
+feature WAIT, a verdict that holds a press longer, unless told not to.
 
 It is written from the protocol's documentation, not from Linda's client, so that the two are held
 to the same text rather than to each other.
@@ -33,6 +34,9 @@ from Xlib.protocol import rq
 HELLO, START, STOP, VERDICT, HEARTBEAT = 0x01, 0x02, 0x03, 0x04, 0x05
 WELCOME, GOODBYE, KEY, EXPIRED, RELEASED, DEVICE, LOCKS, HEARTBEAT_ECHO = range(0x81, 0x89)
 KEY_ASK, KEY_SYNTHETIC = 0x01, 0x02
+FEATURE_WAIT = 2
+#: VERDICT's values: pass, keep, and with FEATURE_WAIT, hold the press longer.
+VERDICT_PASS, VERDICT_KEEP, VERDICT_WAIT = 0, 1, 2
 RELEASE, PRESS, REPEAT = 0, 1, 2
 RELEASED_STOPPED, RELEASED_EMERGENCY, RELEASED_BACKGROUND, RELEASED_VIRTUAL, RELEASED_SESSION_UNKNOWN = range(
 	1, 6
@@ -187,7 +191,10 @@ class _Entry:
 	code: int
 	press: bool
 	arrival: float
+	#: Seconds from its arrival after which it is passed on without a verdict.
+	bound: float = 0.0
 	verdict: bool | None = None
+	waited: bool = False
 
 
 class StandIn:
@@ -205,13 +212,21 @@ class StandIn:
 		toX: bool = True,
 		announcedVerdictTimeout: float | None = None,
 		settle: float = 0.0,
+		features: int = FEATURE_WAIT,
+		waitTimeout: float = 0.6,
 	) -> None:
 		"""
 		:param toX: Whether keys go on to the X display; without, they go nowhere, and only what the
 			client did with them is recorded.
 		:param announcedVerdictTimeout: The bound WELCOME gives, when it is to be another than the one
 			kept, as for a client that cannot keep it.
+		:param features: Those it grants of the features a client asks for.
+		:param waitTimeout: The bound of a press the client answered with WAIT.
 		"""
+		self.features = features
+		self.waitTimeout = waitTimeout
+		#: The features granted to the client served now.
+		self.granted = 0
 		self.announcedVerdictTimeout = announcedVerdictTimeout
 		#: Seconds from the first START to the first grab, as the helper's virtual keyboard settles.
 		self.settle = settle
@@ -253,6 +268,8 @@ class StandIn:
 		self.events: list[tuple] = []
 		#: (seq, keep, seconds from the key's reading to its verdict) of each verdict in time.
 		self.verdicts: list[tuple[int, bool, float]] = []
+		#: (seq, seconds from the key's reading) of each WAIT that held a press longer.
+		self.waits: list[tuple[int, float]] = []
 		self.heartbeats: list[float] = []
 		self.starts = 0
 		self.admitted = threading.Event()
@@ -431,7 +448,7 @@ class StandIn:
 		self._seq += 1
 		now = time.monotonic()
 		if value != REPEAT:
-			self._line.append(_Entry(self._seq, evdev, value == PRESS, now))
+			self._line.append(_Entry(self._seq, evdev, value == PRESS, now, self.verdictTimeout))
 		self._note("key", self._seq, evdev, value, flags)
 		self._sendClient(struct.pack("<BQIHBB", KEY, self._seq, DEVICE_NUMBER, evdev, value, flags))
 		self._advance(now)
@@ -441,7 +458,7 @@ class StandIn:
 		while self._line:
 			head = self._line[0]
 			if head.press and head.verdict is None:
-				if now - head.arrival < self.verdictTimeout:
+				if now - head.arrival < head.bound:
 					return
 				head.verdict = False
 				self._note("expired", head.seq)
@@ -452,7 +469,7 @@ class StandIn:
 					self._run = (head.arrival, head.arrival)
 				else:
 					self._run = (self._run[0], head.arrival)
-				if head.arrival + self.verdictTimeout - self._run[0] >= self.unansweredSpan:
+				if head.arrival + head.bound - self._run[0] >= self.unansweredSpan:
 					self._line.popleft()
 					self._virtual(head.code, True)
 					self._dropClient(sendGoodbye=(GOODBYE_UNANSWERED, "presses went unanswered"))
@@ -539,9 +556,9 @@ class StandIn:
 				if self._client is not None:
 					watched.append(self._client)
 				timeout = 0.02 if self._client is not None else 0.2
-				undecided = [e.arrival for e in self._line if e.press and e.verdict is None]
+				undecided = [e.arrival + e.bound for e in self._line if e.press and e.verdict is None]
 				if undecided:
-					timeout = max(0.0, min(timeout, undecided[0] + self.verdictTimeout - now))
+					timeout = max(0.0, min(timeout, min(undecided) - now))
 			readable, _w, _x = select.select(watched, [], [], timeout)
 			with self._lock:
 				if self._wakeRead in readable:
@@ -572,6 +589,7 @@ class StandIn:
 		if len(data) != 7 or data[0] != HELLO:
 			caller.close()
 			return
+		asked = struct.unpack("<BHI", data)[2]
 		if not self.answering:
 			self._waiting.append(caller)
 			return
@@ -587,6 +605,7 @@ class StandIn:
 			caller.close()
 			return
 		self._client = caller
+		self.granted = asked & self.features
 		self._lastHeard = time.monotonic()
 		self._lights = None
 		self.gone.clear()
@@ -599,7 +618,7 @@ class StandIn:
 				self.unansweredSpan,
 			)
 		]
-		self._sendClient(struct.pack("<BHIHHHH", WELCOME, 1, 0, *ms))
+		self._sendClient(struct.pack("<BHIHHHH", WELCOME, 1, self.granted, *ms))
 		self._note("admitted")
 		self.admitted.set()
 
@@ -644,8 +663,15 @@ class StandIn:
 		elif kind == STOP and len(data) == 1:
 			self._note("stop")
 			self._letGo(RELEASED_STOPPED, dropUndecided=False)
-		elif kind == VERDICT and len(data) == 10:
-			_kind, seq, keep = struct.unpack("<BQB", data)
+		elif (
+			kind == VERDICT
+			and len(data) == 10
+			and (
+				data[9] in (VERDICT_PASS, VERDICT_KEEP)
+				or (data[9] == VERDICT_WAIT and self.granted & FEATURE_WAIT)
+			)
+		):
+			_kind, seq, value = struct.unpack("<BQB", data)
 			self._advance(now)
 			for entry in self._line:
 				# Each press's own bound runs from its reading, wherever it is in line.
@@ -653,14 +679,22 @@ class StandIn:
 					entry.seq == seq
 					and entry.press
 					and entry.verdict is None
-					and now - entry.arrival < self.verdictTimeout
+					and now - entry.arrival < entry.bound
 				):
-					entry.verdict = bool(keep)
-					self.verdicts.append((seq, bool(keep), now - entry.arrival))
-					self._note("verdict", seq, bool(keep))
+					if value == VERDICT_WAIT:
+						# Only the first counts.
+						if not entry.waited:
+							entry.waited = True
+							entry.bound = self.waitTimeout
+							self.waits.append((seq, now - entry.arrival))
+							self._note("wait", seq)
+						break
+					entry.verdict = bool(value)
+					self.verdicts.append((seq, bool(value), now - entry.arrival))
+					self._note("verdict", seq, bool(value))
 					break
 			else:
-				self._note("late verdict", seq, bool(keep))
+				self._note("late verdict", seq, value)
 			self._advance(now)
 		else:
 			self._note("malformed", data)
