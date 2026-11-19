@@ -584,6 +584,200 @@ fn each_client_counts_its_keys_from_one() {
     assert_eq!(keys, vec![1]);
 }
 
+// WAIT, with FEATURE_WAIT.
+
+impl T {
+    /// As capturing, with FEATURE_WAIT asked for and granted.
+    fn waiting() -> (T, u32) {
+        let mut t = T::new();
+        let k = t.w.plug("AT Translated Set 2 keyboard");
+        t.connect(CLIENT, PEER);
+        t.from(
+            CLIENT,
+            FromClient::Hello {
+                version: PROTOCOL_VERSION,
+                features: FEATURE_WAIT,
+            },
+        );
+        t.core.admitted(CLIENT, Ok(SESSION.into()), t.now);
+        t.take();
+        let welcome = t.sent();
+        assert!(
+            matches!(
+                welcome[0],
+                ToClient::Welcome {
+                    features: FEATURE_WAIT,
+                    ..
+                }
+            ),
+            "{welcome:?}"
+        );
+        t.send(FromClient::Start);
+        t.pass(VIRTUAL_SETTLE);
+        assert!(t.w.grabbed(k));
+        t.out.clear();
+        (t, k)
+    }
+
+    fn wait(&mut self, seq: u64) {
+        self.send(FromClient::Wait { seq });
+    }
+
+    fn expired(&mut self) -> Vec<u64> {
+        self.sent()
+            .into_iter()
+            .filter_map(|m| match m {
+                ToClient::Expired { seq } => Some(seq),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+#[test]
+fn a_press_held_by_wait_is_kept_or_passed_as_answered_within_the_longer_bound() {
+    let (mut t, k) = T::waiting();
+    t.press(k, KEY_A);
+    let a = t.last_seq();
+    t.wait(a);
+    t.pass(VERDICT_WAIT_TIMEOUT - ms(10));
+    assert!(t.w.emitted().is_empty());
+    assert!(t.expired().is_empty());
+    t.verdict(a, true);
+    t.release(k, KEY_A);
+    t.pass(ms(20));
+    assert!(t.w.emitted().is_empty(), "the kept key went out");
+    t.press(k, KEY_T);
+    let b = t.last_seq();
+    t.wait(b);
+    t.pass(VERDICT_WAIT_TIMEOUT - ms(10));
+    assert!(t.w.emitted().is_empty());
+    t.verdict(b, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_T, 1)]);
+    t.release(k, KEY_T);
+    assert_eq!(t.w.emitted(), vec![(KEY_T, 1), (KEY_T, 0)]);
+    assert!(t.expired().is_empty());
+}
+
+#[test]
+fn a_press_held_by_wait_is_passed_at_the_longer_bound_with_later_keys_in_order_behind_it() {
+    let (mut t, k) = T::waiting();
+    t.press(k, KEY_A);
+    let a = t.last_seq();
+    t.wait(a);
+    // Shift comes behind it and is answered; T comes behind that and is not.
+    t.pass(ms(50));
+    t.press(k, KEY_LEFTSHIFT);
+    let shift = t.last_seq();
+    t.verdict(shift, false);
+    t.press(k, KEY_T);
+    let late = t.last_seq();
+    t.release(k, KEY_A);
+    t.release(k, KEY_T);
+    t.release(k, KEY_LEFTSHIFT);
+    t.pass(VERDICT_WAIT_TIMEOUT - ms(60));
+    assert!(t.w.emitted().is_empty(), "went out before the longer bound");
+    t.pass(ms(10));
+    assert_eq!(
+        t.w.emitted(),
+        vec![
+            (KEY_A, 1),
+            (KEY_LEFTSHIFT, 1),
+            (KEY_T, 1),
+            (KEY_A, 0),
+            (KEY_T, 0),
+            (KEY_LEFTSHIFT, 0)
+        ]
+    );
+    assert_eq!(t.expired(), vec![a, late]);
+    assert!(t.w.virtual_down().is_empty());
+}
+
+#[test]
+fn only_the_first_wait_counts_and_only_while_the_press_waits() {
+    let (mut t, k) = T::waiting();
+    t.press(k, KEY_A);
+    let a = t.last_seq();
+    t.wait(a);
+    t.pass(ms(500));
+    // A second WAIT does not move the bound again.
+    t.wait(a);
+    t.pass(VERDICT_WAIT_TIMEOUT - ms(500));
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1)]);
+    assert_eq!(t.expired(), vec![a]);
+    // A WAIT for a press already passed on at its bound changes nothing.
+    t.release(k, KEY_A);
+    t.press(k, KEY_T);
+    let b = t.last_seq();
+    t.pass(VERDICT_TIMEOUT);
+    t.wait(b);
+    assert_eq!(t.expired(), vec![b]);
+    // Nor does one for a press already answered.
+    t.release(k, KEY_T);
+    t.press(k, KEY_LEFTSHIFT);
+    let c = t.last_seq();
+    t.verdict(c, true);
+    t.wait(c);
+    t.pass(VERDICT_WAIT_TIMEOUT);
+    assert!(t.expired().is_empty());
+    assert!(t.core.client.is_some());
+}
+
+#[test]
+fn a_wait_without_the_feature_breaks_the_protocol() {
+    let (mut t, k) = T::capturing();
+    t.press(k, KEY_A);
+    let a = t.last_seq();
+    t.wait(a);
+    assert_eq!(goodbye_reason(&t.sent()), Some(Goodbye::Malformed));
+    t.assert_let_go();
+}
+
+#[test]
+fn a_client_that_only_ever_says_wait_is_dropped_as_one_that_says_nothing() {
+    // Someone typing ten keys a second at a client that answers every press WAIT and nothing more.
+    let typed = |wait: bool| {
+        let (mut t, k) = T::waiting();
+        let start = t.now;
+        for _ in 0..40 {
+            t.press(k, KEY_A);
+            if wait {
+                let seq = t.last_seq();
+                t.wait(seq);
+            }
+            t.pass(ms(50));
+            t.release(k, KEY_A);
+            t.pass(ms(50));
+            if goodbye_reason(&t.sent()) == Some(Goodbye::Unanswered) {
+                t.assert_let_go();
+                return t.now - start;
+            }
+        }
+        panic!("not dropped after four seconds of typing");
+    };
+    let silent = typed(false);
+    let waiting = typed(true);
+    assert!(silent <= UNANSWERED_SPAN + ms(100), "{silent:?}");
+    assert!(
+        waiting <= UNANSWERED_SPAN + VERDICT_WAIT_TIMEOUT,
+        "{waiting:?}, a client saying nothing {silent:?}"
+    );
+}
+
+#[test]
+fn the_emergency_chord_goes_past_a_press_held_by_wait() {
+    let (mut t, k) = T::waiting();
+    t.press(k, KEY_A);
+    let a = t.last_seq();
+    t.wait(a);
+    for c in CHORD.map(|keys| keys[0]) {
+        t.press(k, c);
+    }
+    assert!(t.sent().contains(&released(Released::Emergency)));
+    t.assert_let_go();
+    assert!(t.w.emitted().is_empty(), "the held press went out");
+}
+
 // The bounded wait for a verdict.
 
 #[test]

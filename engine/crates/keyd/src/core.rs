@@ -9,7 +9,8 @@
 //! - Nothing is grabbed unless an admitted client asked to capture and its session is in front,
 //!   and the virtual keyboard exists, has appeared and has had time to be taken up.
 //! - A keyboard is grabbed only while every key on it is up, looked at again after the grab.
-//! - Every press waits at most VERDICT_TIMEOUT for its verdict and is passed on without one. A
+//! - Every press waits at most VERDICT_TIMEOUT for its verdict, or VERDICT_WAIT_TIMEOUT once the
+//!   client has answered it WAIT, and is passed on without one. A
 //!   key's release and repeats follow what became of its press, and no key goes out on the virtual
 //!   keyboard before every key read before it has been decided.
 //! - Letting go, for any reason, ends with every key the virtual keyboard holds down released and
@@ -124,6 +125,20 @@ struct Entry {
     arrival: Instant,
     /// For a press, true to keep it, false to pass it on, once known.
     verdict: Option<bool>,
+    /// The client answered the press WAIT.
+    waited: bool,
+}
+
+impl Entry {
+    /// When a press is passed on without its verdict.
+    fn bound(&self) -> Instant {
+        self.arrival
+            + if self.waited {
+                VERDICT_WAIT_TIMEOUT
+            } else {
+                VERDICT_TIMEOUT
+            }
+    }
 }
 
 struct Client {
@@ -134,6 +149,8 @@ struct Client {
     /// chord or a failure of the virtual keyboard.
     wants: bool,
     last_heard: Instant,
+    /// The features it was granted.
+    features: u32,
 }
 
 struct Caller {
@@ -289,7 +306,7 @@ impl<D: Devices> Core<D> {
             }
         }
         if let Some(e) = self.line.front() {
-            at(e.arrival + VERDICT_TIMEOUT);
+            at(e.bound());
         }
         if self.capturing
             && let Some(r) = self.rescan_at
@@ -433,6 +450,7 @@ impl<D: Devices> Core<D> {
                     session,
                     wants: false,
                     last_heard: now,
+                    features: features & FEATURES_KNOWN,
                 });
                 // Numbered afresh, so that the first key's number tells nothing of how many keys
                 // another client had. Nothing is in line: no client, no capture.
@@ -650,6 +668,7 @@ impl<D: Devices> Core<D> {
                 }
             }
             FromClient::Verdict { seq, keep } => self.verdict(seq, keep, now),
+            FromClient::Wait { seq } if c.features & FEATURE_WAIT != 0 => self.wait(seq, now),
             FromClient::Wait { .. } => {
                 self.drop_later(Goodbye::Malformed, "WAIT without FEATURE_WAIT".into())
             }
@@ -670,11 +689,28 @@ impl<D: Devices> Core<D> {
         if let Some(e) = self.line.iter_mut().find(|e| e.seq == seq)
             && e.press
             && e.verdict.is_none()
-            && now < e.arrival + VERDICT_TIMEOUT
+            && now < e.bound()
         {
             e.verdict = Some(keep);
         }
         self.advance(now);
+    }
+
+    /// WAIT: the press keeps waiting, to VERDICT_WAIT_TIMEOUT from its reading. Only the first
+    /// counts, and only while the press is still waiting for its verdict.
+    fn wait(&mut self, seq: u64, now: Instant) {
+        if seq == 0 || seq >= self.next_seq {
+            let why = format!("a WAIT on key {seq}, which was never sent");
+            self.drop_later(Goodbye::Malformed, why);
+            return;
+        }
+        if let Some(e) = self.line.iter_mut().find(|e| e.seq == seq)
+            && e.press
+            && e.verdict.is_none()
+            && now < e.bound()
+        {
+            e.waited = true;
+        }
     }
 
     fn client_in_front(&self) -> bool {
@@ -1239,6 +1275,7 @@ impl<D: Devices> Core<D> {
                 press: value == KEY_PRESS,
                 arrival: now,
                 verdict: None,
+                waited: false,
             });
         }
         self.send_client(ToClient::Key(Key {
@@ -1263,14 +1300,14 @@ impl<D: Devices> Core<D> {
                         self.unanswered = None;
                         keep
                     }
-                    None if now >= e.arrival + VERDICT_TIMEOUT => {
+                    None if now >= e.bound() => {
                         let first = match self.unanswered {
                             Some((first, last)) if e.arrival <= last + UNANSWERED_GAP => first,
                             _ => e.arrival,
                         };
                         self.unanswered = Some((first, e.arrival));
                         self.send_client(ToClient::Expired { seq: e.seq });
-                        if e.arrival + VERDICT_TIMEOUT >= first + UNANSWERED_SPAN {
+                        if e.bound() >= first + UNANSWERED_SPAN {
                             give_up = true;
                         }
                         false

@@ -254,7 +254,7 @@ pub const FEATURE_TYPING: u32 = 1;
 /// [`VERDICT_WAIT_TIMEOUT`] instead of [`VERDICT_TIMEOUT`].
 pub const FEATURE_WAIT: u32 = 2;
 /// The features this helper grants.
-pub const FEATURES_KNOWN: u32 = 0;
+pub const FEATURES_KNOWN: u32 = FEATURE_WAIT;
 /// The device number of keys the client types, once typing exists. Real keyboards are numbered as
 /// the kernel numbers input devices, which never comes near this.
 pub const TYPED_DEVICE: u32 = u32::MAX;
