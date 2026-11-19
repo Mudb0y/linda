@@ -217,6 +217,8 @@ pub struct Core<D: Devices> {
     /// What is left to deal with of a batch read from a keyboard, for letting go in the middle of
     /// it to pass on.
     batch: VecDeque<InputEvent>,
+    /// The keyboard that batch was read from.
+    batch_from: u32,
     out: Vec<Output>,
 }
 
@@ -250,6 +252,7 @@ impl<D: Devices> Core<D> {
             forgiven: None,
             refusals: None,
             batch: VecDeque::new(),
+            batch_from: 0,
             out: Vec::new(),
         }
     }
@@ -619,6 +622,7 @@ impl<D: Devices> Core<D> {
         match state {
             KState::Held => {
                 self.batch = events.into();
+                self.batch_from = n;
                 while self.capturing && self.keyboards.get(&n).is_some_and(|k| !k.resync_due) {
                     let Some(ev) = self.batch.pop_front() else {
                         break;
@@ -1572,14 +1576,14 @@ impl<D: Devices> Core<D> {
         }
         self.passed.clear();
         let rest: Vec<InputEvent> = self.batch.drain(..).collect();
-        self.tap(&rest);
+        self.tap(self.batch_from, &rest);
         let mut keyboards = std::mem::take(&mut self.keyboards);
-        for kbd in keyboards.values_mut() {
+        for (n, kbd) in &mut keyboards {
             let mut events = Vec::new();
             if kbd.state == KState::Held {
                 let _ = kbd.k.read(&mut events);
             }
-            self.tap(&events);
+            self.tap(*n, &events);
             kbd.k.ungrab();
         }
         drop(keyboards);
@@ -1604,16 +1608,41 @@ impl<D: Devices> Core<D> {
 }
 
 impl<D: Devices> Core<D> {
-    /// Keys read as the helper lets go, each press passed on as a tap, with no verdict asked; what
-    /// follows a loss of events is left alone, as ever.
-    fn tap(&mut self, events: &[InputEvent]) {
+    /// Keys read as the helper lets go, each press passed on as a tap, with no verdict asked, and,
+    /// when it went out, told to the client, if it is still there and its session in front, as a
+    /// press and a release without flags, so that it knows what the program had. What follows a
+    /// loss of events is left alone, as ever. Each read is of what the kernel keeps for a reader,
+    /// a few dozen events, so a client not reading is sent a few dozen messages a keyboard at
+    /// most, and is dropped, not waited for, once more wait for it than its outbox takes.
+    fn tap(&mut self, device: u32, events: &[InputEvent]) {
+        // Let go of because its session is no longer in front, the client must not learn what
+        // went to the session that is.
+        let tell = self
+            .client
+            .as_ref()
+            .is_some_and(|c| self.session_in_front() == Some(c.session.as_str()));
         for e in events {
             if e.kind == EV_SYN && e.code == SYN_DROPPED {
                 return;
             }
             if e.kind == EV_KEY && e.value == 1 && is_virtual_key(e.code) {
                 self.press_virtual(e.code);
+                let went_out = self.pressed[usize::from(e.code)] > 0;
                 self.release_virtual(e.code);
+                if !tell || !went_out {
+                    continue;
+                }
+                for value in [KEY_PRESS, KEY_RELEASE] {
+                    let seq = self.next_seq;
+                    self.next_seq += 1;
+                    self.send_client(ToClient::Key(Key {
+                        seq,
+                        device,
+                        code: e.code,
+                        value,
+                        flags: 0,
+                    }));
+                }
             }
         }
     }

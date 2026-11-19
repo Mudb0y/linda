@@ -1478,6 +1478,80 @@ fn letting_go_puts_out_what_was_typed_in_the_order_typed() {
     );
 }
 
+/// What letting go taps the client is told, as a press and a release without flags, in the order
+/// they went out and before RELEASED: after the chord the rest of its batch, then each keyboard's
+/// last read, each with its keyboard's number.
+#[test]
+fn the_keys_tapped_as_the_helper_lets_go_are_told_before_released() {
+    let mut t = T::new();
+    let k = t.w.plug("keyboard");
+    let k2 = t.w.plug("second keyboard");
+    t.admit(CLIENT);
+    t.send(FromClient::Start);
+    t.pass(VIRTUAL_SETTLE);
+    t.out.clear();
+    for c in CHORD.map(|keys| keys[0]) {
+        t.w.press(k, c);
+    }
+    t.w.press(k, KEY_G);
+    t.w.press(k2, KEY_H);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    let after_chord: Vec<ToClient> = t
+        .sent()
+        .into_iter()
+        .skip_while(|m| !matches!(m, ToClient::Key(k) if k.code == KEY_ESC))
+        .skip(1)
+        .collect();
+    let tap = |m: &ToClient| match m {
+        ToClient::Key(key) => Some((key.device, key.code, key.value, key.flags)),
+        _ => None,
+    };
+    assert_eq!(
+        after_chord.iter().map(tap).collect::<Vec<_>>(),
+        vec![
+            Some((k, KEY_G, KEY_PRESS, 0)),
+            Some((k, KEY_G, KEY_RELEASE, 0)),
+            Some((k2, KEY_H, KEY_PRESS, 0)),
+            Some((k2, KEY_H, KEY_RELEASE, 0)),
+            None,
+        ]
+    );
+    assert_eq!(after_chord[4], released(Released::Emergency));
+
+    // On STOP, the same.
+    let (mut t, k) = T::capturing();
+    t.w.press(k, KEY_G);
+    t.send(FromClient::Stop);
+    let told: Vec<Option<(u32, u16, u8, u8)>> = t.sent().iter().map(tap).collect();
+    assert_eq!(
+        told,
+        vec![
+            Some((k, KEY_G, KEY_PRESS, 0)),
+            Some((k, KEY_G, KEY_RELEASE, 0)),
+            None
+        ]
+    );
+    assert_eq!(t.w.emitted(), vec![(KEY_G, 1), (KEY_G, 0)]);
+
+    // Let go of because another session came in front, the client is told nothing of a key that
+    // went to that session.
+    let (mut t, k) = T::capturing();
+    t.w.press(k, KEY_G);
+    t.core.front_changed(front("c1", 1000), t.now);
+    t.take();
+    assert_eq!(t.sent(), vec![released(Released::Background)]);
+    assert_eq!(t.w.emitted(), vec![(KEY_G, 1), (KEY_G, 0)]);
+
+    // Nor is a client dropped told anything.
+    let (mut t, k) = T::capturing();
+    t.w.press(k, KEY_G);
+    t.core.disconnected(CLIENT, t.now);
+    t.take();
+    assert!(t.everything_sent_to(CLIENT).is_empty());
+    assert_eq!(t.w.emitted(), vec![(KEY_G, 1), (KEY_G, 0)]);
+}
+
 #[test]
 fn keys_read_after_the_emergency_chord_in_the_same_batch_are_passed_on() {
     let (mut t, k) = T::capturing();
