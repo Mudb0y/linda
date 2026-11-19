@@ -1427,6 +1427,61 @@ fn keys_read_after_the_emergency_chord_in_the_same_batch_are_passed_on() {
     assert_eq!(t.w.emitted(), vec![(KEY_G, 1), (KEY_G, 0)]);
 }
 
+/// The emergency chord after a loss of events, in each order of loss, press and the helper's
+/// question to the kernel: keys pressed in the lost stretch, keys whose press was read with the
+/// report that ended the loss, keys pressed between that read and the question, and keys pressed
+/// after the question.
+#[test]
+fn the_chord_lets_go_whenever_its_keys_went_down_around_a_loss_of_events() {
+    let chord = CHORD.map(|keys| keys[0]);
+    // Each key in turn is pressed in the lost stretch (0), read with the report (1), pressed
+    // before the question (2) or after it (3).
+    for order in 0..4usize.pow(3) {
+        let (mut t, k) = T::capturing();
+        let when: Vec<usize> = (0..3).map(|i| order / 4usize.pow(i as u32) % 4).collect();
+        for (c, w) in chord.iter().zip(&when) {
+            if *w == 0 {
+                t.w.press(k, *c);
+            }
+        }
+        t.w.overflow(k, &[]);
+        for (c, w) in chord.iter().zip(&when) {
+            match w {
+                1 => t.w.press(k, *c),
+                2 => t.w.change_unread(k, *c, true),
+                _ => {}
+            }
+        }
+        t.core.keyboard_ready(k, t.now);
+        t.take();
+        for (c, w) in chord.iter().zip(&when) {
+            if *w == 3 {
+                t.press(k, *c);
+            }
+        }
+        assert!(
+            t.sent().contains(&released(Released::Emergency)),
+            "chord keys at {when:?} (0 lost, 1 read, 2 before the question, 3 after)"
+        );
+        t.assert_let_go();
+    }
+}
+
+#[test]
+fn a_key_read_after_a_loss_and_let_go_of_before_the_question_is_not_left_down() {
+    let (mut t, k) = T::capturing();
+    t.w.overflow(k, &[]);
+    t.w.press(k, KEY_A);
+    t.w.change_unread(k, KEY_A, false);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    let keys: Vec<(u16, u8)> = t.keys().iter().map(|k| (k.code, k.value)).collect();
+    assert_eq!(keys, vec![(KEY_A, KEY_PRESS), (KEY_A, KEY_RELEASE)]);
+    t.pass(VERDICT_TIMEOUT);
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1), (KEY_A, 0)]);
+    assert!(t.w.virtual_down().is_empty());
+}
+
 #[test]
 fn the_numpads_enter_serves_the_emergency_chord_as_well() {
     let (mut t, k) = T::capturing();
@@ -2388,7 +2443,6 @@ impl Keyboard for FlushingKeyboard {
 /// of again. The question comes microseconds after the read unless the helper is taken off the
 /// processor in between, as on the starved machine that made it lose events.
 #[test]
-#[ignore = "third review: a key let go of as the helper catches up after lost events stays down"]
 fn fault_a_key_let_go_of_as_the_helper_catches_up_after_lost_events_does_not_stay_down() {
     fn say(core: &mut Core<FlushingDevices>, m: FromClient, now: Instant) {
         core.received(CLIENT, &m.encode(), now);

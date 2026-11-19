@@ -115,6 +115,9 @@ struct Kbd<K> {
     unseen: KeySet,
     /// The kernel dropped events: what comes until the next report is discarded.
     dropping: bool,
+    /// The report that ends a loss of events has been read: the keys down are to be asked for once
+    /// everything read with it has been dealt with.
+    resync_due: bool,
 }
 
 /// A press or release in line for the virtual keyboard.
@@ -604,6 +607,11 @@ impl<D: Devices> Core<D> {
                 if !self.capturing {
                     self.pass_after_letting_go(&events[read..]);
                 }
+                if let Some(kbd) = self.keyboards.get_mut(&n)
+                    && std::mem::take(&mut kbd.resync_due)
+                {
+                    self.resync(n, now);
+                }
             }
             // Copies of what the desktop has: a key may have gone up.
             KState::Waiting(_) if result.is_ok() => self.try_grab(n, now),
@@ -1069,6 +1077,7 @@ impl<D: Devices> Core<D> {
                         down: KeySet::new(),
                         unseen: KeySet::new(),
                         dropping: false,
+                        resync_due: false,
                     },
                 );
                 self.try_grab(f.number, now);
@@ -1251,7 +1260,7 @@ impl<D: Devices> Core<D> {
         if kbd.dropping {
             if ev.kind == EV_SYN && ev.code == SYN_REPORT {
                 kbd.dropping = false;
-                self.resync(n, now);
+                kbd.resync_due = true;
             }
             return;
         }
@@ -1262,10 +1271,13 @@ impl<D: Devices> Core<D> {
         }
     }
 
-    /// After the kernel dropped events: a key the helper has down that the kernel has up was
-    /// released unseen, and gets its release now. A key that went down unseen has no press in
-    /// line; it is kept among the unseen, which the chord is looked for in at once, since the
-    /// person may be holding it for a way out of a helper that fell behind.
+    /// After the kernel dropped events, once everything read with the report that ended the loss
+    /// has been dealt with: the kernel's answer to which keys are down is its state after all of
+    /// that, and asking also throws away every key event it had queued and not yet given, so the
+    /// answer is reconciled with what was read, never followed by more of it. A key the helper has
+    /// down that the kernel has up was released unseen, and gets its release now. A key that went
+    /// down unseen has no press in line; it is kept among the unseen, which the chord is looked for
+    /// in at once, since the person may be holding it for a way out of a helper that fell behind.
     fn resync(&mut self, n: u32, now: Instant) {
         let Some(kbd) = self.keyboards.get_mut(&n) else {
             return;

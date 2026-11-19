@@ -224,6 +224,18 @@ impl World {
         self.lock().devices.get_mut(&n).unwrap().busy = busy;
     }
 
+    /// A key goes down, or up, after the helper's last read and before it asks which keys are down:
+    /// the kernel's state has the change, and the event is thrown away as it is asked.
+    pub fn change_unread(&self, n: u32, code: u16, down: bool) {
+        let mut s = self.lock();
+        let d = s.devices.get_mut(&n).unwrap();
+        if down {
+            d.down.insert(code);
+        } else {
+            d.down.remove(code);
+        }
+    }
+
     /// Whether letting go of the keyboard fails, as the kernel's does when it is interrupted.
     pub fn fail_ungrab(&self, n: u32, fails: bool) {
         self.lock().devices.get_mut(&n).unwrap().ungrab_fails = fails;
@@ -404,12 +416,15 @@ impl Keyboard for MockKeyboard {
         Ok(())
     }
 
+    /// As the kernel's EVIOCGKEY, which also throws away every key event queued for this open file
+    /// and not yet read (__evdev_flush_queue in drivers/input/evdev.c).
     fn keys_down(&self) -> io::Result<KeySet> {
-        let s = self.world.lock();
-        let d = &s.devices[&self.n];
+        let mut s = self.world.lock();
+        let d = s.devices.get_mut(&self.n).unwrap();
         if d.gone {
             return Err(io::Error::from_raw_os_error(libc::ENODEV));
         }
+        d.queue.retain(|e| e.kind != EV_KEY);
         Ok(d.down.clone())
     }
 
