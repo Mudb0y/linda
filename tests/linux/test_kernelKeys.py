@@ -19,7 +19,7 @@ import pytest
 import test_browseKeys as browseKeys
 import webSession
 from desktopSession import PREFIX_MARK, DesktopSession
-from keydStandIn import StandIn
+from keydStandIn import StandIn, code
 from test_keys import ENTRY_TEXT, LAYOUTS, STARTUP_TIMEOUT, configText, entryState, transcript, waitForEntry
 
 #: Seconds within which the helper must have a verdict, which it passes a press on after.
@@ -106,12 +106,15 @@ def presses(vk=None):
 	return [e for e in delivered if not e["up"] and not e["repeat"] and (vk is None or e["vk"] == vk)]
 
 
-def startSource(routeName="auto", consumed=x11.EXTENDED_INSERT | x11.CAPS_LOCK):
+def startSource(routeName="auto", consumed=x11.EXTENDED_INSERT | x11.CAPS_LOCK, waitForKernel=True):
 	source = route.RoutedKeySource(routeName, path, said.append)
 	source.start(deliver, lambda: mode["now"])
 	source.setConsumed(consumed, True)
-	if keyboard is not None and source.isKernel:
-		keyboard.waitFor(lambda: keyboard.capturing)
+	if routeName != "x11" and waitForKernel:
+		# Keys come from X until the helper holds the keyboard.
+		deadline = time.monotonic() + 10
+		while not source.isKernel and time.monotonic() < deadline:
+			time.sleep(0.02)
 	time.sleep(0.3)
 	return source
 
@@ -382,13 +385,58 @@ def test_heartbeatComesFromTheThreadThatAnswersKeys(tmp_path: Path):
 	assert not value["kernelAfter"]
 
 
+#: The helper's virtual keyboard settling for a second before it holds the keyboard: the X source's
+#: keys meanwhile, then letters typed fast across the moment the helper holds it, each of which must
+#: reach NVDA once and the window once.
+OVERLAP_CHILD = r"""
+source = startSource(waitForKernel=False)
+time.sleep(0.2)
+mark = len(delivered)
+keyboard.press("Insert+t")
+time.sleep(0.3)
+before = {"kernel": source.isKernel, "events": [[e["vk"], e["nvda"]] for e in delivered[mark:] if not e["up"]]}
+windowKeys()
+delivered.clear()
+typed = "abcdefghijklmnopqrstuvwxyz"
+switched = None
+for letter in typed:
+	keyboard.press(letter, hold=0.01, gap=0.005)
+	if switched is None and source.isKernel:
+		switched = letter
+	time.sleep(0.02)
+time.sleep(0.5)
+letters = [chr(e["vk"]).lower() for e in delivered if not e["up"] and not e["repeat"]]
+got = windowKeys()
+result = {
+	"before": before,
+	"letters": "".join(letters),
+	"window": [evdev for evdev, down in got if down],
+	"switched": switched,
+	"kernel": source.isKernel,
+}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_keysComeFromXUntilTheHelperHoldsTheKeyboardAndOnceAfter(tmp_path: Path):
+	value = runKernelChild(tmp_path, OVERLAP_CHILD, standIn={"settle": 1.0})
+	# Read from X while the helper's keyboard settles: NVDA+t is NVDA's.
+	assert value["before"] == {"kernel": False, "events": [[0x2D, True], [ord("T"), True]]}
+	assert value["kernel"]
+	assert value["switched"] is not None, "the helper did not hold the keyboard while the letters were typed"
+	# Each letter once to NVDA and once to the window, whichever way it came.
+	assert value["letters"] == "abcdefghijklmnopqrstuvwxyz"
+	assert value["window"] == [code(letter) for letter in "abcdefghijklmnopqrstuvwxyz"]
+
+
 BUSY_CHILD = r"""
 import socket, struct
 other = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 other.connect(path)
 other.send(struct.pack("<BHI", 1, 1, 0))
 other.recv(256)
-source = startSource()
+source = startSource(waitForKernel=False)
 first = source.isKernel
 keyboard.press("t")
 time.sleep(0.3)
@@ -729,40 +777,126 @@ def test_layoutAndGroupFollowTheXServer(tmp_path: Path):
 	assert value["second"] == ["ł"]
 
 
+#: The X display's repeat set as a desktop sets it, with XKB's SetControls.
+REPEAT_CONTROLS = r"""
+from Xlib.protocol import rq
+from linuxPlatform.keys import kernel as kernelSource
+
+
+class XkbSetControls(rq.Request):
+	_request = rq.Struct(
+		rq.Card8("opcode"),
+		rq.Opcode(7),
+		rq.RequestLength(),
+		rq.Card16("deviceSpec"),
+		rq.Pad(12),
+		rq.Card8("mkDfltBtn"),
+		rq.Card8("groupsWrap"),
+		rq.Card16("axOptions"),
+		rq.Pad(2),
+		rq.Card32("affectEnabledCtrls"),
+		rq.Card32("enabledCtrls"),
+		rq.Card32("changeCtrls"),
+		rq.Card16("repeatDelay"),
+		rq.Card16("repeatInterval"),
+		rq.Pad(28),
+		rq.FixedBinary("perKeyRepeat", 32),
+	)
+
+
+xkb = app.query_extension("XKEYBOARD").major_opcode
+x11._XkbUseExtension(display=app.display, opcode=xkb, wantedMajor=1, wantedMinor=0)
+original = kernelSource._XkbGetControls(display=app.display, opcode=xkb, deviceSpec=x11.XKB_CORE_KEYBOARD)
+
+
+def setRepeat(delay=None, interval=None, enabled=True, perKey=None):
+	now = kernelSource._XkbGetControls(display=app.display, opcode=xkb, deviceSpec=x11.XKB_CORE_KEYBOARD)
+	XkbSetControls(
+		display=app.display,
+		opcode=xkb,
+		deviceSpec=x11.XKB_CORE_KEYBOARD,
+		mkDfltBtn=0,
+		groupsWrap=0,
+		axOptions=0,
+		affectEnabledCtrls=1,
+		enabledCtrls=int(enabled),
+		# RepeatKeys for the delay and interval, PerKeyRepeat for which keys.
+		changeCtrls=1 | 1 << 30,
+		repeatDelay=int((delay or now.repeatDelay / 1000) * 1000),
+		repeatInterval=int((interval or now.repeatInterval / 1000) * 1000),
+		perKeyRepeat=bytes(perKey if perKey is not None else now.perKeyRepeat),
+	)
+	app.sync()
+	time.sleep(0.3)
+
+
+def hold(name, seconds):
+	keyboard.down(name)
+	deadline = time.monotonic() + seconds
+	while time.monotonic() < deadline:
+		# The kernel's own repeats, at its own rate, which NVDA must not follow.
+		keyboard.repeat(name)
+		time.sleep(0.03)
+	keyboard.up(name)
+	time.sleep(0.2)
+
+
+def repeats(vk):
+	found = [e for e in delivered if e["vk"] == vk and e["repeat"]]
+	delivered.clear()
+	return found
+"""
+
 REPEAT_CHILD = r"""
 source = startSource()
-keyboard.down("Insert")
-for _ in range(3):
-	keyboard.repeat("Insert")
-	time.sleep(0.03)
-keyboard.up("Insert")
-keyboard.down("a")
-for _ in range(2):
-	keyboard.repeat("a")
-	time.sleep(0.03)
-keyboard.up("a")
-time.sleep(0.3)
-result = {
-	"events": [[e["vk"], e["up"], e["repeat"], e["reached"], e["nvda"]] for e in delivered],
-	"window": windowKeys(),
-}
+result = {}
+try:
+	setRepeat(0.3, 0.05)
+	delivered.clear()
+	hold("Insert", 0.6)
+	insert = repeats(0x2D)
+	result["insert"] = {"count": len(insert), "reached": sorted({e["reached"] for e in insert})}
+	hold("a", 0.6)
+	a = repeats(ord("A"))
+	result["a"] = {"count": len(a), "reached": sorted({e["reached"] for e in a})}
+	result["aPutOut"] = [down for evdev, down in keyboard.emitted() if evdev == 30]
+	# The desktop changes the rate: followed.
+	setRepeat(0.2, 0.1)
+	hold("Insert", 0.6)
+	result["slower"] = len(repeats(0x2D))
+	# A modifier does not repeat, and neither does a key the desktop has stop repeating.
+	hold("Shift_L", 0.6)
+	result["shift"] = len(repeats(0xA0))
+	perKey = bytearray(original.perKeyRepeat)
+	perKey[118 >> 3] &= ~(1 << (118 & 7))
+	setRepeat(perKey=perKey)
+	hold("Insert", 0.6)
+	result["insertOff"] = len(repeats(0x2D))
+	setRepeat(perKey=original.perKeyRepeat, enabled=False)
+	hold("Insert", 0.6)
+	result["allOff"] = len(repeats(0x2D))
+finally:
+	setRepeat(original.repeatDelay / 1000, original.repeatInterval / 1000, True, original.perKeyRepeat)
 source.stop()
 keyboard.close()
 """
 
 
-def test_repeatsComeToNVDAAlone(tmp_path: Path):
-	value = runKernelChild(tmp_path, REPEAT_CHILD)
-	assert value["events"] == [
-		[0x2D, False, False, False, True],
-		*[[0x2D, False, True, False, True]] * 3,
-		[0x2D, True, False, False, False],
-		[ord("A"), False, False, True, False],
-		*[[ord("A"), False, True, True, False]] * 2,
-		[ord("A"), True, False, True, False],
-	]
-	# The X display repeats a key by itself; the helper puts out only the press and the release.
-	assert value["window"] == [[30, True], [30, False]]
+def test_keptKeysRepeatAsTheXDisplayRepeats(tmp_path: Path):
+	value = runKernelChild(tmp_path, REPEAT_CONTROLS + REPEAT_CHILD)
+	# Held 0.6 s, after a delay of 0.3 s at one each 0.05 s: some six, none of the kernel's thirty.
+	assert 4 <= value["insert"]["count"] <= 8, value
+	assert value["insert"]["reached"] == [False]
+	# A key passed on repeats to NVDA too, which hears what the application has repeated by the X display;
+	# the helper put out one press of it alone.
+	assert 4 <= value["a"]["count"] <= 8, value
+	assert value["a"]["reached"] == [True]
+	assert value["aPutOut"] == [True, False]
+	# After 0.2 s, one each 0.1 s.
+	assert 2 <= value["slower"] <= 5, value
+	assert value["shift"] == 0
+	assert value["insertOff"] == 0
+	assert value["allOff"] == 0
 
 
 BROWSE_CHILD = r"""
@@ -925,22 +1059,12 @@ back = {
 	"all": [[e["vk"], e["up"], e["repeat"], e["t"]] for e in delivered],
 }
 source.stop()
-keyboard.refusal = (3, "not allowed")
-said.clear()
-forced = startSource("kernel")
-time.sleep(0.5)
-delivered.clear()
-windowKeys()
-keyboard.press("t")
-time.sleep(0.3)
-strict = {"kernel": forced.isKernel, "said": said, "delivered": len(delivered), "window": windowKeys()}
-forced.stop()
-result = {"x11Only": x11Only, "auto": auto, "back": back, "strict": strict}
+result = {"x11Only": x11Only, "auto": auto, "back": back}
 keyboard.close()
 """
 
 
-def test_routeSettingForcesEither(tmp_path: Path):
+def test_routeSettingForcesTheXDisplay(tmp_path: Path):
 	value = runKernelChild(tmp_path, ROUTE_CHILD)
 	assert value["x11Only"] == {"kernel": False, "admitted": False}
 	assert value["auto"]
@@ -949,13 +1073,6 @@ def test_routeSettingForcesEither(tmp_path: Path):
 		"gone": True,
 		"insert": [False, True],
 	}, value["back"]
-	# Set to the kernel alone, and turned away: no keys read at all, which NVDA says.
-	assert value["strict"] == {
-		"kernel": False,
-		"said": ["NVDA is set to take keys from the kernel alone, and cannot; it reads no keys"],
-		"delivered": 0,
-		"window": [[20, True], [20, False]],
-	}
 
 
 EXPIRY_CHILD = r"""
@@ -1103,7 +1220,7 @@ def test_kernelNvdaChordReachesNVDAAlone(
 	log = launch.text("nvda.log")
 	assert f"Input: kb({keys.layout}):NVDA+t" in log
 	assert f"Input: kb({keys.layout}):(typing key)" in log
-	assert "Keys are read from the X display" not in log
+	assert "linda-keyd was given up" not in log
 
 
 @pytest.mark.parametrize("layoutName", LAYOUTS)
@@ -1433,10 +1550,11 @@ def test_kernelBrowseAndFocusModeKeys(desktop: DesktopSession, keyboard: StandIn
 	assert page.field() == "ab"
 
 	step("control+Home", "heading level 1 Keys page")
-	# Down held: the kernel's repeats come to NVDA alone, each a line.
+	# Down held: repeated at the X display's rate, to NVDA alone, each a line; the kernel's own
+	# repeats, which the stand-in sends as well, are not.
 	mark = desktop.mark()
 	keyboard.down("Down")
-	for _ in range(4):
+	for _ in range(8):
 		time.sleep(0.15)
 		keyboard.repeat("Down")
 	keyboard.up("Down")
@@ -1450,8 +1568,13 @@ def test_kernelBrowseAndFocusModeKeys(desktop: DesktopSession, keyboard: StandIn
 	step("Insert+shift+space", "Single letter navigation on")
 	assert page.log() == ["a", "b", "h"]
 
-	step("control+l", browseKeys.ADDRESS_BAR + PREFIX_MARK)
+	# Firefox names its address bar after its search engine once it has loaded them, which may be
+	# before this or after.
+	mark = desktop.mark()
+	keyboard.press("control+l")
 	browseKeys.waitForCapture(nvda, "off")
+	time.sleep(browseKeys.SETTLE)
+	assert any("combo box" in text for text in desktop.spokenSince(mark)), desktop.spokenSince(mark)
 	assert page.log() == ["a", "b", "h", "Control+l"]
 	step("Insert+q", "Exit Linda" + PREFIX_MARK)
 	keyboard.press("Return")

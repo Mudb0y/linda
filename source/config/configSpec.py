@@ -578,6 +578,6 @@ if sys.platform != "win32":
 	# NVDA's add-on store holds add-ons written for Windows, so Linux asks it for nothing until the
 	# user turns it on; see linuxPlatform.nvdaAddonStore.
 	confspec["addonStore"]["enabled"] = "boolean(default=false)"
-	# Where keys come from: linda-keyd when it admits NVDA and the X display otherwise, or either
-	# alone; see linuxPlatform.keys.route.
-	confspec["keyboard"]["keyRoute"] = 'option("auto", "kernel", "x11", default="auto")'
+	# Where keys come from: linda-keyd when it admits NVDA and the X display otherwise, or the X
+	# display alone; see linuxPlatform.keys.route.
+	confspec["keyboard"]["keyRoute"] = 'option("auto", "x11", default="auto")'

@@ -182,8 +182,10 @@ class StandIn:
 		heartbeatInterval: float = 0.5,
 		heartbeatTimeout: float = 2.0,
 		unansweredSpan: float = 1.0,
+		unansweredGap: float = 1.0,
 		toX: bool = True,
 		announcedVerdictTimeout: float | None = None,
+		settle: float = 0.0,
 	) -> None:
 		"""
 		:param toX: Whether keys go on to the X display; without, they go nowhere, and only what the
@@ -192,11 +194,15 @@ class StandIn:
 			kept, as for a client that cannot keep it.
 		"""
 		self.announcedVerdictTimeout = announcedVerdictTimeout
+		#: Seconds from the first START to the first grab, as the helper's virtual keyboard settles.
+		self.settle = settle
+		self._captureAt = 0.0
 		self.path = str(path)
 		self.verdictTimeout = verdictTimeout
 		self.heartbeatInterval = heartbeatInterval
 		self.heartbeatTimeout = heartbeatTimeout
 		self.unansweredSpan = unansweredSpan
+		self.unansweredGap = unansweredGap
 		self._x = _XKeyboard() if toX else None
 		self._lock = threading.RLock()
 		self._wakeRead, self._wakeWrite = os.pipe()
@@ -213,7 +219,8 @@ class StandIn:
 		self._kept: set[int] = set()
 		self._virtualDown: set[int] = set()
 		self._lastHeard = 0.0
-		self._unansweredSince: float | None = None
+		#: (reading of the first press, reading of the last) of the run of unanswered presses.
+		self._run: tuple[float, float] | None = None
 		self._lights: int | None = None
 		self.capturing = False
 		#: Asked to capture while keys were down: the helper grabs once every key is up.
@@ -309,8 +316,7 @@ class StandIn:
 			self._down.discard(evdev)
 			if not self.capturing:
 				self._toX(evdev, False)
-				if self._startWaiting and not self._down:
-					self._capture()
+				self._tryCapture(time.monotonic())
 				return
 			self._enter(evdev, RELEASE, 0)
 		self._wake()
@@ -421,13 +427,20 @@ class StandIn:
 				head.verdict = False
 				self._note("expired", head.seq)
 				self._sendClient(struct.pack("<BQ", EXPIRED, head.seq))
-				if self._unansweredSince is None:
-					self._unansweredSince = head.arrival
-				elif now - self._unansweredSince >= self.unansweredSpan:
+				# A run of unanswered presses goes on only while each is read within UNANSWERED_GAP of the
+				# one before it, in reading order.
+				if self._run is None or head.arrival - self._run[1] > self.unansweredGap:
+					self._run = (head.arrival, head.arrival)
+				else:
+					self._run = (self._run[0], head.arrival)
+				if head.arrival + self.verdictTimeout - self._run[0] >= self.unansweredSpan:
 					self._line.popleft()
 					self._virtual(head.code, True)
 					self._dropClient(sendGoodbye=(GOODBYE_UNANSWERED, "presses went unanswered"))
 					return
+			elif head.press:
+				# Answered in time, which ends any run.
+				self._run = None
 			self._line.popleft()
 			if head.press:
 				if head.verdict:
@@ -461,7 +474,7 @@ class StandIn:
 		for evdev in sorted(self._virtualDown):
 			self._virtual(evdev, False)
 		self._kept.clear()
-		self._unansweredSince = None
+		self._run = None
 		self._startWaiting = False
 		if self.capturing:
 			self.capturing = False
@@ -486,6 +499,7 @@ class StandIn:
 		while not self._stopping:
 			with self._lock:
 				now = time.monotonic()
+				self._tryCapture(now)
 				self._advance(now)
 				if self._client is not None and now - self._lastHeard > self.heartbeatTimeout:
 					self._dropClient(sendGoodbye=(GOODBYE_SILENT, "no heartbeat"))
@@ -570,6 +584,11 @@ class StandIn:
 		self._note("admitted")
 		self.admitted.set()
 
+	def _tryCapture(self, now: float) -> None:
+		# A key down as the grab is taken would stay down in the desktop for ever.
+		if self._startWaiting and not self._down and now >= self._captureAt:
+			self._capture()
+
 	def _capture(self) -> None:
 		self._startWaiting = False
 		self.capturing = True
@@ -598,11 +617,11 @@ class StandIn:
 			self.starts += 1
 			self._note("start")
 			if not self.capturing:
-				if self._down:
-					# A key down as the grab is taken would stay down in the desktop for ever.
-					self._startWaiting = True
-				else:
-					self._capture()
+				self._startWaiting = True
+				# The virtual keyboard settles for the desktop to take it up, once in the helper's life.
+				self._captureAt = now + self.settle
+				self.settle = 0.0
+				self._tryCapture(now)
 		elif kind == STOP and len(data) == 1:
 			self._note("stop")
 			self._letGo(RELEASED_STOPPED, dropUndecided=False)
@@ -620,7 +639,6 @@ class StandIn:
 					entry.verdict = bool(keep)
 					self.verdicts.append((seq, bool(keep), now - entry.arrival))
 					self._note("verdict", seq, bool(keep))
-					self._unansweredSince = None
 					break
 			else:
 				self._note("late verdict", seq, bool(keep))

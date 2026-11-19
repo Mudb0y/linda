@@ -5,7 +5,7 @@ import config
 import wx
 
 #: The configuration's routes, in the order the choice lists them.
-ROUTES = ("auto", "kernel", "x11")
+ROUTES = ("auto", "x11")
 
 
 def _labels() -> list[str]:
@@ -14,10 +14,6 @@ def _labels() -> list[str]:
 		# linda-keyd, the program that takes the keyboard in the kernel, when it runs and lets NVDA, and
 		# the X display otherwise.
 		_("linda-keyd when it lets NVDA, otherwise the X display"),
-		# Translators: A choice on Linux in the Advanced settings panel, of where NVDA takes keys from:
-		# linda-keyd alone, the program that takes the keyboard in the kernel; NVDA reads no keys while it
-		# does not run or does not let NVDA.
-		_("linda-keyd alone"),
 		# Translators: A choice on Linux in the Advanced settings panel, of where NVDA takes keys from:
 		# the X display alone, never linda-keyd.
 		_("the X display alone"),

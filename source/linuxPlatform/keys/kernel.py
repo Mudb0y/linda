@@ -92,6 +92,10 @@ NUMPAD_INSERT_MODS = sum(x11.NUMPAD_INSERT_GRAB_MODS)
 LOCK_MODS = X.LockMask | x11.NUM_LOCK_MASK
 #: XKB's StateNotify, the one XKB event this source asks for.
 XKB_STATE_NOTIFY = 2
+#: XKB's ControlsNotify, which says the repeat changed among other things.
+XKB_CONTROLS_NOTIFY = 3
+#: XkbRepeatKeysMask: whether keys repeat at all.
+XKB_REPEAT_KEYS = 1
 #: How many windows' processes are remembered, for asking whose window has the focus.
 WINDOW_PIDS_KEPT = 256
 
@@ -139,6 +143,46 @@ class _XkbGetState(rq.ReplyRequest):
 		rq.Int16("latchedGroup"),
 		rq.Pad(14),
 	)
+
+
+class _XkbGetControls(rq.ReplyRequest):
+	"""XKB's controls, of which this source wants the repeat: whether keys repeat, after how long, how
+	often, and which keys."""
+
+	_request = rq.Struct(
+		rq.Card8("opcode"),
+		rq.Opcode(6),
+		rq.RequestLength(),
+		rq.Card16("deviceSpec"),
+		rq.Pad(2),
+	)
+	_reply = rq.Struct(
+		rq.ReplyCode(),
+		rq.Card8("deviceID"),
+		rq.Card16("sequence_number"),
+		rq.ReplyLength(),
+		rq.Pad(12),
+		rq.Card16("repeatDelay"),
+		rq.Card16("repeatInterval"),
+		rq.Pad(32),
+		rq.Card32("enabledCtrls"),
+		rq.FixedBinary("perKeyRepeat", 32),
+	)
+
+
+@dataclass(frozen=True)
+class _Repeat:
+	"""How the X server repeats a key held down, which a key NVDA keeps must do as well."""
+
+	enabled: bool = True
+	#: Seconds before the first repeat, and between repeats.
+	delay: float = 0.66
+	interval: float = 0.04
+	#: A bit for each key code, set for each key that repeats.
+	perKey: bytes = b"\xff" * 32
+
+	def repeats(self, keycode: int) -> bool:
+		return self.enabled and bool(self.perKey[keycode >> 3] & 1 << (keycode & 7))
 
 
 #: StateNotify after its first four bytes, which python-xlib gives as the data of an event it does not
@@ -251,16 +295,20 @@ class KernelKeySource:
 		self,
 		connection: socket.socket,
 		welcome: keydClient.Welcome,
-		onLost: Callable[[str, bool], None],
+		onLost: Callable[[str, bool], None] | None = None,
+		onHeld: Callable[[], None] | None = None,
 	) -> None:
 		"""
 		:param onLost: Called once, on the source's own thread, when the helper lets go of the keyboard
 			for good or the connection ends, with why and whether it was the emergency chord. Every key
 			NVDA was told is down has been released to it first.
+		:param onHeld: Called on the source's own thread when the helper first says it holds a keyboard,
+			before any key of that keyboard is read.
 		"""
 		self._sock = connection
 		self._welcome = welcome
 		self._onLost = onLost
+		self._onHeld = onHeld
 		self._answerWithin = {kind: welcome.verdictTimeout * share for kind, share in ANSWER_SHARES.items()}
 		self._wakeRead, self._wakeWrite = os.pipe()
 		self._commands: deque[Callable[[], None]] = deque()
@@ -319,6 +367,12 @@ class KernelKeySource:
 		self._nextBeat = 0.0
 		self._lastEcho = 0.0
 		self._holding = False
+		#: The X server's repeat, replaced whole as it changes.
+		self._repeatSettings = _Repeat()
+		#: The press of the key that repeats now, and when it repeats next: the last key pressed that
+		#: repeats at all, as the X server has it, until it is released.
+		self._repeating: _Press | None = None
+		self._nextRepeat: float | None = None
 		#: The interpreter's switch interval before this source changed it, while it has.
 		self._switchBefore: float | None = None
 
@@ -381,6 +435,12 @@ class KernelKeySource:
 		os.close(self._wakeWrite)
 		if self._switchBefore is not None and sys.getswitchinterval() == SWITCH_INTERVAL:
 			sys.setswitchinterval(self._switchBefore)
+
+	def setCallbacks(
+		self, onLost: Callable[[str, bool], None] | None, onHeld: Callable[[], None] | None
+	) -> None:
+		"""As the constructor's, for a caller that needs the source to make them."""
+		self._onLost, self._onHeld = onLost, onHeld
 
 	@property
 	def isHolding(self) -> bool:
@@ -488,14 +548,14 @@ class KernelKeySource:
 			).supported:
 				raise RuntimeError("the X server's XKB is not one NVDA knows")
 			self._xkbOpcode, self._xkbEvent = opcode, info.first_event
-			stateNotify = 1 << XKB_STATE_NOTIFY
+			wanted = 1 << XKB_STATE_NOTIFY | 1 << XKB_CONTROLS_NOTIFY
 			_XkbSelectEvents(
 				display=d.display,
 				opcode=opcode,
 				deviceSpec=x11.XKB_CORE_KEYBOARD,
-				affectWhich=stateNotify,
+				affectWhich=wanted,
 				clear=0,
-				selectAll=stateNotify,
+				selectAll=wanted,
 				affectMap=0,
 				map=0,
 			)
@@ -513,6 +573,7 @@ class KernelKeySource:
 				| (LOCK_SCROLL if leds & 4 else 0)
 			)
 			self._loadKeymap((state.baseGroup, state.latchedGroup, state.lockedGroup))
+			self._readRepeat()
 			d.sync()
 			self._requests = display.Display()
 		except Exception:
@@ -584,11 +645,24 @@ class KernelKeySource:
 			tables = self._tables
 			if tables is not None and group != tables.group:
 				self._useTables(_tables(tables.keymap, tables.names, group))
+		elif event.type == self._xkbEvent and getattr(event, "detail", None) == XKB_CONTROLS_NOTIFY:
+			self._readRepeat()
 		elif event.type == X.MappingNotify:
 			self._events.refresh_keyboard_mapping(event)
 			self._loadKeymap()
 		elif event.type == X.PropertyNotify and event.atom == self._rulesAtom:
 			self._loadKeymap()
+
+	def _readRepeat(self) -> None:
+		controls = _XkbGetControls(
+			display=self._events.display, opcode=self._xkbOpcode, deviceSpec=x11.XKB_CORE_KEYBOARD
+		)
+		self._repeatSettings = _Repeat(
+			enabled=bool(controls.enabledCtrls & XKB_REPEAT_KEYS),
+			delay=max(controls.repeatDelay, 1) / 1000,
+			interval=max(controls.repeatInterval, 1) / 1000,
+			perKey=bytes(controls.perKeyRepeat),
+		)
 
 	def _focusTakesCapture(self) -> bool:
 		"""Whether the window with the keyboard focus is one a document's keys are captured in: of the
@@ -702,7 +776,7 @@ class KernelKeySource:
 				except Exception:
 					log.exception("Acting on a request to the kernel key source")
 			now = time.monotonic()
-			deadlines = [self._answer(now), self._beat(now)]
+			deadlines = [self._answer(now), self._beat(now), self._repeatNow(now)]
 			if self._lost:
 				return
 			due = min((t for t in deadlines if t is not None), default=None)
@@ -755,6 +829,11 @@ class KernelKeySource:
 				if message.status == keydClient.DEVICE_HELD and not self._holding:
 					self._holding = True
 					log.info("Keys are taken from the kernel through linda-keyd")
+					if self._onHeld is not None:
+						try:
+							self._onHeld()
+						except Exception:
+							log.exception("Reporting that linda-keyd holds the keyboard")
 			case keydClient.Released(reason=reason):
 				self._onReleased(reason)
 			case keydClient.Goodbye():
@@ -792,7 +871,8 @@ class KernelKeySource:
 		if self._stopping:
 			return
 		try:
-			self._onLost(why, emergency)
+			if self._onLost is not None:
+				self._onLost(why, emergency)
 		except Exception:
 			log.exception("Reporting that linda-keyd was lost")
 
@@ -912,8 +992,8 @@ class KernelKeySource:
 			self._press(keycode, now, key.seq, typed=False, decided=not key.flags & keydClient.KEY_ASK)
 		elif key.value == KEY_RELEASE:
 			self._release(keycode, now, typed=False)
-		elif key.value == KEY_REPEAT:
-			self._repeat(keycode, now)
+		# The kernel's own repeats are ignored: they follow the kernel's rate, a quarter of a second to
+		# the first, where the X server, which repeats a key passed on, follows the desktop's setting.
 
 	def _press(self, keycode: int, now: float, seq: int, typed: bool, decided: bool = False) -> None:
 		tables = self._tables
@@ -945,6 +1025,9 @@ class KernelKeySource:
 		presses[keycode] = press
 		if not typed:
 			self._bySeq[seq] = press
+			if self._repeatSettings.repeats(keycode):
+				self._repeating = press
+				self._nextRepeat = now + self._repeatSettings.delay
 		if decided:
 			press.decide(True)
 			press.settled = True
@@ -992,6 +1075,26 @@ class KernelKeySource:
 			_Item(keycode, KEY_RELEASE, press, tables, depressed, locked, now, typed=typed, altGr=levelShift)
 		)
 
+	def _repeatNow(self, now: float) -> float | None:
+		"""Repeat the key held down that repeats, when it is due, as the X server repeats it: to NVDA alone,
+		whether the key reached the application, where the X server repeats it, or not.
+
+		:return: When it repeats next, or None while no key repeats.
+		"""
+		press = self._repeating
+		if press is None:
+			return None
+		if self._presses.get(press.keycode) is not press:
+			self._repeating = self._nextRepeat = None
+			return None
+		if now >= self._nextRepeat:
+			self._repeat(press.keycode, now)
+			interval = self._repeatSettings.interval
+			# Behind by more than a repeat, as after a pause of the interpreter: the X server does not
+			# make up the repeats it missed either.
+			self._nextRepeat = max(self._nextRepeat + interval, now + interval / 2)
+		return self._nextRepeat
+
 	def _repeat(self, keycode: int, now: float) -> None:
 		tables = self._tables
 		if keycode in tables.levelShift and not self._held:
@@ -1022,6 +1125,7 @@ class KernelKeySource:
 		self._down.clear()
 		self._bySeq.clear()
 		self._nvdaHeld.clear()
+		self._repeating = self._nextRepeat = None
 
 	def _typeKey(self, keycode: int, vkCode: int, extended: bool, isUp: bool) -> None:
 		"""Press or release a key as a keyboard would, so that NVDA has it as it has any key, and the
