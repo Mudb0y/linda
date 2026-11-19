@@ -10,6 +10,8 @@ from typing import (  # noqa: I001
 	Union,
 )
 from collections.abc import Callable
+import sys
+import threading
 import weakref
 import garbageHandler
 from logHandler import log
@@ -118,6 +120,14 @@ class AutoPropertyType(ABCMeta):
 			self.__abstractmethods__ = (self.__abstractmethods__ | newAbstractProps) - oldAbstractProps
 
 
+if sys.platform != "win32":
+	#: Held while an AutoPropertyObject is added to its instances and while they are listed: the key
+	#: sources' threads make a gesture for every key while the main thread lists them each core pump,
+	#: and list() of the weak dictionary goes through it in Python, which an instance added meanwhile
+	#: breaks off with RuntimeError. Reentrant, as listing may collect garbage that makes one.
+	_instancesLock = threading.RLock()
+
+
 class AutoPropertyObject(garbageHandler.TrackedObject, metaclass=AutoPropertyType):
 	"""A class that dynamically supports properties, by looking up _get_*, _set_*, and _del_* methods at runtime.
 	_get_x will make property x with a getter (you can get its value).
@@ -150,6 +160,10 @@ class AutoPropertyObject(garbageHandler.TrackedObject, metaclass=AutoPropertyTyp
 		#: Maps properties to cached values.
 		#: @type: dict
 		self._propertyCache = {}
+		if sys.platform != "win32":
+			with _instancesLock:
+				self.__instances[self] = None
+			return self
 		self.__instances[self] = None
 		return self
 
@@ -172,6 +186,12 @@ class AutoPropertyObject(garbageHandler.TrackedObject, metaclass=AutoPropertyTyp
 	@classmethod
 	def invalidateCaches(cls):
 		"""Invalidate the caches for all current instances."""
+		if sys.platform != "win32":
+			with _instancesLock:
+				instances = list(cls.__instances)
+			for instance in instances:
+				instance.invalidateCache()
+			return
 		# We use a list here, as invalidating the cache on an object may cause instances to disappear,
 		# which would in turn cause an exception due to the dictionary changing size during iteration.
 		for instance in list(cls.__instances):

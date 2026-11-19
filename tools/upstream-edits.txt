@@ -350,6 +350,11 @@ source/audioDucking.py
   Linux, which would need a ducking policy in the sound server's session
   manager. It answers before the Windows checks, which on Linux would ask
   isInstalledCopy and hasUiAccess, neither of which knows the sound server
+source/baseObject.py
+  Linux runtime: an AutoPropertyObject is added to its instances, and
+  invalidateCaches lists them, under a lock: list() of the weak dictionary,
+  a loop in Python, was broken off with RuntimeError by a gesture made
+  meanwhile on a key source's thread, which failed the core's pump
 source/braille/brailleHandler.py
   Linux runtime: the display acknowledgement timer is a
   linuxPlatform.ioThread.WaitableTimer, since Linux has no waitable timer
