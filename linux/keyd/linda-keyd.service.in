@@ -7,6 +7,14 @@ Description=Linda's key capture helper
 # It follows logind and asks polkit on the system bus; it waits for the bus by itself when the bus is
 # not there yet, holding nothing meanwhile.
 After=dbus.service
+# A helper that keeps being ended stays stopped, and Linda keeps taking keys through X: a fault that
+# came back at every capture would otherwise leave the keyboard dead for a second every few seconds
+# for as long as it lasted. A capture and an end take four seconds at the least, the virtual
+# keyboard's second and the watchdog's among them, so five starts in two minutes trip within half
+# a minute of such a fault, while a crash now and then, or a restart by hand, comes nowhere near.
+# systemctl reset-failed linda-keyd lets it be started again.
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=notify
