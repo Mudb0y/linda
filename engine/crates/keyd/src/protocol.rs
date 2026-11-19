@@ -189,6 +189,13 @@ pub const LOOP_TICK: Duration = Duration::from_millis(200);
 pub const STALL_LIMIT: Duration = Duration::from_secs(1);
 /// How often the watchdog thread looks at the loop.
 pub const WATCHDOG_CHECK: Duration = Duration::from_millis(100);
+/// A sleep of WATCHDOG_CHECK that the watchdog thread finds took longer than this means the whole
+/// process was stopped, not the loop alone: frozen while the machine suspended and resumed, which
+/// the monotonic clock counts, or starved of the processor. Every thread wakes together then, so
+/// the loop is given STALL_LIMIT afresh from that moment rather than judged by a turn it could not
+/// have made. Half of STALL_LIMIT, five times the sleep, is beyond any ordinary lateness of a
+/// sleeping thread.
+pub const WATCHDOG_FROZEN: Duration = Duration::from_millis(500);
 
 /// The most connections at once that have not been admitted yet. Any more are closed at once.
 pub const MAX_CALLERS: usize = 4;

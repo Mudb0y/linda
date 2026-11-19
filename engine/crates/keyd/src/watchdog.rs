@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::device::Guard;
-use crate::protocol::{STALL_LIMIT, VERDICT_TIMEOUT, WATCHDOG_CHECK};
+use crate::protocol::{STALL_LIMIT, VERDICT_TIMEOUT, WATCHDOG_CHECK, WATCHDOG_FROZEN};
 
 const NONE: u64 = u64::MAX;
 
@@ -46,18 +46,42 @@ impl Progress {
 
     /// What is wrong at `now`, if anything.
     pub fn stalled(&self, now: Instant) -> Option<Stall> {
+        self.stalled_after(now, None)
+    }
+
+    /// What is wrong at `now`, counting nothing from before `fresh`.
+    fn stalled_after(&self, now: Instant, fresh: Option<Instant>) -> Option<Stall> {
+        let floor = fresh.map_or(0, |t| self.ms(t));
         let now = self.ms(now);
-        let turned = self.turned.load(Relaxed);
+        let turned = self.turned.load(Relaxed).max(floor);
         let limit = STALL_LIMIT.as_millis() as u64;
         if now.saturating_sub(turned) > limit {
             return Some(Stall::Loop(now.saturating_sub(turned)));
         }
         let oldest = self.oldest.load(Relaxed);
         let bound = limit + VERDICT_TIMEOUT.as_millis() as u64;
-        if oldest != NONE && now.saturating_sub(oldest) > bound {
-            return Some(Stall::Key(now.saturating_sub(oldest)));
+        if oldest != NONE && now.saturating_sub(oldest.max(floor)) > bound {
+            return Some(Stall::Key(now.saturating_sub(oldest.max(floor))));
         }
         None
+    }
+}
+
+/// The watchdog thread's judgement, one round after each of its sleeps.
+struct Rounds {
+    last: Instant,
+    /// When the thread last woke from a sleep far longer than it asked for, as WATCHDOG_FROZEN
+    /// says: the loop is judged from then on, not before.
+    fresh: Option<Instant>,
+}
+
+impl Rounds {
+    fn judge(&mut self, progress: &Progress, now: Instant) -> Option<Stall> {
+        if now.saturating_duration_since(self.last) > WATCHDOG_FROZEN {
+            self.fresh = Some(now);
+        }
+        self.last = now;
+        progress.stalled_after(now, self.fresh)
     }
 }
 
@@ -88,12 +112,17 @@ pub fn spawn(
     thread::Builder::new()
         .name("watchdog".into())
         .spawn(move || {
+            let mut rounds = Rounds {
+                last: Instant::now(),
+                fresh: None,
+            };
             loop {
                 thread::sleep(WATCHDOG_CHECK);
+                let stall = rounds.judge(&progress, Instant::now());
                 if !guard.holding() {
                     continue;
                 }
-                if let Some(why) = progress.stalled(Instant::now()) {
+                if let Some(why) = stall {
                     guard.release_all();
                     log!("watchdog: {why}; let go of every keyboard, and ending");
                     end();
@@ -220,6 +249,47 @@ mod tests {
         p.turned(t + STALL_LIMIT, Some(t));
         let why = p.stalled(t + STALL_LIMIT + VERDICT_TIMEOUT + Duration::from_millis(2));
         assert!(matches!(why, Some(Stall::Key(_))));
+    }
+
+    #[test]
+    fn a_process_frozen_whole_gives_the_loop_a_fresh_start_and_no_more() {
+        /// When the watchdog thread, waking every WATCHDOG_CHECK from `from`, finds a stall.
+        fn caught(p: &Progress, r: &mut Rounds, from: Instant) -> Instant {
+            let mut at = from;
+            loop {
+                at += WATCHDOG_CHECK;
+                if r.judge(p, at).is_some() {
+                    return at;
+                }
+            }
+        }
+        let t = Instant::now();
+        // A loop stalled while the watchdog thread wakes on time is caught within STALL_LIMIT.
+        let p = Progress::new();
+        p.turned(t, Some(t));
+        let mut r = Rounds {
+            last: t,
+            fresh: None,
+        };
+        let after = caught(&p, &mut r, t) - t;
+        assert!(
+            after > STALL_LIMIT && after <= STALL_LIMIT + WATCHDOG_CHECK,
+            "{after:?}"
+        );
+        // Every thread frozen for three seconds, as across a suspend: the watchdog thread wakes to
+        // a sleep that took them all, and the loop's last turn and oldest key are not held against
+        // it; a loop that still does not turn is caught as it would have been from the thaw.
+        let mut r = Rounds {
+            last: t,
+            fresh: None,
+        };
+        let thawed = t + Duration::from_secs(3);
+        assert_eq!(r.judge(&p, thawed), None);
+        let after = caught(&p, &mut r, thawed) - thawed;
+        assert!(
+            after > STALL_LIMIT && after <= STALL_LIMIT + WATCHDOG_CHECK,
+            "{after:?}"
+        );
     }
 
     #[test]
