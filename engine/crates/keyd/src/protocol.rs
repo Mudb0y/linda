@@ -43,7 +43,9 @@
 //!    on its virtual keyboard only once every key read before it has been decided, so the client
 //!    may be sent several presses before it has answered the first, and answers them in any order.
 //!    A press not answered within [`VERDICT_TIMEOUT`] of its reading is passed on, and EXPIRED
-//!    says so; a verdict that comes later is ignored. When the client fails to answer a run of
+//!    says so, once every key read before it has been decided: at its bound, or later, when a
+//!    press before it holds the line longer (with WAIT). Until EXPIRED, a verdict for it counts,
+//!    after its bound too; one that comes after EXPIRED is ignored. When the client fails to answer a run of
 //!    presses spanning [`UNANSWERED_SPAN`], the helper lets go and sends GOODBYE UNANSWERED; what
 //!    makes a run is given with that bound.
 //! 6. STOP asks the helper to let go, which it confirms with RELEASED STOPPED.

@@ -1913,7 +1913,6 @@ fn fault_a_key_let_go_of_is_not_held_down_past_the_repeat_delay_behind_a_wait() 
 /// order and the key before is waiting on the focus, runs the command and the application gets the
 /// key as well.
 #[test]
-#[ignore = "second review: fails while the fault stands"]
 fn fault_a_keep_for_a_press_still_in_line_behind_a_wait_is_not_thrown_away() {
     let (mut t, k) = T::waiting();
     t.press(k, KEY_A);
@@ -1960,6 +1959,29 @@ fn fault_a_key_pressed_after_a_loss_of_events_is_not_lost() {
     assert!(
         keys.contains(&(KEY_LEFTSHIFT, KEY_PRESS)),
         "Shift, pressed after the loss and read in order, never reached the client: {keys:?}"
+    );
+}
+
+#[test]
+fn a_press_behind_a_held_one_is_expired_only_as_it_is_taken_out_of_line() {
+    let (mut t, k) = T::waiting();
+    let a = t.held(k, KEY_A);
+    t.press(k, KEY_INSERT);
+    let insert = t.last_seq();
+    t.pass(VERDICT_TIMEOUT * 3);
+    assert!(
+        t.expired().is_empty(),
+        "EXPIRED before Insert left the line"
+    );
+    t.verdict(a, false);
+    assert_eq!(t.expired(), vec![insert]);
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1), (KEY_INSERT, 1)]);
+    // Out of line, it can be answered no more.
+    t.verdict(insert, true);
+    t.release(k, KEY_INSERT);
+    assert_eq!(
+        t.w.emitted(),
+        vec![(KEY_A, 1), (KEY_INSERT, 1), (KEY_INSERT, 0)]
     );
 }
 

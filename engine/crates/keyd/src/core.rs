@@ -718,7 +718,7 @@ impl<D: Devices> Core<D> {
                 }
             }
             FromClient::Verdict { seq, keep } => self.verdict(seq, keep, now),
-            FromClient::Wait { seq } if c.features & FEATURE_WAIT != 0 => self.wait(seq, now),
+            FromClient::Wait { seq } if c.features & FEATURE_WAIT != 0 => self.wait(seq),
             FromClient::Wait { .. } => {
                 self.drop_later(Goodbye::Malformed, "WAIT without FEATURE_WAIT".into())
             }
@@ -734,12 +734,12 @@ impl<D: Devices> Core<D> {
             self.drop_later(Goodbye::Malformed, why);
             return;
         }
-        // A verdict on a key that is no longer waiting, because it came too late or because no
-        // verdict was asked for, changes nothing.
+        // A press counts as waiting for its verdict until the helper takes it out of line: at its
+        // bound, or later, behind presses before it that hold the line. A verdict on a key out of
+        // line, passed on without one and EXPIRED, or one no verdict was asked for, changes nothing.
         if let Some(e) = self.line.iter_mut().find(|e| e.seq == seq)
             && e.press
             && e.verdict.is_none()
-            && now < e.bound()
         {
             e.verdict = Some(keep);
         }
@@ -747,8 +747,8 @@ impl<D: Devices> Core<D> {
     }
 
     /// WAIT: the press keeps waiting, to VERDICT_WAIT_TIMEOUT from its reading. Only the first
-    /// counts, and only while the press is still waiting for its verdict.
-    fn wait(&mut self, seq: u64, now: Instant) {
+    /// counts, and only while the press is still in line waiting for its verdict.
+    fn wait(&mut self, seq: u64) {
         if seq == 0 || seq >= self.next_seq {
             let why = format!("a WAIT on key {seq}, which was never sent");
             self.drop_later(Goodbye::Malformed, why);
@@ -757,7 +757,6 @@ impl<D: Devices> Core<D> {
         if let Some(e) = self.line.iter_mut().find(|e| e.seq == seq)
             && e.press
             && e.verdict.is_none()
-            && now < e.bound()
         {
             e.waited = true;
         }
