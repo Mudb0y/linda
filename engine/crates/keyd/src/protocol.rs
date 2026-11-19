@@ -54,6 +54,12 @@
 //! 8. GOODBYE comes before the helper closes the connection, with the reason. Whenever the
 //!    connection ends, for any reason, the helper has let go of everything.
 //!
+//! Whenever the helper lets go, with RELEASED or as the connection ends, the presses still waiting
+//! for a verdict are passed on as if their bounds had come, each put on the virtual keyboard and
+//! released again with the rest, so that the application has had them; a verdict that comes for
+//! one later is ignored. Only after the emergency chord are they dropped instead: neither the
+//! virtual keyboard nor the application has them.
+//!
 //! The emergency chord, Backspace, Escape and Enter held down together on the keyboards the helper
 //! holds, is read by the helper itself before it does anything else with a key. It lets go of
 //! every keyboard, drops the keys still waiting for a verdict, and sends RELEASED EMERGENCY. It
