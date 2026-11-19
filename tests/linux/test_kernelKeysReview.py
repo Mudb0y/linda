@@ -113,6 +113,74 @@ def test_firstKeyBackInADocumentIsBrowseModes(tmp_path: Path, route: str):
 	assert value["nvda"] == [[True, False]], value
 
 
+#: As BACK_TO_DOCUMENT_CHILD, with h typed 10 ms after the focus is back while each thread of NVDA's
+#: that reads the X server's focus events takes 80 ms over the focus coming back, as when NVDA's other
+#: threads keep the interpreter: the key reaches NVDA before NVDA has read where the focus is.
+SLOW_FOCUS_CHILD = r"""
+other = root.create_window(0, 0, 100, 100, 0, app.screen().root_depth, event_mask=X.KeyPressMask)
+other.change_property(pidAtom, Xatom.CARDINAL, 32, [2])
+other.map()
+app.sync()
+source = startSource(ROUTE)
+mode["now"] = "browse"
+source.setCapture("browse", 1)
+time.sleep(0.3)
+other.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+time.sleep(0.2)
+mode["now"] = "off"
+source.setCapture("off")
+time.sleep(0.3)
+
+
+def slowFocus(handle):
+	def handled(event):
+		if event.type == X.FocusIn:
+			time.sleep(0.08)
+		return handle(event)
+
+	return handled
+
+
+source._x._handle = slowFocus(source._x._handle)
+if source._kernel is not None:
+	source._kernel._onXEvent = slowFocus(source._kernel._onXEvent)
+windowKeys()
+delivered.clear()
+window.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+
+
+def follow():
+	time.sleep(0.15)
+	mode["now"] = "browse"
+	source.setCapture("browse", 1)
+
+
+threading.Thread(target=follow, daemon=True).start()
+time.sleep(0.01)
+keyboard.press("h", hold=0.03)
+time.sleep(0.8)
+result = {
+	"kernel": source.isKernel,
+	"window": [key for key in windowKeys() if key[1]],
+	"nvda": [[e["captured"], e["reached"]] for e in presses(ord("H"))],
+}
+source.stop()
+keyboard.close()
+"""
+
+
+@pytest.mark.parametrize("route", ("x11", "auto"))
+def test_firstKeyBackInADocumentIsBrowseModesBeforeNVDAReadsTheFocus(tmp_path: Path, route: str):
+	value = runKernelChild(tmp_path, f"ROUTE = {route!r}\n" + SLOW_FOCUS_CHILD)
+	assert value["kernel"] == (route == "auto")
+	assert value["window"] == [], (
+		f"on the {route} route h reached the page as NVDA had yet to read that the focus was back: {value}"
+	)
+	assert value["nvda"] == [[True, False]], value
+
+
 #: A second window of the document's own application takes the focus, as a file chooser opened with
 #: Control+O from Firefox does, and h is typed in it before NVDA's focus has followed: where h went.
 SAME_APPLICATION_WINDOW_CHILD = r"""

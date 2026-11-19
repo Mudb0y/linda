@@ -293,6 +293,12 @@ class _Press:
 	#: verdict this one shares: the helper's virtual keyboard holds the key down from the first press
 	#: passed to the last release, so the application had only that press.
 	follows: "_Press | None" = None
+	#: For a press whose kind turns on where the focus is, the layout thread's look at the X server it
+	#: waits for, and set once that look decided it, or once it was decided without; None for any other.
+	focusLook: int = 0
+	looked: threading.Event | None = None
+	#: Whether the document's window had the focus as far as was known when it came.
+	focusedAtFirst: bool = False
 	lock: threading.Lock = field(default_factory=threading.Lock)
 
 	def decide(self, passed: bool) -> bool:
@@ -380,6 +386,12 @@ class KernelKeySource:
 		#: (that window, whether it has the focus) as the last of its events said, replaced whole.
 		self._watchedWindow = 0
 		self._focusSeen: tuple[int, bool] = (0, False)
+		#: Looks at the focus asked of the layout's thread, by the thread that answers keys, and the last
+		#: one it made: each a round trip to the X server, after which every focus event the X server sent
+		#: before it has been read.
+		self._looksAsked = 0
+		self._looksDone = 0
+		self._layoutWakeRead, self._layoutWakeWrite = os.pipe()
 		#: Key codes down, the locks left out: what holds the modifiers down.
 		self._down: set[int] = set()
 		#: Key code: the press of each key down, from the keyboards and from typeKey; of a key held on
@@ -463,6 +475,7 @@ class KernelKeySource:
 		"""Let go of the helper, which lets go of the keyboards, and tell NVDA every key it holds is up."""
 		self._stopping = True
 		self._wake()
+		self._wakeLayout()
 		for thread in (self._thread, self._layoutThread):
 			if thread is not None:
 				thread.join(2)
@@ -483,8 +496,8 @@ class KernelKeySource:
 			self._sock.close()
 		except OSError:
 			pass
-		os.close(self._wakeRead)
-		os.close(self._wakeWrite)
+		for fd in (self._wakeRead, self._wakeWrite, self._layoutWakeRead, self._layoutWakeWrite):
+			os.close(fd)
 		if self._switchBefore is not None and sys.getswitchinterval() == SWITCH_INTERVAL:
 			sys.setswitchinterval(self._switchBefore)
 
@@ -578,6 +591,12 @@ class KernelKeySource:
 	def _wake(self) -> None:
 		try:
 			os.write(self._wakeWrite, b"\0")
+		except OSError:
+			pass
+
+	def _wakeLayout(self) -> None:
+		try:
+			os.write(self._layoutWakeWrite, b"\0")
 		except OSError:
 			pass
 
@@ -675,7 +694,19 @@ class KernelKeySource:
 		try:
 			while not self._stopping:
 				self._watchCapture()
-				select.select([d.fileno()], [], [], CAPTURE_LOOK)
+				asked = self._looksAsked
+				if asked != self._looksDone:
+					# A key's kind waits on it: the reply comes after every event the X server sent before
+					# it, so that the focus is known as the X server had it once the key had come.
+					d.get_input_focus()
+					while d.pending_events():
+						self._onXEvent(d.next_event())
+					self._looksDone = asked
+					self._wake()
+					continue
+				readable, _w, _x = select.select([d.fileno(), self._layoutWakeRead], [], [], CAPTURE_LOOK)
+				if self._layoutWakeRead in readable:
+					os.read(self._layoutWakeRead, 4096)
 				while d.pending_events():
 					self._onXEvent(d.next_event())
 		except (error.ConnectionClosedError, OSError):
@@ -1070,6 +1101,13 @@ class KernelKeySource:
 				return None
 			if press.passed is None and press.follows is not None and press.follows.passed is not None:
 				press.decide(press.follows.passed)
+			if (
+				press.looked is not None
+				and not press.looked.is_set()
+				and press.passed is None
+				and self._looksDone >= press.focusLook
+			):
+				self._looked(press, now)
 			if press.passed is None:
 				if first and press.started is None:
 					press.started = now
@@ -1121,6 +1159,8 @@ class KernelKeySource:
 		if press.settled:
 			return
 		press.settled = True
+		if press.looked is not None:
+			press.looked.set()
 		if press.typed:
 			if press.passed:
 				self._xtest(press.keycode, False)
@@ -1191,15 +1231,54 @@ class KernelKeySource:
 			return NVDA_KIND
 		if numpadReview and keycode in NUMPAD_REVIEW_KEYCODES and not effective & ~NUMPAD_REVIEW_MODS:
 			return NVDA_KIND
-		if self._grabsTake(capture):
-			modeSets = self._modeSets
-			if not modeSets:
-				self._makeModeSets()
-				modeSets = self._modeSets
-			for masks in (modeSets.get("browse", {}).get(keycode), modeSets.get("focus", {}).get(keycode)):
-				if masks is not None and effective & ~LOCK_MODS in masks:
-					return CAPTURE_KIND
+		if self._grabsTake(capture) and self._inCaptureSets(keycode, effective):
+			return CAPTURE_KIND
 		return PASS_KIND
+
+	def _inCaptureSets(self, keycode: int, effective: int) -> bool:
+		"""Whether the X source's grabs of a document's keys are made for this key with these modifiers."""
+		modeSets = self._modeSets
+		if not modeSets:
+			self._makeModeSets()
+			modeSets = self._modeSets
+		for masks in (modeSets.get("browse", {}).get(keycode), modeSets.get("focus", {}).get(keycode)):
+			if masks is not None and effective & ~LOCK_MODS in masks:
+				return True
+		return False
+
+	def _turnsOnFocus(self, keycode: int, effective: int, capture: x11.CaptureState) -> bool:
+		"""Whether a press is a document's or the application's by where the focus is alone: the window
+		its keys are grabbed on having it or not."""
+		return (
+			bool(capture.window)
+			and self._grabsTake(capture._replace(focused=True))
+			and (self._inCaptureSets(keycode, effective))
+		)
+
+	def _lookAtFocus(self, press: _Press, focused: bool) -> None:
+		"""Have the layout's thread read where the focus is before the press is decided. The watch of the
+		focus reads the X server's events as they come, on a thread of its own, and a key typed a few
+		milliseconds after the focus moved, as the first after Alt+Tab, came here sooner than the event
+		that the focus had moved was read, and went where the focus had been."""
+		self._looksAsked += 1
+		press.focusLook = self._looksAsked
+		press.focusedAtFirst = focused
+		press.looked = threading.Event()
+		self._wakeLayout()
+
+	def _looked(self, press: _Press, now: float) -> None:
+		"""Decide by the focus as it is now known a press that waited for the layout's thread to read it."""
+		capture = self._captureNow(now)
+		focused = self._grabsTake(capture)
+		if focused != press.focusedAtFirst:
+			# Which key it was is the user's typing; that the look mattered is worth a count.
+			log.debug(f"The focus had {'reached' if focused else 'left'} a document's window as a key came")
+		if focused:
+			press.document = capture.documentUntil is not None and now < capture.documentUntil
+		else:
+			press.kind = press.own = PASS_KIND
+			press.decide(True)
+		press.looked.set()
 
 	def _depressed(self, tables: _Tables) -> int:
 		mods = 0
@@ -1275,9 +1354,24 @@ class KernelKeySource:
 			under = tuple(self._nvdaHeld.values())
 		else:
 			kind = own
+		# Until the layout's thread has read where the focus is, browse mode's, so as to wait for it.
+		looks = (
+			not decided
+			and not held
+			and kind == own
+			and not typed
+			and own in (PASS_KIND, CAPTURE_KIND)
+			and self._layoutThread is not None
+			and self._layoutThread.is_alive()
+			and self._turnsOnFocus(keycode, effective, capture)
+		)
+		if looks:
+			kind = own = CAPTURE_KIND
 		press = _Press(seq, keycode, now, kind, own, effective, typed=typed, under=under, device=device)
 		if kind == CAPTURE_KIND and capture.documentUntil is not None and now < capture.documentUntil:
 			press.document = True
+		if looks:
+			self._lookAtFocus(press, self._grabsTake(capture))
 		if own == NVDA_KIND and keycode in NVDA_KEYCODES and kind in (NVDA_KIND, HOLD_KIND):
 			self._nvdaHeld[keycode] = press
 		presses = self._typed if typed else self._presses
@@ -1420,6 +1514,8 @@ class KernelKeySource:
 			press.dropped = dropUndecided
 			press.decide(not dropUndecided)
 			press.settled = True
+			if press.looked is not None:
+				press.looked.set()
 		self._holders.clear()
 		if self._tables is not None:
 			for keycode in sorted(self._presses):
@@ -1521,8 +1617,12 @@ class KernelKeySource:
 		)
 
 	def _decideKey(self, item: _Item) -> None:
-		event = self._event(item)
 		press = item.press
+		if item.value == KEY_PRESS and press is not None and press.looked is not None:
+			# What it is waits on the layout's thread, which the thread that answers keys answers for by
+			# itself within the press's bound.
+			press.looked.wait(x11.DOCUMENT_WAIT)
+		event = self._event(item)
 		if item.altGr:
 			# Held for input help or for another computer, AltGr is what Windows' hook reports for it: a
 			# left Control of its own scan code, then right Alt, so that it types on a Windows computer
