@@ -74,7 +74,9 @@
 //! for it as it is let go of, go on to the application as taps, pressed and released at once,
 //! whatever the reason for letting go, the emergency chord included. They come too late for the
 //! client to be asked, and each is sent as a KEY press and a KEY release without flags, in the
-//! order they go out, before the RELEASED that follows: on STOP, on the emergency chord, and on
+//! order they go out; a key the client was told is down whose release is read there is sent its
+//! release, without flags, as it is read, so before any later press of it. All of this comes
+//! before the RELEASED that follows: on STOP, on the emergency chord, and on
 //! BACKGROUND for a sleep. A tap the virtual keyboard did not take is not sent, so on
 //! VIRTUAL_KEYBOARD none is, since none goes out. A client the helper drops, whose connection has
 //! ended, or whose session is not in front, as on BACKGROUND for another session and on

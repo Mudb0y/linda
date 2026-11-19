@@ -1612,15 +1612,20 @@ impl<D: Devices> Core<D> {
         self.passed.clear();
         // Never on the virtual keyboard, they need no release, and must not go out as taps.
         self.held_back.clear();
-        let rest: Vec<InputEvent> = self.batch.drain(..).collect();
-        self.tap(self.batch_from, &rest);
         let mut keyboards = std::mem::take(&mut self.keyboards);
+        let rest: Vec<InputEvent> = self.batch.drain(..).collect();
+        let mut gone = KeySet::new();
+        let down = match keyboards.get_mut(&self.batch_from) {
+            Some(kbd) => &mut kbd.down,
+            None => &mut gone,
+        };
+        self.tap(self.batch_from, down, &rest);
         for (n, kbd) in &mut keyboards {
             let mut events = Vec::new();
             if kbd.state == KState::Held {
                 let _ = kbd.k.read(&mut events);
             }
-            self.tap(*n, &events);
+            self.tap(*n, &mut kbd.down, &events);
             kbd.k.ungrab();
         }
         drop(keyboards);
@@ -1647,11 +1652,13 @@ impl<D: Devices> Core<D> {
 impl<D: Devices> Core<D> {
     /// Keys read as the helper lets go, each press passed on as a tap, with no verdict asked, and,
     /// when it went out, told to the client, if it is still there and its session in front, as a
-    /// press and a release without flags, so that it knows what the program had. What follows a
-    /// loss of events is left alone, as ever. Each read is of what the kernel keeps for a reader,
-    /// a few dozen events, so a client not reading is sent a few dozen messages a keyboard at
-    /// most, and is dropped, not waited for, once more wait for it than its outbox takes.
-    fn tap(&mut self, device: u32, events: &[InputEvent]) {
+    /// press and a release without flags, so that it knows what the program had. The release of a
+    /// key the client was told is down, `down` being those of the keyboard, is told as it is read,
+    /// so that no key is told down twice. What follows a loss of events is left alone, as ever.
+    /// Each read is of what the kernel keeps for a reader, a few dozen events, so a client not
+    /// reading is sent a few dozen messages a keyboard at most, and is dropped, not waited for,
+    /// once more wait for it than its outbox takes.
+    fn tap(&mut self, device: u32, down: &mut KeySet, events: &[InputEvent]) {
         // Let go of because its session is no longer in front, the client must not learn what
         // went to the session that is.
         let tell = self
@@ -1662,26 +1669,38 @@ impl<D: Devices> Core<D> {
             if e.kind == EV_SYN && e.code == SYN_DROPPED {
                 return;
             }
-            if e.kind == EV_KEY && e.value == 1 && is_virtual_key(e.code) {
+            if e.kind != EV_KEY || !is_virtual_key(e.code) || e.value == KEY_REPEAT.into() {
+                continue;
+            }
+            if down.contains(e.code) {
+                down.remove(e.code);
+                if tell {
+                    self.tell(device, e.code, KEY_RELEASE);
+                }
+            }
+            if e.value == KEY_PRESS.into() {
                 self.press_virtual(e.code);
                 let went_out = self.pressed[usize::from(e.code)] > 0;
                 self.release_virtual(e.code);
-                if !tell || !went_out {
-                    continue;
-                }
-                for value in [KEY_PRESS, KEY_RELEASE] {
-                    let seq = self.next_seq;
-                    self.next_seq += 1;
-                    self.send_client(ToClient::Key(Key {
-                        seq,
-                        device,
-                        code: e.code,
-                        value,
-                        flags: 0,
-                    }));
+                if tell && went_out {
+                    self.tell(device, e.code, KEY_PRESS);
+                    self.tell(device, e.code, KEY_RELEASE);
                 }
             }
         }
+    }
+
+    /// Tells the client of a key that is not put in line, with no flags.
+    fn tell(&mut self, device: u32, code: u16, value: u8) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.send_client(ToClient::Key(Key {
+            seq,
+            device,
+            code,
+            value,
+            flags: 0,
+        }));
     }
 }
 

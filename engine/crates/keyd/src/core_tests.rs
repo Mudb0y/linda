@@ -3557,7 +3557,6 @@ fn fault_a_made_up_insert_is_not_typed_under_modifiers_it_did_not_go_down_under(
 /// key held on another keyboard, which reaches neither NVDA nor the program, so NVDA hears nothing
 /// of the very key the tap was told for.
 #[test]
-#[ignore = "sixth review: a key told down and tapped again as the helper lets go is told down twice"]
 fn fault_a_key_tapped_as_the_helper_lets_go_is_not_told_down_twice() {
     let (mut t, k) = T::capturing();
     t.pressed_out(k, KEY_A);
