@@ -68,28 +68,81 @@ impl std::fmt::Write for Line {
 /// a terminal or a pipe when the helper is run by hand, is written to only when poll says it can
 /// take more now.
 fn write_now(fd: std::os::fd::RawFd, b: &[u8]) {
-    // SAFETY: b is valid for its length; the flags make the call return at once.
-    let sent = unsafe {
-        libc::send(
+    write_whole(&CUT, b, |b| {
+        // SAFETY: b is valid for its length; the flags make the call return at once.
+        let sent = unsafe {
+            libc::send(
+                fd,
+                b.as_ptr().cast(),
+                b.len(),
+                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+            )
+        };
+        if sent >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOTSOCK) {
+            return sent;
+        }
+        let mut p = libc::pollfd {
             fd,
-            b.as_ptr().cast(),
-            b.len(),
-            libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
-        )
-    };
-    if sent >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOTSOCK) {
-        return;
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one pollfd, waiting for nothing.
+        if unsafe { libc::poll(&mut p, 1, 0) } == 1 && p.revents & libc::POLLOUT != 0 {
+            // SAFETY: b is valid for its length.
+            unsafe { libc::write(fd, b.as_ptr().cast(), b.len()) }
+        } else {
+            -1
+        }
+    });
+}
+
+/// A line was cut short: on a stream, such as the journal's, the next would run on from it.
+static CUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Writes a line with `write`, which says how much it took, or less than nothing. After a line that
+/// was cut short, a newline goes first, and lines are dropped until it has gone, so that every line
+/// starts whole.
+fn write_whole(
+    cut: &std::sync::atomic::AtomicBool,
+    b: &[u8],
+    mut write: impl FnMut(&[u8]) -> isize,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if cut.load(Relaxed) {
+        if write(b"\n") != 1 {
+            return;
+        }
+        cut.store(false, Relaxed);
     }
-    let mut p = libc::pollfd {
-        fd,
-        events: libc::POLLOUT,
-        revents: 0,
-    };
-    // SAFETY: one pollfd, waiting for nothing.
-    if unsafe { libc::poll(&mut p, 1, 0) } == 1 && p.revents & libc::POLLOUT != 0 {
-        // SAFETY: b is valid for its length.
-        unsafe { libc::write(fd, b.as_ptr().cast(), b.len()) };
+    let took = write(b);
+    if took >= 0 && (took as usize) < b.len() {
+        cut.store(true, Relaxed);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn a_line_cut_short_is_ended_before_the_next_and_nothing_runs_on() {
+    use std::sync::atomic::AtomicBool;
+    let cut = AtomicBool::new(false);
+    let mut stream = Vec::new();
+    let mut room = 12;
+    let write = |stream: &mut Vec<u8>, room: &mut usize, b: &[u8]| {
+        let n = b.len().min(*room);
+        stream.extend_from_slice(&b[..n]);
+        *room -= n;
+        n as isize
+    };
+    write_whole(&cut, b"first line\n", |b| write(&mut stream, &mut room, b));
+    write_whole(&cut, b"second line\n", |b| write(&mut stream, &mut room, b));
+    // Full: the next line is dropped, newline and all.
+    write_whole(&cut, b"third line\n", |b| write(&mut stream, &mut room, b));
+    room = 100;
+    write_whole(&cut, b"fourth line\n", |b| write(&mut stream, &mut room, b));
+    assert_eq!(
+        String::from_utf8(stream).unwrap(),
+        "first line\ns\nfourth line\n"
+    );
 }
 
 /// Ends the process at once after a panic on any thread: a thread that panicked would leave its
