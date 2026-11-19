@@ -595,11 +595,13 @@ impl<D: Devices> Core<D> {
         };
         match state {
             KState::Held => {
-                for ev in events {
-                    if !self.capturing || !self.keyboards.contains_key(&n) {
-                        break;
-                    }
-                    self.event(n, ev, now);
+                let mut read = 0;
+                while read < events.len() && self.capturing && self.keyboards.contains_key(&n) {
+                    self.event(n, events[read], now);
+                    read += 1;
+                }
+                if !self.capturing {
+                    self.pass_after_letting_go(&events[read..]);
                 }
             }
             // Copies of what the desktop has: a key may have gone up.
@@ -1487,8 +1489,14 @@ impl<D: Devices> Core<D> {
     }
 
     /// Lets go of every keyboard. The line is settled as if no more verdicts were coming, every
-    /// press undecided passed on, or with `drop_undecided` thrown away; then every key the virtual
-    /// keyboard holds down is released, and only then is each keyboard ungrabbed and closed.
+    /// press undecided passed on, or with `drop_undecided` thrown away. Then each keyboard is read
+    /// once more and ungrabbed at once, and what was read is passed on, so that nothing typed while
+    /// the helper lets go is lost: an ungrab waits in the kernel for milliseconds, and what came to
+    /// a keyboard still grabbed and was not read would reach nobody. The kernel stops giving the
+    /// helper alone a keyboard's events as its ungrab begins, so what comes after reaches the desktop
+    /// from the keyboard itself and is not read here. Then every key the virtual keyboard holds down
+    /// is released, a key pressed in that last read included, and only then is each keyboard
+    /// closed.
     fn let_go(&mut self, why: Option<Released>, drop_undecided: bool, now: Instant) {
         if drop_undecided {
             self.line.clear();
@@ -1499,6 +1507,19 @@ impl<D: Devices> Core<D> {
                 }
             }
             self.advance(now);
+        }
+        let mut keyboards = std::mem::take(&mut self.keyboards);
+        for (n, kbd) in &mut keyboards {
+            let mut events = Vec::new();
+            if kbd.state == KState::Held {
+                let _ = kbd.k.read(&mut events);
+            }
+            kbd.k.ungrab();
+            if !kbd.dropping {
+                for ev in events.iter().filter(|e| e.kind == EV_KEY) {
+                    self.pass_last(*n, kbd, ev.code, ev.value);
+                }
+            }
         }
         for code in 0..KEY_CNT {
             if self.pressed[code] > 0 {
@@ -1511,9 +1532,7 @@ impl<D: Devices> Core<D> {
             }
         }
         self.passed.clear();
-        for (_, mut kbd) in std::mem::take(&mut self.keyboards) {
-            kbd.k.ungrab();
-        }
+        drop(keyboards);
         self.known.clear();
         self.open_failed.clear();
         if self.capturing {
@@ -1530,6 +1549,56 @@ impl<D: Devices> Core<D> {
         );
         if let Some(reason) = why {
             self.send_client(ToClient::Released { reason });
+        }
+    }
+}
+
+impl<D: Devices> Core<D> {
+    /// A key event read from a keyboard as it is let go of, passed on with no verdict asked: a
+    /// press goes out, and a release goes out when its press did.
+    fn pass_last(&mut self, n: u32, kbd: &mut Kbd<D::Keyboard>, code: u16, value: i32) {
+        if !is_virtual_key(code) {
+            return;
+        }
+        match value {
+            1 if !kbd.down.contains(code) => {
+                kbd.down.insert(code);
+                self.passed.insert((n, code), true);
+                self.press_virtual(code);
+            }
+            0 if kbd.down.contains(code) => {
+                kbd.down.remove(code);
+                if self.passed.remove(&(n, code)) == Some(true) {
+                    self.release_virtual(code);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// What was read in the same batch as a key that made the helper let go, the emergency chord's
+    /// last, and came after it: passed on, and every key it put down released again, since the
+    /// keyboard has been let go of and its later events reach the desktop from it.
+    fn pass_after_letting_go(&mut self, events: &[InputEvent]) {
+        let mut out = KeySet::new();
+        for e in events
+            .iter()
+            .filter(|e| e.kind == EV_KEY && is_virtual_key(e.code))
+        {
+            match e.value {
+                1 if !out.contains(e.code) => {
+                    out.insert(e.code);
+                    self.press_virtual(e.code);
+                }
+                0 if out.contains(e.code) => {
+                    out.remove(e.code);
+                    self.release_virtual(e.code);
+                }
+                _ => {}
+            }
+        }
+        for code in out.iter() {
+            self.release_virtual(code);
         }
     }
 }

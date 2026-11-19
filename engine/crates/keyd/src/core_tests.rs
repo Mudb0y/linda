@@ -1364,6 +1364,69 @@ fn a_chord_held_wholly_while_events_were_lost_lets_go_at_once() {
     t.assert_let_go();
 }
 
+const KEY_G: u16 = 34;
+const KEY_H: u16 = 35;
+
+/// A key typed after the loop last read a keyboard and before the helper lets go of it is read once
+/// more as the keyboard is let go of and passed on, whatever the reason for letting go; the mock
+/// keeps such a key in the keyboard's queue, unread, as the kernel keeps it for the grabbing file.
+#[test]
+fn a_key_typed_as_the_helper_lets_go_is_passed_on_and_nothing_left_down() {
+    type LetGo = Box<dyn Fn(&mut T)>;
+    let ways: Vec<(&str, LetGo)> = vec![
+        ("STOP", Box::new(|t| t.send(FromClient::Stop))),
+        (
+            "the client gone",
+            Box::new(|t| {
+                t.core.disconnected(CLIENT, t.now);
+                t.take();
+            }),
+        ),
+        (
+            "the client silent",
+            Box::new(|t| t.quiet(HEARTBEAT_TIMEOUT + HEARTBEAT_INTERVAL)),
+        ),
+        ("another session", Box::new(|t| t.logind(front("5", 1001)))),
+        (
+            "sleep",
+            Box::new(|t| {
+                t.core.sleeping(true, t.now);
+                t.take();
+            }),
+        ),
+    ];
+    for (why, let_go) in ways {
+        let (mut t, k) = T::capturing();
+        // G is tapped, and H pressed and still held, the loop having read neither.
+        t.w.press(k, KEY_G);
+        t.w.release(k, KEY_G);
+        t.w.press(k, KEY_H);
+        let_go(&mut t);
+        assert!(!t.w.any_grabbed(), "{why}");
+        assert_eq!(
+            t.w.emitted(),
+            vec![(KEY_G, 1), (KEY_G, 0), (KEY_H, 1), (KEY_H, 0)],
+            "{why}"
+        );
+        assert!(t.w.virtual_down().is_empty(), "{why}");
+    }
+}
+
+#[test]
+fn keys_read_after_the_emergency_chord_in_the_same_batch_are_passed_on() {
+    let (mut t, k) = T::capturing();
+    for c in CHORD.map(|keys| keys[0]) {
+        t.w.press(k, c);
+    }
+    t.w.press(k, KEY_G);
+    t.w.release(k, KEY_G);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    assert!(t.sent().contains(&released(Released::Emergency)));
+    t.assert_let_go();
+    assert_eq!(t.w.emitted(), vec![(KEY_G, 1), (KEY_G, 0)]);
+}
+
 #[test]
 fn the_numpads_enter_serves_the_emergency_chord_as_well() {
     let (mut t, k) = T::capturing();
