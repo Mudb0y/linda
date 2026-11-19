@@ -20,7 +20,7 @@ RuntimeDirectory=linda-keyd
 # Every local user may connect: who becomes the client is decided by logind and polkit.
 RuntimeDirectoryMode=0755
 
-# Its loop feeds the watchdog every second, holding a keyboard or not. Its own watchdog thread lets
+# Its loop feeds the watchdog every half second, holding a keyboard or not. Its own watchdog thread lets
 # go and ends it after one second without progress; this is for when that thread cannot run either,
 # as when the process is stopped, which SIGABRT ends as it would a running one. SIGKILL follows a
 # second later for a process that SIGABRT did not end.

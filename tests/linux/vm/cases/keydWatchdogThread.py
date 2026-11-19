@@ -50,8 +50,16 @@ def run(ground: "Ground") -> None:
 		keyboard.run({"release": "KEY_LEFTSHIFT"}, {"tap": "KEY_Q"})
 		x = ground.waitForKeys("x", [("KEY_Q", 1), ("KEY_Q", 0)], after, device=UHID)
 		assert STALL < x[0]["t"] - stoppedAt, x
-		ground.waitForHelperLog(f"status={WATCHDOG_EXIT}", mark)
-		assert not [line for _t, line in ground.helperLog(mark) if "Watchdog timeout" in line]
+		ended = ground.waitForHelperLog("Main process exited", mark)
+		systemd = [t for t, line in ground.helperLog(mark) if "Watchdog timeout" in line]
+		ground.machine.log(
+			f"{ended[1]}, {ended[0] - stoppedAt:.3f} s after the loop stopped; systemd's watchdog "
+			+ (f"fired {systemd[0] - stoppedAt:.3f} s after it" if systemd else "never fired")
+		)
+		# The thread let go first. On a starved host systemd's watchdog may still fire while the helper
+		# is ending, which ends it all the same; before the thread, it would mean the thread failed.
+		assert not systemd or said[0] < systemd[0], (said, systemd)
+		assert systemd or f"status={WATCHDOG_EXIT}" in ended[1], ended
 
 	with ground.subtest("systemd starts it again"):
 		ground.waitFor(lambda: ground.helperPid() not in (0, pid), "the helper to start again", 10)

@@ -91,10 +91,20 @@ pub fn spawn(
         })
 }
 
+/// How often to feed systemd's watchdog of the given timeout: a quarter of it. systemd's watchdog
+/// is there for when the watchdog thread cannot run, so the thread must come first whenever it can:
+/// it notices a stalled loop at most STALL_LIMIT and WATCHDOG_CHECK after the loop's last turn,
+/// while systemd fires once the timeout has passed since the last feed, which can be a whole
+/// interval before the loop stopped. Fed at half the timeout, as sd_watchdog_enabled advises, a two
+/// second timeout could fire one second after the stall, before the thread.
+pub fn feed_interval(timeout: Duration) -> Duration {
+    timeout / 4
+}
+
 /// systemd's notification socket, when the helper runs as a service of type notify.
 pub struct Notifier {
     socket: UnixDatagram,
-    /// How often to feed systemd's watchdog: half its timeout, as sd_watchdog_enabled advises.
+    /// How often to feed systemd's watchdog, by [`feed_interval`].
     interval: Option<Duration>,
     next: Instant,
 }
@@ -112,7 +122,7 @@ impl Notifier {
                     .ok()
                     .is_none_or(|p| p.parse() == Ok(std::process::id()))
             })
-            .map(|usec| Duration::from_micros(usec) / 2);
+            .map(|usec| feed_interval(Duration::from_micros(usec)));
         match Notifier::connect(path.as_encoded_bytes(), interval) {
             Ok(n) => Some(n),
             Err(e) => {
@@ -240,6 +250,18 @@ mod tests {
             "{after:?}"
         );
         assert!(!guard.holding());
+    }
+
+    #[test]
+    fn the_thread_comes_before_systemd() {
+        // WatchdogSec in linux/keyd/linda-keyd.service.in.
+        let timeout = Duration::from_secs(2);
+        let earliest_systemd = timeout - feed_interval(timeout);
+        let latest_thread = STALL_LIMIT + WATCHDOG_CHECK;
+        assert!(
+            earliest_systemd >= latest_thread + Duration::from_millis(400),
+            "{earliest_systemd:?} {latest_thread:?}"
+        );
     }
 
     #[test]
