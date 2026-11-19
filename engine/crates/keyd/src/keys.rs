@@ -21,6 +21,7 @@ pub const SYN_DROPPED: u16 = 3;
 pub const KEY_ESC: u16 = 1;
 pub const KEY_BACKSPACE: u16 = 14;
 pub const KEY_ENTER: u16 = 28;
+pub const KEY_KPENTER: u16 = 96;
 pub const KEY_LEFTSHIFT: u16 = 42;
 pub const KEY_CAPSLOCK: u16 = 58;
 pub const KEY_A: u16 = 30;
@@ -37,9 +38,10 @@ pub const LED_KANA: u16 = 4;
 /// The lock lights the virtual keyboard has, and the only ones the helper copies.
 pub const LEDS: [u16; 5] = [LED_NUML, LED_CAPSL, LED_SCROLLL, LED_COMPOSE, LED_KANA];
 
-/// The emergency chord: held down together, they make the helper let go of every keyboard. keyd's
-/// panic sequence, which every keyboard has and nothing presses by accident.
-pub const CHORD: [u16; 3] = [KEY_BACKSPACE, KEY_ESC, KEY_ENTER];
+/// The emergency chord: a key of each of these held down together makes the helper let go of every
+/// keyboard. keyd's panic sequence, which every keyboard has and nothing presses by accident, with
+/// the numpad's Enter as good as the main one, since a hand may find either first.
+pub const CHORD: [&[u16]; 3] = [&[KEY_BACKSPACE], &[KEY_ESC], &[KEY_ENTER, KEY_KPENTER]];
 
 /// The codes udev requires of a keyboard for ID_INPUT_KEYBOARD: Escape, the digits, the row from
 /// Q, and A and S, every code from 1 to 31 (test_key in systemd's udev-builtin-input_id.c). Power
@@ -336,7 +338,12 @@ pub mod tests {
         ] {
             assert!(is_virtual_key(code), "{code:#x}");
         }
-        assert!(KEYBOARD_KEYS.clone().chain(CHORD).all(is_virtual_key));
+        assert!(
+            KEYBOARD_KEYS
+                .clone()
+                .chain(CHORD.into_iter().flatten().copied())
+                .all(is_virtual_key)
+        );
     }
 
     #[test]

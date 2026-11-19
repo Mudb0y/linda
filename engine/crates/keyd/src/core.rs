@@ -1205,10 +1205,12 @@ impl<D: Devices> Core<D> {
     }
 
     fn chord_held(&self) -> bool {
-        CHORD.iter().all(|c| {
-            self.keyboards
-                .values()
-                .any(|k| k.state == KState::Held && (k.down.contains(*c) || k.unseen.contains(*c)))
+        CHORD.iter().all(|keys| {
+            keys.iter().any(|c| {
+                self.keyboards.values().any(|k| {
+                    k.state == KState::Held && (k.down.contains(*c) || k.unseen.contains(*c))
+                })
+            })
         })
     }
 

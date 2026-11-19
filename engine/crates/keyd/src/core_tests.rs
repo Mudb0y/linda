@@ -1109,7 +1109,7 @@ fn the_emergency_chord_lets_go_at_once_with_the_client_hung() {
         t.pass(HEARTBEAT_INTERVAL);
     }
     assert!(!t.w.is_open(k));
-    for c in CHORD {
+    for c in CHORD.map(|keys| keys[0]) {
         t.w.release(k, c);
     }
     t.w.release(k, KEY_LEFTSHIFT);
@@ -1138,13 +1138,23 @@ fn a_key_that_went_down_unseen_goes_nowhere_and_leaves_nothing_down() {
 #[test]
 fn a_chord_held_wholly_while_events_were_lost_lets_go_at_once() {
     let (mut t, k) = T::capturing();
-    for c in CHORD {
+    for c in CHORD.map(|keys| keys[0]) {
         t.w.press(k, c);
     }
     t.w.overflow(k, &[]);
     t.core.keyboard_ready(k, t.now);
     t.take();
     assert_eq!(t.sent(), vec![released(Released::Emergency)]);
+    t.assert_let_go();
+}
+
+#[test]
+fn the_numpads_enter_serves_the_emergency_chord_as_well() {
+    let (mut t, k) = T::capturing();
+    t.press(k, KEY_BACKSPACE);
+    t.press(k, KEY_ESC);
+    t.press(k, KEY_KPENTER);
+    assert!(t.sent().contains(&released(Released::Emergency)));
     t.assert_let_go();
 }
 
@@ -1164,7 +1174,7 @@ fn the_emergency_chord_counts_across_keyboards() {
 #[test]
 fn the_chord_is_not_set_off_by_its_keys_one_after_another() {
     let (mut t, k) = T::capturing();
-    for c in CHORD {
+    for c in CHORD.map(|keys| keys[0]) {
         t.press(k, c);
         t.release(k, c);
     }
