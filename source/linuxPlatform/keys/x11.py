@@ -591,7 +591,8 @@ class X11KeySource:
 		#: of their own inside it, and move it there only after the window manager has given it to the
 		#: top-level window, a tenth of a second later in the guests. None otherwise.
 		self._captureTop = None
-		#: Key code: the masks the captured keys are grabbed with on that top-level window. They are
+		#: Key code: the masks the captured keys are grabbed with on that top-level window, which the
+		#: guard is told of with the other windows grabbed on. They are
 		#: grabbed there while the focus is outside it, where they take nothing, so as to take the first
 		#: key as the focus comes back to it, and while it has the focus itself, having come from outside;
 		#: never while a window inside it has the focus, where a grab on its parent would move the focus
@@ -1571,7 +1572,8 @@ class X11KeySource:
 		# Every grab of this source holds the keyboard on its key, the NVDA keys' among them.
 		guarding = bool(self._grabbed) or bool(self._captured) or self._held
 		windows = " ".join(
-			str(window.id if window is not None else 0) for window in (self._keysWindow, self._captureWindow)
+			str(window.id if window is not None else 0)
+			for window in (self._keysWindow, self._captureWindow, self._captureTop)
 		)
 		beat = f"{int(guarding)} {self._guardResource} {windows}\n"
 		lastTime, lastBeat = self._lastBeat
