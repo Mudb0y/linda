@@ -44,19 +44,19 @@
 //!    may be sent several presses before it has answered the first, and answers them in any order.
 //!    A release waits behind the presses read before it, in the same way, if its key is one of the
 //!    modifiers (both Shifts, Controls, Alts and Supers, and Caps Lock), or if its own press, or an
-//!    earlier press of the same key, is still waiting ahead of it; any other release goes out as soon as its
-//!    press has gone out, ahead of presses still waiting, so that a key let go of is not held down
-//!    long enough for the desktop to repeat it. A release overtaking another key's press changes
+//!    earlier press of the same key, is still waiting ahead of it; any other release goes out as
+//!    soon as its press has gone out, ahead of presses still waiting, so that a key let go of is
+//!    not held down long enough for the desktop to repeat it. A release overtaking another key's press changes
 //!    nothing for a program.
 //!    A press not answered within [`VERDICT_TIMEOUT`] of its reading is passed on, and EXPIRED
 //!    says so, once every press read before it has been decided: at its bound, or later, when a
 //!    press before it holds the line longer (with WAIT). After a freeze of the whole helper that it
 //!    forgives, as across a suspend, the bound of every press still waiting runs afresh from the
 //!    thaw, the client having been frozen too, so EXPIRED may come well after the press's reading
-//!    plus its bound by the client's clock. Until EXPIRED, a verdict for it counts,
-//!    after its bound too; one that comes after EXPIRED is ignored. When the client fails to answer a run of
-//!    presses spanning [`UNANSWERED_SPAN`], the helper lets go and sends GOODBYE UNANSWERED; what
-//!    makes a run is given with that bound.
+//!    plus its bound by the client's clock. Until EXPIRED, a verdict for it counts, after its
+//!    bound too; one that comes after EXPIRED is ignored. When the client fails to answer a run
+//!    of presses spanning [`UNANSWERED_SPAN`], the helper lets go and sends GOODBYE UNANSWERED;
+//!    what makes a run is given with that bound.
 //! 6. STOP asks the helper to let go, which it confirms with RELEASED STOPPED.
 //! 7. RELEASED, for whatever reason, means the helper holds no keyboard any more and has released
 //!    every key it held down on its virtual keyboard; the client should take every key it was told
@@ -69,17 +69,37 @@
 //! for a verdict are passed on as if their bounds had come, each put on the virtual keyboard and
 //! released again with the rest, so that the application has had them; a verdict that comes for
 //! one later is ignored. Only after the emergency chord are those dropped instead: neither the
-//! virtual keyboard nor the application has them. Keys the helper has not yet read when it lets go
-//! (the rest of what it read with the chord's last key, and what each keyboard has for it as it is
-//! let go of) go on to the application as taps, pressed and released at once, whatever the reason
-//! for letting go, the emergency chord included; they come too late for the client to be asked,
-//! and are not sent as KEY.
+//! virtual keyboard nor the application has them. Keys read and not yet dealt with when the
+//! helper lets go (the rest of what it read with the chord's last key), and what each keyboard has
+//! for it as it is let go of, go on to the application as taps, pressed and released at once,
+//! whatever the reason for letting go, the emergency chord included; they come too late for the
+//! client to be asked, and are not sent as KEY.
 //!
 //! After the kernel has dropped events for a keyboard, the helper deals with nothing more of what
-//! it read with the loss, asks the kernel which keys are down, and makes its picture the kernel's:
-//! a key it had down that is up gets its release, told with [`KEY_SYNTHETIC`]; a key down that it
-//! did not see go down is never told, nor put on the virtual keyboard, until it has been let go of
-//! and pressed again. A key typed during the loss, or held across it, is so lost.
+//! it read with the loss, asks the kernel which keys are down, and compares the answer with the
+//! keys on that keyboard it has told the client are down, by a press not yet followed by its
+//! release. It sends, before any KEY for an event read after the answer:
+//!
+//! - for each key told down that the kernel has up, in rising order of code, a release flagged
+//!   [`KEY_SYNTHETIC`] alone;
+//! - then for each key the kernel has down that was not told down and that modifies others, one
+//!   of [`MODIFIERS`](crate::keys::MODIFIERS) or
+//!   [`READER_MODIFIERS`](crate::keys::READER_MODIFIERS), in rising order of code, a press flagged
+//!   [`KEY_ASK`] and [`KEY_SYNTHETIC`]. It is a press like any other: it wants a verdict, which
+//!   [`VERDICT_TIMEOUT`], WAIT, EXPIRED and the run of unanswered presses govern as for any press,
+//!   it goes on the virtual keyboard when passed, and its release comes later as an ordinary
+//!   release, without flags, once read. It went down at a moment that cannot be known, perhaps
+//!   before keys now taken as down; every key read after it was typed under it, for as long as its
+//!   release has not come. Let go of after the answer, it is a press and a release with nothing
+//!   between;
+//! - and nothing for any other key the kernel has down that was not told down: neither its
+//!   repeats nor its release are sent, and a later press of it is sent as any press.
+//!
+//! The answer can count a press the helper reads only after it, since the kernel sets a key's bit
+//! as the driver reports it and hands the event to readers only at the end of the packet. Such a
+//! press is sent as an ordinary press, unless a made-up press of that key was just sent, in which
+//! case nothing more is. A key typed during the loss is lost, and so is one held across it that
+//! does not modify others, until it is pressed again.
 //!
 //! The emergency chord, Backspace, Escape and Enter (the main one or the numpad's) held down
 //! together on the keyboards the helper holds, is read by the helper itself before it does anything else with a key. It lets go of
@@ -296,7 +316,8 @@ pub const TYPED_DEVICE: u32 = u32::MAX;
 /// The press wants a verdict.
 pub const KEY_ASK: u8 = 0x01;
 /// Made by the helper rather than read from the keyboard: the release of a key held down on a
-/// keyboard that vanished, or whose events the kernel dropped.
+/// keyboard that vanished, or whose events the kernel dropped, or, with [`KEY_ASK`], the press of
+/// a modifier found down after the kernel dropped events.
 pub const KEY_SYNTHETIC: u8 = 0x02;
 /// Reserved for keys the client typed, once typing exists.
 pub const KEY_TYPED: u8 = 0x04;

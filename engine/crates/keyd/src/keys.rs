@@ -26,6 +26,7 @@ pub const KEY_LEFTSHIFT: u16 = 42;
 pub const KEY_CAPSLOCK: u16 = 58;
 pub const KEY_A: u16 = 30;
 pub const KEY_INSERT: u16 = 110;
+pub const KEY_KP0: u16 = 82;
 pub const KEY_POWER: u16 = 116;
 pub const KEY_MAX: u16 = 0x2ff;
 pub const KEY_CNT: usize = KEY_MAX as usize + 1;
@@ -43,6 +44,20 @@ pub const LEDS: [u16; 5] = [LED_NUML, LED_CAPSL, LED_SCROLLL, LED_COMPOSE, LED_K
 /// often make a Control or a level shift held down like one. The release of any other key whose
 /// press has gone out may overtake presses still waiting for their verdict.
 pub const MODIFIERS: [u16; 9] = [29, 42, 54, 56, 97, 100, 125, 126, KEY_CAPSLOCK];
+
+/// The keys a screen reader holds down to change what other keys mean, beyond the MODIFIERS:
+/// Insert and the numpad's Insert, NVDA's own modifier keys, Caps Lock, its third, being among the
+/// MODIFIERS already. A key of either list the kernel has down after dropping events, which the
+/// helper had not told the client was down, is told as a press, so that a key typed under it is
+/// not taken for one typed alone. A layout can make further keys modifiers, a level shift on the
+/// key left of Z, say, which neither list knows: the same question, still open, as which keys
+/// keep their place in line.
+pub const READER_MODIFIERS: [u16; 2] = [KEY_INSERT, KEY_KP0];
+
+/// Whether a key held down changes what other keys mean, by the two lists above.
+pub fn modifies(code: u16) -> bool {
+    MODIFIERS.contains(&code) || READER_MODIFIERS.contains(&code)
+}
 
 /// The emergency chord: a key of each of these held down together makes the helper let go of every
 /// keyboard. keyd's panic sequence, which every keyboard has and nothing presses by accident, with

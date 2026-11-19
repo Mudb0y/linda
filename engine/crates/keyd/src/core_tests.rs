@@ -2217,27 +2217,107 @@ fn fault_a_keep_for_a_press_still_in_line_behind_a_wait_is_not_thrown_away() {
     );
 }
 
-/// The second review's test of a Shift pressed after a loss of events, whose expectation the fifth
-/// wave's rule reverses. Shift, its press read with the loss and so left alone, is down by the
-/// kernel's answer and not seen to go down: it is unseen, and not told, since when it went down
-/// cannot be known. The letter typed next is told and put out without it; once Shift has been let
-/// go of and pressed again, it is an ordinary key.
+/// The second review's test of a key pressed after a loss of events, as the fifth and sixth waves'
+/// rule has it. G, its press read with the loss and so left alone, is down by the kernel's answer
+/// and was not told down: it is unseen, and not told, since when it went down, and so under which
+/// modifiers, cannot be known. Once let go of and pressed again, it is an ordinary key. A modifier
+/// is told instead, as below.
 #[test]
 fn a_key_held_across_a_loss_of_events_is_seen_once_pressed_again() {
     let (mut t, k) = T::capturing();
     t.w.overflow(k, &[]);
-    // Shift goes down after the loss, before the helper has caught up.
-    t.w.press(k, KEY_LEFTSHIFT);
+    t.w.press(k, KEY_G);
     t.core.keyboard_ready(k, t.now);
     t.take();
     t.press(k, KEY_A);
     t.release(k, KEY_A);
-    t.release(k, KEY_LEFTSHIFT);
+    t.release(k, KEY_G);
     let keys: Vec<(u16, u8)> = t.keys().iter().map(|k| (k.code, k.value)).collect();
     assert_eq!(keys, vec![(KEY_A, KEY_PRESS), (KEY_A, KEY_RELEASE)]);
-    t.press(k, KEY_LEFTSHIFT);
+    t.press(k, KEY_G);
     let keys: Vec<(u16, u8)> = t.keys().iter().map(|k| (k.code, k.value)).collect();
-    assert_eq!(keys, vec![(KEY_LEFTSHIFT, KEY_PRESS)]);
+    assert_eq!(keys, vec![(KEY_G, KEY_PRESS)]);
+}
+
+/// After a loss, the releases of keys told down that the kernel has up come first, then a press,
+/// asking and made up, of each key found down that modifies others and was not told down; a key
+/// told down and still down is told nothing more, nor is the press of a modifier the answer
+/// already counted, read after it. The made-up press is decided like any other.
+#[test]
+fn a_modifier_found_down_after_a_loss_is_told_after_the_releases_and_decided_like_any_press() {
+    let (mut t, k) = T::capturing();
+    t.pressed_out(k, KEY_A);
+    t.pressed_out(k, KEY_LEFTSHIFT);
+    t.w.change_unread(k, KEY_A, false);
+    t.w.change_unread(k, KEY_INSERT, true);
+    t.w.overflow(k, &[]);
+    t.w.press(k, KEY_LEFTCTRL);
+    t.w.press(k, KEY_G);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    let told = t.keys();
+    let keys: Vec<(u16, u8, u8)> = told.iter().map(|k| (k.code, k.value, k.flags)).collect();
+    assert_eq!(
+        keys,
+        vec![
+            (KEY_A, KEY_RELEASE, KEY_SYNTHETIC),
+            (KEY_LEFTCTRL, KEY_PRESS, KEY_ASK | KEY_SYNTHETIC),
+            (KEY_INSERT, KEY_PRESS, KEY_ASK | KEY_SYNTHETIC),
+        ]
+    );
+    let (control, insert) = (told[1].seq, told[2].seq);
+    // Control's own press, counted by the answer and read after it.
+    t.press(k, KEY_LEFTCTRL);
+    assert!(t.keys().is_empty());
+    t.verdict(control, false);
+    t.verdict(insert, true);
+    t.press(k, KEY_C);
+    let c = t.keys();
+    assert_eq!(
+        c.iter()
+            .map(|k| (k.code, k.value, k.flags))
+            .collect::<Vec<_>>(),
+        vec![(KEY_C, KEY_PRESS, KEY_ASK)]
+    );
+    t.verdict(c[0].seq, false);
+    t.release(k, KEY_LEFTCTRL);
+    t.release(k, KEY_INSERT);
+    let keys: Vec<(u16, u8, u8)> = t
+        .keys()
+        .iter()
+        .map(|k| (k.code, k.value, k.flags))
+        .collect();
+    assert_eq!(
+        keys,
+        vec![(KEY_LEFTCTRL, KEY_RELEASE, 0), (KEY_INSERT, KEY_RELEASE, 0)]
+    );
+    assert_eq!(
+        t.w.emitted(),
+        vec![
+            (KEY_A, 1),
+            (KEY_LEFTSHIFT, 1),
+            (KEY_A, 0),
+            (KEY_LEFTCTRL, 1),
+            (KEY_C, 1),
+            (KEY_LEFTCTRL, 0),
+        ]
+    );
+}
+
+/// A made-up press nobody answers is passed at its bound with EXPIRED, as any press.
+#[test]
+fn a_made_up_press_left_unanswered_is_expired_at_its_bound() {
+    let (mut t, k) = T::capturing();
+    t.w.overflow(k, &[]);
+    t.w.press(k, KEY_LEFTCTRL);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    let control = t.last_seq();
+    t.pass(VERDICT_TIMEOUT - ms(1));
+    assert!(t.expired().is_empty());
+    t.pass(ms(1));
+    assert_eq!(t.expired(), vec![control]);
+    assert_eq!(t.w.emitted(), vec![(KEY_LEFTCTRL, 1)]);
 }
 
 #[test]
@@ -2887,7 +2967,10 @@ fn sequences(keys: &[(u16, usize)], len: usize) -> Vec<Vec<Phys>> {
 /// from `a` to `b` lost, the loss marked, those from `b` to `r` read with the mark, those from `r`
 /// to `q` coming after that read and before the helper asks which keys are down, which throws them
 /// away, and those from `q` on read one at a time; then every key still down let go of. The client
-/// passes every press at once. Returns whether the emergency chord let go, or what went wrong.
+/// passes every press at once. A key that modifies others counts as down for the client, and on
+/// the virtual keyboard, when a key is told or put out if and only if it was physically down when
+/// that key went down, but for a press the helper made up, which may come in any order with
+/// others it made up. Returns whether the emergency chord let go, or what went wrong.
 fn around_a_loss(seq: &[Phys], a: usize, b: usize, r: usize, q: usize) -> Result<bool, String> {
     let mut states = Vec::new();
     let mut s = KeySet::new();
@@ -2909,6 +2992,7 @@ fn around_a_loss(seq: &[Phys], a: usize, b: usize, r: usize, q: usize) -> Result
     };
     let (mut t, k) = T::capturing();
     let mut told = KeySet::new();
+    let mut made_up = KeySet::new();
     let mut out = KeySet::new();
     let mut emitted = 0;
     let mut fired = false;
@@ -2921,19 +3005,42 @@ fn around_a_loss(seq: &[Phys], a: usize, b: usize, r: usize, q: usize) -> Result
             for m in sent {
                 match m {
                     ToClient::Key(key) if key.value == KEY_PRESS => {
+                        if told.contains(key.code) {
+                            return Err(format!("{} told down twice", key.code));
+                        }
                         let at = pressed_at(key.code, p)?;
-                        for m in MODIFIERS {
-                            if m != key.code && told.contains(m) && !at.contains(m) {
-                                return Err(format!(
-                                    "{} told under {m}, which was up when it went down",
-                                    key.code
-                                ));
+                        if key.flags & KEY_SYNTHETIC != 0 {
+                            made_up.insert(key.code);
+                        } else {
+                            for m in MODIFIERS
+                                .into_iter()
+                                .chain(READER_MODIFIERS)
+                                .filter(|m| *m != key.code)
+                            {
+                                if told.contains(m) && !at.contains(m) {
+                                    return Err(format!(
+                                        "{} told under {m}, which was up when it went down",
+                                        key.code
+                                    ));
+                                }
+                                if !told.contains(m) && at.contains(m) {
+                                    return Err(format!(
+                                        "{} told without {m}, which was down when it went down",
+                                        key.code
+                                    ));
+                                }
                             }
                         }
                         told.insert(key.code);
                         t.verdict(key.seq, false);
                     }
-                    ToClient::Key(key) if key.value == KEY_RELEASE => told.remove(key.code),
+                    ToClient::Key(key) if key.value == KEY_RELEASE => {
+                        if !told.contains(key.code) {
+                            return Err(format!("{} told up, never told down", key.code));
+                        }
+                        told.remove(key.code);
+                        made_up.remove(key.code);
+                    }
                     ToClient::Released {
                         reason: Released::Emergency,
                     } => fired = true,
@@ -2948,11 +3055,22 @@ fn around_a_loss(seq: &[Phys], a: usize, b: usize, r: usize, q: usize) -> Result
                     return Err(format!("{code} put out twice"));
                 }
                 let at = pressed_at(code, p)?;
-                for m in MODIFIERS {
-                    if m != code && out.contains(m) && !at.contains(m) {
-                        return Err(format!(
-                            "{code} put out under {m}, which was up when it went down"
-                        ));
+                if !made_up.contains(code) {
+                    for m in MODIFIERS
+                        .into_iter()
+                        .chain(READER_MODIFIERS)
+                        .filter(|m| *m != code)
+                    {
+                        if out.contains(m) && !at.contains(m) {
+                            return Err(format!(
+                                "{code} put out under {m}, which was up when it went down"
+                            ));
+                        }
+                        if !out.contains(m) && at.contains(m) {
+                            return Err(format!(
+                                "{code} put out without {m}, which was down when it went down"
+                            ));
+                        }
                     }
                 }
                 out.insert(code);
@@ -3035,8 +3153,8 @@ fn every_loss(seqs: &[Vec<Phys>], judge: impl Fn(&[Phys], usize, usize, Result<b
 }
 
 #[test]
-fn no_key_goes_out_under_a_modifier_let_go_of_in_any_order_around_a_loss_of_events() {
-    let seqs = sequences(&[(KEY_LEFTCTRL, 2), (KEY_A, 1), (KEY_T, 1)], 6);
+fn no_key_goes_out_under_a_modifier_up_nor_without_one_down_in_any_order_around_a_loss_of_events() {
+    let seqs = sequences(&[(KEY_LEFTCTRL, 2), (KEY_INSERT, 1), (KEY_A, 1)], 6);
     every_loss(&seqs, |seq, _, _, r| {
         if let Err(e) = r {
             panic!("{seq:?}: {e}");
@@ -3093,7 +3211,6 @@ const KEY_SPACE: u16 = 57;
 /// enumeration checks that no key goes out under a modifier that was up when it went down; this is
 /// the other half, a key going out without a modifier that was down.
 #[test]
-#[ignore = "fifth review: a key typed under a modifier held across a loss of events goes out without it"]
 fn fault_a_key_typed_under_a_modifier_held_across_a_loss_does_not_go_out_without_it() {
     let (mut t, k) = T::capturing();
     // The helper falls behind and the kernel drops what it held; Control goes down at the end of
@@ -3126,7 +3243,6 @@ fn fault_a_key_typed_under_a_modifier_held_across_a_loss_does_not_go_out_without
 /// mode, comes as Space, which browse mode binds to activatePosition: it presses the button or
 /// follows the link at the cursor. NVDA+Tab, which says where the focus is, moves it instead.
 #[test]
-#[ignore = "fifth review: the NVDA key held across a loss of events is never told, and the key under it comes alone"]
 fn fault_a_key_typed_under_the_nvda_key_held_across_a_loss_is_not_told_without_it() {
     let (mut t, k) = T::capturing();
     t.w.overflow(k, &[]);

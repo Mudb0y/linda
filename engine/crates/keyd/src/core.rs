@@ -32,6 +32,7 @@ use std::time::Instant;
 use crate::device::{Devices, Found, GrabError, InputEvent, Keyboard, ReadError, VirtualKeyboard};
 use crate::keys::{
     Assessment, CHORD, EV_KEY, EV_SYN, KEY_CNT, KeySet, MODIFIERS, SYN_DROPPED, is_virtual_key,
+    modifies,
 };
 use crate::protocol::*;
 
@@ -109,9 +110,9 @@ struct Kbd<K> {
     reported: Option<DeviceStatus>,
     /// The keys whose press has been read and put in line, and whose release has not.
     down: KeySet,
-    /// Keys the kernel had down after it dropped events, which the helper did not see go down:
-    /// never sent to the client nor passed on. They count towards the emergency chord, and their
-    /// repeats and release go nowhere.
+    /// Keys the kernel had down after it dropped events, which the helper had not told the client
+    /// were down, other than those that modify others: not sent to the client nor passed on. They
+    /// count towards the emergency chord, and their repeats and release go nowhere.
     unseen: KeySet,
     /// The kernel dropped events: the rest of what was read with the loss is not dealt with, and
     /// the kernel is asked which keys are down once it has all been read.
@@ -1287,15 +1288,19 @@ impl<D: Devices> Core<D> {
     /// After the kernel dropped events, as libevdev does: what was read after the loss has been
     /// left alone, and only the kernel's answer to which keys are down is believed, its state after
     /// all of that; asking also throws away every key event queued and not yet read. The helper's
-    /// picture is made the kernel's from the difference. A key the helper has down that the kernel
-    /// has up was released unseen, and gets its release now, in line before any key read after.
-    /// A key the kernel has down that the helper did not see go down is kept among the unseen, never
-    /// told nor put out, since when it went down, and under which modifiers, cannot be known: told
-    /// now, it could be taken as typed under a modifier that was up when it went down. The unseen
-    /// count towards the chord, which is looked for at once, since the person may be holding it for
-    /// a way out of a helper that fell behind. From the answer on every key is read in order again,
-    /// so whatever counts as down when a key is told really is. A key tapped wholly within the loss,
-    /// or after it in the same batch, is lost, at a moment when keys are lost anyway.
+    /// picture is made the kernel's from the difference with what it has told the client. A key
+    /// told down that the kernel has up was released unseen, and gets its release now, in line
+    /// before any key read after. A key the kernel has down that was not told down went down at a
+    /// moment that cannot be known, so under which modifiers cannot either. If it modifies others,
+    /// it is told now as a press, after those releases, asking for its verdict like any other: it
+    /// does nothing by itself, and every key it could change is read after the answer, under it,
+    /// as typed; left out, they would go to the program and to the client as typed alone, Control+C
+    /// as C. Any other such key is kept among the unseen, neither told nor put out: told now, it
+    /// could be taken as typed under a modifier that was up when it went down. The unseen count
+    /// towards the chord, which is looked for at once, since the person may be holding it for a way
+    /// out of a helper that fell behind. From the answer on every key is read in order again, so
+    /// whatever counts as down when a key is told really is, and was. A key tapped wholly within the
+    /// loss, or after it in the same batch, is lost, at a moment when keys are lost anyway.
     fn resync(&mut self, n: u32, now: Instant) {
         let Some(kbd) = self.keyboards.get_mut(&n) else {
             return;
@@ -1309,11 +1314,16 @@ impl<D: Devices> Core<D> {
             }
         };
         let mut unseen = KeySet::new();
+        let mut found = Vec::new();
         for code in down
             .iter()
             .filter(|c| is_virtual_key(*c) && !kbd.down.contains(*c))
         {
-            unseen.insert(code);
+            if modifies(code) {
+                found.push(code);
+            } else {
+                unseen.insert(code);
+            }
         }
         kbd.unseen = unseen;
         let lost: Vec<u16> = kbd.down.iter().filter(|c| !down.contains(*c)).collect();
@@ -1322,6 +1332,12 @@ impl<D: Devices> Core<D> {
                 kbd.down.remove(code);
             }
             self.enter(n, code, KEY_RELEASE, KEY_SYNTHETIC, now);
+        }
+        for code in found {
+            if let Some(kbd) = self.keyboards.get_mut(&n) {
+                kbd.down.insert(code);
+            }
+            self.enter(n, code, KEY_PRESS, KEY_ASK | KEY_SYNTHETIC, now);
         }
         if self.chord_held() {
             self.emergency(now);
@@ -1337,8 +1353,11 @@ impl<D: Devices> Core<D> {
         if !is_virtual_key(code) {
             return;
         }
-        // An unseen key's repeats and release go nowhere. A press of it, which can come only after
-        // its release has been read, is an ordinary one.
+        // An unseen key's repeats and release go nowhere. A press of it is an ordinary one: either
+        // its release was read first, or it is the very press the kernel's answer counted, read
+        // after it, since the kernel sets a key's bit as the driver reports it and hands the event
+        // to readers only at the end of the packet. A modifier told by the answer is down, and
+        // such a press of it is ignored as any press of a key down.
         if kbd.unseen.contains(code) {
             if value != KEY_REPEAT.into() {
                 kbd.unseen.remove(code);
@@ -1523,11 +1542,13 @@ impl<D: Devices> Core<D> {
     /// kernel for milliseconds while the desktop would go on repeating a key held. Then what is
     /// left of the batch being dealt with, when the emergency chord came in the middle of it, is
     /// passed on, and each keyboard in turn is read once more and what was read passed on, before
-    /// that keyboard is ungrabbed: what came to a keyboard still grabbed and was not read would
-    /// reach nobody. Each key read is passed on as a tap, pressed and released at once, its release
-    /// from the keyboard itself coming to the desktop after the ungrab for a key it never had down
-    /// from it. The kernel stops giving the helper alone a keyboard's events as its ungrab begins,
-    /// so what comes after reaches the desktop from the keyboard itself, in order after the taps.
+    /// that keyboard is ungrabbed, since what came to a keyboard still grabbed and was not read
+    /// would reach nobody: only a key coming between that read and the start of the ungrab, a
+    /// matter of microseconds, is so lost. Each key read is passed on as a tap, pressed and
+    /// released at once, its release from the keyboard itself coming to the desktop after the
+    /// ungrab for a key it never had down from it. The kernel stops giving the helper alone a
+    /// keyboard's events as its ungrab begins, so what comes after reaches the desktop from the
+    /// keyboard itself, in order after the taps.
     fn let_go(&mut self, why: Option<Released>, drop_undecided: bool, now: Instant) {
         if drop_undecided {
             self.line.clear();
