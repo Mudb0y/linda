@@ -18,6 +18,17 @@ const WATCHDOG_EXIT: i32 = 70;
 fn main() {
     // With _exit rather than an abort, so that no core dump holds keys typed.
     keyd::end_on_panic();
+    // Nor by any signal: the kernel makes no dump of a process that is not dumpable, even one it
+    // would pipe to systemd-coredump whatever LimitCORE says, which takes its time while the dying
+    // helper still holds its grabs. It also makes /proc/PID root's and keeps ptrace by the helper's
+    // own user out, which nothing here needs.
+    // SAFETY: prctl with these arguments only sets a flag of this process.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        keyd::log_line(format_args!(
+            "cannot keep the kernel from dumping the helper's memory: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
     if std::env::args().nth(1).as_deref() == Some("--version") {
         println!("linda-keyd {}", env!("CARGO_PKG_VERSION"));
         return;

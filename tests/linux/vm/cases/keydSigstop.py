@@ -1,6 +1,6 @@
 """The outermost watchdog: a helper stopped by SIGSTOP, holding a keyboard and with Shift passed on and
 held, can do nothing at all, its own watchdog thread included. Within two seconds of its last sign of
-life systemd's watchdog sends SIGABRT, which ends a stopped process as it would a running one, with
+life systemd's watchdog sends SIGKILL, which ends a stopped process as it would a running one, with
 no core dump; the kernel then lets go of the keyboard and destroys the virtual keyboard, releasing
 Shift, and systemd starts the helper again.
 """
@@ -42,8 +42,8 @@ def run(ground: "Ground") -> None:
 		assert [r["value"] for r in release] == [1, 0], release
 		ground.machine.log(f"Shift released by the kernel {release[1]['t'] - stopped:.2f} s after the stop")
 		ground.waitForHelperLog("Watchdog timeout", mark)
-		ground.waitForHelperLog("with signal SIGABRT", mark)
-		ground.waitForHelperLog("status=6/ABRT", mark)
+		ground.waitForHelperLog("with signal SIGKILL", mark)
+		ground.waitForHelperLog("status=9/KILL", mark)
 		for t, line in ground.helperLog(mark):
 			ground.machine.log(f"{t - stopped:+.3f} s: {line}")
 		# The watchdog's two seconds count from the last time the loop fed it, before the stop.

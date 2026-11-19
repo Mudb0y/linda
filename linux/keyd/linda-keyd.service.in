@@ -42,9 +42,11 @@ RuntimeDirectoryMode=0755
 
 # Its loop feeds the watchdog every half second, holding a keyboard or not. Its own watchdog thread lets
 # go and ends it after one second without progress; this is for when that thread cannot run either,
-# as when the process is stopped, which SIGABRT ends as it would a running one. SIGKILL follows a
-# second later for a process that SIGABRT did not end.
+# as when the process is stopped. SIGKILL rather than systemd's SIGABRT, which the kernel would make
+# a core dump of, piped to systemd-coredump whatever LimitCORE says, while the dying helper still held
+# its grabs; SIGKILL ends a stopped process too (WatchdogSignal= is in systemd since 240).
 WatchdogSec=2
+WatchdogSignal=SIGKILL
 TimeoutAbortSec=1
 Restart=always
 RestartSec=1

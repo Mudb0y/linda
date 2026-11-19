@@ -22,7 +22,7 @@ def run(ground: "Ground") -> None:
 			line.split("=", 1)
 			for line in ground.shell(
 				f"systemctl show {UNIT} -p Type -p User -p Group -p SupplementaryGroups -p Restart -p WatchdogUSec "
-				"-p TimeoutAbortUSec -p OOMScoreAdjust -p LimitCORE -p NoNewPrivileges -p CapabilityBoundingSet "
+				"-p TimeoutAbortUSec -p WatchdogSignal -p OOMScoreAdjust -p LimitCORE -p NoNewPrivileges -p CapabilityBoundingSet "
 				"-p RuntimeDirectory -p UnitFileState -p NotifyAccess"
 			).splitlines()
 		)
@@ -35,6 +35,7 @@ def run(ground: "Ground") -> None:
 			"Restart": "always",
 			"WatchdogUSec": "2s",
 			"TimeoutAbortUSec": "1s",
+			"WatchdogSignal": "9",
 			"OOMScoreAdjust": "-900",
 			"LimitCORE": "0",
 			"NoNewPrivileges": "yes",
@@ -62,6 +63,8 @@ def run(ground: "Ground") -> None:
 		primaryGid = ground.shell("id -g linda-keyd").strip()
 		assert sorted(status["Groups"].split()) == sorted([inputGid, primaryGid]), status["Groups"]
 		assert int(status["CapEff"], 16) == 0 and int(status["CapPrm"], 16) == 0, status["CapEff"]
+		# Not dumpable, so its /proc entries are root's.
+		assert ground.shell(f"stat -c %U /proc/{pid}/environ").strip() == "root"
 		# /dev/uinput it has from systemd, opened, with no access of its own; its standard input and
 		# output are /dev/null after it has taken the device to a descriptor of its own.
 		held = ground.shell(f"ls -l /proc/{pid}/fd | grep -c ' -> /dev/uinput$' || true").strip()

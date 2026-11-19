@@ -14,8 +14,8 @@ use std::mem::{ManuallyDrop, size_of};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering::SeqCst};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -108,17 +108,105 @@ fn ioctl_read(fd: BorrowedFd<'_>, op: Opcode, buf: &mut [u8]) -> io::Result<c_in
     }
 }
 
-/// The table of grabbed devices that the watchdog thread reads. Lock-free, so that a loop stopped
-/// anywhere, even between the two halves of a grab, cannot keep the watchdog from it.
+/// The table of grabbed devices, and the virtual keyboard, that the watchdog thread reads. Lock-free,
+/// so that a loop stopped anywhere, even between the two halves of a grab, cannot keep the watchdog
+/// from it.
 pub struct Grabs {
     slots: [AtomicI32; MAX_GRABBED],
+    /// The virtual keyboard, while it exists.
+    virt: AtomicI32,
+    release: Release,
+}
+
+/// What the watchdog has done when it fires: one worker for each place in the table and one for the
+/// virtual keyboard, started with the table and waiting, so that firing neither allocates nor starts
+/// a thread, which a stalled loop holding the allocator's lock could prevent. Each acts on its own
+/// place alone: a revoke waits for the device's lock in the kernel, which the loop holds while it is
+/// in a call on that keyboard, and a loop stuck in one must keep the watchdog from that keyboard
+/// alone, and from ending the helper, which closes them all, not at all.
+struct Release {
+    fired: Mutex<bool>,
+    go: Condvar,
+    /// How many workers have acted.
+    done: AtomicUsize,
+    /// Every worker was started; otherwise firing does all in turn on the watchdog thread.
+    workers: AtomicBool,
 }
 
 impl Grabs {
-    fn new() -> Grabs {
-        Grabs {
+    fn new() -> Arc<Grabs> {
+        Grabs::with(revoke, destroy)
+    }
+
+    /// With what revoking a keyboard and destroying the virtual keyboard are, for the tests.
+    fn with(revoke: fn(RawFd), destroy: fn(RawFd)) -> Arc<Grabs> {
+        let g = Arc::new(Grabs {
             slots: std::array::from_fn(|_| AtomicI32::new(-1)),
+            virt: AtomicI32::new(-1),
+            release: Release {
+                fired: Mutex::new(false),
+                go: Condvar::new(),
+                done: AtomicUsize::new(0),
+                workers: AtomicBool::new(true),
+            },
+        });
+        for place in 0..=MAX_GRABBED {
+            let me = g.clone();
+            let started = thread::Builder::new()
+                .name("release".into())
+                .stack_size(64 * 1024)
+                .spawn(move || {
+                    let mut fired = me.release.fired.lock().unwrap_or_else(|e| e.into_inner());
+                    while !*fired {
+                        fired = me.release.go.wait(fired).unwrap_or_else(|e| e.into_inner());
+                    }
+                    drop(fired);
+                    me.act(place, revoke, destroy);
+                    me.release.done.fetch_add(1, SeqCst);
+                });
+            if started.is_err() {
+                g.release.workers.store(false, SeqCst);
+            }
         }
+        g
+    }
+
+    fn act(&self, place: usize, revoke: fn(RawFd), destroy: fn(RawFd)) {
+        match self.slots.get(place) {
+            Some(s) => {
+                let fd = s.load(SeqCst);
+                if fd >= 0 {
+                    revoke(fd);
+                }
+            }
+            None => {
+                let fd = self.virt.load(SeqCst);
+                if fd >= 0 {
+                    destroy(fd);
+                }
+            }
+        }
+    }
+
+    /// Revokes every keyboard in the table and destroys the virtual keyboard, waiting for them at
+    /// most `within`.
+    fn release(&self, within: Duration) {
+        if !self.release.workers.load(SeqCst) {
+            for place in 0..=MAX_GRABBED {
+                self.act(place, revoke, destroy);
+            }
+            return;
+        }
+        *self.release.fired.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.release.go.notify_all();
+        let end = Instant::now() + within;
+        while self.release.done.load(SeqCst) <= MAX_GRABBED && Instant::now() < end {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn set_virtual(&self, fd: RawFd) {
+        self.virt.store(fd, SeqCst);
     }
 
     fn register(&self, fd: RawFd) -> Option<usize> {
@@ -130,45 +218,21 @@ impl Grabs {
     fn unregister(&self, slot: usize) {
         self.slots[slot].store(-1, SeqCst);
     }
-    /// Revokes every device in the table, each on a thread of its own, and waits for them at most
-    /// `within`. A revoke waits for the device's lock in the kernel, which the loop holds while it
-    /// is in a call on that keyboard; a loop stuck in one must keep the watchdog from that keyboard
-    /// alone, and from ending the helper, which closes them all, not at all.
-    fn release_with(&self, revoke: fn(RawFd), within: Duration) {
-        let (done, finished) = mpsc::channel();
-        let mut started = 0;
-        for s in &self.slots {
-            let fd = s.load(SeqCst);
-            if fd < 0 {
-                continue;
-            }
-            let done = done.clone();
-            let spawned = thread::Builder::new().name("revoke".into()).spawn(move || {
-                revoke(fd);
-                let _ = done.send(());
-            });
-            match spawned {
-                Ok(_) => started += 1,
-                Err(_) => revoke(fd),
-            }
-        }
-        let end = Instant::now() + within;
-        for _ in 0..started {
-            if finished
-                .recv_timeout(end.saturating_duration_since(Instant::now()))
-                .is_err()
-            {
-                return;
-            }
-        }
-    }
 }
 
 fn revoke(fd: RawFd) {
     let _ = ioctl_value(fd, EVIOCREVOKE, 0);
 }
 
-/// The longest the watchdog waits for the keyboards to be revoked before it ends the helper anyway.
+/// The kernel releases every key the virtual keyboard holds down as it destroys it, which it does
+/// as the helper ends only once every thread has, a loop stuck in an uninterruptible call among
+/// them: until then a key held down would go on repeating in the desktop.
+fn destroy(fd: RawFd) {
+    let _ = ioctl_value(fd, UI_DEV_DESTROY, 0);
+}
+
+/// The longest the watchdog waits for the keyboards to be revoked and the virtual keyboard
+/// destroyed before it ends the helper anyway.
 const REVOKE_WAIT: Duration = Duration::from_millis(100);
 
 impl Guard for Grabs {
@@ -180,7 +244,7 @@ impl Guard for Grabs {
     /// comes back to life cannot go on with it. A device is registered before it is grabbed and
     /// unregistered only after it is let go and before it is closed, so every grab is in the table.
     fn release_all(&self) {
-        self.release_with(revoke, REVOKE_WAIT);
+        self.release(REVOKE_WAIT);
     }
 }
 
@@ -199,7 +263,7 @@ impl Evdev {
         Evdev {
             own: None,
             inotify: None,
-            grabs: Arc::new(Grabs::new()),
+            grabs: Grabs::new(),
             uinput: Arc::new(Mutex::new(None)),
         }
     }
@@ -461,8 +525,10 @@ impl Devices for Evdev {
         }
         ioctl_value(fd, UI_DEV_CREATE, 0)?;
         // From here the device exists, and dropping the file destroys it.
+        self.grabs.set_virtual(file.as_raw_fd());
         let mut v = EvVirtual {
             file,
+            grabs: self.grabs.clone(),
             kept: self.uinput.clone(),
             dir: PathBuf::new(),
             leds: 0,
@@ -674,6 +740,8 @@ impl Drop for EvKeyboard {
 
 pub struct EvVirtual {
     file: File,
+    /// Where the watchdog finds it.
+    grabs: Arc<Grabs>,
     /// The kept /dev/uinput this is a copy of.
     kept: Arc<Mutex<Option<File>>>,
     /// Its directory in sysfs, inputN.
@@ -743,6 +811,7 @@ impl Drop for EvVirtual {
     /// The kernel releases every key the device still holds down as it destroys it. When it will
     /// not destroy it on request, the kept file goes too, and closing the last copy destroys it.
     fn drop(&mut self) {
+        self.grabs.set_virtual(-1);
         if ioctl_value(self.file.as_raw_fd(), UI_DEV_DESTROY, 0).is_err() {
             log!("the virtual keyboard would not be destroyed, so /dev/uinput is closed");
             drop(self.kept.lock().unwrap_or_else(|e| e.into_inner()).take());
@@ -875,22 +944,26 @@ mod tests {
 
     #[test]
     fn a_keyboard_whose_revoke_hangs_keeps_the_watchdog_from_no_other() {
-        let g = Grabs::new();
-        for fd in [3000, 3001, 3002] {
-            g.register(fd).unwrap();
-        }
         fn revoke(fd: RawFd) {
             if fd == 3000 {
                 thread::sleep(Duration::from_secs(10));
             }
             REVOKED.lock().unwrap().push(fd);
         }
+        fn destroy(fd: RawFd) {
+            REVOKED.lock().unwrap().push(-fd);
+        }
+        let g = Grabs::with(revoke, destroy);
+        for fd in [3000, 3001, 3002] {
+            g.register(fd).unwrap();
+        }
+        g.set_virtual(4000);
         let started = Instant::now();
-        g.release_with(revoke, REVOKE_WAIT);
+        g.release(REVOKE_WAIT);
         let took = started.elapsed();
         assert!(took < REVOKE_WAIT + Duration::from_millis(400), "{took:?}");
         let mut revoked = REVOKED.lock().unwrap().clone();
         revoked.sort();
-        assert_eq!(revoked, vec![3001, 3002]);
+        assert_eq!(revoked, vec![-4000, 3001, 3002]);
     }
 }
