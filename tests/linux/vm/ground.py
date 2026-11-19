@@ -696,10 +696,11 @@ def main(
 		ground.boot()
 		module.run(ground)
 		if ground.lindaStarted:
-			errors = _loadFile("harness", harness).nvdaLogErrorRecords(
-				ground.shell(f"cat {LINDA_DIRECTORY}/nvda.log")
+			errors = _loadFile("harness", harness).nvdaLogErrorRecords(ground.lindaLog())
+			whole = [record for _t, record in ground.lindaLogRecords("") if record.startswith(tuple(errors))]
+			assert not errors, f"Linda's log holds {len(errors)} records at ERROR or above:\n" + "\n".join(
+				whole or errors
 			)
-			assert not errors, f"Linda's log holds {len(errors)} records at ERROR or above: {errors}"
 	except BaseException:
 		machine.log(ground.diagnostics())
 		raise
