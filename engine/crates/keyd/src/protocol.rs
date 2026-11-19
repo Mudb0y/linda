@@ -81,7 +81,29 @@
 //! other type is malformed, and the helper ends the connection over it. A client should still
 //! ignore a helper message of a type it does not know.
 //!
-//! Version 1 defines no feature. The first planned is [`FEATURE_TYPING`], for Remote Access and
+//! Version 1 defines one feature, [`FEATURE_WAIT`]. With it granted, the client may answer a press
+//! still waiting for its verdict with VERDICT [`VERDICT_WAIT`], which holds it for longer: the
+//! press's bound becomes [`VERDICT_WAIT_TIMEOUT`] from its reading instead of [`VERDICT_TIMEOUT`],
+//! for when the client cannot yet tell whether it wants the key, as when its reader has not yet
+//! followed the focus. Everything else about the press is as before:
+//! - Only the first WAIT for a press counts. A WAIT for a press that is not waiting (answered,
+//!   passed on at its bound, or let go of) changes nothing, as a late VERDICT does not.
+//! - The press is still answered with keep or pass, at any time before its longer bound; without
+//!   an answer by then it is passed on and EXPIRED is sent, as at the usual bound.
+//! - The order rule holds: keys read after it wait behind it, each with its own bound from its own
+//!   reading, and each may itself be answered, WAIT included, while it waits.
+//! - WAIT is no answer to the rule of UNANSWERED_SPAN: a press passed on at its bound after a WAIT
+//!   counts as unanswered, so a client that answers only WAIT is dropped by it as one that says
+//!   nothing is, when it holds up typing for UNANSWERED_SPAN.
+//! - The emergency chord is read as each key comes, before it goes in line, so no press held by
+//!   WAIT delays it.
+//! - Heartbeats and every other bound are as before.
+//!
+//! A client that sends VERDICT 2 without FEATURE_WAIT granted is dropped as for any malformed
+//! message. A helper without the feature grants it not, and the client answers within
+//! VERDICT_TIMEOUT as it would anyway.
+//!
+//! The next planned is [`FEATURE_TYPING`], for Remote Access and
 //! NVDA's own sent keys: a client message TYPE with a code, a value and a flag, which the helper
 //! puts in line as a key of the pseudo-device [`TYPED_DEVICE`] and sends back as KEY with the flag
 //! [`KEY_TYPED`], to be decided as any key is, or with its flag set, puts straight on the virtual
@@ -110,6 +132,15 @@ pub const PROTOCOL_VERSION: u16 = 1;
 /// not merely busy. Each key's bound runs from its own reading, so no key ever waits longer than
 /// this however many are queued before it.
 pub const VERDICT_TIMEOUT: Duration = Duration::from_millis(100);
+/// The longest the helper holds a press the client answered with WAIT, from the press's reading,
+/// before it passes the key on by itself. The X route holds a key up to 100 ms for NVDA's answer and
+/// up to half a second for NVDA's focus to follow the X focus into a document (DOCUMENT_WAIT in
+/// source/linuxPlatform/keys/x11.py); the client's own clock starts a little after the helper read
+/// the key, and 600 ms covers both with room. It is also well inside the watchdog's bound on a key
+/// in line, STALL_LIMIT and VERDICT_TIMEOUT from its reading, so that a held key is never taken for
+/// a stall. Not carried in WELCOME, whose layout is fixed in version 1: a client that asks for
+/// FEATURE_WAIT takes it from here.
+pub const VERDICT_WAIT_TIMEOUT: Duration = Duration::from_millis(600);
 /// The longest the client may stay silent once admitted. Half a second is the interval Linda's X
 /// route feeds its own guard at (HEARTBEAT_INTERVAL in x11.py), and cheap at four messages to the
 /// timeout.
@@ -219,6 +250,9 @@ pub const MAX_MESSAGE: usize = 256;
 
 /// Not defined in version 1; reserved for typing keys through the helper.
 pub const FEATURE_TYPING: u32 = 1;
+/// VERDICT [`VERDICT_WAIT`]: the client may hold a press for its answer up to
+/// [`VERDICT_WAIT_TIMEOUT`] instead of [`VERDICT_TIMEOUT`].
+pub const FEATURE_WAIT: u32 = 2;
 /// The features this helper grants.
 pub const FEATURES_KNOWN: u32 = 0;
 /// The device number of keys the client types, once typing exists. Real keyboards are numbered as
@@ -249,8 +283,11 @@ pub const HELLO: u8 = 0x01;
 pub const START: u8 = 0x02;
 /// `<B`.
 pub const STOP: u8 = 0x03;
-/// `<BQB`: type, sequence number of the press, 1 to keep it or 0 to pass it on.
+/// `<BQB`: type, sequence number of the press, 1 to keep it or 0 to pass it on; with
+/// [`FEATURE_WAIT`], [`VERDICT_WAIT`] to hold it longer.
 pub const VERDICT: u8 = 0x04;
+/// The value of VERDICT that holds a press until [`VERDICT_WAIT_TIMEOUT`], with [`FEATURE_WAIT`].
+pub const VERDICT_WAIT: u8 = 2;
 /// `<BI`: type, a counter of the client's choosing, echoed back.
 pub const HEARTBEAT: u8 = 0x05;
 
@@ -368,11 +405,23 @@ pub enum Ignored {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FromClient {
-    Hello { version: u16, features: u32 },
+    Hello {
+        version: u16,
+        features: u32,
+    },
     Start,
     Stop,
-    Verdict { seq: u64, keep: bool },
-    Heartbeat { counter: u32 },
+    Verdict {
+        seq: u64,
+        keep: bool,
+    },
+    /// VERDICT [`VERDICT_WAIT`], once [`FEATURE_WAIT`] is granted.
+    Wait {
+        seq: u64,
+    },
+    Heartbeat {
+        counter: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -600,6 +649,11 @@ impl FromClient {
                 b.extend_from_slice(&seq.to_le_bytes());
                 b.push(u8::from(*keep));
             }
+            FromClient::Wait { seq } => {
+                b.push(VERDICT);
+                b.extend_from_slice(&seq.to_le_bytes());
+                b.push(VERDICT_WAIT);
+            }
             FromClient::Heartbeat { counter } => {
                 b.push(HEARTBEAT);
                 b.extend_from_slice(&counter.to_le_bytes());
@@ -629,12 +683,12 @@ impl FromClient {
             VERDICT => {
                 r.fixed("VERDICT", 10)?;
                 let seq = r.u64();
-                let keep = match r.u8() {
-                    0 => false,
-                    1 => true,
-                    v => return Err(Malformed(format!("VERDICT {v} is neither 0 nor 1"))),
-                };
-                FromClient::Verdict { seq, keep }
+                match r.u8() {
+                    0 => FromClient::Verdict { seq, keep: false },
+                    1 => FromClient::Verdict { seq, keep: true },
+                    VERDICT_WAIT => FromClient::Wait { seq },
+                    v => return Err(Malformed(format!("VERDICT {v} is not 0, 1 or 2"))),
+                }
             }
             HEARTBEAT => {
                 r.fixed("HEARTBEAT", 5)?;
@@ -826,6 +880,7 @@ mod tests {
                 seq: 1,
                 keep: false,
             },
+            FromClient::Wait { seq: 3 },
             FromClient::Heartbeat { counter: 1 },
         ] {
             assert_eq!(FromClient::decode(&m.encode()), Ok(m.clone()), "{m:?}");
@@ -855,6 +910,8 @@ mod tests {
         assert_eq!(hello.encode(), vec![HELLO, 1, 0, 0, 0, 0, 0]);
         let verdict = FromClient::Verdict { seq: 2, keep: true };
         assert_eq!(verdict.encode(), vec![VERDICT, 2, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let wait = FromClient::Wait { seq: 2 };
+        assert_eq!(wait.encode(), vec![VERDICT, 2, 0, 0, 0, 0, 0, 0, 0, 2]);
     }
 
     #[test]
@@ -880,7 +937,7 @@ mod tests {
             (&[KEY], "unknown message type 0x83"),
             (&[START, 0], "START of 2 bytes"),
             (&[HELLO, 1, 0], "HELLO of 3 bytes"),
-            (&[VERDICT, 1, 0, 0, 0, 0, 0, 0, 0, 2], "neither 0 nor 1"),
+            (&[VERDICT, 1, 0, 0, 0, 0, 0, 0, 0, 3], "not 0, 1 or 2"),
             (&[HEARTBEAT, 1, 2, 3], "HEARTBEAT of 4 bytes"),
         ] {
             let e = FromClient::decode(m).unwrap_err();

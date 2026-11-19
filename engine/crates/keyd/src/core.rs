@@ -650,6 +650,9 @@ impl<D: Devices> Core<D> {
                 }
             }
             FromClient::Verdict { seq, keep } => self.verdict(seq, keep, now),
+            FromClient::Wait { .. } => {
+                self.drop_later(Goodbye::Malformed, "WAIT without FEATURE_WAIT".into())
+            }
             FromClient::Heartbeat { counter } => {
                 self.send_client(ToClient::HeartbeatEcho { counter })
             }
@@ -1379,6 +1382,7 @@ fn name(m: &FromClient) -> &'static str {
         FromClient::Start => "START",
         FromClient::Stop => "STOP",
         FromClient::Verdict { .. } => "VERDICT",
+        FromClient::Wait { .. } => "WAIT",
         FromClient::Heartbeat { .. } => "HEARTBEAT",
     }
 }
