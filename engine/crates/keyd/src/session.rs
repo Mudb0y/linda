@@ -306,7 +306,8 @@ async fn front(c: &Connection) -> zbus::Result<Front> {
     }
     let (uid, _): (u32, OwnedObjectPath) =
         get(c, path.as_str(), SESSION, "User").await?.try_into()?;
-    Ok(Front::Session { id, uid })
+    let vt: u32 = get(c, path.as_str(), SESSION, "VTNr").await?.try_into()?;
+    Ok(Front::Session { id, uid, vt })
 }
 
 fn error_name(e: &zbus::Error) -> Option<&str> {
@@ -454,6 +455,7 @@ mod tests {
                 front: Front::Session {
                     id: "2".into(),
                     uid: 1000,
+                    vt: 7,
                 },
                 allowed: Ok(true),
                 asked_polkit: false,
@@ -528,6 +530,7 @@ mod tests {
                     f.front = Front::Session {
                         id: "3".into(),
                         uid: 1000,
+                        vt: 2,
                     }
                 }),
             ),

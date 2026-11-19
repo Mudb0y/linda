@@ -203,7 +203,18 @@ impl T {
 }
 
 fn front(id: &str, uid: u32) -> Front {
-    Front::Session { id: id.into(), uid }
+    on_console(id, uid, X_CONSOLE)
+}
+
+/// The console an X session is on, by logind's word, unless a test says otherwise.
+const X_CONSOLE: u32 = 7;
+
+fn on_console(id: &str, uid: u32, vt: u32) -> Front {
+    Front::Session {
+        id: id.into(),
+        uid,
+        vt,
+    }
 }
 
 fn released(reason: Released) -> ToClient {
@@ -1203,7 +1214,7 @@ impl T {
 #[test]
 fn a_switch_of_consoles_lets_go_before_logind_says_so_and_only_logind_grabs_again() {
     let (mut t, k) = T::capturing();
-    t.console(1);
+    t.console(X_CONSOLE);
     assert!(t.w.grabbed(k));
     t.press(k, KEY_LEFTSHIFT);
     let seq = t.last_seq();
@@ -1221,7 +1232,7 @@ fn a_switch_of_consoles_lets_go_before_logind_says_so_and_only_logind_grabs_agai
     t.logind(Front::Nobody);
     assert!(!t.w.is_open(k));
     // The kernel switches back: not enough on its own.
-    t.console(1);
+    t.console(X_CONSOLE);
     t.pass(Duration::from_secs(1));
     assert!(!t.w.is_open(k), "grabbed again on the kernel's word alone");
     t.w.release(k, KEY_LEFTSHIFT);
@@ -1232,10 +1243,10 @@ fn a_switch_of_consoles_lets_go_before_logind_says_so_and_only_logind_grabs_agai
 #[test]
 fn a_switch_away_and_back_before_logind_speaks_grabs_again_when_it_does() {
     let (mut t, k) = T::capturing();
-    t.console(1);
+    t.console(X_CONSOLE);
     t.console(3);
     t.assert_let_go();
-    t.console(1);
+    t.console(X_CONSOLE);
     assert!(!t.w.is_open(k));
     // logind, asked again, names the client's session, which the kernel agrees is in front.
     t.logind(front(SESSION, 1000));

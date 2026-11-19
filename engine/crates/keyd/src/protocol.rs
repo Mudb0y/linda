@@ -283,7 +283,7 @@ pub enum Released {
     /// The emergency chord.
     Emergency = 2,
     /// The client's session is no longer the one in front. The helper lets go the moment the
-    /// kernel switches consoles away from the one that was in front when logind last spoke, before
+    /// kernel puts in front another console than that of the session logind last named, before
     /// logind has said what changed, so that nothing typed on another console, a password perhaps,
     /// comes to the client. It captures again by itself only once logind says the client's session
     /// is in front, never on the kernel's word alone.

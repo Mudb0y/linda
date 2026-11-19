@@ -65,6 +65,7 @@ impl Helper {
         notices.post(Notice::Front(Front::Session {
             id: SESSION.into(),
             uid,
+            vt: 7,
         }));
         let thread = Some(thread::spawn(move || server.run()));
         Helper {

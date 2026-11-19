@@ -52,6 +52,8 @@ pub enum Front {
     Session {
         id: String,
         uid: u32,
+        /// The console the session is on, VTNr by logind's word; 0 when it is on none.
+        vt: u32,
     },
 }
 
@@ -168,10 +170,8 @@ pub struct Core<D: Devices> {
     front: Front,
     /// The console the kernel says is in front, N of ttyN in /sys/class/tty/tty0/active.
     console: Option<u32>,
-    /// The console that was in front when logind last said which session is.
-    front_console: Option<u32>,
-    /// The kernel has put another console in front since logind last said which session is, and
-    /// logind has said nothing since that agrees with the kernel. Nothing is captured meanwhile.
+    /// The kernel has put another console in front than the one of the session logind last named,
+    /// and logind has said nothing since. Nothing is captured meanwhile.
     console_moved: bool,
     /// The run of unanswered presses, by when its first and its last press were read, as
     /// UNANSWERED_SPAN in the protocol defines it.
@@ -204,7 +204,6 @@ impl<D: Devices> Core<D> {
             asking: BTreeSet::new(),
             front: Front::Unknown,
             console: None,
-            front_console: None,
             console_moved: false,
             unanswered: None,
             drop_pending: None,
@@ -439,13 +438,7 @@ impl<D: Devices> Core<D> {
 
     /// What logind says is in front, each time it is asked or tells of a change.
     pub fn front_changed(&mut self, front: Front, now: Instant) {
-        // logind learns of a switch of consoles after the kernel has made it: an answer naming the
-        // session it named before, while another console is in front, is from before the switch.
-        let stale = self.console_moved && front == self.front && self.console != self.front_console;
-        if !stale {
-            self.console_moved = false;
-            self.front_console = self.console;
-        }
+        self.console_moved = false;
         if front != self.front {
             log!("in front on seat0: {front:?}");
             self.front = front;
@@ -462,20 +455,35 @@ impl<D: Devices> Core<D> {
         self.settle(now);
     }
 
-    /// The kernel has put console `n` in front. A console other than the one logind last spoke of
-    /// means the session in front has changed, whatever logind has yet to say: the helper lets go
-    /// at once, and captures again only once logind says which session is in front.
+    /// The kernel has put console `n` in front. A console other than that of the session logind
+    /// last named means the session in front has changed, whatever logind has yet to say: the
+    /// helper lets go at once, and captures again only once logind speaks again.
     pub fn console_changed(&mut self, n: u32, now: Instant) {
         self.console = Some(n);
-        match self.front_console {
-            None => self.front_console = Some(n),
-            Some(c) if c != n && !self.console_moved => {
-                log!("console {n} is in front, before logind has said so");
-                self.console_moved = true;
-            }
-            _ => {}
+        if let Front::Session { vt, .. } = self.front
+            && vt != n
+            && !self.console_moved
+        {
+            log!("console {n} is in front, before logind has said so");
+            self.console_moved = true;
         }
         self.settle(now);
+    }
+
+    /// The session logind last named as in front, while the kernel agrees: it has put no other
+    /// console in front since, and the console in front is the session's own. logind learns of a
+    /// switch of consoles after the kernel has made it, and the console thread and the logind
+    /// thread may be heard in either order, so an answer is judged by the console logind places
+    /// its session on, never by when it came.
+    fn session_in_front(&self) -> Option<&str> {
+        match &self.front {
+            Front::Session { id, vt, .. }
+                if !self.console_moved && self.console.is_none_or(|c| c == *vt) =>
+            {
+                Some(id)
+            }
+            _ => None,
+        }
     }
 
     pub fn keyboard_ready(&mut self, n: u32, now: Instant) {
@@ -768,10 +776,10 @@ impl<D: Devices> Core<D> {
     fn reconcile(&mut self, now: Instant) {
         let wanted = self.client.as_ref().is_some_and(|c| c.wants);
         let in_front = wanted
-            && !self.console_moved
-            && self.client.as_ref().is_some_and(
-                |c| matches!(&self.front, Front::Session { id, .. } if *id == c.session),
-            );
+            && self
+                .client
+                .as_ref()
+                .is_some_and(|c| self.session_in_front() == Some(c.session.as_str()));
         if !in_front {
             if self.capturing {
                 let why = if !wanted {
