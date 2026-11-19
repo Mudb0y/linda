@@ -1878,7 +1878,6 @@ const DESKTOP_REPEAT_DELAY: Duration = Duration::from_millis(500);
 /// the desktop repeats it: Tab pressed once moves the focus several times, Enter sends twice. Without
 /// WAIT a release waits at most VERDICT_TIMEOUT, well under any repeat delay.
 #[test]
-#[ignore = "second review: fails while the fault stands"]
 fn fault_a_key_let_go_of_is_not_held_down_past_the_repeat_delay_behind_a_wait() {
     let (mut t, k) = T::waiting();
     t.press(k, KEY_TAB);
@@ -1962,4 +1961,118 @@ fn fault_a_key_pressed_after_a_loss_of_events_is_not_lost() {
         keys.contains(&(KEY_LEFTSHIFT, KEY_PRESS)),
         "Shift, pressed after the loss and read in order, never reached the client: {keys:?}"
     );
+}
+
+// Releases that go out ahead of presses still waiting.
+
+impl T {
+    /// A press of `code` passed on at once, and on the virtual keyboard.
+    fn pressed_out(&mut self, k: u32, code: u16) {
+        self.press(k, code);
+        let seq = self.last_seq();
+        self.verdict(seq, false);
+        assert!(self.w.virtual_down().contains(code));
+    }
+
+    /// A press of `code` answered WAIT; its sequence number.
+    fn held(&mut self, k: u32, code: u16) -> u64 {
+        self.press(k, code);
+        let seq = self.last_seq();
+        self.wait(seq);
+        seq
+    }
+}
+
+#[test]
+fn a_release_behind_a_waiting_press_is_still_told_to_the_client_in_order() {
+    let (mut t, k) = T::waiting();
+    t.pressed_out(k, KEY_TAB);
+    t.keys();
+    t.press(k, KEY_A);
+    t.release(k, KEY_TAB);
+    t.release(k, KEY_A);
+    let told: Vec<(u16, u8)> = t.keys().iter().map(|k| (k.code, k.value)).collect();
+    assert_eq!(
+        told,
+        vec![
+            (KEY_A, KEY_PRESS),
+            (KEY_TAB, KEY_RELEASE),
+            (KEY_A, KEY_RELEASE)
+        ]
+    );
+    assert!(t.w.virtual_down().is_empty(), "Tab waited behind A");
+    assert_eq!(t.w.emitted(), vec![(KEY_TAB, 1), (KEY_TAB, 0)]);
+}
+
+#[test]
+fn a_key_pressed_again_while_the_line_waits_has_its_second_release_wait_behind_its_second_press() {
+    let (mut t, k) = T::waiting();
+    t.pressed_out(k, KEY_TAB);
+    let a = t.held(k, KEY_A);
+    t.release(k, KEY_TAB);
+    t.press(k, KEY_TAB);
+    let again = t.last_seq();
+    t.release(k, KEY_TAB);
+    assert_eq!(t.w.emitted(), vec![(KEY_TAB, 1), (KEY_TAB, 0)]);
+    t.verdict(again, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_TAB, 1), (KEY_TAB, 0)]);
+    t.verdict(a, false);
+    assert_eq!(
+        t.w.emitted(),
+        vec![
+            (KEY_TAB, 1),
+            (KEY_TAB, 0),
+            (KEY_A, 1),
+            (KEY_TAB, 1),
+            (KEY_TAB, 0)
+        ]
+    );
+}
+
+#[test]
+fn a_release_whose_press_is_still_in_line_waits_with_it() {
+    let (mut t, k) = T::waiting();
+    let a = t.held(k, KEY_A);
+    t.press(k, KEY_T);
+    let tee = t.last_seq();
+    t.verdict(tee, false);
+    t.release(k, KEY_T);
+    assert!(t.w.emitted().is_empty());
+    t.verdict(a, true);
+    assert_eq!(t.w.emitted(), vec![(KEY_T, 1), (KEY_T, 0)]);
+}
+
+#[test]
+fn a_modifiers_release_keeps_its_place_and_a_kept_keys_never_goes_out() {
+    let (mut t, k) = T::waiting();
+    t.pressed_out(k, KEY_LEFTSHIFT);
+    t.press(k, KEY_INSERT);
+    let insert = t.last_seq();
+    t.verdict(insert, true);
+    let a = t.held(k, KEY_A);
+    t.release(k, KEY_LEFTSHIFT);
+    t.release(k, KEY_INSERT);
+    assert_eq!(
+        t.w.emitted(),
+        vec![(KEY_LEFTSHIFT, 1)],
+        "Shift came up ahead of A"
+    );
+    t.verdict(a, false);
+    assert_eq!(
+        t.w.emitted(),
+        vec![(KEY_LEFTSHIFT, 1), (KEY_A, 1), (KEY_LEFTSHIFT, 0)]
+    );
+}
+
+#[test]
+fn letting_go_with_releases_and_presses_queued_leaves_nothing_down() {
+    let (mut t, k) = T::waiting();
+    t.pressed_out(k, KEY_TAB);
+    t.pressed_out(k, KEY_LEFTSHIFT);
+    t.held(k, KEY_A);
+    t.release(k, KEY_TAB);
+    t.press(k, KEY_TAB);
+    t.release(k, KEY_LEFTSHIFT);
+    t.send(FromClient::Stop);
+    t.assert_let_go();
 }

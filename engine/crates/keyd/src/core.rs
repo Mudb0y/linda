@@ -29,7 +29,8 @@ use std::time::{Duration, Instant};
 
 use crate::device::{Devices, Found, GrabError, InputEvent, Keyboard, ReadError, VirtualKeyboard};
 use crate::keys::{
-    Assessment, CHORD, EV_KEY, EV_SYN, KEY_CNT, KeySet, SYN_DROPPED, SYN_REPORT, is_virtual_key,
+    Assessment, CHORD, EV_KEY, EV_SYN, KEY_CNT, KeySet, MODIFIERS, SYN_DROPPED, SYN_REPORT,
+    is_virtual_key,
 };
 use crate::protocol::*;
 
@@ -1378,12 +1379,40 @@ impl<D: Devices> Core<D> {
                 }
             }
         }
+        self.release_early();
         if give_up {
             let why = format!(
                 "presses went unanswered for {} ms",
                 UNANSWERED_SPAN.as_millis()
             );
             self.drop_later(Goodbye::Unanswered, why);
+        }
+    }
+
+    /// Puts out at once the release of a key whose press has gone out, rather than behind presses
+    /// still waiting for their verdict, which may hold the line up to VERDICT_WAIT_TIMEOUT: a key
+    /// held down that long on the virtual keyboard is repeated by the desktop, and Tab pressed once
+    /// moves the focus twice. A release overtaking another key's press changes nothing for a
+    /// program, unless the key is one of the MODIFIERS, which keep their place. A release whose
+    /// own press, or a later press of the same key, is still in line waits for it.
+    fn release_early(&mut self) {
+        let mut waiting: Vec<(u32, u16)> = Vec::new();
+        let mut i = 0;
+        while i < self.line.len() {
+            let e = self.line[i];
+            let key = (e.device, e.code);
+            if e.press {
+                waiting.push(key);
+            } else if !waiting.contains(&key)
+                && !MODIFIERS.contains(&e.code)
+                && self.passed.get(&key) == Some(&true)
+            {
+                self.line.remove(i);
+                self.passed.remove(&key);
+                self.release_virtual(e.code);
+                continue;
+            }
+            i += 1;
         }
     }
 

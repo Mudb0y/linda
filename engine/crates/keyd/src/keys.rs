@@ -38,6 +38,12 @@ pub const LED_KANA: u16 = 4;
 /// The lock lights the virtual keyboard has, and the only ones the helper copies.
 pub const LEDS: [u16; 5] = [LED_NUML, LED_CAPSL, LED_SCROLLL, LED_COMPOSE, LED_KANA];
 
+/// The keys whose release changes what a later key means, which therefore keep their place in line:
+/// both Shifts, Controls, Alts (the right one is AltGr) and Supers, and Caps Lock, which XKB options
+/// often make a Control or a level shift held down like one. The release of any other key whose
+/// press has gone out may overtake presses still waiting for their verdict.
+pub const MODIFIERS: [u16; 9] = [29, 42, 54, 56, 97, 100, 125, 126, KEY_CAPSLOCK];
+
 /// The emergency chord: a key of each of these held down together makes the helper let go of every
 /// keyboard. keyd's panic sequence, which every keyboard has and nothing presses by accident, with
 /// the numpad's Enter as good as the main one, since a hand may find either first.
