@@ -640,6 +640,13 @@ class X11KeySource:
 	def holdKeyboard(self, hold: bool) -> None:
 		self._post(lambda: self._hold(hold))
 
+	def awaitCommands(self, timeout: float) -> bool:
+		"""Wait until the X thread has done what was asked of it before now, up to timeout seconds;
+		whether it has."""
+		done = threading.Event()
+		self._post(done.set)
+		return done.wait(timeout)
+
 	def setCapsLock(self, on: bool) -> None:
 		self._post(lambda: self._setCapsLock(on))
 

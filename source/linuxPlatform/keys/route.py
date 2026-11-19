@@ -54,6 +54,9 @@ DECIDED_GRACE = 0.3
 #: go nowhere. The helper makes it and lets the desktop take it up before it grabs anything, so it is
 #: there already as a rule.
 VIRTUAL_WAIT = 0.5
+#: Seconds the kernel source goes on holding every key, as for input help, after the hold ends, for
+#: the X source to let go of the keyboard it grabbed for it.
+HOLD_RELEASE_WAIT = 0.2
 
 
 class RoutedKeySource:
@@ -223,8 +226,16 @@ class RoutedKeySource:
 	def holdKeyboard(self, hold: bool) -> None:
 		with self._lock:
 			self._hold = hold
-			for source in self._both():
-				source.holdKeyboard(hold)
+			x, kernel = self._x, self._kernel
+			if x is not None:
+				x.holdKeyboard(hold)
+				if not hold and kernel is not None:
+					# The kernel source passes keys on again the moment it is told, and a press that reached
+					# the X display before the X source had let go of the keyboard went to the X source's
+					# grab, the application having its release alone.
+					x.awaitCommands(HOLD_RELEASE_WAIT)
+			if kernel is not None:
+				kernel.holdKeyboard(hold)
 
 	# What acts on the X display as a whole is the X source's, which runs for NVDA's whole life: a key
 	# sent through XTEST comes back to it, which knows its own, and to no other. The kernel source sends

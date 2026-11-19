@@ -736,3 +736,37 @@ def test_keyPassedOnByTheHelperAfterItsReleaseReachedTheApplication(tmp_path: Pa
 	assert value["kernel"] and value["expired"] == 1, value
 	assert value["window"] == [[110, True], [110, False]], value
 	assert value["releases"] == [True], f"NVDA was told Insert never reached the application: {value}"
+
+
+#: Input help ends while the X thread is slow to let go of the keyboard it grabbed for it, and b is
+#: typed at once: what the window had.
+HOLD_ENDS_CHILD = r"""
+source = startSource()
+source.holdKeyboard(True)
+time.sleep(0.2)
+hold = source._x._hold
+
+
+def slowHold(wanted):
+	if not wanted:
+		time.sleep(0.05)
+	hold(wanted)
+
+
+source._x._hold = slowHold
+windowKeys()
+source.holdKeyboard(False)
+keyboard.press("b", hold=0.03)
+time.sleep(0.3)
+result = {"kernel": source.isKernel, "window": windowKeys()}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_keyTypedAsInputHelpEndsReachesTheApplicationWhole(tmp_path: Path):
+	value = runKernelChild(tmp_path, HOLD_ENDS_CHILD)
+	assert value["kernel"]
+	assert value["window"] == [[48, True], [48, False]], (
+		f"the press went to the X source's grab of the keyboard, still there: {value}"
+	)
