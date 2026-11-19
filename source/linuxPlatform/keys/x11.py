@@ -434,13 +434,16 @@ RECONNECT_ATTEMPTS = 10
 #: requests the source would have made: release every passive key grab on the root and on the
 #: windows, replay the held press to the application, and let go of the keyboard. The source's next
 #: request would then be numbered wrongly, which is one more reason to close the connection after
-#: them.
+#: them. They end with a change of a property of the root's, which the guard waits to see before it
+#: closes that connection from its own: the X server reads the two connections in no set order, and
+#: closed first, the source's connection took the held press with it, the presses behind it reaching
+#: the application without it.
 GUARD_PROGRAM = r"""
 import json, os, select, struct, sys, time
 socket, root = int(sys.argv[1]), int(sys.argv[2])
 sys.path[:0] = json.loads(sys.argv[3])
 silence = float(sys.argv[4])
-from Xlib import X, display, error
+from Xlib import X, Xatom, display, error
 from Xlib.xobject.resource import Resource
 
 
@@ -453,13 +456,27 @@ def free(windows):
 	)
 	requests += struct.pack("=BBHI", 35, X.ReplayKeyboard, 2, X.CurrentTime)
 	requests += struct.pack("=BxHI", 32, 2, X.CurrentTime)
+	# ChangeProperty of nothing, as a mark that the X server has done the rest.
+	requests += struct.pack("=BBHIIIBxxxI", 18, X.PropModeReplace, 6, root, done, Xatom.STRING, 8, 0)
 	try:
 		os.write(socket, requests)
 	except OSError:
 		pass
 
 
+def awaitDone(deadline):
+	while time.monotonic() < deadline:
+		while connection.pending_events():
+			event = connection.next_event()
+			if event.type == X.PropertyNotify and event.atom == done:
+				return
+		select.select([connection.fileno()], [], [], max(0.0, deadline - time.monotonic()))
+
+
 connection = display.Display()
+done = connection.intern_atom("_LINDA_KEY_GUARD")
+connection.screen().root.change_attributes(event_mask=X.PropertyChangeMask)
+connection.sync()
 guarding, resource, windows, heard, pending = False, 0, [], time.monotonic(), b""
 while True:
 	timeout = max(0.0, heard + silence - time.monotonic()) if guarding and resource else None
@@ -479,6 +496,7 @@ while True:
 	elif guarding and resource:
 		free(windows)
 		try:
+			awaitDone(time.monotonic() + 1)
 			Resource(connection.display, resource).kill_client()
 			connection.sync()
 		except error.XError:
