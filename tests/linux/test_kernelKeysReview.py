@@ -934,3 +934,63 @@ def test_everyReleaseNVDAHasIsItsPresss(tmp_path: Path, route: str):
 	assert value["unmatched"] == [], (
 		f"on the {route} route releases came as other keys than their presses: {value}"
 	)
+
+
+#: As TOP_LEVEL_CHILD, with another program holding h on the top-level window; the focus comes back
+#: to the top-level window from outside, and h and j are typed there: how long after each was typed
+#: NVDA had it.
+REFUSED_ON_TOP_CHILD = r"""
+other = root.create_window(0, 0, 100, 100, 0, app.screen().root_depth, event_mask=X.KeyPressMask)
+other.change_property(pidAtom, Xatom.CARDINAL, 32, [2])
+other.map()
+top = root.create_window(0, 0, 300, 300, 0, app.screen().root_depth, event_mask=X.KeyPressMask)
+top.change_property(pidAtom, Xatom.CARDINAL, 32, [1])
+wmState = app.intern_atom("WM_STATE")
+top.change_property(wmState, wmState, 32, [1, 0])
+top.map()
+page = top.create_window(-1, -1, 1, 1, 0, app.screen().root_depth, event_mask=X.KeyPressMask)
+page.map()
+app.sync()
+holder = display.Display()
+holder.create_resource_object("window", top.id).grab_key(
+	holder.keysym_to_keycode(XK.XK_h), X.AnyModifier, False, X.GrabModeAsync, X.GrabModeAsync
+)
+holder.sync()
+time.sleep(0.2)
+page.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+time.sleep(0.2)
+source = startSource("x11")
+mode["now"] = "browse"
+source.setCapture("browse", 1)
+time.sleep(0.3)
+other.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+time.sleep(0.3)
+top.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+time.sleep(0.3)
+delivered.clear()
+start = len(keyboard.events)
+keyboard.press("h", "j", hold=0.03, gap=0.01)
+time.sleep(0.8)
+typed = {rest[0]: t for t, what, *rest in keyboard.events[start:] if what == "x" and rest[1]}
+late = {}
+for e in presses():
+	evdev = {ord("H"): 35, ord("J"): 36}.get(e["vk"])
+	if evdev in typed:
+		late[chr(e["vk"])] = round(e["t"] - typed[evdev], 3)
+result = {"late": late}
+source.stop()
+keyboard.close()
+holder.close()
+"""
+
+
+def test_keyAnotherProgramHoldsOnTheTopLevelWindowIsNotWaitedFor(tmp_path: Path):
+	value = runKernelChild(tmp_path, REFUSED_ON_TOP_CHILD)
+	assert set(value["late"]) == {"H", "J"}, value
+	assert max(value["late"].values()) < 0.15, (
+		f"a key another program holds on the top-level window was taken for one Linda's grab holds, and NVDA "
+		f"had it, and the key after it, a quarter of a second late: {value}"
+	)

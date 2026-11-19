@@ -1649,7 +1649,7 @@ class X11KeySource:
 	def _captureMatches(self, keycode: int, effective: int) -> bool:
 		if not self._captureFocused:
 			return False
-		masks = self._captured.get(keycode)
+		masks = (self._topGrabbed if self._captureOnTop else self._captured).get(keycode)
 		return masks is not None and effective & 0xFF in masks
 
 	def _applyGrabs(self, nvdaModifierKeys: int, numpadReview: bool) -> None:
@@ -1927,13 +1927,20 @@ class X11KeySource:
 		top = self._captureTop
 		if top is None or self._topGrabbed or not self._captured:
 			return
-		# Another program's grab of the same key there, or the window gone, leaves that key ungrabbed.
-		catcher = error.CatchError(error.BadAccess, error.BadWindow)
+		catchers: list[tuple[int, int, error.CatchError]] = []
 		for keycode, masks in self._captured.items():
 			for mask in masks:
+				catcher = error.CatchError(error.BadAccess, error.BadWindow)
 				top.grab_key(keycode, mask, False, X.GrabModeAsync, X.GrabModeSync, onerror=catcher)
-		self._topGrabbed = {keycode: set(masks) for keycode, masks in self._captured.items()}
-		self._display.flush()
+				catchers.append((keycode, mask, catcher))
+		self._display.sync()
+		# Another program's grab of the same key there, or the window gone, leaves that key ungrabbed, and
+		# a press of it is not one the X server will hold.
+		grabbed: dict[int, set[int]] = {}
+		for keycode, mask, catcher in catchers:
+			if not catcher.get_error():
+				grabbed.setdefault(keycode, set()).add(mask)
+		self._topGrabbed = grabbed
 
 	def _ungrabTop(self) -> None:
 		top, grabbed, self._topGrabbed = self._captureTop, self._topGrabbed, {}
