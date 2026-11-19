@@ -1386,6 +1386,11 @@ impl<D: Devices> Core<D> {
             1 if !kbd.down.contains(code) => {
                 kbd.down.insert(code);
                 if self.chord_held() {
+                    // Never told, so not among the keys told down, whose releases letting go
+                    // tells.
+                    if let Some(kbd) = self.keyboards.get_mut(&n) {
+                        kbd.down.remove(code);
+                    }
                     self.emergency(now);
                     return;
                 }

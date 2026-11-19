@@ -3170,12 +3170,21 @@ fn sequences(keys: &[(u16, usize)], len: usize) -> Vec<Vec<Phys>> {
 /// One sequence of physical key events with a loss: events before `a` read one at a time, those
 /// from `a` to `b` lost, the loss marked, those from `b` to `r` read with the mark, those from `r`
 /// to `q` coming after that read and before the helper asks which keys are down, which throws them
-/// away, and those from `q` on read one at a time; then every key still down let go of. The client
-/// passes every press at once. A key that modifies others counts as down for the client, and on
-/// the virtual keyboard, when a key is told or put out if and only if it was physically down when
-/// that key went down, but for a press the helper made up, which may come in any order with
-/// others it made up. Returns whether the emergency chord let go, or what went wrong.
-fn around_a_loss(seq: &[Phys], a: usize, b: usize, r: usize, q: usize) -> Result<bool, String> {
+/// away, and those from `q` on read one at a time, or in one batch if `batched`, so that the chord
+/// can complete in the middle of a batch whose rest the helper passes on as it lets go; then every
+/// key still down let go of. The client passes every press at once. A key that modifies others
+/// counts as down for the client, and on the virtual keyboard, when a key is told or put out if
+/// and only if it was physically down when that key went down, but for a press the helper made
+/// up, which may come in any order with others it made up. Returns whether the emergency chord
+/// let go, or what went wrong.
+fn around_a_loss(
+    seq: &[Phys],
+    a: usize,
+    b: usize,
+    r: usize,
+    q: usize,
+    batched: bool,
+) -> Result<bool, String> {
     let mut states = Vec::new();
     let mut s = KeySet::new();
     for e in seq {
@@ -3333,9 +3342,21 @@ fn around_a_loss(seq: &[Phys], a: usize, b: usize, r: usize, q: usize) -> Result
     t.core.keyboard_ready(k, t.now);
     t.take();
     look(&mut t, q.checked_sub(1))?;
-    for (i, e) in seq.iter().enumerate().skip(q) {
-        read(&mut t, *e);
-        look(&mut t, Some(i))?;
+    if batched && q < seq.len() {
+        for e in &seq[q..] {
+            match e {
+                Phys::Down(c) => t.w.press(k, *c),
+                Phys::Up(c) => t.w.release(k, *c),
+            }
+        }
+        t.core.keyboard_ready(k, t.now);
+        t.take();
+        look(&mut t, Some(seq.len() - 1))?;
+    } else {
+        for (i, e) in seq.iter().enumerate().skip(q) {
+            read(&mut t, *e);
+            look(&mut t, Some(i))?;
+        }
     }
     let last = seq.len().checked_sub(1);
     for code in s.iter() {
@@ -3355,13 +3376,21 @@ fn around_a_loss(seq: &[Phys], a: usize, b: usize, r: usize, q: usize) -> Result
 
 /// Every placement of a loss, of the end of the read and of the question in each sequence.
 fn every_loss(seqs: &[Vec<Phys>], judge: impl Fn(&[Phys], usize, usize, Result<bool, String>)) {
+    every_loss_read(seqs, false, judge);
+}
+
+fn every_loss_read(
+    seqs: &[Vec<Phys>],
+    batched: bool,
+    judge: impl Fn(&[Phys], usize, usize, Result<bool, String>),
+) {
     for seq in seqs {
         let n = seq.len();
         for a in 0..=n {
             for b in a..=n {
                 for r in b..=n {
                     for q in r..=n {
-                        judge(seq, a, q, around_a_loss(seq, a, b, r, q));
+                        judge(seq, a, q, around_a_loss(seq, a, b, r, q, batched));
                     }
                 }
             }
@@ -3401,7 +3430,17 @@ fn modifiers_found_down_after_a_loss_go_out_before_what_is_typed_under_them_and_
 fn the_chord_lets_go_in_any_order_around_a_loss_of_events_when_and_only_when_it_was_held() {
     let chord = CHORD.map(|keys| keys[0]);
     let seqs = sequences(&chord.map(|c| (c, 1)), 6);
-    every_loss(&seqs, |seq, a, q, r| {
+    // Read one at a time after the question, and in one batch, whose rest the helper passes on as
+    // it lets go.
+    for batched in [false, true] {
+        every_loss_read(&seqs, batched, |seq, a, q, r| {
+            judge_chord(chord, seq, a, q, r)
+        });
+    }
+}
+
+fn judge_chord(chord: [u16; 3], seq: &[Phys], a: usize, q: usize, r: Result<bool, String>) {
+    {
         let fired = match r {
             Ok(fired) => fired,
             Err(e) => panic!("{seq:?}: {e}"),
@@ -3429,7 +3468,52 @@ fn the_chord_lets_go_in_any_order_around_a_loss_of_events_when_and_only_when_it_
             !never || !fired,
             "{seq:?} lost from {a}, asked at {q}: the chord let go, never held"
         );
-    });
+    }
+}
+
+/// Whichever key completes the chord, the numpad's Enter included, it is never told, and nor is
+/// its release read in the rest of the batch, nor are the keys after it told but as taps.
+#[test]
+fn the_key_that_completes_the_chord_is_never_told_down_nor_up() {
+    for enter in [KEY_ENTER, KEY_KPENTER] {
+        let keys = [KEY_BACKSPACE, KEY_ESC, enter];
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let (mut t, k) = T::capturing();
+            for i in order {
+                t.w.press(k, keys[i]);
+            }
+            let last = keys[order[2]];
+            t.w.release(k, last);
+            t.w.press(k, last);
+            t.w.release(k, keys[order[0]]);
+            t.core.keyboard_ready(k, t.now);
+            t.take();
+            let told: Vec<(u16, u8, u8)> = t
+                .keys()
+                .iter()
+                .map(|k| (k.code, k.value, k.flags))
+                .collect();
+            let first = keys[order[0]];
+            assert_eq!(
+                told,
+                vec![
+                    (first, KEY_PRESS, KEY_ASK),
+                    (keys[order[1]], KEY_PRESS, KEY_ASK),
+                    (last, KEY_PRESS, 0),
+                    (last, KEY_RELEASE, 0),
+                    (first, KEY_RELEASE, 0),
+                ],
+                "{order:?} with {enter}"
+            );
+        }
+    }
 }
 
 // Found in the fifth review. Each is ignored, so that the package's checks still pass, and fails
@@ -3581,7 +3665,6 @@ fn fault_a_key_tapped_as_the_helper_lets_go_is_not_told_down_twice() {
 /// release of every key among them read there is told, so this key's release is told too: a
 /// release of a key the client was never told was down.
 #[test]
-#[ignore = "sixth review: the release of the chord's last key, never told down, is told as the helper lets go"]
 fn fault_the_chords_last_key_is_not_told_up_without_being_told_down() {
     let (mut t, k) = T::capturing();
     for c in CHORD.map(|keys| keys[0]) {
