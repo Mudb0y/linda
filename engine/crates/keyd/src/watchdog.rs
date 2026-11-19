@@ -188,6 +188,10 @@ pub struct Notifier {
     /// How often to feed systemd's watchdog, by [`feed_interval`].
     interval: Option<Duration>,
     next: Instant,
+    /// A watchdog timeout systemd is to be told, which has not gone yet.
+    unsaid: Option<Duration>,
+    /// systemd's watchdog may be at SLEEP_WATCHDOG: the unit's own timeout has not gone since.
+    long: bool,
 }
 
 impl Notifier {
@@ -213,7 +217,7 @@ impl Notifier {
         }
     }
 
-    fn connect(path: &[u8], timeout: Option<Duration>) -> io::Result<Notifier> {
+    pub(crate) fn connect(path: &[u8], timeout: Option<Duration>) -> io::Result<Notifier> {
         let socket = UnixDatagram::unbound()?;
         match path.strip_prefix(b"@") {
             Some(name) => {
@@ -232,25 +236,49 @@ impl Notifier {
             timeout,
             interval: timeout.map(feed_interval),
             next: Instant::now(),
+            unsaid: None,
+            long: false,
         })
     }
 
     /// Lets systemd's watchdog wait SLEEP_WATCHDOG while the machine sleeps, the helper holding
     /// nothing, and puts it back to the unit's own timeout once it has woken. systemd times it on
     /// the monotonic clock, which runs on while every process is frozen around a suspend, and would
-    /// otherwise kill the helper as it thawed. Each starts systemd's timer afresh.
+    /// otherwise kill the helper as it thawed. Each starts systemd's timer afresh. A word that does
+    /// not go, as when systemd's queue is full in the rush of a resume, is said again at each feed
+    /// until it has gone; until the unit's own timeout has gone, [`Notifier::long`] says so.
     pub fn sleeping(&mut self, asleep: bool, now: Instant) {
         let Some(timeout) = self.timeout else {
             return;
         };
-        let usec = if asleep { SLEEP_WATCHDOG } else { timeout }.as_micros();
-        self.send(&format!("WATCHDOG_USEC={usec}"));
+        self.unsaid = Some(if asleep { SLEEP_WATCHDOG } else { timeout });
+        self.long = true;
+        self.say_timeout();
         self.next = now + feed_interval(timeout);
     }
 
-    pub fn send(&self, state: &str) {
-        if let Err(e) = self.socket.send(state.as_bytes()) {
-            log!("cannot tell systemd {state}: {e}");
+    /// Whether systemd's watchdog may still be at SLEEP_WATCHDOG, when nothing is to be grabbed.
+    pub fn long(&self) -> bool {
+        self.long
+    }
+
+    fn say_timeout(&mut self) {
+        if let Some(d) = self.unsaid
+            && self.send(&format!("WATCHDOG_USEC={}", d.as_micros()))
+        {
+            self.unsaid = None;
+            self.long = Some(d) != self.timeout;
+        }
+    }
+
+    /// Whether it went.
+    pub fn send(&self, state: &str) -> bool {
+        match self.socket.send(state.as_bytes()) {
+            Ok(_) => true,
+            Err(e) => {
+                log!("cannot tell systemd {state}: {e}");
+                false
+            }
         }
     }
 
@@ -259,6 +287,7 @@ impl Notifier {
         if let Some(i) = self.interval
             && now >= self.next
         {
+            self.say_timeout();
             self.send("WATCHDOG=1");
             self.next = now + i;
         }
@@ -488,7 +517,6 @@ mod tests {
     /// again: systemd's watchdog stays at SLEEP_WATCHDOG, ten minutes, while the helper holds the
     /// keyboards again, until the machine next sleeps.
     #[test]
-    #[ignore = "second review: fails while the fault stands"]
     fn fault_the_units_watchdog_comes_back_after_sleep_though_the_first_word_is_lost() {
         let dir = std::env::temp_dir().join(format!("keyd-notify-lost-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

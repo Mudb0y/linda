@@ -175,6 +175,9 @@ pub struct Server<D: Devices> {
     progress: Arc<Progress>,
     notifier: Option<Notifier>,
     stop: Arc<AtomicBool>,
+    /// logind has said the machine woke, and the core is to be told once systemd's watchdog is the
+    /// unit's own again.
+    waking: bool,
 }
 
 impl<D: Devices> Server<D> {
@@ -196,6 +199,7 @@ impl<D: Devices> Server<D> {
             progress,
             notifier,
             stop: Arc::new(AtomicBool::new(false)),
+            waking: false,
         }
     }
 
@@ -250,7 +254,16 @@ impl<D: Devices> Server<D> {
         if let Some(n) = &mut self.notifier {
             n.feed(now);
         }
+        self.wake_when_told(now);
         Ok(())
+    }
+
+    fn wake_when_told(&mut self, now: Instant) {
+        if self.waking && !self.notifier.as_ref().is_some_and(|n| n.long()) {
+            self.waking = false;
+            self.core.sleeping(false, now);
+            self.carry_out(now);
+        }
     }
 
     /// What is ready, in the order it is to be served: the keyboards first, and new connections,
@@ -298,16 +311,20 @@ impl<D: Devices> Server<D> {
                         Notice::Console(n) => self.core.console_changed(n, now),
                         Notice::Admitted(conn, r) => self.core.admitted(conn, r, now),
                         Notice::Sleep { asleep, inhibitor } => {
-                            self.progress.sleeping(asleep, now);
-                            self.core.sleeping(asleep, now);
-                            self.carry_out(now);
                             // Holding nothing while asleep, the helper cannot leave a keyboard dead
-                            // if systemd's watchdog lets it be frozen longer; holding again, it is
-                            // back on the unit's own.
+                            // if systemd's watchdog lets it be frozen longer; it captures again only
+                            // once systemd has the unit's own timeout back.
+                            self.progress.sleeping(asleep, now);
+                            self.waking = !asleep;
+                            if asleep {
+                                self.core.sleeping(true, now);
+                                self.carry_out(now);
+                            }
                             if let Some(n) = &mut self.notifier {
                                 n.sleeping(asleep, now);
                             }
                             drop(inhibitor);
+                            self.wake_when_told(now);
                         }
                         Notice::Wake => {}
                     }

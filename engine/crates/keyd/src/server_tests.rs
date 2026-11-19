@@ -36,6 +36,13 @@ impl Helper {
     }
 
     fn start_with(decide: impl FnMut(&Peer) -> Result<String, Refusal> + Send + 'static) -> Helper {
+        Helper::start_full(decide, None)
+    }
+
+    fn start_full(
+        decide: impl FnMut(&Peer) -> Result<String, Refusal> + Send + 'static,
+        notifier: Option<Notifier>,
+    ) -> Helper {
         let dir = std::env::temp_dir().join(format!(
             "keyd-{}-{}",
             std::process::id(),
@@ -58,7 +65,7 @@ impl Helper {
             Box::new(move || e.store(true, Relaxed)),
         )
         .unwrap();
-        let mut server = Server::new(core, listener, notices.clone(), admit, progress, None);
+        let mut server = Server::new(core, listener, notices.clone(), admit, progress, notifier);
         let stop = server.stopper();
         // SAFETY: getuid cannot fail.
         let uid = unsafe { libc::getuid() };
@@ -536,6 +543,69 @@ fn going_to_sleep_lets_go_before_the_inhibitor_is_released() {
     c.until(MARGIN, |m| {
         matches!(m, ToClient::Device { device, status: DeviceStatus::Held, .. } if *device == k)
     });
+}
+
+#[test]
+fn nothing_is_grabbed_after_waking_until_systemd_has_the_units_watchdog_back() {
+    use std::os::unix::net::UnixDatagram;
+    let dir = std::env::temp_dir().join(format!("keyd-notify-wake-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir(&dir).unwrap();
+    let path = dir.join("notify");
+    let systemd = UnixDatagram::bind(&path).unwrap();
+    systemd.set_nonblocking(true).unwrap();
+    let n = Notifier::connect(
+        path.as_os_str().as_encoded_bytes(),
+        Some(Duration::from_secs(2)),
+    )
+    .unwrap();
+    let h = Helper::start_full(|_| Ok(SESSION.into()), Some(n));
+    let k = h.w.plug("keyboard");
+    let c = h.capturing(k);
+    h.notices.post(Notice::Sleep {
+        asleep: true,
+        inhibitor: None,
+    });
+    c.until(MARGIN, |m| {
+        *m == ToClient::Released {
+            reason: Released::Background,
+        }
+    });
+    // systemd's queue is full as the machine wakes.
+    let filler = UnixDatagram::unbound().unwrap();
+    filler.set_nonblocking(true).unwrap();
+    while filler.send_to(b"X", &path).is_ok() {}
+    h.notices.post(Notice::Sleep {
+        asleep: false,
+        inhibitor: None,
+    });
+    for _ in 0..10 {
+        c.send(&FromClient::Heartbeat { counter: 1 });
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            !h.w.grabbed(k),
+            "grabbed while systemd's watchdog was ten minutes"
+        );
+    }
+    let mut b = [0u8; 64];
+    let mut said = Vec::new();
+    let mut read = |said: &mut Vec<String>| {
+        while let Ok(len) = systemd.recv(&mut b) {
+            said.push(String::from_utf8_lossy(&b[..len]).into_owned());
+        }
+    };
+    read(&mut said);
+    c.send(&FromClient::Heartbeat { counter: 2 });
+    c.until(MARGIN * 2, |m| {
+        matches!(m, ToClient::Device { device, status: DeviceStatus::Held, .. } if *device == k)
+    });
+    read(&mut said);
+    assert!(
+        said.iter().any(|m| m == "WATCHDOG_USEC=2000000"),
+        "{:?}",
+        said.iter().filter(|m| *m != "X").collect::<Vec<_>>()
+    );
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
