@@ -43,6 +43,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from typing import NamedTuple
 
 from logHandler import log
 from xkbcommon import xkb
@@ -391,6 +392,31 @@ def _logError(message: str) -> None:
 		pass
 
 
+class CaptureState(NamedTuple):
+	"""Where this source captures a document's keys, for the kernel source to send each of its keys
+	where these grabs would: replaced whole on the X thread as it changes, read from any thread. It is
+	as of the last events of the X server's that the X thread has read, a millisecond or so behind the
+	X server while the interpreter is free."""
+
+	#: The window the keys are grabbed on, 0 while none is.
+	window: int
+	#: The process of that window, as the grabs were made.
+	windowProcess: int | None
+	#: Whether that window has the keyboard focus, so that the grabs take the keys typed.
+	focused: bool
+	#: The mode in force, and the document's mode as the focus left the window, while it is away.
+	mode: CaptureMode
+	dormant: CaptureMode | None
+	#: Until when the keys are those of a document whose window the focus came back to before NVDA's
+	#: focus did, a key of which is held for NVDA's focus up to DOCUMENT_WAIT; None while they are not.
+	documentUntil: float | None
+	#: The process NVDA last said the document is of, when it said.
+	processID: int | None
+
+
+NO_CAPTURE = CaptureState(0, None, False, "off", None, None, None)
+
+
 @dataclass
 class _Ticket:
 	"""A press under a grab of this source, which the X server holds the keyboard on until it is
@@ -537,6 +563,10 @@ class X11KeySource:
 		#: None while they are not.
 		self._documentPending: float | None = None
 		self._loggedCapture: CaptureMode = "off"
+		#: The process of the capture window, and the one NVDA last said the document is of.
+		self._captureWindowProcess: int | None = None
+		self._captureProcess: int | None = None
+		self._captureState = NO_CAPTURE
 		#: Presses under a grab not yet answered, in the order they came.
 		self._tickets: deque[_Ticket] = deque()
 		#: Key code: (vk, scan) a press was delivered as when it was not the key's own, for its release.
@@ -791,6 +821,7 @@ class X11KeySource:
 		except Exception:
 			log.exception("Keys stopped being read from the X display")
 		finally:
+			self._captureState = NO_CAPTURE
 			if self._display is not None:
 				try:
 					# Keys another computer held would stay down on the display after NVDA.
@@ -813,6 +844,7 @@ class X11KeySource:
 			now = time.monotonic()
 			self._flushRaw(now)
 			deadlines = [self._answer(now), self._beat(now), self._documentExpiry(now), self._retryHold(now)]
+			self._publishCapture()
 			if self._raw:
 				deadlines.append(self._raw[0][0] + RAW_WAIT)
 			due = min((t for t in deadlines if t is not None), default=None)
@@ -903,6 +935,31 @@ class X11KeySource:
 					self._onVirtualKeyboard()
 				except Exception:  # noqa: BLE001
 					_logError("Reporting the virtual keyboard's state")
+
+	@property
+	def captureState(self) -> CaptureState:
+		"""Where the keys of a document are captured, as of the X thread's last look."""
+		return self._captureState
+
+	def _publishCapture(self) -> None:
+		window = self._captureWindow
+		state = CaptureState(
+			window.id if window is not None else 0,
+			self._captureWindowProcess if window is not None else None,
+			self._captureFocused,
+			self._captureMode,
+			self._dormantMode,
+			self._documentPending,
+			self._captureProcess,
+		)
+		if state != self._captureState:
+			self._captureState = state
+
+	def expectEcho(self, keycode: int, isUp: bool) -> None:
+		"""Take the next event of keycode from XTEST for one another source sends, and deliver it to no
+		one; from any thread, before the key is sent."""
+		with self._lock:
+			self._echoes.append((time.monotonic(), keycode, isUp))
 
 	@property
 	def virtualKeyboardState(self) -> tuple[bool, bool]:
@@ -1275,7 +1332,8 @@ class X11KeySource:
 			verdict = held.verdict
 			if verdict is None:
 				verdict = held.kind != NVDA_GRAB
-				log.debug(f"Key {held.keycode} answered without NVDA: {'replayed' if verdict else 'kept'}")
+				# Which key it was is the user's typing, which stays out of the log.
+				log.debug(f"A key was answered without NVDA: {'replayed' if verdict else 'kept'}")
 			if verdict:
 				held.replayed = True
 				self._grabChord(held)
@@ -1609,6 +1667,9 @@ class X11KeySource:
 		# said so: until then its mode is still the document's, which is no reason to take the keys of
 		# another application. A document in another window of the same one is, and so is one of
 		# another application once NVDA's focus is in it.
+		if mode != "off":
+			# Off says nothing of the document whose keys stay grabbed while the focus is away.
+			self._captureProcess = processID
 		if (
 			window is not None
 			and not self._captureFocused
@@ -1724,6 +1785,7 @@ class X11KeySource:
 					)
 					catchers.append((keycode, base | lock, catcher))
 		self._captureWindow = window
+		self._captureWindowProcess = self._windowPid(window)
 		self._captureFocused = True
 		# The window has the focus, which the NVDA keys follow too, the more surely for a second look.
 		self._followFocus()

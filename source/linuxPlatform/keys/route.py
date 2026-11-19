@@ -3,7 +3,9 @@ NVDA, from the X display always, and the kernel source coming and going on top o
 
 The X source reads the X display from start to end. Beside it, the kernel source takes the keys of
 every keyboard the helper holds, and the helper puts out on its virtual keyboard what NVDA passes.
-Those keys reach the X display too, decided already, and the X source gives them to no one: while
+Where a document's keys go is the X source's to say, for both: the kernel source asks it where its
+grabs are, so that each key goes where it would on the X route. The keys passed reach the X display
+too, decided already, and the X source gives them to no one: while
 the helper serves this NVDA, a press of the virtual keyboard is the kernel source's, and its release
 follows it whenever it comes. Every other key, from a keyboard the helper leaves alone, one made
 through uinput, or one another program sends through XTEST, is the X source's, as it is with no
@@ -336,7 +338,10 @@ class RoutedKeySource:
 			return None, f"linda-keyd did not admit NVDA: {e}"
 		from . import kernel
 
-		source = kernel.KernelKeySource(connection, welcome, None, None)
+		# The kernel source sends a document's keys where the X source's grabs would, by the X source's
+		# own account of them, and puts down in the X display through it what the helper never passed.
+		x = self._x
+		source = kernel.KernelKeySource(connection, welcome, None, None, x)
 		source.setCallbacks(partial(self._onKernelLost, source), partial(self._onKernelHeld, source))
 		return source, "linda-keyd admitted NVDA"
 

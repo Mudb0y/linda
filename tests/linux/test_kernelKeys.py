@@ -903,6 +903,8 @@ BROWSE_CHILD = r"""
 source = startSource()
 source.setCapture("browse", None)
 mode["now"] = "browse"
+# The X source grabs the keys on its own thread, which the kernel source follows, as on the X route.
+time.sleep(0.1)
 keyboard.press("h")
 keyboard.press("shift+h")
 keyboard.press("Down")

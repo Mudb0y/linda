@@ -11,10 +11,15 @@ keymap the X server was given, from the root window as the X source reads it, th
 server's XKB state, the locks from the lights the helper reports, and the modifiers from the keys
 themselves, since a key NVDA keeps never reaches the X server to change its state.
 
+Where a document's keys go is the X source's account: its grabs take browse mode's keys on the
+window of the document while that window has the focus, and a key of this source goes where those
+grabs would send it, by the snapshot of them the X source keeps.
+
 The helper passes a press on by itself when no verdict comes within its bound, so the thread that
 reads the helper's socket answers by itself a little before that: a key of browse mode is passed, a
-key under the NVDA key kept, as on the X route. That thread also sends the heartbeat, so that the
-helper lets go should it hang. It must answer in time however busy NVDA's other threads keep the
+key under the NVDA key kept, as on the X route. A helper that grants WAIT holds a press longer when
+asked, and NVDA then has as long as the X route gives it. That thread also sends the heartbeat, so
+that the helper lets go should it hang. It must answer in time however busy NVDA's other threads keep the
 interpreter, and every call into a C library gives the interpreter up and waits to have it back, so
 it works in plain Python on tables made ahead: the layout is followed, and those tables made, on a
 thread of its own, and each key is turned into NVDA's terms by the decider, the thread that hands
@@ -47,11 +52,13 @@ from .keydClient import KEY_PRESS, KEY_RELEASE, KEY_REPEAT, LOCK_CAPS, LOCK_NUM,
 #: help; or passed at once, as every other key is, NVDA having it after the application.
 NVDA_KIND, CAPTURE_KIND, HOLD_KIND, PASS_KIND = x11.NVDA_GRAB, x11.CAPTURE_GRAB, "hold", "pass"
 #: The share of the helper's bound after which this source answers by itself a press NVDA has not
-#: answered, by what the press is. NVDA answers in under a millisecond as a rule, and in a few dozen
-#: while its other threads keep the interpreter busy, as this thread then waits for it each time it
-#: reads or sends. An NVDA key is kept early, as one passed on by the helper would reach the
-#: application; browse mode's key, which the helper would pass on as this source would, waits nearly
-#: to the end, so that NVDA has the longest to take it, while a late answer still counts as one.
+#: answered, by what the press is, with a helper that cannot be asked to wait. NVDA answers in under a
+#: millisecond as a rule, and in a few dozen while its other threads keep the interpreter busy, as
+#: this thread then waits for it each time it reads or sends. An NVDA key is kept early, as one passed
+#: on by the helper would reach the application; browse mode's key, which the helper would pass on as
+#: this source would, waits nearly to the end, so that NVDA has the longest to take it, while a late
+#: answer still counts as one. With a helper that can, the NVDA key's share is when it is asked to wait
+#: for a press NVDA has not answered, early for the same reason.
 ANSWER_SHARES = {x11.NVDA_GRAB: 0.4, x11.CAPTURE_GRAB: 0.7}
 #: Seconds the interpreter lets a busy thread run before it hands over to one that waits, while keys
 #: come from the helper: five by default. The thread that answers keys waits for the interpreter each
@@ -96,8 +103,15 @@ XKB_STATE_NOTIFY = 2
 XKB_CONTROLS_NOTIFY = 3
 #: XkbRepeatKeysMask: whether keys repeat at all.
 XKB_REPEAT_KEYS = 1
-#: How many windows' processes are remembered, for asking whose window has the focus.
-WINDOW_PIDS_KEPT = 256
+#: Modifiers that reach the application while the NVDA key is held, so that the X server has them down
+#: as the user does should they outlast the NVDA key; a chord with them stays NVDA's, as its key is.
+#: Alt and Super are kept, as on the X route: alone, the application would take them for a press of
+#: their own, which opens a menu.
+MODIFIERS_PASSED_UNDER_NVDA = X.ShiftMask | X.ControlMask
+MODIFIERS_KEPT_UNDER_NVDA = X.Mod1Mask | X.Mod4Mask
+#: Seconds beyond the helper's bound for a press that a press released is remembered for, by its number:
+#: the helper may say it passed the press on after the release has come.
+EXPIRY_SLACK = 1.0
 
 _DEPRESSED = xkb.StateComponent.XKB_STATE_MODS_DEPRESSED
 
@@ -261,6 +275,12 @@ class _Press:
 	dropped: bool = False
 	#: A typed key released before its press was decided.
 	releasedEarly: bool = False
+	#: Whether it came while the X source held a document's keys for NVDA's focus to come back to it.
+	document: bool = False
+	#: When the presses before it were all decided, from which NVDA has its time for it; None until.
+	started: float | None = None
+	#: Whether the helper was asked to hold it longer.
+	waited: bool = False
 	lock: threading.Lock = field(default_factory=threading.Lock)
 
 	def decide(self, passed: bool) -> bool:
@@ -297,6 +317,7 @@ class KernelKeySource:
 		welcome: keydClient.Welcome,
 		onLost: Callable[[str, bool], None] | None = None,
 		onHeld: Callable[[], None] | None = None,
+		xSource: x11.X11KeySource | None = None,
 	) -> None:
 		"""
 		:param onLost: Called once, on the source's own thread, when the helper lets go of the keyboard
@@ -304,12 +325,18 @@ class KernelKeySource:
 			NVDA was told is down has been released to it first.
 		:param onHeld: Called on the source's own thread when the helper first says it holds a keyboard,
 			before any key of that keyboard is read.
+		:param xSource: The X source beside this one, whose grabs say where a document's keys go; without
+			it, none are captured.
 		"""
 		self._sock = connection
 		self._welcome = welcome
 		self._onLost = onLost
 		self._onHeld = onHeld
+		self._x = xSource
+		self._canWait = bool(welcome.features & keydClient.FEATURE_WAIT)
 		self._answerWithin = {kind: welcome.verdictTimeout * share for kind, share in ANSWER_SHARES.items()}
+		#: Seconds after which the helper passes on a press it was not answered about.
+		self._bound = keydClient.VERDICT_WAIT_TIMEOUT if self._canWait else welcome.verdictTimeout
 		self._wakeRead, self._wakeWrite = os.pipe()
 		self._commands: deque[Callable[[], None]] = deque()
 		self._stopping = False
@@ -337,8 +364,6 @@ class KernelKeySource:
 		self._xkbOpcode: int | None = None
 		self._xkbEvent: int | None = None
 		self._rulesAtom: int | None = None
-		self._pidAtom: int | None = None
-		self._windowPids: dict[int, int | None] = {}
 		#: Key codes down, the locks left out: what holds the modifiers down.
 		self._down: set[int] = set()
 		#: Key code: the press of each key down, from the keyboards and from typeKey.
@@ -346,6 +371,14 @@ class KernelKeySource:
 		self._typed: dict[int, _Press] = {}
 		#: Sequence number: the press, while it is down.
 		self._bySeq: dict[int, _Press] = {}
+		#: Sequence number: the press, released while the helper may still pass it on; and when each
+		#: is forgotten, in order.
+		self._released: dict[int, _Press] = {}
+		self._forget: deque[tuple[float, int]] = deque()
+		#: Key code: the press of each Alt or Super kept under the NVDA key and still held, which goes
+		#: down in the X display before a key passed on with it; and the key codes of those that have.
+		self._keptModifiers: dict[int, _Press] = {}
+		self._modifiersPutDown: set[int] = set()
 		#: Presses whose verdict the helper has not had, in the order they came.
 		self._pending: deque[_Press] = deque()
 		#: Key code: the press of each NVDA key down that was not passed on, which makes every press
@@ -356,8 +389,6 @@ class KernelKeySource:
 		# What NVDA asked, each replaced whole, as the thread that answers keys reads them without a lock.
 		self._consumed = (0, False)
 		self._held = False
-		self._captureMode: CaptureMode = "off"
-		self._capturePid: int | None = None
 		self._gestureKeys: dict[str, frozenset[GestureKey]] = {"browse": frozenset(), "focus": frozenset()}
 		#: Mode: key code: the modifier masks it is captured with; both modes or none.
 		self._modeSets: dict[str, dict[int, set[int]]] = {}
@@ -451,13 +482,9 @@ class KernelKeySource:
 		self._consumed = (nvdaModifierKeys, numpadReview)
 
 	def setCapture(self, mode: CaptureMode, processID: int | None = None) -> None:
+		# Which keys are captured where is the X source's, which is asked the same.
 		if mode != "off" and not self._modeSets:
 			self._makeModeSets()
-		changed = mode != self._captureMode
-		self._capturePid = processID if mode != "off" else None
-		self._captureMode = mode
-		if changed:
-			log.debug(f"Keys captured for {mode} mode")
 
 	def setCaptureGestures(self, browse: frozenset[GestureKey], focus: frozenset[GestureKey]) -> None:
 		wanted = {"browse": browse, "focus": focus}
@@ -562,7 +589,6 @@ class KernelKeySource:
 			root = d.screen().root
 			root.change_attributes(event_mask=X.PropertyChangeMask)
 			self._rulesAtom = d.intern_atom(x11.RULES_NAMES_PROPERTY)
-			self._pidAtom = d.intern_atom("_NET_WM_PID")
 			state = _XkbGetState(display=d.display, opcode=opcode, deviceSpec=x11.XKB_CORE_KEYBOARD)
 			leds = d.get_keyboard_control().led_mask
 			# Until the helper says which lights are on: the X server's own locks, Scroll Lock's light
@@ -664,49 +690,52 @@ class KernelKeySource:
 			perKey=bytes(controls.perKeyRepeat),
 		)
 
-	def _focusTakesCapture(self) -> bool:
-		"""Whether the window with the keyboard focus is one a document's keys are captured in: of the
-		application whose document set the mode, when that is known, and never one of NVDA's own.
+	def _captureState(self) -> x11.CaptureState:
+		return self._x.captureState if self._x is not None else x11.NO_CAPTURE
 
-		The X route grabs the keys on that window alone, so that a key typed in another application
-		before NVDA's focus has followed it there reaches that application.
+	@staticmethod
+	def _grabsTake(state: x11.CaptureState) -> bool:
+		"""Whether the X source's grabs of a document's keys take a key typed now, by state.
+
+		They are on the window that had the focus as NVDA's focus reached the document, and stay there
+		while the focus is away, taking nothing, so that a key typed in another window, of the same
+		application or another, before NVDA's focus has followed it there reaches that window. Beyond
+		the X route, never while NVDA says the document is another process's than that window's, as
+		when NVDA's focus reached a document as the focus left for another application.
 		"""
+		if not state.window or not state.focused:
+			return False
+		return not (state.processID and state.windowProcess and state.processID != state.windowProcess)
+
+	def _putDownKeptModifiers(self) -> None:
+		"""Put down in the X display, before a key passed on reaches it, each Alt or Super kept under the
+		NVDA key and still held, so that the key comes with it as the user typed it, as on the X route,
+		where a grab keeps a key from the application and not from the X server's state."""
+		codes = [
+			code
+			for code, press in self._keptModifiers.items()
+			if code not in self._modifiersPutDown and self._presses.get(code) is press
+		]
+		if codes and self._sendToX(codes, False):
+			self._modifiersPutDown.update(codes)
+
+	def _sendToX(self, keycodes: list[int], isUp: bool) -> bool:
+		"""Send keys through XTEST as the X source's own, which it gives to no one, and wait for the X
+		server to have them, ahead of any key the helper passes on after."""
+		if self._x is None:
+			return False
 		with self._xLock:
-			d = self._requests
-			if d is None:
+			if self._requests is None:
 				return False
 			try:
-				focus = d.get_input_focus().focus
-				if isinstance(focus, int) or focus.id == d.screen().root.id:
-					return False
-				pid = self._windowPids.get(focus.id, -1)
-				if pid == -1:
-					pid = self._windowPid(focus)
-					if len(self._windowPids) >= WINDOW_PIDS_KEPT:
-						self._windowPids.clear()
-					self._windowPids[focus.id] = pid
-			except (error.XError, error.ConnectionClosedError, OSError):
-				return True
-		if pid == os.getpid():
-			return False
-		wanted = self._capturePid
-		return not (wanted and pid and pid != wanted)
-
-	def _windowPid(self, window) -> int | None:
-		"""The process a window belongs to, by its own _NET_WM_PID or its nearest parent's."""
-		root = self._requests.screen().root
-		try:
-			for _level in range(4):
-				pid = window.get_full_property(self._pidAtom, X.AnyPropertyType)
-				if pid is not None and len(pid.value):
-					return int(pid.value[0])
-				parent = window.query_tree().parent
-				if isinstance(parent, int) or parent.id == root.id:
-					return None
-				window = parent
-		except error.BadWindow:
-			return None
-		return None
+				for keycode in keycodes:
+					self._x.expectEcho(keycode, isUp)
+					xtest.fake_input(self._requests, X.KeyRelease if isUp else X.KeyPress, keycode)
+				self._requests.get_input_focus()
+			except (error.ConnectionClosedError, OSError):
+				log.debugWarning("Sending a modifier to the X display", exc_info=True)
+				return False
+		return True
 
 	def _xtest(self, keycode: int, isUp: bool) -> None:
 		with self._xLock:
@@ -896,10 +925,21 @@ class KernelKeySource:
 		:return: When to look again, or None while no press waits.
 		"""
 		due = None
+		first = True
 		for press in list(self._pending):
 			if press.passed is None:
-				limit = press.arrival + self._answerWithin.get(press.kind, self._answerWithin[NVDA_KIND])
+				if first and press.started is None:
+					press.started = now
+				first = False
+				limit = self._answerBy(press)
 				if now < limit:
+					waitAt = self._waitAt(press)
+					if waitAt is not None and not press.waited:
+						if now >= waitAt:
+							press.waited = True
+							self._send(keydClient.wait(press.seq))
+						else:
+							limit = min(limit, waitAt)
 					due = limit if due is None else min(due, limit)
 					continue
 				# A slow NVDA costs a key of browse mode a delay and never the key, and a chord with the NVDA
@@ -908,6 +948,30 @@ class KernelKeySource:
 			self._pending.remove(press)
 			self._settle(press)
 		return due
+
+	def _answerBy(self, press: _Press) -> float:
+		"""When this source answers a press NVDA has not answered by itself.
+
+		With a helper that can wait, as on the X route: NVDA has CAPTURE_TIMEOUT for a press from the
+		moment every press before it is decided, as the X server holds the keyboard on one press at a
+		time and NVDA learns of the next only then, and DOCUMENT_WAIT for one of a document whose window
+		has the focus again before NVDA's focus is back in it; never beyond DOCUMENT_WAIT from its
+		coming, which leaves the helper's longer bound a tenth of a second to have the answer. Without,
+		a share of the helper's bound from its coming, by what the press is.
+		"""
+		if not self._canWait:
+			return press.arrival + self._answerWithin.get(press.kind, self._answerWithin[NVDA_KIND])
+		latest = press.arrival + x11.DOCUMENT_WAIT
+		if press.started is None:
+			return latest
+		return min(latest, press.started + (x11.DOCUMENT_WAIT if press.document else x11.CAPTURE_TIMEOUT))
+
+	def _waitAt(self, press: _Press) -> float | None:
+		"""When to ask the helper to hold a press NVDA has not answered: at once for a document's key
+		that waits for NVDA's focus, early for any other, as this thread may be late itself."""
+		if not self._canWait:
+			return None
+		return press.arrival if press.document else press.arrival + self._answerWithin[NVDA_KIND]
 
 	def _settle(self, press: _Press) -> None:
 		"""Act on a press's verdict: tell the helper, or send a typed key, and follow what it changes."""
@@ -920,9 +984,19 @@ class KernelKeySource:
 				if press.releasedEarly:
 					self._xtest(press.keycode, True)
 		elif not press.expired:
+			if press.passed and self._keptModifiers:
+				self._putDownKeptModifiers()
 			self._send(keydClient.verdict(press.seq, keep=not press.passed))
 		if press.passed:
 			self._passed(press)
+		elif (
+			press.under
+			and press.kind == NVDA_KIND
+			and self._tables.keyMods.get(press.keycode, 0)
+			and self._presses.get(press.keycode) is press
+		):
+			# A modifier kept under the NVDA key, which the X server has up until a key passed on needs it.
+			self._keptModifiers[press.keycode] = press
 
 	def _passed(self, press: _Press) -> None:
 		if self._nvdaHeld.get(press.keycode) is press:
@@ -938,7 +1012,8 @@ class KernelKeySource:
 		# By number only, as a key typed is kept out of the log; a count of these says how often NVDA
 		# answered too late for the helper.
 		log.debug(f"linda-keyd passed key {seq} on before NVDA answered it")
-		press = self._bySeq.get(seq)
+		# Released already, the helper read the release before the press's bound came.
+		press = self._bySeq.get(seq) or self._released.get(seq)
 		if press is None:
 			return
 		press.expired = True
@@ -951,11 +1026,16 @@ class KernelKeySource:
 			with press.lock:
 				press.passed = True
 			self._passed(press)
+			if (
+				self._keptModifiers.get(press.keycode) is press
+				and press.keycode not in self._modifiersPutDown
+			):
+				del self._keptModifiers[press.keycode]
 
 	# Keys, in plain Python on the tables.
 
-	def _ownKind(self, keycode: int, effective: int) -> str:
-		"""What a press would be by itself, with no NVDA key held."""
+	def _ownKind(self, keycode: int, effective: int, capture: x11.CaptureState) -> str:
+		"""What a press would be by itself, with no NVDA key held, the X source's grabs being capture."""
 		nvdaModifierKeys, numpadReview = self._consumed
 		flag = NVDA_KEYCODES.get(keycode)
 		if (
@@ -967,7 +1047,7 @@ class KernelKeySource:
 			return NVDA_KIND
 		if numpadReview and keycode in NUMPAD_REVIEW_KEYCODES and not effective & ~NUMPAD_REVIEW_MODS:
 			return NVDA_KIND
-		if self._captureMode != "off":
+		if self._grabsTake(capture):
 			modeSets = self._modeSets
 			if not modeSets:
 				self._makeModeSets()
@@ -1007,18 +1087,27 @@ class KernelKeySource:
 		levelShift = keycode in tables.levelShift
 		if keycode not in LOCK_KEYCODES:
 			self._down.add(keycode)
-		own = self._ownKind(keycode, effective)
+		capture = self._captureState()
+		own = self._ownKind(keycode, effective, capture)
 		under: tuple[_Press, ...] = ()
+		mods = tables.keyMods.get(keycode, 0)
 		if held:
 			kind = HOLD_KIND
 		elif own == NVDA_KIND:
 			kind = NVDA_KIND
+		elif self._nvdaHeld and (
+			levelShift or mods & MODIFIERS_PASSED_UNDER_NVDA and not mods & MODIFIERS_KEPT_UNDER_NVDA
+		):
+			# The chord is NVDA's by its key; what this one changes the X server must see.
+			kind = own
 		elif self._nvdaHeld:
 			kind = NVDA_KIND
 			under = tuple(self._nvdaHeld.values())
 		else:
 			kind = own
 		press = _Press(seq, keycode, now, kind, own, effective, typed=typed, under=under)
+		if kind == CAPTURE_KIND and capture.documentUntil is not None and now < capture.documentUntil:
+			press.document = True
 		if own == NVDA_KIND and keycode in NVDA_KEYCODES and kind in (NVDA_KIND, HOLD_KIND):
 			self._nvdaHeld[keycode] = press
 		presses = self._typed if typed else self._presses
@@ -1062,7 +1151,7 @@ class KernelKeySource:
 		# None for a key down before the helper held the keyboard, whose press the application had.
 		press = presses.pop(keycode, None)
 		if press is not None:
-			self._bySeq.pop(press.seq, None)
+			self._retire(press, now)
 			if self._nvdaHeld.get(keycode) is press:
 				del self._nvdaHeld[keycode]
 			if typed:
@@ -1077,6 +1166,20 @@ class KernelKeySource:
 		self._decisions.put(
 			_Item(keycode, KEY_RELEASE, press, tables, depressed, locked, now, typed=typed, altGr=levelShift)
 		)
+
+	def _retire(self, press: _Press, now: float) -> None:
+		"""Forget a press released, by its number only once the helper can no longer pass it on."""
+		self._bySeq.pop(press.seq, None)
+		if self._keptModifiers.get(press.keycode) is press:
+			del self._keptModifiers[press.keycode]
+			if press.keycode in self._modifiersPutDown:
+				self._modifiersPutDown.discard(press.keycode)
+				self._sendToX([press.keycode], True)
+		while self._forget and self._forget[0][0] <= now:
+			self._released.pop(self._forget.popleft()[1], None)
+		if not press.typed:
+			self._released[press.seq] = press
+			self._forget.append((press.arrival + self._bound + EXPIRY_SLACK, press.seq))
 
 	def _repeatNow(self, now: float) -> float | None:
 		"""Repeat the key held down that repeats, when it is due, as the X server repeats it: to NVDA alone,
@@ -1261,8 +1364,9 @@ class KernelKeySource:
 			return
 		if press.passed is not None:
 			if press.defaulted:
+				# By number, as which key it was is the user's typing.
 				log.debug(
-					f"Key {press.keycode} answered without NVDA: {'passed' if press.passed else 'kept'}"
+					f"linda-keyd's key {press.seq} answered without NVDA: {'passed' if press.passed else 'kept'}"
 				)
 			if press.passed:
 				# The application has had the key, as NVDA did not answer in time; NVDA acting on it as
@@ -1288,19 +1392,30 @@ class KernelKeySource:
 			x11._logError("Delivering a key")
 			return True
 
+	def _askMode(self) -> CaptureMode | None:
+		if self._modeNow is None:
+			return None
+		try:
+			return self._modeNow()
+		# Whatever NVDA's focus raises, the key stays NVDA's to decide, as it was captured for.
+		except Exception:  # noqa: BLE001
+			log.debugWarning("Asking NVDA's mode for a captured key", exc_info=True)
+			return None
+
 	def _capturedNow(self, press: _Press) -> bool:
-		"""Whether NVDA, in the mode it is in at this moment, takes this press of a key a mode captures."""
-		mode: CaptureMode | None = None
-		if self._modeNow is not None:
-			try:
-				mode = self._modeNow()
-			# Whatever NVDA's focus raises, the key stays NVDA's to decide, as it was captured for.
-			except Exception:  # noqa: BLE001
-				log.debugWarning("Asking NVDA's mode for a captured key", exc_info=True)
+		"""Whether NVDA, in the mode it is in at this moment, takes this press of a key a mode captures,
+		as the X source's decider has it: a key typed in a document's window before NVDA's focus is back
+		in it waits for that focus as long as the X route lets it, half a second, less the time to
+		answer; then, whether the grabs would still take it, the focus having had time to move."""
+		waitUntil = self._answerBy(press) - x11.CAPTURE_TIMEOUT / 2 if press.document else None
+		mode = self._askMode()
+		while mode == "off" and waitUntil is not None and time.monotonic() < waitUntil:
+			time.sleep(0.01)
+			mode = self._askMode()
 		if mode is not None:
 			if mode == "off":
 				return False
 			masks = self._modeSets.get(mode, {}).get(press.keycode)
 			if masks is None or press.effective & ~LOCK_MODS not in masks:
 				return False
-		return self._focusTakesCapture()
+		return self._grabsTake(self._captureState())

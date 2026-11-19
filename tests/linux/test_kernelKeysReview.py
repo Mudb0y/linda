@@ -255,6 +255,29 @@ def test_nvdaKeyPressedTwiceReachesTheApplicationWhenNVDAIsSlow(tmp_path: Path, 
 	)
 
 
+#: As DOUBLE_PRESS_CHILD on the kernel route, with what the helper was asked and whether it went on
+#: serving NVDA.
+DOUBLE_PRESS_ASKED_CHILD = DOUBLE_PRESS_CHILD.replace(
+	'result = {"kernel": source.isKernel,',
+	'result = {"waits": len(keyboard.waits), "malformed": [e for e in keyboard.events if e[1] == "malformed"], '
+	'"granted": keyboard.granted, "kernel": source.isKernel,',
+)
+
+
+@pytest.mark.parametrize("features", (2, 0))
+def test_slowNVDAKeyIsHeldLongerOnlyByAHelperThatCanWait(tmp_path: Path, features: int):
+	value = runKernelChild(
+		tmp_path, "ROUTE = 'auto'\n" + DOUBLE_PRESS_ASKED_CHILD, standIn={"features": features}
+	)
+	assert value["kernel"] and value["granted"] == features and not value["malformed"], value
+	if features:
+		assert value["waits"] >= 1 and value["window"] == [[110, True]], value
+	else:
+		# As before WAIT: the NVDA key is kept at 40 ms without NVDA, and the helper is asked nothing
+		# it does not know.
+		assert value["waits"] == 0 and value["window"] == [], value
+
+
 #: The helper says goodbye, and Insert is pressed 50 ms later, as the user goes on typing: whether NVDA
 #: had it and whether it reached the application.
 FALLBACK_GAP_CHILD = r"""
@@ -269,7 +292,7 @@ keyboard.press("Insert", hold=0.03)
 xAt = None
 deadline = time.monotonic() + 3
 while time.monotonic() < deadline:
-	if source._active is not None and not source.isKernel and xAt is None:
+	if not source.isKernel and xAt is None:
 		xAt = time.monotonic() - gone
 	time.sleep(0.005)
 result = {
@@ -290,3 +313,42 @@ def test_noGapWithoutAKeySourceWhenTheHelperGoes(tmp_path: Path):
 		f"Insert typed 50 ms after the helper went reached the application, unheard; the X source took "
 		f"over {value['xAfter']:.3f} s after the goodbye: {value}"
 	)
+
+
+#: Insert is pressed and released within the helper's bound, which here is shorter than the one it
+#: announced, and NVDA takes longer than that bound over it: the helper passes it on after its release
+#: has come, and says so.
+EXPIRED_AFTER_RELEASE_CHILD = r"""
+def slowly(event):
+	time.sleep(0.08)
+	return True
+
+
+keep = slowly
+source = startSource()
+windowKeys()
+delivered.clear()
+keyboard.down("Insert")
+time.sleep(0.01)
+keyboard.up("Insert")
+time.sleep(0.5)
+result = {
+	"kernel": source.isKernel,
+	"expired": len([e for e in keyboard.events if e[1] == "expired"]),
+	"releases": [e["reached"] for e in delivered if e["up"] and e["vk"] == 0x2D],
+	"window": windowKeys(),
+}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_keyPassedOnByTheHelperAfterItsReleaseReachedTheApplication(tmp_path: Path):
+	value = runKernelChild(
+		tmp_path,
+		EXPIRED_AFTER_RELEASE_CHILD,
+		standIn={"verdictTimeout": 0.03, "announcedVerdictTimeout": 0.1},
+	)
+	assert value["kernel"] and value["expired"] == 1, value
+	assert value["window"] == [[110, True], [110, False]], value
+	assert value["releases"] == [True], f"NVDA was told Insert never reached the application: {value}"
