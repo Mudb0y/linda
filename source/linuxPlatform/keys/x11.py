@@ -598,8 +598,11 @@ class X11KeySource:
 		#: never while a window inside it has the focus, where a grab on its parent would move the focus
 		#: for each key.
 		self._topGrabbed: dict[int, set[int]] = {}
-		#: Whether the focus is on that top-level window itself, having come there from outside it.
+		#: Whether the focus is on that top-level window itself, having come there from outside it; and whether
+		#: the captured keys are to be grabbed there now, which an NVDA key's chord letting go of every
+		#: key on that window does not change.
 		self._captureOnTop = False
+		self._topWanted = False
 		#: Until when the keys grabbed now are those of a document NVDA's focus has not reached again;
 		#: None while they are not.
 		self._documentPending: float | None = None
@@ -810,6 +813,7 @@ class X11KeySource:
 		self._captureTop = None
 		self._topGrabbed = {}
 		self._captureOnTop = False
+		self._topWanted = False
 		self._grabKey = None
 		self._serverGrab = None
 		self._otherGrab = None
@@ -1538,6 +1542,7 @@ class X11KeySource:
 		window.ungrab_key(X.AnyKey, X.AnyModifier, onerror=error.CatchError(error.BadWindow))
 		self._grabbed = {}
 		self._grabKeys(window)
+		self._topGrabsLost(window)
 		if self._captureWindow is not None and self._captureWindow.id == window.id:
 			self._applyCapture(self._captureMode)
 
@@ -1703,6 +1708,7 @@ class X11KeySource:
 			# A chord does not follow the focus to another window.
 			self._chordKey = None
 			window.ungrab_key(X.AnyKey, X.AnyModifier, onerror=gone)
+			self._topGrabsLost(window)
 			if self._captureWindow is not None and self._captureWindow.id == window.id:
 				self._dropCapture()
 		if window.id != self._display.screen().root.id and not any(
@@ -1872,17 +1878,17 @@ class X11KeySource:
 		wasOnTop = self._captureOnTop
 		self._captureOnTop = False
 		if focusIn and detail in (X.NotifyNonlinear, X.NotifyAncestor):
-			self._grabTop()
+			self._wantTop(True)
 			self._captureOnTop = True
 			self._focusCapture(True)
 			return
 		if focusIn or detail == X.NotifyInferior:
 			# Inside the top-level window, where the capture window's own grabs and focus are what count.
-			self._ungrabTop()
+			self._wantTop(False)
 			if wasOnTop and not self._focusIsInCapture():
 				self._focusCapture(False)
 			return
-		self._grabTop()
+		self._wantTop(True)
 		if wasOnTop:
 			self._focusCapture(False)
 
@@ -1922,6 +1928,23 @@ class X11KeySource:
 		except error.BadWindow:
 			return None
 		return None if current.id == window.id else current
+
+	def _wantTop(self, wanted: bool) -> None:
+		self._topWanted = wanted
+		if wanted:
+			self._grabTop()
+		else:
+			self._ungrabTop()
+
+	def _topGrabsLost(self, window) -> None:
+		"""Follow every grab of this source on window having been let go of at once, as a chord's end
+		does: on the top-level window, they are made again while they are wanted."""
+		top = self._captureTop
+		if top is None or window.id != top.id:
+			return
+		self._topGrabbed = {}
+		if self._topWanted:
+			self._grabTop()
 
 	def _grabTop(self) -> None:
 		top = self._captureTop
@@ -2000,7 +2023,7 @@ class X11KeySource:
 
 	def _dropCapture(self) -> None:
 		"""Ungrab the captured keys, leaving the mode as it is."""
-		self._ungrabTop()
+		self._wantTop(False)
 		top, self._captureTop = self._captureTop, None
 		self._captureOnTop = False
 		if top is not None and (self._keysWindow is None or top.id != self._keysWindow.id):

@@ -994,3 +994,90 @@ def test_keyAnotherProgramHoldsOnTheTopLevelWindowIsNotWaitedFor(tmp_path: Path)
 		f"a key another program holds on the top-level window was taken for one Linda's grab holds, and NVDA "
 		f"had it, and the key after it, a quarter of a second late: {value}"
 	)
+
+
+#: As TOP_LEVEL_CHILD, on the X route: with the focus on the top-level window itself, back from
+#: another program's, the NVDA key is held and z, which NVDA passes on, typed with it; the focus goes to
+#: the other program's window and comes back to the top-level window, and h is typed 30 ms after:
+#: where h went.
+CHORD_ON_TOP_CHILD = r"""
+other = root.create_window(0, 0, 100, 100, 0, app.screen().root_depth, event_mask=X.KeyPressMask)
+other.change_property(pidAtom, Xatom.CARDINAL, 32, [2])
+other.map()
+top = root.create_window(0, 0, 300, 300, 0, app.screen().root_depth, event_mask=X.KeyPressMask)
+top.change_property(pidAtom, Xatom.CARDINAL, 32, [1])
+wmState = app.intern_atom("WM_STATE")
+top.change_property(wmState, wmState, 32, [1, 0])
+top.map()
+page = top.create_window(-1, -1, 1, 1, 0, app.screen().root_depth, event_mask=X.KeyPressMask)
+page.map()
+app.sync()
+time.sleep(0.2)
+page.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+time.sleep(0.2)
+source = startSource("x11")
+mode["now"] = "browse"
+source.setCapture("browse", 1)
+time.sleep(0.3)
+
+
+def away():
+	other.set_input_focus(X.RevertToParent, X.CurrentTime)
+	app.sync()
+	time.sleep(0.2)
+	mode["now"] = "off"
+	source.setCapture("off")
+	time.sleep(0.3)
+
+
+def back():
+	top.set_input_focus(X.RevertToParent, X.CurrentTime)
+	app.sync()
+
+
+away()
+back()
+time.sleep(0.2)
+mode["now"] = "browse"
+source.setCapture("browse", 1)
+time.sleep(0.3)
+keep = lambda event: event.vkCode != ord("Z")
+keyboard.down("Insert")
+time.sleep(0.05)
+keyboard.press("z", hold=0.03)
+time.sleep(0.05)
+keyboard.up("Insert")
+time.sleep(0.3)
+away()
+windowKeys()
+delivered.clear()
+back()
+
+
+def follow():
+	time.sleep(0.15)
+	mode["now"] = "browse"
+	source.setCapture("browse", 1)
+
+
+threading.Thread(target=follow, daemon=True).start()
+time.sleep(0.03)
+keyboard.press("h", hold=0.03)
+time.sleep(0.6)
+result = {
+	"window": [key for key in windowKeys() if key[1]],
+	"nvda": [[e["captured"], e["reached"]] for e in presses(ord("H"))],
+}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_documentsKeysAreTakenOnTheTopLevelWindowAfterAChordThere(tmp_path: Path):
+	value = runKernelChild(tmp_path, CHORD_ON_TOP_CHILD)
+	assert value["window"] == [], (
+		f"an NVDA key's chord on the top-level window let go of the document's keys there for good, and h "
+		f"typed as the focus came back reached it: {value}"
+	)
+	assert value["nvda"] == [[True, False]], value
