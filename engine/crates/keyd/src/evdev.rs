@@ -14,8 +14,10 @@ use std::mem::size_of;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use libc::{c_int, c_ulong};
 use rustix::fs::inotify;
@@ -128,7 +130,47 @@ impl Grabs {
     fn unregister(&self, slot: usize) {
         self.slots[slot].store(-1, SeqCst);
     }
+
+    /// Revokes every device in the table, each on a thread of its own, and waits for them at most
+    /// `within`. A revoke waits for the device's lock in the kernel, which the loop holds while it
+    /// is in a call on that keyboard; a loop stuck in one must keep the watchdog from that keyboard
+    /// alone, and from ending the helper, which closes them all, not at all.
+    fn release_with(&self, revoke: fn(RawFd), within: Duration) {
+        let (done, finished) = mpsc::channel();
+        let mut started = 0;
+        for s in &self.slots {
+            let fd = s.load(SeqCst);
+            if fd < 0 {
+                continue;
+            }
+            let done = done.clone();
+            let spawned = thread::Builder::new().name("revoke".into()).spawn(move || {
+                revoke(fd);
+                let _ = done.send(());
+            });
+            match spawned {
+                Ok(_) => started += 1,
+                Err(_) => revoke(fd),
+            }
+        }
+        let end = Instant::now() + within;
+        for _ in 0..started {
+            if finished
+                .recv_timeout(end.saturating_duration_since(Instant::now()))
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
 }
+
+fn revoke(fd: RawFd) {
+    let _ = ioctl_value(fd, EVIOCREVOKE, 0);
+}
+
+/// The longest the watchdog waits for the keyboards to be revoked before it ends the helper anyway.
+const REVOKE_WAIT: Duration = Duration::from_millis(100);
 
 impl Guard for Grabs {
     fn holding(&self) -> bool {
@@ -139,12 +181,7 @@ impl Guard for Grabs {
     /// comes back to life cannot go on with it. A device is registered before it is grabbed and
     /// unregistered only after it is let go and before it is closed, so every grab is in the table.
     fn release_all(&self) {
-        for s in &self.slots {
-            let fd = s.load(SeqCst);
-            if fd >= 0 {
-                let _ = ioctl_value(fd, EVIOCREVOKE, 0);
-            }
-        }
+        self.release_with(revoke, REVOKE_WAIT);
     }
 }
 
@@ -749,5 +786,28 @@ mod tests {
             assert!(g.register(2000 + i as RawFd).is_some());
         }
         assert!(g.register(9999).is_none());
+    }
+
+    static REVOKED: std::sync::Mutex<Vec<RawFd>> = std::sync::Mutex::new(Vec::new());
+
+    #[test]
+    fn a_keyboard_whose_revoke_hangs_keeps_the_watchdog_from_no_other() {
+        let g = Grabs::new();
+        for fd in [3000, 3001, 3002] {
+            g.register(fd).unwrap();
+        }
+        fn revoke(fd: RawFd) {
+            if fd == 3000 {
+                thread::sleep(Duration::from_secs(10));
+            }
+            REVOKED.lock().unwrap().push(fd);
+        }
+        let started = Instant::now();
+        g.release_with(revoke, REVOKE_WAIT);
+        let took = started.elapsed();
+        assert!(took < REVOKE_WAIT + Duration::from_millis(400), "{took:?}");
+        let mut revoked = REVOKED.lock().unwrap().clone();
+        revoked.sort();
+        assert_eq!(revoked, vec![3001, 3002]);
     }
 }
