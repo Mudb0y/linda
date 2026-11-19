@@ -2541,3 +2541,230 @@ fn fault_a_press_read_just_before_a_forgiven_freeze_is_not_passed_on_as_the_free
         t.w.emitted()
     );
 }
+
+// Found in the fourth review. Each is ignored, so that the package's checks still pass, and fails
+// with cargo test -p linda-keyd -- --ignored fault_ while the fault it names stands.
+
+const KEY_W: u16 = 17;
+
+/// After a loss of events the helper now deals with the whole batch before it asks the kernel which
+/// keys are down, but it deals with the keys read after the report that ends the loss as though
+/// every key it had down before the loss were down still. A key let go of in the lost stretch stays
+/// down, for the client and on the virtual keyboard, while every key read after the report is
+/// decided and put out, and its release comes only behind them. Control let go of unseen turns the
+/// letters typed next into shortcuts, W into Control+W, which closes a tab; the NVDA key let go of
+/// unseen makes Linda take each letter for an NVDA command, Q for the one that quits. The third
+/// wave asked at the report and had these releases in line ahead of the keys read after it. A loss
+/// needs the helper not to read for the time the kernel's 64 events take to fill, under a second
+/// with a key repeating, as on a machine starved of the processor or across a forgiven freeze.
+#[test]
+#[ignore = "fourth review: keys read after a loss of events go out under a modifier let go of in the loss"]
+fn fault_a_modifier_let_go_of_while_events_were_lost_is_up_before_the_keys_read_after_the_loss() {
+    let (mut t, k) = T::capturing();
+    t.pressed_out(k, KEY_LEFTCTRL);
+    t.keys();
+    // The helper falls behind, Control comes up, and the kernel drops what it held. W goes down
+    // after the loss and is read with the report that ends it.
+    t.w.overflow(k, &[KEY_LEFTCTRL]);
+    t.w.press(k, KEY_W);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    let keys = t.keys();
+    let told: Vec<(u16, u8)> = keys.iter().map(|k| (k.code, k.value)).collect();
+    let w = keys
+        .iter()
+        .find(|k| k.code == KEY_W && k.value == KEY_PRESS)
+        .expect("W's press was sent to the client")
+        .seq;
+    t.verdict(w, false);
+    t.pass(VERDICT_TIMEOUT);
+    let emitted = t.w.emitted();
+    let up = emitted.iter().position(|e| *e == (KEY_LEFTCTRL, 0));
+    let down = emitted.iter().position(|e| *e == (KEY_W, 1));
+    assert!(
+        matches!((up, down), (Some(up), Some(down)) if up < down),
+        "Control, let go of while events were lost, was still down on the virtual keyboard when W, \
+         pressed after it, went out, so the program had Control+W: {emitted:?}"
+    );
+    assert_eq!(
+        told,
+        vec![(KEY_LEFTCTRL, KEY_RELEASE), (KEY_W, KEY_PRESS)],
+        "the client was told of W's press while Control was still down for it"
+    );
+}
+
+/// The same stale view counts towards the emergency chord: Backspace let go of while events were
+/// lost, then Escape and Enter rolled together and read after the report, make the helper let go of
+/// every keyboard and drop the keys waiting, though Backspace has been up all the while. Kernel
+/// capture stays off until the user asks for it again.
+#[test]
+#[ignore = "fourth review: a key let go of while events were lost still counts towards the emergency chord"]
+fn fault_a_key_let_go_of_while_events_were_lost_does_not_complete_the_emergency_chord() {
+    let (mut t, k) = T::capturing();
+    t.pressed_out(k, KEY_BACKSPACE);
+    t.w.overflow(k, &[KEY_BACKSPACE]);
+    t.w.press(k, KEY_ESC);
+    t.w.press(k, KEY_ENTER);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    let sent = t.sent();
+    assert!(
+        !sent.contains(&released(Released::Emergency)),
+        "only Escape and Enter were down, Backspace having come up while events were lost, and the \
+         helper let go as for the emergency chord: {sent:?}"
+    );
+}
+
+/// The mocked devices, with what the virtual keyboard holds down noted at each ungrab.
+struct ProbeDevices {
+    inner: MockDevices,
+    world: World,
+    at_ungrab: std::sync::Arc<std::sync::Mutex<Vec<KeySet>>>,
+}
+
+struct ProbeKeyboard {
+    inner: crate::mock::MockKeyboard,
+    world: World,
+    at_ungrab: std::sync::Arc<std::sync::Mutex<Vec<KeySet>>>,
+}
+
+impl Devices for ProbeDevices {
+    type Keyboard = ProbeKeyboard;
+    type Virtual = <MockDevices as Devices>::Virtual;
+
+    fn scan(&mut self) -> std::io::Result<Vec<Found>> {
+        self.inner.scan()
+    }
+
+    fn open(&mut self, found: &Found) -> std::io::Result<ProbeKeyboard> {
+        Ok(ProbeKeyboard {
+            inner: self.inner.open(found)?,
+            world: self.world.clone(),
+            at_ungrab: self.at_ungrab.clone(),
+        })
+    }
+
+    fn create_virtual(&mut self) -> std::io::Result<Self::Virtual> {
+        self.inner.create_virtual()
+    }
+
+    fn watch(&mut self, on: bool) -> std::io::Result<()> {
+        self.inner.watch(on)
+    }
+
+    fn watch_fd(&self) -> Option<BorrowedFd<'_>> {
+        self.inner.watch_fd()
+    }
+
+    fn watch_drain(&mut self) -> bool {
+        self.inner.watch_drain()
+    }
+
+    fn guard(&self) -> std::sync::Arc<dyn crate::device::Guard> {
+        self.inner.guard()
+    }
+}
+
+impl Keyboard for ProbeKeyboard {
+    fn fd(&self) -> BorrowedFd<'_> {
+        self.inner.fd()
+    }
+
+    fn read(&mut self, out: &mut Vec<InputEvent>) -> Result<(), ReadError> {
+        self.inner.read(out)
+    }
+
+    fn keys_down(&self) -> std::io::Result<KeySet> {
+        self.inner.keys_down()
+    }
+
+    fn grab(&mut self) -> Result<(), GrabError> {
+        self.inner.grab()
+    }
+
+    fn ungrab(&mut self) -> bool {
+        self.at_ungrab
+            .lock()
+            .unwrap()
+            .push(self.world.virtual_down());
+        self.inner.ungrab()
+    }
+
+    fn leds(&self) -> std::io::Result<u16> {
+        self.inner.leds()
+    }
+
+    fn set_leds(&mut self, leds: u16) -> std::io::Result<()> {
+        self.inner.set_leds(leds)
+    }
+}
+
+/// Before this wave every key the virtual keyboard held down was released before the first
+/// keyboard was ungrabbed. Now each keyboard is read and ungrabbed first, and the releases come
+/// after the last ungrab, each of which waits in the kernel for two RCU grace periods. Meanwhile
+/// the desktop goes on taking the keys held there as held: Backspace, the emergency chord's first
+/// key, which went to the program, is repeated by the desktop once the ungrabs take longer than
+/// what was left of its repeat delay, deleting text, and a key let go of on a keyboard already
+/// ungrabbed stays down for the desktop until the last is, its release from the keyboard itself
+/// ignored as one of a key the desktop never had down from it.
+#[test]
+#[ignore = "fourth review: keys stay down on the virtual keyboard while every keyboard is ungrabbed"]
+fn fault_nothing_is_held_on_the_virtual_keyboard_while_the_keyboards_are_ungrabbed() {
+    let w = World::new();
+    let at_ungrab = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut core = Core::new(ProbeDevices {
+        inner: w.devices(),
+        world: w.clone(),
+        at_ungrab: at_ungrab.clone(),
+    });
+    let mut now = Instant::now();
+    let k = w.plug("AT Translated Set 2 keyboard");
+    let say = |core: &mut Core<ProbeDevices>, m: FromClient, now: Instant| {
+        core.received(CLIENT, &m.encode(), now);
+    };
+    core.front_changed(front(SESSION, 1000), now);
+    core.connected(CLIENT, PEER, now);
+    let hello = FromClient::Hello {
+        version: PROTOCOL_VERSION,
+        features: 0,
+    };
+    say(&mut core, hello, now);
+    core.admitted(CLIENT, Ok(SESSION.into()), now);
+    say(&mut core, FromClient::Start, now);
+    for _ in 0..15 {
+        now += ms(100);
+        say(&mut core, FromClient::Heartbeat { counter: 0 }, now);
+        core.tick(now);
+    }
+    assert!(w.grabbed(k), "{:?}", core.take_output());
+    core.take_output();
+    // Backspace goes to the program, then Escape and Enter complete the chord.
+    w.press(k, KEY_BACKSPACE);
+    core.keyboard_ready(k, now);
+    let backspace = core
+        .take_output()
+        .into_iter()
+        .find_map(|o| match o {
+            Output::Send(_, ToClient::Key(key)) if key.code == KEY_BACKSPACE => Some(key.seq),
+            _ => None,
+        })
+        .expect("Backspace's press was sent to the client");
+    let pass = FromClient::Verdict {
+        seq: backspace,
+        keep: false,
+    };
+    say(&mut core, pass, now);
+    assert!(w.virtual_down().contains(KEY_BACKSPACE));
+    w.press(k, KEY_ESC);
+    w.press(k, KEY_ENTER);
+    core.keyboard_ready(k, now);
+    assert!(!w.any_grabbed(), "the chord let go");
+    assert!(w.virtual_down().is_empty());
+    let held = at_ungrab.lock().unwrap().clone();
+    assert!(!held.is_empty(), "the keyboard was ungrabbed");
+    assert!(
+        held.iter().all(|h| h.is_empty()),
+        "Backspace, passed to the program, was still down on the virtual keyboard as the keyboard \
+         was ungrabbed, where the desktop repeats it for as long as the ungrabs take: {held:?}"
+    );
+}
