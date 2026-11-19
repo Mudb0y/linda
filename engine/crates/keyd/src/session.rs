@@ -42,6 +42,8 @@ pub struct SessionInfo {
     pub seat: String,
     pub active: bool,
     pub remote: bool,
+    /// user, greeter, lock-screen, background and the rest logind knows.
+    pub class: String,
 }
 
 /// What admission asks of logind and polkit. Each failure is in words, for the log.
@@ -96,6 +98,13 @@ pub fn admit(
         return Err(not_in_front(format!(
             "session {} is not a local session of seat0",
             s.id
+        )));
+    }
+    // The login screen is a session of its own class, whose reading needs a design of its own.
+    if s.class != "user" {
+        return Err(not_in_front(format!(
+            "session {} is of class {}, and only user sessions are served",
+            s.id, s.class
         )));
     }
     let front = login.front().map_err(no_answer)?;
@@ -233,12 +242,14 @@ impl Login for SystemBus {
             let (seat, _): (String, OwnedObjectPath) = take("Seat")?.try_into()?;
             let active: bool = take("Active")?.try_into()?;
             let remote: bool = take("Remote")?.try_into()?;
+            let class: String = take("Class")?.try_into()?;
             Ok(SessionInfo {
                 id,
                 uid,
                 seat,
                 active,
                 remote,
+                class,
             })
         })
     }
@@ -450,6 +461,7 @@ mod tests {
                         seat: "seat0".into(),
                         active: true,
                         remote: false,
+                        class: "user".into(),
                     },
                 )]),
                 front: Front::Session {
@@ -523,6 +535,14 @@ mod tests {
                 Box::new(|f| f.edit(|s| s.seat = String::new())),
             ),
             ("remote", Box::new(|f| f.edit(|s| s.remote = true))),
+            (
+                "the login screen's",
+                Box::new(|f| f.edit(|s| s.class = "greeter".into())),
+            ),
+            (
+                "a lock screen's",
+                Box::new(|f| f.edit(|s| s.class = "lock-screen".into())),
+            ),
             ("inactive", Box::new(|f| f.edit(|s| s.active = false))),
             (
                 "not in front",
