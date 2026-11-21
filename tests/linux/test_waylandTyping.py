@@ -29,7 +29,7 @@ import pytest
 import remotePeer
 import test_browseKeys as browseKeys
 import webSession
-from desktopSession import DesktopSession
+from desktopSession import PREFIX_MARK, DesktopSession
 from keydStandIn import FEATURE_LATE_PASS, FEATURE_TYPING, FEATURE_WAIT, StandIn, code
 from remotePeer import RemotePeer
 from test_remoteAccess import CHANNEL, PORT, remoteConfig
@@ -526,17 +526,17 @@ def test_browseModeSendsTabAndEscapeOnceEach(desktop: DesktopSession, tmp_path: 
 	with standIn(TYPING) as keyboard:
 		nvda, page = startOnPage(desktop, tmp_path, keyboard)
 		stepOn(desktop, keyboard, "control+Home", "heading level 1 Typing page")
-		stepOn(desktop, keyboard, "Tab", "First link")
+		stepOn(desktop, keyboard, "Tab", "First link" + PREFIX_MARK)
 		page.waitFor("focusLog", ["first"])
 		assert page.read("log") == []
-		stepOn(desktop, keyboard, "Tab", "Second link")
+		stepOn(desktop, keyboard, "Tab", "Second link" + PREFIX_MARK)
 		page.waitFor("focusLog", ["first", "second"])
 		page.waitFor("log", ["Tab"])
 		time.sleep(browseKeys.SETTLE)
 		assert page.read("focusLog") == ["first", "second"]
 		assert page.read("log") == ["Tab"]
 
-		stepOn(desktop, keyboard, "b", "Actions")
+		stepOn(desktop, keyboard, "b", "Actions" + PREFIX_MARK)
 		keyboard.press("Return")
 		page.waitFor("menuLog", ["menu-open"])
 		browseKeys.waitForCapture(nvda, "focus")
@@ -557,7 +557,7 @@ def test_withoutTypingTheCannotTypeLineIsSpokenOnce(desktop: DesktopSession, tmp
 	with standIn(FEATURE_WAIT) as keyboard:
 		nvda, page = startOnPage(desktop, tmp_path, keyboard)
 		stepOn(desktop, keyboard, "control+Home", "heading level 1 Typing page")
-		mark = stepOn(desktop, keyboard, "Tab", "First link")
+		mark = stepOn(desktop, keyboard, "Tab", "First link" + PREFIX_MARK)
 		cannot = lindaSays(NO_SENDER)
 		stepOn(desktop, keyboard, "Tab", cannot)
 		keyboard.press("Tab")
@@ -636,7 +636,8 @@ def test_remoteAccessTypesIntoAGtk4Entry(desktop: DesktopSession, tmp_path: Path
 				lambda m: m["type"] == "speak" and "Key probe" in remotePeer.spokenText(m), since=mark
 			)
 			time.sleep(0.5)
-			assert follower.probe.lines[-1] == "text Ab", follower.probe.lines[-5:]
+			texts = [line for line in follower.probe.lines if line.startswith("text ")]
+			assert texts[-1] == "text Ab", follower.probe.lines[-5:]
 
 			assert not numLockIsOn(keyboard)
 			given = len(follower.probe.lines)
