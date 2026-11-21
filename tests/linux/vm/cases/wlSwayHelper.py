@@ -233,22 +233,32 @@ def locks(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", figu
 		with ground.expectedFailure(LIGHTS_GONE):
 			assert bool(told[-1] & CAPS) == (seen["newHelper"]["letter"] == ["A"]), seen["newHelper"]
 
-	with ground.subtest("let go again, the desktop lights the keyboards itself at the next change"):
+	with ground.subtest("let go again, Caps Lock turned on at the keyboard lights it"):
 		mark = ground.mark()
 		client.stop()
 		client.waitFor("RELEASED", mark)
-		capsOn = seen["newHelper"]["letter"] == ["A"]
+		again: dict[str, object] = {"lightsAtLetGo": allLights(ground)}
+		seen["letGoAgain"] = again
+		# Turning Caps Lock off changes no light, every one being off already, so the tap that shows
+		# whether the desktop lights the keyboard must be one that turns it on.
+		if seen["newHelper"]["letter"] == ["A"]:
+			mark = ground.mark()
+			keyboard.tap("KEY_CAPSLOCK")
+			ground.waitForKeys("evdev", typedKeys("KEY_CAPSLOCK"), mark, device=UHID)
+			again["letterOff"] = letterA(ground, keyboard)
+			assert again["letterOff"] == ["a"], again
 		mark = ground.mark()
 		keyboard.tap("KEY_CAPSLOCK")
 		ground.waitForKeys("evdev", typedKeys("KEY_CAPSLOCK"), mark, device=UHID)
-		ground.waitFor(
-			lambda: bool(lights(ground, UHID) & CAPS) != capsOn,
-			"the desktop to light the uhid keyboard itself",
-		)
-		if not capsOn:
-			assert letterA(ground, keyboard) == ["A"]
-			keyboard.tap("KEY_CAPSLOCK")
-			ground.waitFor(lambda: not lights(ground, UHID) & CAPS, "Caps Lock's light off again")
+		again["letterOn"] = letterA(ground, keyboard)
+		ground.settle(0.5)
+		again["lightsOn"] = allLights(ground)
+		ground.machine.log(f"let go again: {again}")
+		assert again["letterOn"] == ["A"], again
+		for name in REAL:
+			assert again["lightsOn"][name] & CAPS, (name, again)
+		keyboard.tap("KEY_CAPSLOCK")
+		ground.waitFor(lambda: not lights(ground, UHID) & CAPS, "Caps Lock's light off again")
 		assert letterA(ground, keyboard) == ["a"]
 
 
