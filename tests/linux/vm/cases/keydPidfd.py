@@ -28,7 +28,8 @@ SOCKET_PATH = "/run/linda-keyd/socket"
 HELLO, WELCOME, GOODBYE = 0x01, 0x81, 0x82
 GOODBYE_REASONS = {2: "NOT_IN_FRONT", 3: "NOT_AUTHORIZED", 4: "BUSY", 5: "NO_ANSWER", 6: "SILENT"}
 RACE = "/run/current-system/sw/bin/ground-pidfd-race"
-POLKIT_UNIT = "polkit.service"
+#: The tag keydPidfd.nix's polkit rule logs under.
+POLKIT_TAG = "ground-polkit"
 #: Long enough to outlast the race; each process is killed as soon as it is over.
 LIFE = 60
 
@@ -179,7 +180,7 @@ def _raceIn(ground: "Ground", cgroup: str, how: str) -> dict:
 
 
 def _polkitLog(ground: "Ground", since: float) -> list[str]:
-	text = ground.shell(f"journalctl -o json --no-pager -u {POLKIT_UNIT} 2>/dev/null || true")
+	text = ground.shell(f"journalctl -o json --no-pager -t {POLKIT_TAG} 2>/dev/null || true")
 	lines = []
 	for line in text.splitlines():
 		if not line.strip():
