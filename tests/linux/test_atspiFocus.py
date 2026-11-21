@@ -421,3 +421,37 @@ def test_aFloodOfFocusChangesLeavesKeysPrompt(desktop: DesktopSession, tmp_path:
 	assert "Potential freeze" not in log, log[-6000:]
 	probe.close()
 	_closeClean(desktop, nvda)
+
+
+def _legacyFocusStep(desktop: DesktopSession, key: str, *expected: str) -> None:
+	"""Press key; expected, and nothing more, is what NVDA says."""
+	mark = desktop.mark()
+	desktop.press(key)
+	desktop.expect(*expected, since=mark)
+	_waitForQuiet(desktop)
+	assert desktop.spokenSince(mark) == list(expected), desktop.spokenSince(mark)
+
+
+@pytest.mark.parametrize("mode", ["only", "both"])
+def test_menuFocusSentAsTheLegacyFocusEvent(desktop: DesktopSession, tmp_path: Path, mode: str):
+	"""fixtures/apps/legacyFocus.py: a menu whose focus comes as focus: alone, as from a program that
+	bundles an older GTK 3 and bridge, and as both focus: and the state change, each said once."""
+	title = f"Legacy focus {mode}"
+	app = desktop.startApp(desktop.fixture("legacyFocus", mode), title=title)
+	assert app.stdout.readline() == "ready\n"
+	_waitUntilActive(title)
+	nvda, probe = _startNVDA(desktop, tmp_path)
+	desktop.expect(title, "Press me button", since=0, timeout=STARTUP_BOUND)
+	_waitForQuiet(desktop)
+	if mode == "both":
+		# The real menu bar has the focus first, as in gtkFixture.
+		_legacyFocusStep(desktop, "F10", "File sub Menu Alt plus F 1 of 1")
+		_legacyFocusStep(desktop, "Down", "Open 1 of 3")
+	else:
+		_legacyFocusStep(desktop, "F10", "Open 1 of 3")
+	_legacyFocusStep(desktop, "Down", "Save 2 of 3")
+	_legacyFocusStep(desktop, "Down", "Quit 3 of 3")
+	_legacyFocusStep(desktop, "Up", "Save 2 of 3")
+	_legacyFocusStep(desktop, "Escape", "Press me button")
+	probe.close()
+	_closeClean(desktop, nvda)

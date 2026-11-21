@@ -190,6 +190,11 @@ def answeredSlowlyWithin(busName: str, seconds: float) -> bool:
 	return at is not None and time.monotonic() - at < seconds
 
 
+def knownToolkit(busName: str) -> str | None:
+	"""The ToolkitName of busName's application if it has been asked already, without asking."""
+	return _toolkits.get(busName)
+
+
 def heardFrom(busName: str) -> None:
 	"""An event came from busName, so it answers again."""
 	_hungSince.pop(busName, None)

@@ -24,6 +24,18 @@ from . import client as _clientModule
 from . import liveRegions
 from .client import ROOT_PATH, AppHung, Client, Node, NodeGone
 
+#: What ATK's focus tracker sends, which GTK 3 called before it reported focus as a change of the focused
+#: state: a program that bundles an older GTK 3 and bridge sends only this for its menus. Orca takes it
+#: as focus. A bridge sends it only to a listener registered for it, and it is taken only from the
+#: toolkits in LEGACY_FOCUS_TOOLKITS.
+LEGACY_FOCUS_EVENT = "focus:"
+#: The toolkits whose focus: is a focus, by their ToolkitName in lower case: GTK 3's, and GTK 2's. Today's
+#: GTK 3 never sends it. Firefox and Qt send it beside the state change, and Firefox also for a menu as it
+#: opens, which NVDA on Windows never takes for the focus, as the item focused in it is.
+LEGACY_FOCUS_TOOLKITS = frozenset({"gtk", "gail"})
+#: The events that say an object has the focus, the state change only with detail1 set.
+_FOCUS_EVENTS = frozenset({"object:state-changed:focused", LEGACY_FOCUS_EVENT})
+
 #: The events registered with the registry. Registration filters nothing in at-spi2-core 2.62, so the
 #: callback filters again.
 EVENT_TYPES = [
@@ -41,6 +53,7 @@ EVENT_TYPES = [
 	"window:activate",
 	"window:deactivate",
 	"window:create",
+	LEGACY_FOCUS_EVENT,
 ]
 WINDOW_ACTIVATION_EVENTS = frozenset({"window:activate", "window:deactivate"})
 #: What Qt's QAccessibleAnnouncementEvent and GTK 4's gtk_accessible_announce send: a message for the
@@ -518,6 +531,15 @@ def _isPasswordText(node: Node) -> bool:
 	return role == "password text"
 
 
+def _takesLegacyFocus(busName: str) -> bool:
+	"""Whether busName's toolkit is known, without asking, to be one in LEGACY_FOCUS_TOOLKITS. Looking for
+	an application's focus asks its toolkit, so a GTK program's is known once one of its windows has been
+	activated. Asking for an application not asked yet would be a round trip in the middle of wx.Yield,
+	which every event of Firefox's content process after it would then wait for."""
+	toolkit = _clientModule.knownToolkit(busName)
+	return toolkit is not None and toolkit.lower() in LEGACY_FOCUS_TOOLKITS
+
+
 def _onEvent(eventType: str, source: Node | None, detail1: int, detail2: int, anyData) -> None:
 	# Runs inside wx.Yield in the middle of whatever NVDA was doing: append and ask for a pump, nothing
 	# more.
@@ -526,6 +548,8 @@ def _onEvent(eventType: str, source: Node | None, detail1: int, detail2: int, an
 	import core
 
 	if core._hasShutdownBeenTriggered:
+		return
+	if eventType == LEGACY_FOCUS_EVENT and not _takesLegacyFocus(source.busName):
 		return
 	_clientModule.heardFrom(source.busName)
 	now = time.monotonic()
@@ -565,7 +589,8 @@ def _onEvent(eventType: str, source: Node | None, detail1: int, detail2: int, an
 	with _queueLock:
 		_queue.append((eventType, source, detail1, detail2, anyData))
 	core.requestPump(
-		immediate=eventType in ("object:state-changed:focused", "object:active-descendant-changed")
+		immediate=eventType in _FOCUS_EVENTS
+		or eventType == "object:active-descendant-changed"
 		or eventType in WINDOW_ACTIVATION_EVENTS,
 	)
 
@@ -684,6 +709,7 @@ def _isFocusEvent(event) -> bool:
 	eventType, _source, detail1, _detail2, _anyData = event
 	return (
 		(eventType == "object:state-changed:focused" and detail1)
+		or eventType == LEGACY_FOCUS_EVENT
 		or eventType == "window:activate"
 		or (eventType == "object:active-descendant-changed")
 	)
@@ -1296,7 +1322,7 @@ def pumpAll() -> None:
 		event = kept[index]
 		if _isBlur(event):
 			lostFocus.add(event[1].key)
-		elif event[0] == "object:state-changed:focused" and event[1].key in lostFocus:
+		elif event[0] in _FOCUS_EVENTS and event[1].key in lostFocus:
 			blurredAfter.add(index)
 	# GTK clears an entry's selection as it loses the focus, after saying so; read as the focus's, it
 	# would be announced as the next control is.
