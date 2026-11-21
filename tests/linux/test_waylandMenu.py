@@ -38,6 +38,8 @@ ACTIVATION_BOUND = 1.0
 MENU_TITLE = "Linda"
 #: Seconds to wait for anything more after what a step expects.
 SETTLE = 0.4
+#: The start of the warning logged when GDK's display is not of the session's kind.
+DISAGREEMENT = "GDK opened a display of kind"
 #: Typed into the probe, and never to be found in Linda's log.
 MARKER = "kqzmxjwv"
 GTK = ("gtkFixture", "Fixture window")
@@ -313,20 +315,25 @@ class Linda:
 	"""Linda with the windows probe plugin: commands to it, what it recorded and what it spoke."""
 
 	def __init__(
-		self, directory: Path, *, appProcess: int | None = None, config: Path = SESSION_CONFIG
+		self,
+		directory: Path,
+		*,
+		appProcess: int | None = None,
+		config: Path = SESSION_CONFIG,
+		env: dict[str, str] | None = None,
 	) -> None:
 		self.directory = directory
 		self.probe = directory / "probe"
 		(self.probe / "commands").mkdir(parents=True)
 		(self.probe / "records.jsonl").touch()
 		hooks = directory / "hooks"
-		(hooks / "globalPlugins").mkdir(parents=True)
+		(hooks / "globalPlugins").mkdir(parents=True, exist_ok=True)
 		(hooks / "globalPlugins" / "windowsProbe.py").write_text(PLUGIN, encoding="utf-8")
 		(hooks / "synthDrivers").symlink_to(harness.HERE / "synthDrivers")
 		configDir = directory / "config"
 		configDir.mkdir()
 		(configDir / "nvda.ini").write_text(config.read_text(encoding="utf-8"), encoding="utf-8")
-		env = {"LINDA_TEST_HOOKS_DIR": str(hooks), "LINDA_WINDOWS_PROBE": str(self.probe)}
+		env = {"LINDA_TEST_HOOKS_DIR": str(hooks), "LINDA_WINDOWS_PROBE": str(self.probe), **(env or {})}
 		if appProcess is not None:
 			env["LINDA_WINDOWS_PROBE_APP"] = str(appProcess)
 		self.launch = harness.startLauncher(
@@ -597,5 +604,34 @@ def test_onXTheTrayMenuIsTheGtkPopupAndHandlersSeeTheSame(tmp_path: Path) -> Non
 			assert returned["t"] >= handler["t"]
 			linda.expect("Linda Settings: General (normal configuration) dialog", since=mark)
 			assert not linda.records("presentAgain")
+			assert DISAGREEMENT not in linda.launch.text("nvda.log")
+		finally:
+			linda.stop()
+
+
+@pytest.mark.rigSession("x11")
+def test_displayOfAnotherKindThanTheSessionIsLoggedOnceAndFollowed(tmp_path: Path) -> None:
+	"""A session forced to Wayland whose GDK opened the rig's X display: NVDA's windows follow GDK."""
+	with desktopSession.DesktopSession(tmp_path / "desktop") as desktop:
+		app = desktop.startApp(desktop.fixture(GTK[0]), title=GTK[1])
+		assert app.stdout.readline() == "ready\n"
+		desktopSession.activate(GTK[1])
+		linda = Linda(tmp_path / "linda", env={"LINDA_SESSION_TYPE": "wayland"})
+		try:
+			assert linda.ready["displayKind"] == "x11"
+			lines = [line for line in linda.launch.text("nvda.log").splitlines() if DISAGREEMENT in line]
+			assert lines == [
+				(
+					"GDK opened a display of kind x11 in a session of kind wayland; NVDA's own windows are shown "
+					"for the display. The session is wayland by rule 1: LINDA_SESSION_TYPE is wayland"
+				),
+			], lines
+			linda.waitForState(lambda state: (state["focus"] or {}).get("processID") == app.pid)
+			mark = len(linda.spoken())
+			popup = linda.command("menu")
+			linda.expect("Preferences sub Menu P 1 of 9", since=mark)
+			assert linda.waitFor("popupMenu", since=popup)["displayKind"] == "x11"
+			desktop.press("Escape")
+			linda.waitFor("popupReturned", since=popup)
 		finally:
 			linda.stop()

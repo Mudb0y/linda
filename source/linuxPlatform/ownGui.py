@@ -591,9 +591,10 @@ def _setFocusOnceActive(self) -> None:
 	_upstreamSetFocus(self)
 	topLevel = wx.GetTopLevelParent(self)
 	if topLevel is None or topLevel is self or topLevel.IsShown():
-		if topLevel is not None and isWaylandDisplay() and _needsPresentingAgain(topLevel):
-			# NVDA focuses a window that waits behind another to bring it forward, as it does on Windows.
-			presentAgain(topLevel)
+		if topLevel is self and isWaylandDisplay() and _needsPresentingAgain(self):
+			# NVDA focuses a window of its own that waits behind another to bring it forward, as on Windows.
+			# A control is not enough: the speech viewer focuses its check box as it loses the keyboard too.
+			presentAgain(self)
 		return
 	target = weakref.ref(self)
 	if getattr(topLevel, "_lindaFocusTarget", None) is None:
