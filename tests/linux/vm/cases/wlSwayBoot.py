@@ -311,8 +311,8 @@ def run(ground: "Ground") -> None:
 
 	with ground.subtest("the session starts again without Xwayland"):
 		startAgain(ground, xwayland=False)
-		ground.machine.log(
-			f"E20 start-up without Xwayland, seconds from starting lightdm again: {ground.bootTimes}"
-		)
+		# The recorders' time is still the first boot's: the restart waits only for the session.
+		times = {name: t for name, t in ground.bootTimes.items() if name != "recorders"}
+		ground.machine.log(f"E20 start-up without Xwayland, seconds from starting lightdm again: {times}")
 	variant(ground, keyboard, xwayland=False)
 	memory(ground, "at the end")
