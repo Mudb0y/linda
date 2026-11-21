@@ -342,13 +342,18 @@ def run(ground: "Ground") -> None:
 		assert line["presses"] == {"OUT": TYPED_WAITING_LIMIT - 1}, line
 		assert line["releases"] == {"OUT": TYPED_WAITING_LIMIT - 1}, line
 		assert line["head"] == "OUT", line
-		rate = seen["rate"]
-		# The bucket was full, and earns one key in each hundredth of a second the burst took.
-		earned = TYPED_PER_SECOND * rate["seconds"] + 2
-		assert TYPED_BURST <= 2 * rate["pressesOut"] <= TYPED_BURST + earned, rate
-		assert rate["pressesFull"] > 0, rate
-		assert set(rate["releases"]) <= {"OUT", "NOT_DOWN"}, rate
-		assert rate["releases"].get("OUT", 0) == rate["pressesOut"], rate
+		# The paced burst outlasts the bucket by much more than a key's worth of time, which a burst
+		# sent at once does only in a guest slowed by load.
+		assert seen["paced"]["seconds"] > 0.5, seen["paced"]
+		for rate in (seen["rate"], seen["paced"]):
+			# The bucket was full, and earns one key in each hundredth of a second the burst took. A
+			# release takes a key from it only when one is there and goes out when none is, so once it
+			# is empty each key earned lets a whole tap out.
+			earned = TYPED_PER_SECOND * rate["seconds"] + 2
+			assert TYPED_BURST // 2 <= rate["pressesOut"] <= TYPED_BURST // 2 + earned, rate
+			assert rate["pressesFull"] > 0, rate
+			assert set(rate["releases"]) <= {"OUT", "NOT_DOWN"}, rate
+			assert rate["releases"].get("OUT", 0) == rate["pressesOut"], rate
 		ground.settle(0.5)
 		# A is among the keys of the line too. A burst this fast can overrun the kernel's queue for a
 		# reader of the virtual keyboard, which then loses events, so what each reader had is told and
@@ -362,7 +367,8 @@ def run(ground: "Ground") -> None:
 			- 1
 			for source in ("evdev", "x")
 		}
-		ground.machine.log(f"of {rate['pressesOut']} typed A taps put out, the readers had {seenBy}")
+		out = seen["rate"]["pressesOut"] + seen["paced"]["pressesOut"]
+		ground.machine.log(f"of {out} typed A taps put out, the readers had {seenBy}")
 		state = ground.run(["xinput", "query-state", VIRTUAL_KEYBOARD])
 		assert state.returncode == 0, state
 		assert "=down" not in state.stdout, state.stdout
@@ -556,24 +562,34 @@ def caps(keyboard: str) -> dict:
 		"releases": Counter(r["outcome"] for r in releases.values()),
 	}
 	typist.typed([1001])
-	# The bucket full again.
+	# The bucket full again before each burst.
 	time.sleep(2.5)
+	rate = tapA(typist, range(2000, 2300), 0)
+	time.sleep(2.5)
+	# Six hundred a second for a second: the bucket is empty after about 0.4 s.
+	paced = tapA(typist, range(3000, 3600), 1 / 600)
+	typist.send(bytes([STOP]))
+	typist.waitFor(lambda r: r["type"] == "RELEASED")
+	return {"line": line, "rate": rate, "paced": paced}
+
+
+def tapA(typist: Typist, tags: range, spacing: float) -> dict:
+	"""Press and release A by turns, one TYPE each spacing seconds from the first, and what came of
+	the presses and the releases."""
 	start = time.monotonic()
-	tags = range(2000, 2300)
-	for tag in tags:
+	for n, tag in enumerate(tags):
+		if spacing:
+			time.sleep(max(0, start + n * spacing - time.monotonic()))
 		typist.type(tag, KEY_A, tag % 2 == 0, INJECT)
 	got = typist.typed(tags, 10)
 	presses = [got[tag]["outcome"] for tag in tags if tag % 2 == 0]
-	rate = {
+	return {
 		"pressesOut": presses.count("OUT"),
 		"pressesFull": presses.count("REFUSED_FULL"),
 		"pressesOther": len(presses) - presses.count("OUT") - presses.count("REFUSED_FULL"),
 		"releases": Counter(got[tag]["outcome"] for tag in tags if tag % 2),
 		"seconds": max(r["t"] for r in got.values()) - start,
 	}
-	typist.send(bytes([STOP]))
-	typist.waitFor(lambda r: r["type"] == "RELEASED")
-	return {"line": line, "rate": rate}
 
 
 def lost(keyboard: str, ready: str) -> dict:
