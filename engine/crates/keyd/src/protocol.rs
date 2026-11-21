@@ -203,7 +203,8 @@
 //! - [`TYPED_REFUSED_KEY`]: the helper does not type that code, or not at that moment, by the rules
 //!   below;
 //! - [`TYPED_REFUSED_FULL`]: too many typed keys are waiting, or have come too fast;
-//! - [`TYPED_NOT_DOWN`]: a release of a key the client has not typed down;
+//! - [`TYPED_NOT_DOWN`]: a release of a key the client has not typed down, or, as its turn comes,
+//!   of one whose press was refused as it went out;
 //! - [`TYPED_LOST`]: the helper let go before the key went out, and it never will.
 //!
 //! A refused key goes nowhere and takes no place in line. TYPED comes as soon as the key's fate is
@@ -218,8 +219,11 @@
 //!   is TYPED_REFUSED_STATE. How many keyboards are held does not matter, so typing works where the
 //!   only keyboard is one the helper leaves alone.
 //! - Only the codes that source/linuxPlatform/keys/keyMap.py names in its FIXED, NUMPAD and LAYOUT
-//!   tables, without KEY_SLEEP (142). Never KEY_POWER (116), KEY_SUSPEND (205), KEY_POWER2 (0x164)
-//!   or KEY_RESTART (0x198): logind takes the virtual keyboard's power keys as the machine's.
+//!   tables, without KEY_SLEEP (142), which are [`TYPEABLE`](crate::keys::TYPEABLE). Never
+//!   KEY_POWER (116), KEY_SUSPEND (205), KEY_POWER2 (0x164) or KEY_RESTART (0x198): logind takes
+//!   the virtual keyboard's power keys as the machine's.
+//! - No press of a key the client has typed down and not yet released, which is answered
+//!   TYPED_REFUSED_KEY: a key goes down once, and its one release brings it up.
 //! - Never a press of SysRq (99) while an Alt is down on the virtual keyboard, nor of an Alt while
 //!   SysRq is down there. And never any typed press while the kernel's SysRq handler may be active
 //!   for the virtual keyboard: from a press of SysRq that went out there while an Alt was down
@@ -235,7 +239,10 @@
 //!   them, since a release is no command. So no typed press is taken as a SysRq command, and no
 //!   typed SysRq makes the handler active.
 //! - At most [`TYPED_WAITING_LIMIT`] typed keys in line at once, and no more than
-//!   [`TYPED_PER_SECOND`] a second over time, in bursts of up to [`TYPED_BURST`].
+//!   [`TYPED_PER_SECOND`] a second over time, in bursts of up to [`TYPED_BURST`]. The release of a
+//!   key typed down counts toward both, and is never refused by them: refused, it would leave the
+//!   key down on the virtual keyboard, repeating, and there are never more of them waiting than
+//!   the codes the helper types.
 //! - Whenever the helper lets go, for whatever reason, typed keys not yet out are dropped and
 //!   answered TYPED_LOST, never put out, unlike the user's own keys still waiting: a key sent for
 //!   one moment must not land in the next. Keys typed down are released with every other key the
@@ -363,8 +370,7 @@ pub const UNANSWERED_GAP: Duration = Duration::from_secs(1);
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
 /// The longest the helper waits for logind and polkit to admit a client before it turns it away.
 /// polkit may have to be started by the bus and its rules engine run on the first question, which
-/// can take a second or two on a loaded machine; a client turned away keeps the X route and may
-/// ask again.
+/// can take a second or two on a loaded machine; a client turned away may ask again.
 pub const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// The bound on each call to logind or polkit, so that a hung service holds up neither the
 /// admission of the next client nor the following of the active session for long.
@@ -463,14 +469,14 @@ pub const FEATURES_KNOWN: u32 = FEATURE_WAIT;
 /// The device number of keys the client types with [`TYPE_DECIDE`]. Real keyboards are numbered as
 /// the kernel numbers input devices, which never comes near this.
 pub const TYPED_DEVICE: u32 = u32::MAX;
-/// The most typed keys in line at once, with [`FEATURE_TYPING`]; beyond it TYPE is answered
+/// The most typed keys in line at once, with [`FEATURE_TYPING`]; beyond it a typed press is answered
 /// [`TYPED_REFUSED_FULL`]. Someone typing from another computer has a few keys on the way at a time,
 /// and the line has no other bound, so this keeps a client gone wrong from filling the helper's
 /// memory with keys that would all go out.
 pub const TYPED_WAITING_LIMIT: usize = 64;
 /// How many typed keys a second the helper takes over time, presses and releases each counted, and
-/// how many it takes at once after a pause: a bucket of [`TYPED_BURST`] filled at this rate, a TYPE
-/// that finds it empty answered [`TYPED_REFUSED_FULL`]. Far beyond anyone typing, even a short
+/// how many it takes at once after a pause: a bucket of [`TYPED_BURST`] filled at this rate, a typed
+/// press that finds it empty answered [`TYPED_REFUSED_FULL`]. Far beyond anyone typing, even a short
 /// string sent at once, yet a client gone wrong cannot type pages a second into whatever has the
 /// focus.
 pub const TYPED_PER_SECOND: u32 = 100;
@@ -673,6 +679,22 @@ pub enum FromClient {
     Heartbeat {
         counter: u32,
     },
+    /// TYPE, once [`FEATURE_TYPING`] is granted.
+    Type {
+        tag: u32,
+        code: u16,
+        press: bool,
+        mode: TypeMode,
+    },
+}
+
+/// TYPE's mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeMode {
+    /// [`TYPE_DECIDE`].
+    Decide,
+    /// [`TYPE_INJECT`].
+    Inject,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -717,6 +739,13 @@ pub enum ToClient {
     },
     HeartbeatEcho {
         counter: u32,
+    },
+    /// With [`FEATURE_TYPING`]: the outcome, one of the TYPED_ values, of the TYPE with this tag,
+    /// sent as the KEY numbered `seq`, or 0.
+    Typed {
+        tag: u32,
+        seq: u64,
+        outcome: u8,
     },
 }
 
@@ -812,6 +841,12 @@ impl ToClient {
                 b.push(HEARTBEAT_ECHO);
                 b.extend_from_slice(&counter.to_le_bytes());
             }
+            ToClient::Typed { tag, seq, outcome } => {
+                b.push(TYPED);
+                b.extend_from_slice(&tag.to_le_bytes());
+                b.extend_from_slice(&seq.to_le_bytes());
+                b.push(*outcome);
+            }
         }
         b
     }
@@ -878,6 +913,14 @@ impl ToClient {
                 r.fixed("HEARTBEAT", 5)?;
                 ToClient::HeartbeatEcho { counter: r.u32() }
             }
+            TYPED => {
+                r.fixed("TYPED", 14)?;
+                let (tag, seq, outcome) = (r.u32(), r.u64(), r.u8());
+                if !(TYPED_OUT..=TYPED_LOST).contains(&outcome) {
+                    return Err(Malformed(format!("unknown TYPED outcome {outcome}")));
+                }
+                ToClient::Typed { tag, seq, outcome }
+            }
             t => return Err(Malformed(format!("unknown message type {t:#04x}"))),
         };
         Ok(message)
@@ -909,10 +952,59 @@ impl FromClient {
                 b.push(HEARTBEAT);
                 b.extend_from_slice(&counter.to_le_bytes());
             }
+            FromClient::Type {
+                tag,
+                code,
+                press,
+                mode,
+            } => {
+                b.push(TYPE);
+                b.extend_from_slice(&tag.to_le_bytes());
+                b.extend_from_slice(&code.to_le_bytes());
+                b.push(u8::from(*press));
+                b.push(match mode {
+                    TypeMode::Decide => TYPE_DECIDE,
+                    TypeMode::Inject => TYPE_INJECT,
+                });
+            }
         }
         b
     }
 
+    /// A message from a client granted `features`: what [`FromClient::decode`] reads, and the types
+    /// those features bring, which from any other client are of an unknown type.
+    pub fn decode_granted(m: &[u8], features: u32) -> Result<FromClient, Malformed> {
+        if m.first() != Some(&TYPE) || features & FEATURE_TYPING == 0 {
+            return FromClient::decode(m);
+        }
+        let mut r = Reader::new(m)?;
+        r.fixed("TYPE", 9)?;
+        let (tag, code, value, mode) = (r.u32(), r.u16(), r.u8(), r.u8());
+        let press = match value {
+            0 => false,
+            1 => true,
+            v => return Err(Malformed(format!("TYPE {v} is not 0 or 1"))),
+        };
+        let mode = match mode {
+            TYPE_DECIDE => TypeMode::Decide,
+            TYPE_INJECT => TypeMode::Inject,
+            m => return Err(Malformed(format!("TYPE in mode {m}, not 0 or 1"))),
+        };
+        // The words go to the log, so they do not name the code.
+        if !crate::keys::is_virtual_key(code) {
+            return Err(Malformed(
+                "TYPE of a code the virtual keyboard cannot send".into(),
+            ));
+        }
+        Ok(FromClient::Type {
+            tag,
+            code,
+            press,
+            mode,
+        })
+    }
+
+    /// The messages of a client granted no feature that brings a message type of its own.
     pub fn decode(m: &[u8]) -> Result<FromClient, Malformed> {
         let mut r = Reader::new(m)?;
         let message = match r.kind {
@@ -1318,6 +1410,72 @@ mod tests {
                 "{out:?}"
             );
             assert!(out.contains(&Output::Close(1)), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn type_and_typed_come_back_as_they_went_and_type_only_once_granted() {
+        let typed = FromClient::Type {
+            tag: 0x0102_0304,
+            code: 30,
+            press: true,
+            mode: TypeMode::Inject,
+        };
+        let b = typed.encode();
+        assert_eq!(b, vec![TYPE, 4, 3, 2, 1, 30, 0, 1, TYPE_INJECT]);
+        assert_eq!(FromClient::decode_granted(&b, FEATURE_TYPING), Ok(typed));
+        let decide = FromClient::Type {
+            tag: u32::MAX,
+            code: 0x2e8,
+            press: false,
+            mode: TypeMode::Decide,
+        };
+        let b = decide.encode();
+        assert_eq!(b.len(), 9);
+        assert_eq!(FromClient::decode_granted(&b, FEATURE_TYPING), Ok(decide));
+        for features in [0, FEATURE_WAIT, FEATURE_LATE_PASS | FEATURE_VIRTUAL_SEEN] {
+            let e = FromClient::decode_granted(&b, features).unwrap_err();
+            assert!(e.0.contains("unknown message type 0x06"), "{e}");
+        }
+        // Everything else reads as without the feature.
+        let wait = FromClient::Wait { seq: 3 };
+        assert_eq!(
+            FromClient::decode_granted(&wait.encode(), FEATURE_TYPING),
+            Ok(wait)
+        );
+        for outcome in TYPED_OUT..=TYPED_LOST {
+            let m = ToClient::Typed {
+                tag: 7,
+                seq: 0x0102_0304_0506_0708,
+                outcome,
+            };
+            let b = m.encode();
+            assert_eq!(b.len(), 14);
+            assert_eq!(&b[..5], &[TYPED, 7, 0, 0, 0]);
+            assert_eq!(ToClient::decode(&b), Ok(m));
+        }
+        assert!(ToClient::decode(&[TYPED, 7, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 8]).is_err());
+    }
+
+    #[test]
+    fn a_broken_type_is_refused_with_a_reason_that_names_no_key() {
+        let granted = |m: &[u8]| FromClient::decode_granted(m, FEATURE_TYPING).unwrap_err().0;
+        for (m, why) in [
+            (vec![TYPE, 1, 0, 0, 0, 30, 0, 1], "TYPE of 8 bytes"),
+            (vec![TYPE, 1, 0, 0, 0, 30, 0, 1, 1, 0], "TYPE of 10 bytes"),
+            (vec![TYPE, 1, 0, 0, 0, 30, 0, 2, 1], "TYPE 2 is not 0 or 1"),
+            (vec![TYPE, 1, 0, 0, 0, 30, 0, 1, 2], "mode 2"),
+        ] {
+            assert!(granted(&m).contains(why), "{m:?}: {}", granted(&m));
+        }
+        // A mouse button, 0x110, and codes beyond the kernel's.
+        for code in [0u16, 0x110, 0x2c0, 0x300, u16::MAX] {
+            let mut m = vec![TYPE, 1, 0, 0, 0];
+            m.extend_from_slice(&code.to_le_bytes());
+            m.extend_from_slice(&[1, TYPE_INJECT]);
+            let why = granted(&m);
+            assert!(why.contains("cannot send"), "{code:#x}: {why}");
+            assert!(!why.contains(&code.to_string()), "{why}");
         }
     }
 

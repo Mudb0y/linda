@@ -417,14 +417,13 @@ impl<D: Devices> Core<D> {
 
     /// One message from a connection.
     pub fn received(&mut self, conn: ConnId, m: &[u8], now: Instant) {
-        let message = FromClient::decode(m);
-        if self.client.as_ref().is_some_and(|c| c.conn == conn) {
-            match message {
+        if let Some(c) = self.client.as_ref().filter(|c| c.conn == conn) {
+            match FromClient::decode_granted(m, c.features) {
                 Ok(msg) => self.client_said(msg, now),
                 Err(e) => self.drop_later(Goodbye::Malformed, e.0),
             }
         } else if self.callers.contains_key(&conn) {
-            match message {
+            match FromClient::decode(m) {
                 Ok(msg) => self.caller_said(conn, msg, now),
                 Err(e) => self.refuse(conn, Goodbye::Malformed, e.0, now),
             }
@@ -844,6 +843,9 @@ impl<D: Devices> Core<D> {
             }
             FromClient::Heartbeat { counter } => {
                 self.send_client(ToClient::HeartbeatEcho { counter })
+            }
+            FromClient::Type { .. } => {
+                self.drop_later(Goodbye::Malformed, "TYPE is not built".into())
             }
         }
     }
@@ -1768,6 +1770,7 @@ fn name(m: &FromClient) -> &'static str {
         FromClient::Verdict { .. } => "VERDICT",
         FromClient::Wait { .. } => "WAIT",
         FromClient::Heartbeat { .. } => "HEARTBEAT",
+        FromClient::Type { .. } => "TYPE",
     }
 }
 
