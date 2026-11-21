@@ -48,6 +48,13 @@ def memory(ground: "Ground", when: str) -> None:
 	ground.machine.log(ground.shell("ps -eo rss,user,comm --sort=-rss | head -n 12"))
 
 
+def toolkitAccessibility(ground: "Ground") -> str:
+	"""The session's org.gnome.desktop.interface toolkit-accessibility, as dconf has it."""
+	answer = ground.run(["gsettings", "get", "org.gnome.desktop.interface", "toolkit-accessibility"])
+	assert answer.returncode == 0, answer
+	return answer.stdout.strip()
+
+
 def typedTo(ground: "Ground", keyboard: object, title: str) -> None:
 	"""B, then AltGr with A, which the Polish layout makes a with ogonek and the US one a plain a."""
 	mark = ground.mark()
@@ -125,11 +132,16 @@ def run(ground: "Ground") -> None:
 			typedTo(ground, keyboard, title)
 
 	with ground.subtest("the shell probe lists the desktop and counts the events of an Alt+Tab"):
+		found = toolkitAccessibility(ground)
 		result = shellProbe.probe(ground, lambda: ground.altTab())
+		left = toolkitAccessibility(ground)
+		ground.machine.log(f"E9 toolkit-accessibility before the probe {found}, after it {left}")
+		assert left == found, (found, left)
 		for phase in ("before", "claimed", "after"):
 			names = [a.get("name") for a in result[f"applications {phase}"]["applications"]]
 			ground.machine.log(f"E9 applications on the desktop, {phase}: {names}")
-		ground.machine.log(f"E9 settings: {result['settings']}")
+		for phase in ("before", "claimed", "listening", "after", "restored"):
+			ground.machine.log(f"E9 settings, {phase}: {result[f'settings {phase}']}")
 		ground.machine.log(f"E9 event counts during Alt+Tab: {result['events']['counts']}")
 
 	with ground.subtest("Alt+Tab moves the focus between the two windows as AT-SPI reports it"):

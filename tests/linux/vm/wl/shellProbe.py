@@ -7,16 +7,23 @@ AT-SPI client run in the session:
 	shellProbe.py OUT SECONDS
 
 It writes one JSON object a line to OUT: "settings", the desktop's screen reader and toolkit
-accessibility settings and the bus's IsEnabled and ScreenReaderEnabled as found; "applications",
-phase "before", each application on the AT-SPI desktop with its process, toolkit and top-level
-children; then it claims IsEnabled, as a screen reader does, and after a pause lists them again, phase
-"claimed"; "listening", once it has registered for window, focus, state, children and property
-events; after SECONDS, "events", the count of each event type from each application and the first
-of them in order, by role and accessible name only; the applications again, phase "after"; and
-"done". No text event is asked for, so nothing typed is recorded.
+accessibility settings and the bus's IsEnabled and ScreenReaderEnabled, and "applications", each
+application on the AT-SPI desktop with its process, toolkit and top-level children, both phase
+"before"; then it claims IsEnabled, as a screen reader does, and after a pause writes both again,
+phase "claimed"; the settings, phase "listening", once it has registered for window, focus, state,
+children and property events, and then "listening"; after SECONDS, "events", the count of each event
+type from each application and the first of them in order, by role and accessible name only; both
+again, phase "after"; the settings, phase "restored"; and "done". No text event is asked for, so
+nothing typed is recorded.
+
+at-spi2-core's bus launcher writes toolkit-accessibility true to the desktop's settings when IsEnabled
+is claimed and when the first event listener registers, and leaves it so when the listener goes
+(at-spi-bus-launcher.c, handle_set_property, on_event_listener_registered and
+event_listener_vanished_callback, in 2.62.0). The probe therefore puts the setting back as it found
+it before it ends, so that what a case does after it runs as the desktop had it.
 
 On the host, probe runs it in the guest around a key sequence a case gives, and answers the records
-by kind.
+by kind, the settings and the applications by phase.
 """
 
 import json
@@ -55,7 +62,7 @@ def probe(ground: "Ground", keys: Callable[[], None], seconds: float = 8.0) -> d
 	def kinds() -> dict[str, object]:
 		found: dict[str, object] = {}
 		for record in ground.readJsonLines(OUTPUT):
-			key = record["kind"] if record["kind"] != "applications" else f"applications {record['phase']}"
+			key = f"{record['kind']} {record['phase']}" if "phase" in record else record["kind"]
 			found[key] = record
 		return found
 
@@ -97,19 +104,32 @@ def _guest(path: str, seconds: float) -> None:
 		except GLib.Error as e:
 			return f"error: {e.message}"
 
-	def setting(schema: str, key: str) -> object:
+	def schema(name: str) -> Gio.Settings | None:
 		source = Gio.SettingsSchemaSource.get_default()
-		if source is None or source.lookup(schema, True) is None:
+		if source is None or source.lookup(name, True) is None:
 			return None
-		return Gio.Settings.new(schema).get_boolean(key)
+		return Gio.Settings.new(name)
 
-	write(
-		"settings",
-		screenReaderEnabled=setting("org.gnome.desktop.a11y.applications", "screen-reader-enabled"),
-		toolkitAccessibility=setting("org.gnome.desktop.interface", "toolkit-accessibility"),
-		isEnabled=status("IsEnabled"),
-		screenReaderStatus=status("ScreenReaderEnabled"),
-	)
+	screenReader = schema("org.gnome.desktop.a11y.applications")
+	interface = schema("org.gnome.desktop.interface")
+
+	def toolkitAccessibility() -> bool | None:
+		return interface.get_boolean("toolkit-accessibility") if interface is not None else None
+
+	def settings(phase: str) -> None:
+		write(
+			"settings",
+			phase=phase,
+			screenReaderEnabled=screenReader.get_boolean("screen-reader-enabled")
+			if screenReader is not None
+			else None,
+			toolkitAccessibility=toolkitAccessibility(),
+			isEnabled=status("IsEnabled"),
+			screenReaderStatus=status("ScreenReaderEnabled"),
+		)
+
+	found = toolkitAccessibility()
+	settings("before")
 
 	Atspi.init()
 	Atspi.set_timeout(2000, 5000)
@@ -151,6 +171,7 @@ def _guest(path: str, seconds: float) -> None:
 		None,
 	)
 	time.sleep(CLAIM_SETTLE)
+	settings("claimed")
 	applications("claimed")
 
 	counts: dict[str, int] = {}
@@ -190,6 +211,7 @@ def _guest(path: str, seconds: float) -> None:
 	listener = Atspi.EventListener.new(onEvent)
 	for event in EVENTS:
 		listener.register(event)
+	settings("listening")
 	write("listening")
 
 	def end() -> bool:
@@ -199,7 +221,12 @@ def _guest(path: str, seconds: float) -> None:
 	GLib.timeout_add(int(seconds * 1000), end)
 	Atspi.event_main()
 	write("events", counts=counts, first=first)
+	settings("after")
 	applications("after")
+	if found is not None and toolkitAccessibility() != found:
+		interface.set_boolean("toolkit-accessibility", found)
+		Gio.Settings.sync()
+	settings("restored")
 	write("done")
 
 
