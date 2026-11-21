@@ -51,6 +51,11 @@ CONSOLE_TEXT = "/tmp/ground/console.txt"
 NVDA_LOG = "/tmp/ground/linda/nvda.log"
 OLD_LOG = "/tmp/ground/linda/nvda-old.log"
 STOPPED_LETTERS = "abcdefghijklmnop"
+US_RIGHT_ALT = (
+	"with US English in use beside Polish, Linda's names feed compiles the right Alt key as Alt_R where "
+	"GNOME's keymap has ISO_Level3_Shift (E5-gnome.md, key 100), so Linda names AltGr with A as Alt with "
+	"A and echoes nothing; package P is to remove it"
+)
 
 
 def noHelper(ground: "Ground", keyboard: "FakeKeyboard") -> int:
@@ -152,11 +157,15 @@ def layoutAfterSwitch(ground: "Ground", keyboard: "FakeKeyboard", layout: str) -
 		assert app[1]["keyval"] == "aogonek", app
 		ground.waitForSpeech(OGONEK, mark)
 	else:
-		# In US English the right Alt is Alt, so AltGr with A is Alt with A, which types no letter.
+		# GNOME keeps the right Alt key as AltGr in US English beside Polish, and A's third level is a,
+		# which the program gets; Linda should name and echo it so.
 		assert not any(OGONEK in text for text in name), name
 		assert app[1]["keyval"] == "a", app
 		ground.settle(0.5)
 		assert not any(OGONEK in text for text in said(ground, mark)), said(ground, mark)
+		with ground.expectedFailure(US_RIGHT_ALT):
+			assert "ctrl plus alt plus a" in name, name
+			ground.waitForSpeech("a", mark, timeout=3)
 	ground.machine.log(
 		f"in {layout} AltGr with A reached the program as {app[1]['keyval']}; Linda said {said(ground, mark)}"
 	)
