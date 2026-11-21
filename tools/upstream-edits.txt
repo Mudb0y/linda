@@ -477,7 +477,10 @@ source/globalCommands.py
   every platform: GlobalCommands' scripts of the features platformFeatures
   says the platform lacks are replaced, before the instance is made, by
   ones bound to no gesture and listed nowhere, which say they are not
-  available. Windows supports every feature, so none is replaced
+  available. The pointer's, mouse tracking's and the Screen Curtain's,
+  which a Wayland session lacks, keep their gestures, so that their keys
+  say so rather than reach the program. Windows supports every feature, so
+  none is replaced
   Linux runtime: a command with no gesture, takeKeyboardBack, has NVDA
   take the keyboard through linda-keyd again after its emergency chord let
   it go, through linuxPlatform.inputHook

@@ -5630,8 +5630,24 @@ platformFeatures.hideUnsupportedScripts(
 		"toggleAutomaticRefreshOfRecogResult": Feature.WINDOWS_OCR,
 		"activateWindowsOCRSettings": Feature.WINDOWS_OCR,
 		"test_navigatorDisplayModelText": Feature.DISPLAY_MODEL,
+		"leftMouseClick": Feature.POINTER,
+		"rightMouseClick": Feature.POINTER,
+		"toggleLeftMouseButton": Feature.POINTER,
+		"toggleRightMouseButton": Feature.POINTER,
+		"mouseScrollUp": Feature.POINTER,
+		"mouseScrollDown": Feature.POINTER,
+		"mouseScrollLeft": Feature.POINTER,
+		"mouseScrollRight": Feature.POINTER,
+		"moveMouseToNavigatorObject": Feature.POINTER,
+		"moveNavigatorObjectToMouse": Feature.POINTER,
+		"toggleMouseTracking": Feature.MOUSE_TRACKING,
+		"toggleMouseAudioCoordinates": Feature.MOUSE_TRACKING,
+		"toggleMouseTextResolution": Feature.MOUSE_TRACKING,
 	},
 	categoryFeatures={SCRCAT_MAGNIFIER: Feature.MAGNIFIER, SCRCAT_TOUCH: Feature.TOUCH},
+	# A key a person knows for one of these says why nothing happens, rather than reaching the program:
+	# numpad slash would type a slash.
+	keepGestures={Feature.POINTER, Feature.MOUSE_TRACKING, Feature.SCREEN_CURTAIN},
 )
 
 #: The single global commands instance.
