@@ -46,7 +46,12 @@ mutterOnly = pytest.mark.rigSession("mutter")
 @pytest.mark.rigSession("x11")
 @pytest.mark.parametrize("compositor", ["mutter", "sway"])
 def test_waylandSessions(tmp_path: Path, compositor: str) -> None:
-	env = {name: value for name, value in os.environ.items() if not name.startswith("LINDA_RIG_SESSION")}
+	# The X session's choices, which a Wayland rig refuses; many tests' usage lines set LINDA_RIG_WM.
+	env = {
+		name: value
+		for name, value in os.environ.items()
+		if not name.startswith(("LINDA_RIG_SESSION", "LINDA_RIG_WM"))
+	}
 	env.update(LINDA_RIG_COMPOSITOR=compositor)
 	ran = subprocess.run(
 		[

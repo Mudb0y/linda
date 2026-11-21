@@ -99,6 +99,12 @@ def withoutNetwork() -> dict[str, str]:
 	return {name: value for name, value in os.environ.items() if name != network.VARIABLE}
 
 
+def forWaylandRig() -> dict[str, str]:
+	"""withoutNetwork(), and without the X session's window manager, which a Wayland rig refuses and many
+	tests' usage lines set for the X run these tests are part of."""
+	return {name: value for name, value in withoutNetwork().items() if name != "LINDA_RIG_WM"}
+
+
 #: Run in a rig with an address and a port: exits 0 if a TCP connection to them succeeds, 1 if not.
 CONNECT = """
 import socket, sys
@@ -311,7 +317,7 @@ print(json.dumps({
 def test_waylandSessionHasNoXvfb(compositor: str, xwayland: str):
 	"""No Xvfb and none of its display: DISPLAY names the compositor's Xwayland when it was asked for, and
 	nothing otherwise, so that a Wayland test can never pass by taking the X route."""
-	env = {**withoutNetwork(), "LINDA_RIG_COMPOSITOR": compositor, "LINDA_RIG_XWAYLAND": xwayland}
+	env = {**forWaylandRig(), "LINDA_RIG_COMPOSITOR": compositor, "LINDA_RIG_XWAYLAND": xwayland}
 	done = rig(sys.executable, "-c", INSPECT, env=env)
 	assert done.returncode == 0, done.stderr
 	seen = json.loads(done.stdout)
@@ -340,7 +346,7 @@ def test_waylandSessionHasNoXvfb(compositor: str, xwayland: str):
 
 
 def test_waylandSessionAloneMeansMutter():
-	done = rig(sys.executable, "-c", INSPECT, env={**withoutNetwork(), "LINDA_RIG_SESSION": "wayland"})
+	done = rig(sys.executable, "-c", INSPECT, env={**forWaylandRig(), "LINDA_RIG_SESSION": "wayland"})
 	assert done.returncode == 0, done.stderr
 	seen = json.loads(done.stdout)
 	assert seen["environment"]["LINDA_RIG_COMPOSITOR"] == "mutter"
@@ -614,3 +620,9 @@ def test_noHelperOutlivesANetworkedRig(tmp_path: Path, ending: str | signal.Sign
 		time.sleep(0.1)
 	assert not left
 	assert os.listdir(work) == []
+
+
+def test_waylandRigStartsFromAnXRunWithItsWindowManager(monkeypatch: pytest.MonkeyPatch):
+	monkeypatch.setenv("LINDA_RIG_WM", "marco")
+	done = rig("true", env={**forWaylandRig(), "LINDA_RIG_COMPOSITOR": "sway"})
+	assert done.returncode == 0, done.stderr
