@@ -45,6 +45,7 @@ ALLOWED_RECORDS = [
 		r"Keyboard layout: sway's IPC connection ended",
 		r"Keyboard layout: sway did not list its inputs: \w+",
 		r"Keyboard layout: \d+ sway sockets with a running sway, so none is taken",
+		r"Keyboard layout: the registry [\w.]+ could not be read",
 	)
 ]
 
@@ -314,6 +315,53 @@ result = {
 	# description with another; Mara is listed under two layouts.
 	odd = [e for e in value["elsewhere"] if not e[1].startswith("sun_type")]
 	assert sorted(odd) == [["hr", "glagyz"], ["in", "mara"], ["ru", "ruintl_en"]], value["elsewhere"]
+
+
+def test_userRulesDoNotHideTheSystems(tmp_path: Path):
+	"""xkbcommon looks in $XDG_CONFIG_HOME/xkb before the system's root, and libxkbcommon's way to add
+	a layout of one's own is an evdev.xml there that lists only that layout."""
+	rules = tmp_path / "config" / "xkb" / "rules"
+	rules.mkdir(parents=True)
+	(rules / "evdev.xml").write_text(
+		"""<?xml version="1.0" encoding="UTF-8"?>
+<xkbConfigRegistry version="1.1">
+  <layoutList>
+    <layout>
+      <configItem><name>mine</name><description>Mine</description></configItem>
+      <variantList>
+        <variant><configItem><name>other</name><description>Mine (other)</description></configItem></variant>
+      </variantList>
+    </layout>
+  </layoutList>
+</xkbConfigRegistry>
+"""
+	)
+	(rules / "evdev.extras.xml").write_text("<xkbConfigRegistry")
+	result = runFeed(
+		tmp_path,
+		r"""
+known = swayLayout.registry()
+result = {
+	"paths": swayLayout._includePaths()[:1],
+	"named": {d: list(known.get(d) or ()) for d in ("Mine", "Mine (other)", "Polish", "English (US)")},
+}
+sway = FakeSway([keyboard(LINDA, ["Polish", "Mine (other)"])])
+result["feed"] = started(swayLayout.SwayLayoutFeed(sway.path))
+sway.close()
+""",
+		env={"XDG_CONFIG_HOME": str(tmp_path / "config")},
+	)
+	assert result.value == {
+		"paths": [str(tmp_path / "config" / "xkb")],
+		"named": {
+			"Mine": ["mine", ""],
+			"Mine (other)": ["mine", "other"],
+			"Polish": ["pl", ""],
+			"English (US)": ["us", ""],
+		},
+		"feed": snap(names("pl,mine", ",other")),
+	}
+	assert "Keyboard layout: the registry evdev.extras.xml could not be read" in moduleRecords(result)
 
 
 def test_perIdentifierConfigurationGivesTheNotice(tmp_path: Path):

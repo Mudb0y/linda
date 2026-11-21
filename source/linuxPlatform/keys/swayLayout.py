@@ -166,8 +166,8 @@ def _includePaths() -> list[str]:
 
 def registry(rules: str = DEFAULT_RULES) -> dict[str, tuple[str, str]]:
 	"""Each description the rules' XML registry gives a layout or a variant, with its layout and
-	variant names, from the first include path that has the registry; the first of a description wins.
-	Empty where none has it."""
+	variant names, from every include path as libxkbregistry merges them; the first of a description
+	wins. Empty where none has it."""
 	with _registryLock:
 		found = _registries.get(rules)
 		if found is None:
@@ -179,11 +179,13 @@ def _readRegistry(rules: str) -> dict[str, tuple[str, str]]:
 	from xml.etree import ElementTree
 
 	descriptions: dict[str, tuple[str, str]] = {}
+	# A user's own rules come first and usually list only the user's own layouts, so the system's
+	# must be read as well.
 	for directory in _includePaths():
-		main = os.path.join(directory, "rules", f"{rules}.xml")
-		if not os.path.isfile(main):
-			continue
-		for path in (main, os.path.join(directory, "rules", f"{rules}.extras.xml")):
+		for fileName in (f"{rules}.xml", f"{rules}.extras.xml"):
+			path = os.path.join(directory, "rules", fileName)
+			if not os.path.isfile(path):
+				continue
 			try:
 				root = ElementTree.parse(path).getroot()
 			except (OSError, ElementTree.ParseError):
@@ -201,7 +203,6 @@ def _readRegistry(rules: str) -> dict[str, tuple[str, str]]:
 					description = variant.findtext("configItem/description")
 					if variantName and description:
 						descriptions.setdefault(description, (name, variantName))
-		break
 	return descriptions
 
 
