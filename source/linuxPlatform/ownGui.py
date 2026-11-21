@@ -526,8 +526,8 @@ def _popUpTrayMenu(self, menu: wx.Menu) -> bool:
 	return menuWindow.popUp(self, menu)
 
 
-#: When each of NVDA's top-level GTK windows that has mapped and not yet been active mapped, by its
-#: address, for as long as its activation is waited for.
+#: When each of NVDA's top-level GTK windows last mapped, by its address, while it has not been active
+#: since and its activation is still waited for.
 _awaitingActivation: dict[int, float] = {}
 
 
