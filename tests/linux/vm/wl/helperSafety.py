@@ -125,6 +125,20 @@ def appKeyvals(records: list[dict]) -> list[str]:
 	return [r["keyval"] for r in records if r["value"] == 1]
 
 
+def waitForKeyFrom(ground: "Ground", key: str, since: "Mark", device: str) -> list[dict]:
+	"""Wait until the evdev recorder has a tap of key from device, whatever else came between: once
+	the helper lets go, the releases of the keys it held reach every reader of the keyboard, where in
+	the X guest the X server dropped them, never having had their presses."""
+	found: list[dict] = []
+
+	def arrived() -> bool:
+		found[:] = [r for r in ground.keys("evdev", since, device=device) if r["key"] == key]
+		return keyEvents(found)[:2] == typedKeys(key)
+
+	ground.waitFor(arrived, f"{key} from {device} at the evdev recorder", 5)
+	return found
+
+
 # The grab, and the virtual keyboard's settle.
 
 
@@ -503,7 +517,7 @@ def emergency(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", 
 		said = ground.waitForHelperLog("the emergency chord", mark)
 		enter = next(r for r in written if r["key"] == "KEY_ENTER")
 		# Q, typed after the chord, reaches the program from the keyboard itself.
-		ground.waitForKeys("evdev", typedKeys("KEY_Q"), mark, device=UHID)
+		waitForKeyFrom(ground, "KEY_Q", mark, UHID)
 		app = ground.waitForKeys("app", typedKeys("KEY_Q"), mark)
 		assert appKeyvals(app) == ["q"], app
 		figures["chord"] = {
@@ -541,7 +555,7 @@ def emergency(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", 
 		ground.waitForHelperLog("the emergency chord", mark)
 		mark = ground.mark()
 		ground.press("r")
-		ground.waitForKeys("evdev", typedKeys("KEY_R"), mark, device=VIRTIO_KEYBOARD)
+		waitForKeyFrom(ground, "KEY_R", mark, VIRTIO_KEYBOARD)
 		app = ground.waitForKeys("app", typedKeys("KEY_R"), mark)
 		assert appKeyvals(app) == ["r"], app
 		ground.session({"op": "signal", "name": "keyd-main", "signal": "SIGCONT"})
@@ -655,7 +669,7 @@ def watchdogThread(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClie
 		)
 		after = ground.mark()
 		keyboard.run({"release": "KEY_LEFTSHIFT"}, {"tap": "KEY_Q"})
-		back = ground.waitForKeys("evdev", typedKeys("KEY_Q"), after, device=UHID)
+		back = waitForKeyFrom(ground, "KEY_Q", after, UHID)
 		app = ground.waitForKeys("app", typedKeys("KEY_Q"), after)
 		assert appKeyvals(app) == ["q"], app
 		assert back[0]["t"] - stoppedAt > STALL, back
