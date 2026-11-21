@@ -156,6 +156,14 @@ CASES = [
 		("x11", 2, "sway"),
 	),
 	("DISPLAY=:99 alone, as in the rig", {"DISPLAY": ":99"}, (), ("x11", 6, "other")),
+	# A unit started in an X session before DISPLAY is imported into the user manager.
+	("session type x11 with no DISPLAY", {"XDG_SESSION_TYPE": "x11"}, (), ("none", 7, "other")),
+	(
+		"session type x11 with no DISPLAY and a Wayland socket that is there",
+		{"XDG_SESSION_TYPE": "x11", "WAYLAND_DISPLAY": "wayland-0"},
+		("wayland-0",),
+		("wayland", 4, "other"),
+	),
 	(
 		"startx with a WAYLAND_DISPLAY whose socket is missing",
 		{"XDG_SESSION_TYPE": "tty", "DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-1"},
