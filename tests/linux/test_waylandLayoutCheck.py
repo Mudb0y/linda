@@ -460,7 +460,8 @@ def typeInto(keyboard: StandIn, name: str, text: str) -> None:
 
 def typeIntoPassword(desktop: DesktopSession, keyboard: StandIn, nvda: harness.Launch) -> None:
 	"""Type MARKER into the password field, which compares nothing; each character is still echoed as
-	a star, so its insert reached typedChars."""
+	a star, so its insert reached typedChars. The handler withholds a password text's inserts, so this
+	holds the rule for withheld text; the protected state alone is held by test_whatIsNeverCompared."""
 	typeInto(keyboard, "password", MARKER)
 	stars = [text.strip() for text in desktop.spokenSince(0)].count("star")
 	assert stars == len(MARKER), desktop.spokenSince(0)
