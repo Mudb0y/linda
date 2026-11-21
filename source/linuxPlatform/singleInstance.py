@@ -89,11 +89,7 @@ def displayName() -> str:
 	"""
 	display = os.environ.get("DISPLAY")
 	if not display:
-		wayland = os.environ.get("WAYLAND_DISPLAY") or "none"
-		# The socket may be named by its path or, under XDG_RUNTIME_DIR, by its name alone.
-		if os.path.dirname(wayland) == os.environ.get("XDG_RUNTIME_DIR", "").rstrip("/"):
-			wayland = os.path.basename(wayland)
-		return wayland.replace("/", "_")
+		return _waylandName()
 	host, separator, number = display.rpartition(":")
 	if not separator:
 		return display.replace("/", "_")
@@ -105,13 +101,40 @@ def displayName() -> str:
 	return f"{host}:{number}".replace("/", "_")
 
 
-def lockFilePath(appName: str = APP_NAME) -> str:
+def _waylandName() -> str:
+	wayland = os.environ.get("WAYLAND_DISPLAY") or "none"
+	# The socket may be named by its path or, under XDG_RUNTIME_DIR, by its name alone.
+	if os.path.dirname(wayland) == os.environ.get("XDG_RUNTIME_DIR", "").rstrip("/"):
+		wayland = os.path.basename(wayland)
+	return wayland.replace("/", "_")
+
+
+def displayNames(kind: str) -> list[str]:
+	"""Each display this process holds a lock for, the Wayland socket first.
+
+	In an X session that is displayName() alone, the one lock there has always been. A Wayland
+	session that also has an X display, its Xwayland, locks both: a program started in it may be given
+	only one of the two, and a copy from before the session's kind was known locked the X display alone,
+	so whichever a new copy is given, it finds the copy running.
+
+	:param kind: linuxPlatform.displayServer.kind(), given rather than asked for so that this module
+		needs only the standard library.
+	"""
+	name = displayName()
+	if kind != "wayland" or not os.environ.get("DISPLAY") or not os.environ.get("WAYLAND_DISPLAY"):
+		return [name]
+	waylandName = _waylandName()
+	return [waylandName, name] if waylandName != name else [name]
+
+
+def lockFilePath(appName: str = APP_NAME, display: str | None = None) -> str:
 	"""The lock file for the display this process would run on.
 
 	XDG_RUNTIME_DIR is per user, not per session, so the display is in the name: a user signed in
 	on two displays runs a copy on each.
 
 	:param appName: The directory of the lock: FORMER_APP_NAME for the one copies took under that name.
+	:param display: One of displayNames(); displayName() by default.
 	"""
 	directory = os.path.join(_runtimeDir(), appName)
 	try:
@@ -120,7 +143,9 @@ def lockFilePath(appName: str = APP_NAME) -> str:
 		pass
 	# Whoever can write here could plant a lock file naming any process.
 	_checkPrivateDirectory(directory)
-	return os.path.join(directory, f"display{displayName()}.lock")
+	if display is None:
+		display = displayName()
+	return os.path.join(directory, f"display{display}.lock")
 
 
 class InstanceLock:
