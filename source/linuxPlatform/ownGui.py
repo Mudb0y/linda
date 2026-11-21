@@ -42,6 +42,13 @@ its first item too, and the menu of a captured gesture's forms waits for the NVD
 
 wx's own log goes to NVDA's log, where wxMSW's goes to the debugger rather than to the user;
 wxGTK would print it on standard error.
+
+On a Wayland display a program gets the keyboard only for a window as it maps, and only for input it
+received itself, which a screen reader that takes its keys elsewhere never has. So there NVDA's menu
+opens as a window of its own (menuWindow), a window of NVDA's that is shown and not active is brought
+forward by being unmapped and mapped again, and a window that does not get the keyboard within a second
+of mapping says how to reach it. Which of these runs follows the kind of display GDK opened, not the
+session's kind; on an X display everything here does what it did before.
 """
 
 import atexit
@@ -54,6 +61,7 @@ from collections.abc import Callable
 
 import controlTypes
 import wx
+import wx.adv
 from gui import guiHelper, nvdaControls, settingsDialogs
 from logHandler import log
 
@@ -65,6 +73,13 @@ _RELEASE_INTERVAL = 20
 _RELEASE_ATTEMPTS = 150
 #: Seconds from a dialog becoming active to the focus NVDA chose for it, at most.
 _FIRST_FOCUS_TIMEOUT = 1.0
+#: Milliseconds a window of NVDA's has, on a Wayland display, to get the keyboard after it maps before
+#: NVDA says how to reach it; also how long after a map the window is left to the activation that map
+#: will bring rather than mapped again.
+_ACTIVATION_WAIT = 1000
+
+#: The kinds of display GDK may open, by the name of the display's GType.
+_DISPLAY_KINDS = {"GdkX11Display": "x11", "GdkWaylandDisplay": "wayland"}
 
 #: Accessible roles of the boxes wx puts around a control's GTK widget, which a label should skip.
 _WRAPPER_ROLES = frozenset({"filler", "scroll pane", "panel"})
@@ -112,6 +127,8 @@ class _Gtk:
 			(atk, "atk_relation_type_for_name", ctypes.c_int, (ctypes.c_char_p,)),
 			(gobject, "g_type_check_instance_is_a", ctypes.c_int, (pointer, ctypes.c_size_t)),
 			(glib, "g_list_free", None, (ctypes.POINTER(_GList),)),
+			(gtk, "gtk_widget_hide", None, (pointer,)),
+			(gtk, "gtk_widget_show", None, (pointer,)),
 		):
 			function = getattr(library, name)
 			function.restype = result
@@ -185,8 +202,40 @@ class _Gtk:
 		if accessible:
 			self._functions["atk_object_set_name"](accessible, name.encode())
 
+	def mapAgain(self, window: int) -> None:
+		"""Unmap a shown top-level GTK window and map it again, which wx does not hear of: wx's own Hide
+		would end a modal dialog's loop, and its Show would initialise the dialog again."""
+		self._functions["gtk_widget_hide"](window)
+		self._functions["gtk_widget_show"](window)
+
 
 _gtk: _Gtk | None = None
+_displayKind: str | None = None
+
+
+def displayKind() -> str:
+	"""x11, wayland or other, from the GType of the display GDK opened; none until wx has opened one.
+
+	This, and not the session's kind, decides how NVDA's own windows are shown: GDK may open Wayland in a
+	session classified as X, or X through Xwayland in a Wayland session when GDK_BACKEND says so.
+	"""
+	global _displayKind
+	if _displayKind is not None:
+		return _displayKind
+	if wx.GetApp() is None:
+		return "none"
+	_gtkModule()
+	from gi.repository import Gdk
+
+	display = Gdk.Display.get_default()
+	if display is None:
+		return "none"
+	_displayKind = _DISPLAY_KINDS.get(display.__gtype__.name, "other")
+	return _displayKind
+
+
+def isWaylandDisplay() -> bool:
+	return displayKind() == "wayland"
 
 
 def _gtkCalls() -> _Gtk:
@@ -459,8 +508,58 @@ def _addCapturedOnceKeysReleased(self, *args) -> None:
 
 
 def _popupMenuOnFirstItem(self, menu, *args, **kwargs):
-	selectFirstMenuItemWhenShown()
+	# A dialog's own menu is a popup on every display, opened from a key the dialog received.
+	wx.CallAfter(_selectFirstMenuItem, _MENU_ATTEMPTS)
 	return _upstreamPopupMenu(self, menu, *args, **kwargs)
+
+
+def _popUpTrayMenu(self, menu: wx.Menu) -> bool:
+	"""wx.adv.TaskBarIcon.PopupMenu, which on a Wayland display shows the menu as a window of its own.
+
+	The tray icon's popup hangs off a window that is never mapped, and an xdg_popup needs a mapped
+	parent and the serial of input NVDA's windows received, so it could not open there.
+	"""
+	if not isWaylandDisplay():
+		return _upstreamTrayPopupMenu(self, menu)
+	from . import menuWindow
+
+	return menuWindow.popUp(self, menu)
+
+
+#: When each of NVDA's top-level GTK windows last mapped, by its address, while that is recent.
+_mappedAt: dict[int, float] = {}
+
+
+def _needsPresentingAgain(window: wx.Window) -> bool:
+	return (
+		isinstance(window, wx.TopLevelWindow)
+		and not _isGone(window)
+		and window.IsShown()
+		and not window.IsActive()
+	)
+
+
+def presentAgain(window: wx.TopLevelWindow) -> None:
+	"""Bring a shown window of NVDA's forward on a Wayland display, by mapping it again.
+
+	A compositor activates an already mapped window only for a request made with input the program
+	received itself; Mutter, KWin and sway give a window the keyboard as it maps. A window that mapped
+	within the last second is left to the activation that map brings.
+	"""
+	widget = _widget(window)
+	if time.monotonic() - _mappedAt.get(widget, float("-inf")) < _ACTIVATION_WAIT / 1000:
+		return
+	try:
+		_gtkCalls().mapAgain(widget)
+	except (OSError, AttributeError):
+		log.debugWarning("Could not map a window again through GTK", exc_info=True)
+
+
+def _raiseOrPresentAgain(self) -> None:
+	if isWaylandDisplay() and _needsPresentingAgain(self):
+		presentAgain(self)
+		return
+	_upstreamRaise(self)
 
 
 def _presentTreeChange(treeRef: weakref.ref, isStateChange: bool) -> None:
@@ -491,6 +590,9 @@ def _setFocusOnceActive(self) -> None:
 	_upstreamSetFocus(self)
 	topLevel = wx.GetTopLevelParent(self)
 	if topLevel is None or topLevel is self or topLevel.IsShown():
+		if topLevel is not None and isWaylandDisplay() and _needsPresentingAgain(topLevel):
+			# NVDA focuses a window that waits behind another to bring it forward, as it does on Windows.
+			presentAgain(topLevel)
 		return
 	target = weakref.ref(self)
 	if getattr(topLevel, "_lindaFocusTarget", None) is None:
@@ -749,6 +851,8 @@ _upstreamPostInitInputGestures = None
 _upstreamAddCaptured = None
 _upstreamDoRefresh = None
 _upstreamPopupMenu = wx.Window.PopupMenu
+_upstreamTrayPopupMenu = wx.adv.TaskBarIcon.PopupMenu
+_upstreamRaise = wx.Window.Raise
 _upstreamAddPage = wx.Notebook.AddPage
 _upstreamEnable = wx.Window.Enable
 _upstreamDisable = wx.Window.Disable
@@ -769,6 +873,8 @@ def install() -> None:
 	inputGestures.InputGesturesDialog.postInit = _postInitInputGestures
 	inputGestures.InputGesturesDialog._addCaptured = _addCapturedOnceKeysReleased
 	wx.Window.PopupMenu = _popupMenuOnFirstItem
+	wx.adv.TaskBarIcon.PopupMenu = _popUpTrayMenu
+	wx.Window.Raise = _raiseOrPresentAgain
 	wx.Notebook.AddPage = _addPageOnce
 	wx.Window.Enable = _enableRestoringFocus
 	wx.Window.Disable = _disableRememberingFocus
@@ -806,9 +912,70 @@ def _presentDialogOnMap(window, *args) -> bool:
 	# The hook sees every widget mapped, as map is a signal of every widget.
 	if isinstance(window, Gtk.Window) and window.get_window_type() == Gtk.WindowType.TOPLEVEL:
 		_leaveOutOfModalGrab(window)
-		if window.get_type_hint() == Gdk.WindowTypeHint.DIALOG:
+		kind = displayKind()
+		if kind == "wayland":
+			_awaitActivation(window)
+		elif kind == "x11" and window.get_type_hint() == Gdk.WindowTypeHint.DIALOG:
 			GLib.idle_add(_presentNow, window)
 	return True
+
+
+_capsulePointer = ctypes.PYFUNCTYPE(ctypes.c_void_p, ctypes.py_object, ctypes.c_char_p)(
+	("PyCapsule_GetPointer", ctypes.pythonapi),
+)
+
+
+def _address(gObject) -> int:
+	"""The address of the C object a PyGObject wrapper holds, as wx gives its widgets'."""
+	return _capsulePointer(gObject.__gpointer__, None) or 0
+
+
+def _awaitActivation(window) -> None:
+	"""Note when window mapped, and say how to reach it if it does not get the keyboard within a second.
+
+	Whether it got it is GTK's own word, the active state NVDA's windows give AT-SPI. A window shown
+	without being activated, as the speech viewer is, is not waited for.
+	"""
+	from gi.repository import Gdk, GLib
+
+	if not window.get_focus_on_map() or window.get_type_hint() not in (
+		Gdk.WindowTypeHint.DIALOG,
+		Gdk.WindowTypeHint.NORMAL,
+	):
+		return
+	now = time.monotonic()
+	for address, mapped in list(_mappedAt.items()):
+		if now - mapped >= _ACTIVATION_WAIT / 1000:
+			del _mappedAt[address]
+	_mappedAt[_address(window)] = now
+	activated = [window.is_active()]
+
+	def noteActive(*_args) -> None:
+		activated[0] = activated[0] or window.is_active()
+
+	handler = window.connect("notify::is-active", noteActive)
+
+	def check() -> bool:
+		window.disconnect(handler)
+		if not activated[0] and window.get_mapped():
+			_sayNotActivated()
+		return False
+
+	GLib.timeout_add(_ACTIVATION_WAIT, check)
+
+
+def _sayNotActivated() -> None:
+	import queueHandler
+	import ui
+
+	log.info("A window of NVDA's mapped and did not get the keyboard")
+	queueHandler.queueFunction(
+		queueHandler.eventQueue,
+		ui.message,
+		# Translators: Said on Linux when one of NVDA's windows has opened but the compositor has not given
+		# it the keyboard, so that keys still go to the window that had them.
+		_("NVDA's window opened but did not get the keyboard. Press Alt+Tab to reach it."),
+	)
 
 
 def _leaveOutOfModalGrab(window) -> None:
@@ -846,6 +1013,7 @@ def initialize(app: wx.App) -> None:
 	from gi.repository import GObject
 
 	app.Bind(wx.EVT_CHAR_HOOK, _onCharHook)
+	_compareDisplayWithSession()
 	GObject.add_emission_hook(_gtkModule().Window, "map", _presentDialogOnMap)
 	# Tree events travel up to the application unless a handler keeps them, which none of NVDA's does.
 	for binder in (wx.EVT_TREE_SEL_CHANGED, wx.EVT_TREE_ITEM_EXPANDED, wx.EVT_TREE_ITEM_COLLAPSED):
@@ -853,6 +1021,20 @@ def initialize(app: wx.App) -> None:
 	# wx.App sets its own target as it starts.
 	_logTarget = _NvdaLogTarget()
 	wx.Log.SetActiveTarget(_logTarget)
+
+
+def _compareDisplayWithSession() -> None:
+	"""Log once when GDK opened another kind of display than the session's, after which NVDA's windows
+	follow GDK's and its keys and features the session's."""
+	from . import displayServer
+
+	session = displayServer.kind()
+	display = displayKind()
+	if session in ("x11", "wayland") and display != session:
+		log.warning(
+			f"GDK opened a display of kind {display} in a session of kind {session}; NVDA's own windows "
+			f"are shown for the display. The session is {displayServer.reason()}",
+		)
 
 
 def whenNvdaKeysReleased(callback: Callable[[], None], attemptsLeft: int = _RELEASE_ATTEMPTS) -> None:
@@ -878,8 +1060,11 @@ def selectFirstMenuItemWhenShown() -> None:
 	"""Select the first item of the popup menu about to be shown, once GTK has mapped it, and make
 	Escape in its submenus close only them.
 
-	Called just before a blocking PopupMenu; wx runs the calls queued here inside that menu's loop.
+	Called just before a blocking PopupMenu; wx runs the calls queued here inside that menu's loop. On a
+	Wayland display NVDA's menu is the menu window, which opens on its first item itself.
 	"""
+	if isWaylandDisplay():
+		return
 	wx.CallAfter(_selectFirstMenuItem, _MENU_ATTEMPTS)
 
 
