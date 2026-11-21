@@ -11,6 +11,11 @@ The witness is a screen saver on the session bus that owns org.mate.ScreenSaver,
 org.gnome.ScreenSaver or org.freedesktop.ScreenSaver, answers GetActive, says it is active, and
 belongs to this login session: its XDG_SESSION_ID, or failing that its DISPLAY, is this process's,
 or, where its environment cannot be read, its control group is.
+logind decides where the environment cannot: for a saver whose environment cannot be read, as KWin's,
+which its capabilities make undumpable, and for every saver when this process has no XDG_SESSION_ID,
+as under GNOME, whose user manager starts the shell and the programs of autostart outside any login
+session. The saver is then this session's when logind puts it in this process's session, taking for
+either that is in none the user's display session, and its environment names no other.
 The session bus is the user's, shared by every session they have, so a saver of another session
 drives nothing here. Being active is not enough, as no saver says whether it locked:
 mate-screensaver 1.28 sends ActiveChanged(true) as it merely blanks the screen, and GNOME Shell as
@@ -39,8 +44,10 @@ Both buses are connected on this module's own thread, each attempt bounded by CO
 seconds, so that a bus which accepts and never answers holds up nothing but this thread.
 
 The saver whose evidence makes the lock, and those of its children whose program is named as a
-screen saver's, locker's or greeter's (mate-screensaver-dialog), are the locker: what they show is
-what the user sees over the locked session, and NVDA presents it.
+screen saver's, locker's or greeter's (mate-screensaver-dialog, kscreenlocker_greet), are the locker:
+what they show is what the user sees over the locked session, and NVDA presents it. GNOME's
+org.gnome.ScreenSaver is a proxy of the shell's own, so the process that owns the name it forwards,
+GNOME Shell, which draws the lock screen, is the locker too when it is of this session.
 """
 
 import atexit
@@ -61,6 +68,10 @@ LOGIND = "org.freedesktop.login1"
 LOGIND_PATH = "/org/freedesktop/login1"
 LOGIND_MANAGER = "org.freedesktop.login1.Manager"
 LOGIND_SESSION = "org.freedesktop.login1.Session"
+LOGIND_USER = "org.freedesktop.login1.User"
+#: The bus name a screen saver's name only forwards, whose owner draws the lock screen: GNOME Shell's
+#: since its screen saver service became a proxy (js/dbusServices/screensaver in gnome-shell 51).
+SAVER_DRAWERS = {"org.gnome.ScreenSaver": "org.gnome.Shell.ScreenShield"}
 #: Programs a screen saver runs as its child only to ask for the password of a locked screen.
 UNLOCK_DIALOGS = ("mate-screensaver-dialog",)
 #: Words in the program name of a locker's child that draws its unlock prompt.
@@ -191,6 +202,24 @@ def _isOfThisSession(processID: int) -> bool:
 	return False
 
 
+def _namesAnotherSession(processID: int) -> bool:
+	"""Whether the process's environment names a session other than this process's, which logind's
+	answer for a process in no session must not overrule."""
+	theirs = _environmentOf(processID) or {}
+	for name in ("XDG_SESSION_ID", "DISPLAY"):
+		mine = os.environ.get(name)
+		if mine and theirs.get(name):
+			return theirs[name] != mine
+	return False
+
+
+def _userOf(processID: int) -> int | None:
+	try:
+		return os.stat(f"/proc/{processID}").st_uid
+	except OSError:
+		return None
+
+
 class _Saver:
 	"""What one screen saver bus name has said."""
 
@@ -205,6 +234,13 @@ class _Saver:
 		#: Why its active spell is a lock, once there is evidence.
 		self.evidence: str | None = None
 		self.evidenceFromHint = False
+		#: Whether logind, not the environment, made it this session's.
+		self.byLogind = False
+		#: The process that draws its lock screen, when that is another than its own, as in
+		#: SAVER_DRAWERS; 0 when there is none.
+		self.drawerProcessID = 0
+		self.drawerIsOfThisSession = False
+		self.drawerByLogind = False
 
 
 class _Monitor:
@@ -228,6 +264,9 @@ class _Monitor:
 		self._timeouts: dict[str, int] = {}
 		self._everConnected: set[str] = set()
 		self._sessionPath: str | None = None
+		#: Whether logind says which session a saver is of, as it does when nothing in this process's
+		#: environment can.
+		self._matchByLogind = not os.environ.get("XDG_SESSION_ID")
 		self._hintTrueSince: float | None = None
 		self._lockRequestedAt: float | None = None
 		self._pollSource = None
@@ -463,6 +502,9 @@ class _Monitor:
 			log.debug(f"Session lock: no process ID for {name}: {e}")
 			processID = 0
 		saver = _Saver(name, processID, _isOfThisSession(processID))
+		if (drawer := SAVER_DRAWERS.get(name)) is not None:
+			saver.drawerProcessID = self._processOfName(connection, drawer)
+		self._matchThroughLogind(saver)
 		self._savers[name] = saver
 		path = dict(SCREEN_SAVERS)[name]
 		try:
@@ -535,7 +577,8 @@ class _Monitor:
 			)
 		except GLib.Error as e:
 			log.debug(f"Session lock: logind does not know this session: {e}")
-			return
+			if sessionID or (sessionPath := self._displaySessionFor(connection, os.getpid(), e)) is None:
+				return
 		self._sessionPath = sessionPath
 		for member, handler in (
 			("Lock", self._onLogindLock),
@@ -565,6 +608,110 @@ class _Monitor:
 			),
 		)
 		log.debug(f"Session lock: logind's session {sessionPath}")
+		matched = False
+		for saver in self._savers.values():
+			matched = self._matchThroughLogind(saver) or matched
+		if matched:
+			self._decide("logind put a screen saver in this session")
+
+	def _displaySessionFor(self, connection, processID: int, error) -> str | None:
+		"""The user's display session, for a process of this user that logind put in no session."""
+		from gi.repository import Gio, GLib
+
+		if Gio.DBusError.get_remote_error(error) != f"{LOGIND}.NoSessionForPID":
+			return None
+		uid = os.getuid()
+		if _userOf(processID) != uid:
+			return None
+		try:
+			(userPath,) = self._call(
+				connection, LOGIND, LOGIND_PATH, LOGIND_MANAGER, "GetUser", GLib.Variant("(u)", (uid,)), "(o)"
+			)
+			((_sessionID, sessionPath),) = self._call(
+				connection,
+				LOGIND,
+				userPath,
+				_PROPERTIES,
+				"Get",
+				GLib.Variant("(ss)", (LOGIND_USER, "Display")),
+				"(v)",
+			)
+		except GLib.Error as e:
+			log.debug(f"Session lock: logind does not say which is the user's display session: {e}")
+			return None
+		if sessionPath == "/":
+			log.debug("Session lock: the user has no display session")
+			return None
+		log.debug(
+			f"Session lock: process {processID} is in no session; the user's display session is {sessionPath}"
+		)
+		return sessionPath
+
+	def _processOfName(self, connection, name: str) -> int:
+		from gi.repository import GLib
+
+		try:
+			(owner,) = self._call(
+				connection, _DBUS, _DBUS_PATH, _DBUS, "GetNameOwner", GLib.Variant("(s)", (name,)), "(s)"
+			)
+			(processID,) = self._call(
+				connection,
+				_DBUS,
+				_DBUS_PATH,
+				_DBUS,
+				"GetConnectionUnixProcessID",
+				GLib.Variant("(s)", (owner,)),
+				"(u)",
+			)
+		except GLib.Error as e:
+			log.debug(f"Session lock: no process for {name}: {e}")
+			return 0
+		return processID
+
+	def _matchThroughLogind(self, saver: _Saver) -> bool:
+		"""Ask logind of the saver, and of the process that draws its lock screen, whichever the
+		environment did not make this session's; answers whether either became so."""
+		matched = False
+		if not saver.isOfThisSession and self._logindPutsHere(saver.processID):
+			saver.isOfThisSession = saver.byLogind = matched = True
+			log.debug(f"Session lock: logind puts {saver.name}, process {saver.processID}, in this session")
+		drawer = saver.drawerProcessID
+		if drawer > 0 and not saver.drawerIsOfThisSession:
+			if _isOfThisSession(drawer):
+				saver.drawerIsOfThisSession = True
+			elif self._logindPutsHere(drawer):
+				saver.drawerIsOfThisSession = saver.drawerByLogind = matched = True
+			if saver.drawerIsOfThisSession:
+				log.debug(f"Session lock: process {drawer} draws {saver.name}'s lock screen")
+		return matched
+
+	def _logindPutsHere(self, processID: int) -> bool:
+		"""Whether logind puts the process in this process's session, where the environment cannot say."""
+		if processID <= 0 or self._sessionPath is None:
+			return False
+		if not self._matchByLogind and _environmentOf(processID) is not None:
+			return False
+		connection = self._connections.get("system")
+		if connection is None or _namesAnotherSession(processID):
+			return False
+		from gi.repository import GLib
+
+		try:
+			(sessionPath,) = self._call(
+				connection,
+				LOGIND,
+				LOGIND_PATH,
+				LOGIND_MANAGER,
+				"GetSessionByPID",
+				GLib.Variant("(u)", (processID,)),
+				"(o)",
+			)
+		except GLib.Error as e:
+			sessionPath = self._displaySessionFor(connection, processID, e)
+		if sessionPath != self._sessionPath:
+			log.debug(f"Session lock: logind puts process {processID} in {sessionPath}")
+			return False
+		return True
 
 	def _forgetLogind(self) -> None:
 		self._sessionPath = None
@@ -574,6 +721,13 @@ class _Monitor:
 			if saver.evidenceFromHint:
 				saver.evidence = None
 				saver.evidenceFromHint = False
+			if saver.byLogind:
+				saver.isOfThisSession = False
+				saver.byLogind = False
+				saver.evidence = None
+			if saver.drawerByLogind:
+				saver.drawerIsOfThisSession = False
+				saver.drawerByLogind = False
 
 	def _onLogindOwnerChanged(self, connection, parameters) -> None:
 		_name, _oldOwner, newOwner = parameters.unpack()
@@ -648,7 +802,9 @@ class _Monitor:
 			else:
 				lockers.append(saver)
 		self._pollForDialog(waiting)
-		lockerProcessIDs = frozenset(saver.processID for saver in lockers)
+		lockerProcessIDs = frozenset(saver.processID for saver in lockers) | frozenset(
+			saver.drawerProcessID for saver in lockers if saver.drawerIsOfThisSession
+		)
 		if lockerProcessIDs != self.lockerProcessIDs:
 			self.lockerProcessIDs = lockerProcessIDs
 			self._lockerCache = {}
