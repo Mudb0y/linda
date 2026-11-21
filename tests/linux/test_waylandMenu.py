@@ -577,6 +577,22 @@ def test_lettersChooseByMnemonic(session: WaylandSession) -> None:
 	assert not linda.records("settingsHandler", since=popup["t"])
 
 
+@pytest.mark.rigSession("wayland")
+def test_menuWindowClosedWithinASecondLeavesNoWarning(session: WaylandSession) -> None:
+	"""The check a second after the map finds the window destroyed, and GTK has dropped its handlers."""
+	linda = session.linda
+	session.probeHasFocus()
+	popup, _activation = openMenu(session)
+	escaped = session.press("Escape")
+	returned = linda.waitFor("popupReturned", since=popup["t"])
+	assert returned["t"] - popup["t"] < ACTIVATION_BOUND, (popup, returned)
+	session.listener.activation(lambda event: event["pid"] == session.probe.process.pid, since=escaped)
+	time.sleep(ACTIVATION_BOUND + 1)
+	linda.stop()
+	lines = [line for line in linda.launch.text("nvda.log").splitlines() if "has no handler with id" in line]
+	assert not lines, lines
+
+
 @pytest.mark.rigSession("x11")
 def test_onXTheTrayMenuIsTheGtkPopupAndHandlersSeeTheSame(tmp_path: Path) -> None:
 	"""Experiment E23 on X: the menu is wx's popup, and the settings handler runs inside PopupMenu."""

@@ -958,7 +958,9 @@ def _awaitActivation(window) -> None:
 	noteActive()
 
 	def check() -> bool:
-		window.disconnect(handler)
+		# A window destroyed within the second has already lost its handlers, and GLib warns of the disconnect.
+		if window.handler_is_connected(handler):
+			window.disconnect(handler)
 		if _awaitingActivation.get(address) == mapped:
 			del _awaitingActivation[address]
 		if not activated[0] and window.get_mapped():
