@@ -44,6 +44,8 @@ ATSPI_TIMEOUT_MS = 1000
 #: Seconds Mutter has to move the keyboard after its window switching key, which takes it a few
 #: hundredths of one.
 SWITCH_TIMEOUT = 2.0
+#: Seconds swaymsg has to answer.
+SWAYMSG_TIMEOUT = 5.0
 #: Seconds each key is held on the rig's Wayland keyboard or a stand-in, and between characters typed,
 #: as typeText's xdotool types on the X display.
 KEY_HOLD = 0.03
@@ -194,13 +196,31 @@ def _swayWindows(node: dict):
 
 
 def _swayFocus(title: str) -> None:
-	# By the container's number rather than a title criterion, which sway takes as a regular expression.
-	tree = json.loads(
-		subprocess.run(["swaymsg", "-t", "get_tree"], capture_output=True, text=True, check=True).stdout
-	)
+	# A sway that does not answer leaves the window where it is, for activate's own bound to report.
+	try:
+		shown = subprocess.run(
+			["swaymsg", "-t", "get_tree"],
+			capture_output=True,
+			text=True,
+			check=False,
+			timeout=SWAYMSG_TIMEOUT,
+		)
+		tree = json.loads(shown.stdout)
+	except (subprocess.TimeoutExpired, json.JSONDecodeError):
+		return
 	for window in _swayWindows(tree):
 		if window.get("name") == title:
-			subprocess.run(["swaymsg", f"[con_id={window['id']}] focus"], check=False, capture_output=True)
+			# By the container's number rather than a title criterion, which sway takes as a regular
+			# expression.
+			try:
+				subprocess.run(
+					["swaymsg", f"[con_id={window['id']}] focus"],
+					check=False,
+					capture_output=True,
+					timeout=SWAYMSG_TIMEOUT,
+				)
+			except subprocess.TimeoutExpired:
+				pass
 			return
 
 

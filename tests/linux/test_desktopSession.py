@@ -335,6 +335,24 @@ def test_aKeyThatFailsLetsGoOfTheModifiersHeld(desktop: DesktopSession, monkeypa
 	assert sent == [(42, True), (100, True), (100, False), (42, False)]
 
 
+@pytest.mark.rigSession("sway")
+@pytest.mark.parametrize("standIn", [False], ids=["display"], indirect=True)
+@pytest.mark.parametrize("answer", ["exit 1", "exec sleep 30"], ids=["fails", "hangs"])
+def test_activateIsBoundedWhenSwayDoesNotAnswer(
+	desktop: DesktopSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str
+):
+	fake = tmp_path / "bin" / "swaymsg"
+	fake.parent.mkdir()
+	fake.write_text(f"#!/bin/sh\n{answer}\n")
+	fake.chmod(0o755)
+	monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+	monkeypatch.setattr(desktopSession, "SWAYMSG_TIMEOUT", 0.5)
+	started = time.monotonic()
+	with pytest.raises(AssertionError, match="did not become active"):
+		desktopSession.activate("No such window", timeout=1)
+	assert time.monotonic() - started < 5
+
+
 @pytest.mark.parametrize("standIn", [False], ids=["display"], indirect=True)
 def test_activateGivesEachWindowTheKeyboard(desktop: DesktopSession):
 	"""Under Mutter, which has no way to name a window, the oldest of three needs the most switching."""
