@@ -413,11 +413,4 @@ def test_nvdaSpeaksTheFixturesFirstControl(desktop: DesktopSession, tmp_path: Pa
 	)
 	desktop.close()
 	assert nvda.process.returncode == 0, nvda.describe()
-	# Under a compositor NVDA's own start is not yet clean: the mouse handler asks for the X pointer, and
-	# GTK warns about a window of NVDA's. Those are the Wayland switch-offs' and NVDA's own windows'
-	# to mend; what this proves there is that the driver puts a native window in front of NVDA to read.
-	# The checks those two do not touch still hold there.
-	if desktopSession.compositor() is None:
-		nvda.assertClean(logNames=("nvda.log",))
-	else:
-		nvda.assertClean(ignoring=("noLinuxImplementation", "logErrors", "stderr"))
+	nvda.assertClean(logNames=("nvda.log",))
