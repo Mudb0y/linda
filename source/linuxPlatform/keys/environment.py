@@ -88,7 +88,7 @@ class KernelEnvironment(Protocol):
 		"""A key passed on to the desktop, as an X key code, or its release; kept in memory only."""
 
 	def notePassedLock(self, light: int, now: float) -> None:
-		"""A lock key passed on at now, by keydClient's LOCK_ bit of the light it turns on or off."""
+		"""A lock key passed on at now, by keydClient's LOCK_ bits of the lights it turns on or off."""
 
 	def noteLocks(self, locks: int, now: float) -> None:
 		"""The helper said at now which lights are on, as keydClient's LOCK_ bits."""

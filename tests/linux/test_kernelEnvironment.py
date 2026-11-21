@@ -379,11 +379,18 @@ def test_withoutWaitTheLookIsCutAtThePressShare(tmp_path: Path):
 	assert value["waits"] == 0 and value["expired"] == []
 
 
-#: Caps Lock passed on, in a layout where it is a lock and in one where caps:escape makes it Escape;
-#: then Num Lock guessed on by the layout until the helper's word, and the helper's word reported.
+#: Caps Lock passed on, in a layout where it is a lock, in one where caps:escape makes it Escape, in
+#: one where caps:ctrl_modifier makes it Control with its keysym left Caps_Lock, and in one where
+#: ctrl:swapcaps makes left Control the lock; then Num Lock guessed on by the layout until the helper's
+#: word, and the helper's word reported.
 LOCKS_CHILD = r"""
 outcomes = {}
-for name, options in (("plain", ""), ("escape", "caps:escape")):
+for name, options in (
+	("plain", ""),
+	("escape", "caps:escape"),
+	("control", "caps:ctrl_modifier"),
+	("swapped", "ctrl:swapcaps"),
+):
 	environment = FakeEnvironment(layout=Layout(names=("evdev", "pc105", "us", "", options)))
 	source = startSource(environment)
 	keyboard.press("Caps_Lock")
@@ -392,6 +399,7 @@ for name, options in (("plain", ""), ("escape", "caps:escape")):
 		"capsLock": source.keyState(0x14) & 1,
 		"notes": [call[1:] for call in environment.calls if call[1] in ("passed", "passedLock")],
 		"verdicts": [keep for _seq, keep, _latency in keyboard.verdicts],
+		"lockKeys": sorted(source._lockKeys.items()),
 	}
 	keyboard.verdicts.clear()
 	source.stop()
@@ -426,6 +434,17 @@ def test_aLockIsALockByTheLayout(tmp_path: Path):
 	assert escape["capsLock"] == 0
 	assert escape["notes"] == [["passed", 66, False], ["passed", 66, True]]
 	assert plain["verdicts"] == escape["verdicts"] == [False]
+	# Control by what it does, though its keysym is still Caps_Lock: no light flips.
+	control = value["outcomes"]["control"]
+	assert control["capsLock"] == 0
+	assert control["notes"] == [["passed", 66, False], ["passed", 66, True]]
+	# Num Lock is 77 and Scroll Lock 78; LOCK_NUM is 1 and LOCK_SCROLL 4.
+	assert plain["lockKeys"] == [[66, 2], [77, 1], [78, 4]]
+	assert escape["lockKeys"] == control["lockKeys"] == [[77, 1], [78, 4]]
+	# Left Control, 37, is the Caps Lock key there.
+	swapped = value["outcomes"]["swapped"]
+	assert swapped["lockKeys"] == [[37, 2], [77, 1], [78, 4]]
+	assert swapped["capsLock"] == 0
 	# The layout's guess holds until the helper's word, which a later layout does not override.
 	assert value["guessed"] == 1
 	assert value["told"] == [0, 1]

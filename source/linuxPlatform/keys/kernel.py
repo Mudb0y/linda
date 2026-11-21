@@ -94,14 +94,11 @@ LOCK_LIGHTS = {
 	keyMap.VK["NUMLOCK"]: LOCK_NUM,
 	keyMap.VK["SCROLL"]: LOCK_SCROLL,
 }
-#: Keysym of each lock: its light. With an environment a key is a lock by what the layout makes it,
-#: not by where it is: under caps:escape the Caps Lock key changes no light, and nothing would put a
-#: light flipped by its key code back.
-LOCK_KEYSYMS = {
-	xkb.keysym_from_name("Caps_Lock"): LOCK_CAPS,
-	xkb.keysym_from_name("Num_Lock"): LOCK_NUM,
-	xkb.keysym_from_name("Scroll_Lock"): LOCK_SCROLL,
-}
+#: XKB's name of each lock's light: its bit. With an environment a key is a lock by the light the
+#: layout has it change, not by where it is nor by its keysym: under caps:escape the Caps Lock key
+#: changes no light, under caps:ctrl_modifier it keeps the Caps_Lock keysym and is Control all the
+#: same, and nothing would put a light wrongly flipped back.
+LOCK_LEDS = {"Caps Lock": LOCK_CAPS, "Num Lock": LOCK_NUM, "Scroll Lock": LOCK_SCROLL}
 #: The longest an environment's look at the focus may take and still leave NVDA CAPTURE_TIMEOUT for the
 #: key before DOCUMENT_WAIT from its coming, the last moment this source answers a press it waits on;
 #: the helper's VERDICT_WAIT_TIMEOUT is beyond that.
@@ -470,7 +467,7 @@ class KernelKeySource:
 		#: that answers keys acts on it.
 		self._lookEnds: dict[int, bool] = {}
 		self._looksUnknown = 0
-		#: Key code: the light of each key the environment's layout makes a lock, replaced whole with it.
+		#: Key code: the lights the environment's layout has each lock key change, replaced whole with it.
 		self._lockKeys: dict[int, int] = {}
 		#: Whether the helper has said which lights are on, after which the layout's guess is not taken.
 		self._locksHeard = False
@@ -573,18 +570,26 @@ class KernelKeySource:
 			)
 		perKey = bytearray(32)
 		lockKeys: dict[int, int] = {}
-		state = keymap.state_new()
-		state.update_mask(0, 0, 0, *group)
+		leds = []
+		for ledName, bit in LOCK_LEDS.items():
+			try:
+				leds.append((keymap.led_get_index(ledName), bit))
+			except xkb.XKBError:
+				continue
 		for keycode in range(keymap.min_keycode(), min(keymap.max_keycode(), 255) + 1):
 			if keymap.key_repeats(keycode):
 				perKey[keycode >> 3] |= 1 << (keycode & 7)
-			try:
-				index = state.key_get_layout(keycode)
-			except xkb.XKBError:
-				continue
-			syms = keymap.key_get_syms_by_level(keycode, index, 0)
-			light = LOCK_KEYSYMS.get(syms[0]) if syms else None
-			if light is not None:
+			# Pressed and released by itself, in the group, as the compositor would have it.
+			state = keymap.state_new()
+			state.update_mask(0, 0, 0, *group)
+			before = [state.led_index_is_active(index) for index, _bit in leds]
+			state.update_key(keycode, xkb.KeyDirection.XKB_KEY_DOWN)
+			state.update_key(keycode, xkb.KeyDirection.XKB_KEY_UP)
+			light = 0
+			for (index, bit), was in zip(leds, before):
+				if state.led_index_is_active(index) != was:
+					light |= bit
+			if light:
 				lockKeys[keycode] = light
 		defaults = _Repeat()
 		enabled, delay, interval = (
