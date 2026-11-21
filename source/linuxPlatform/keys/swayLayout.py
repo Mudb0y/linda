@@ -537,12 +537,17 @@ class VirtualKeyboard(NamedTuple):
 def virtualKeyboard(
 	path: str | None = None,
 	*,
+	currentDesktop: str | None = None,
 	identifier: str = VIRTUAL_IDENTIFIER,
 	timeout: float = STATE_TIMEOUT,
 ) -> VirtualKeyboard | None:
 	"""Whether sway lists linda-keyd's keyboard and takes its events, asked now; None when sway cannot
-	be asked."""
-	path = path or socketPath()
+	be asked.
+
+	:param currentDesktop: XDG_CURRENT_DESKTOP as the caller has it, so that sway is found as create
+		finds it when SWAYSOCK is not set.
+	"""
+	path = path or socketPath(currentDesktop)
 	if path is None:
 		return None
 	try:

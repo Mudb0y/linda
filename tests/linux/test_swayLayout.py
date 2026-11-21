@@ -698,6 +698,13 @@ for name, inputs in {
 result["noSocket"] = swayLayout.virtualKeyboard("/tmp/no-sway-here.sock")
 result["noSway"] = swayLayout.virtualKeyboard()
 sway = FakeSway([keyboard(LINDA, ["Polish"])])
+# A session that does not export SWAYSOCK, as create finds sway in it.
+runtime = os.environ["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="run", dir="/tmp")
+os.symlink(sway.path, os.path.join(runtime, f"sway-ipc.{os.getuid()}.{os.getpid()}.sock"))
+result["fromDesktop"] = [swayLayout.virtualKeyboard(currentDesktop=d) for d in ("sway", "GNOME")]
+result["fromDesktop"][0] = list(result["fromDesktop"][0])
+os.unlink(os.path.join(runtime, f"sway-ipc.{os.getuid()}.{os.getpid()}.sock"))
+os.rmdir(runtime)
 os.environ["SWAYSOCK"] = sway.path
 result["fromSwaysock"] = list(swayLayout.virtualKeyboard())
 sway.close()
@@ -711,6 +718,7 @@ sway.close()
 		"unknownMode": [True, None],
 		"noSocket": None,
 		"noSway": None,
+		"fromDesktop": [[True, True], None],
 		"fromSwaysock": [True, True],
 	}
 	assert "Keyboard layout: sway did not list its inputs: FileNotFoundError" in moduleRecords(result)
