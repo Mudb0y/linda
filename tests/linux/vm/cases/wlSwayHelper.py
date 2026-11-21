@@ -32,6 +32,11 @@ LIGHTS_GONE = (
 	"locks, and the helper, which takes the locks from the lights it finds at its first grab, tells "
 	"the client they are off"
 )
+#: The deeper fault under it, which telling the client the right locks would not end.
+NUM_DROPPED = (
+	"sway takes the virtual keyboard's own state, in which Num Lock was never on, for the seat's at the "
+	"first lock key passed through the helper, and so turns off the Num Lock the user had on"
+)
 
 
 #: Seconds after the helper holds again on a switch back by which every desktop E15 measured takes
@@ -196,6 +201,9 @@ def locks(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", figu
 		for name in REAL:
 			assert seen["caps"][name] == told[-1], (name, seen["caps"])
 		assert bool(told[-1] & NUM) == (seen["caps"]["keypad"] == ["KP_1"]), seen["caps"]
+		assert was == NUM, f"Num Lock went before Caps Lock was pressed, so this cannot show it kept: {seen}"
+		with ground.expectedFailure(NUM_DROPPED):
+			assert seen["caps"]["keypad"] == ["KP_1"], seen["caps"]
 
 	with ground.subtest("letting go leaves the keyboards with the console's lights"):
 		mark = ground.mark()
