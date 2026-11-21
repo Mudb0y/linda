@@ -23,7 +23,7 @@ import keydStandIn
 import pytest
 import test_browseKeys as browseKeys
 import webSession
-from desktopSession import PREFIX_MARK, DesktopSession
+from desktopSession import DesktopSession
 from keydStandIn import NullSink, StandIn
 from test_keys import STARTUP_TIMEOUT, configText
 
@@ -153,10 +153,9 @@ if os.environ.get("LINDA_SESSION_TYPE") != "wayland":
 
 
 class Element:
-	hasIrrelevantLocation = False
-
 	def __init__(self, name, parent, location, acts=False):
 		self.name, self.parent, self.location, self.acts = name, parent, location, acts
+		self.hasIrrelevantLocation = location is None
 
 	def doAction(self):
 		actions.append(self.name)
@@ -171,6 +170,10 @@ cases = {
 	"fails": paragraph,
 	"inAnElementWithNoSize": Element("span", paragraph, RectLTWH(10, 20, 0, 0)),
 	"acts": Element("button", root, RectLTWH(10, 40, 40, 10), acts=True),
+	# As every element is under a compositor, whose programs give no place on the screen.
+	"withNoLocationUpToTheRoot": Element("heading", Element("section", root, None), None),
+	"inALinkWithNoLocation": Element("span", Element("link", root, None, acts=True), None),
+	"theRootItself": root,
 }
 result = {}
 for case, element in cases.items():
@@ -193,11 +196,17 @@ def test_anElementWhoseActionFailsSaysTheClickLineInAWaylandSession(tmp_path: Pa
 		"fails": {"spoken": [], "clicks": clicked, "actions": ["paragraph"]},
 		"inAnElementWithNoSize": {"spoken": [], "clicks": clicked, "actions": ["span", "paragraph"]},
 		"acts": {"spoken": [], "clicks": [], "actions": ["button"]},
+		"withNoLocationUpToTheRoot": {"spoken": [], "clicks": [], "actions": ["heading", "section"]},
+		"inALinkWithNoLocation": {"spoken": [], "clicks": [], "actions": ["span", "link"]},
+		"theRootItself": {"spoken": [], "clicks": [], "actions": []},
 	}
 	assert done.value == {
 		"fails": {"spoken": [CLICK], "clicks": [], "actions": ["paragraph"]},
 		"inAnElementWithNoSize": {"spoken": [CLICK], "clicks": [], "actions": ["span", "paragraph"]},
 		"acts": {"spoken": [], "clicks": [], "actions": ["button"]},
+		"withNoLocationUpToTheRoot": {"spoken": [CLICK], "clicks": [], "actions": ["heading", "section"]},
+		"inALinkWithNoLocation": {"spoken": [], "clicks": [], "actions": ["span", "link"]},
+		"theRootItself": {"spoken": [], "clicks": [], "actions": []},
 	}
 
 
@@ -410,23 +419,15 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 """
 
 
-@pytest.mark.rigSession("x11")
-def test_enterOnAHeadingInBrowseModeSaysTheClickLine(
-	desktop: DesktopSession, socketDir: Path, tmp_path: Path
-):
-	"""On Firefox's keys page in a forced Wayland session, with a heading whose action fails, which NVDA
-	would click at: here it says it cannot, Enter does not reach the page, and nothing is logged as an
-	error."""
+def enterOnAHeading(
+	desktop: DesktopSession, socketDir: Path, tmp_path: Path, sink, env: dict[str, str | None]
+) -> harness.Launch:
+	"""On Firefox's keys page, with a heading whose action fails, which NVDA would click at: Linda says
+	it cannot, and Enter does not reach the page."""
 	webSession.requireBrowseLibraries()
 	webSession.startFirefox(desktop, "keys.html")
-	with StandIn(socketDir / "socket") as keyboard:
-		env = {
-			**browseKeys.probeHooks(tmp_path),
-			"LINDA_TEST_KEYD_SOCKET": keyboard.path,
-			"LINDA_SESSION_TYPE": "wayland",
-			"XDG_CURRENT_DESKTOP": None,
-			"XKB_DEFAULT_LAYOUT": "us",
-		}
+	with StandIn(socketDir / "socket", sink=sink) as keyboard:
+		env = {**browseKeys.probeHooks(tmp_path), "LINDA_TEST_KEYD_SOCKET": keyboard.path, **env}
 		(tmp_path / "hooks" / "globalPlugins" / "failingAction.py").write_text(FAILING_ACTION)
 		nvda = desktop.startNVDA(browseKeys.browseConfig(tmp_path), env=env)
 		nvda.waitForLog("Buffer rendered", browseKeys.BUFFER_BOUND)
@@ -434,19 +435,31 @@ def test_enterOnAHeadingInBrowseModeSaysTheClickLine(
 		keyboard.waitFor(lambda: keyboard.capturing)
 		time.sleep(browseKeys.SETTLE)
 		page = browseKeys.KeysPage()
-
-		def step(chord: str, *expected: str) -> int:
+		for chord, expected in (("control+Home", "heading level 1 Keys page"), ("Return", CLICK)):
 			mark = desktop.mark()
 			keyboard.press(chord)
-			browseKeys.expect(desktop, *expected, since=mark)
+			browseKeys.expect(desktop, expected, since=mark)
 			time.sleep(browseKeys.SETTLE)
-			return mark
-
-		step("control+Home", "heading level 1 Keys page")
-		mark = step("Return", CLICK)
 		assert desktop.spokenSince(mark) == [CLICK]
 		assert page.log() == []
-		step("Insert+q", "Exit Linda" + PREFIX_MARK)
-		keyboard.press("Return")
-		nvda.waitForExit(10)
+		nvda.process.terminate()
+		nvda.waitForExit(20)
+	return nvda
+
+
+@pytest.mark.rigSession("x11")
+def test_enterOnAHeadingInAForcedWaylandSession(desktop: DesktopSession, socketDir: Path, tmp_path: Path):
+	# The stand-in's own sink, the X display, where Firefox is.
+	env = {"LINDA_SESSION_TYPE": "wayland", "XDG_CURRENT_DESKTOP": None, "XKB_DEFAULT_LAYOUT": "us"}
+	nvda = enterOnAHeading(desktop, socketDir, tmp_path, None, env)
+	nvda.assertClean(logNames=("nvda.log",))
+
+
+@pytest.mark.rigSession("wayland")
+def test_enterOnAHeadingUnderTheCompositor(desktop: DesktopSession, socketDir: Path, tmp_path: Path):
+	sink = keydStandIn.compositorSink()
+	try:
+		nvda = enterOnAHeading(desktop, socketDir, tmp_path, sink, {"XKB_DEFAULT_LAYOUT": "pl"})
+	finally:
+		sink.close()
 	nvda.assertClean(logNames=("nvda.log",))
