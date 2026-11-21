@@ -10,15 +10,19 @@ nothing holds: Linda's X source tells the two apart by device, as it tells the v
 the real keyboards, and a test names the first to Linda as the virtual keyboard. It sends the lights of the locks as the X
 display sets them, reads the emergency chord itself, lets go of everything when its client falls
 silent, and can be made to refuse, say goodbye, let go, lose its keyboard or vanish. It grants the
-feature WAIT, a verdict that holds a press longer, unless told not to.
+feature WAIT, a verdict that holds a press longer, unless told not to, and TYPE and LATE_PASS only
+when a test names them in features, so that a client can be run with them and without.
 
 The X display is its default sink. A test of a session with no X keyboard behind Linda gives it
-another, as NullSink, which puts keys nowhere and takes the lights from a layout of its own.
+another: NullSink, which puts keys nowhere and takes the lights from a layout of its own, or under
+the rig's compositors MutterSink and SwaySink, which put them on the session's keyboard.
 
 It is written from the protocol's documentation, not from Linda's client, so that the two are held
 to the same text rather than to each other.
 """
 
+import functools
+import importlib.util
 import os
 import select
 import socket
@@ -35,23 +39,48 @@ from Xlib import XK, X, display
 from Xlib.ext import xinput, xtest
 from Xlib.protocol import rq
 
-HELLO, START, STOP, VERDICT, HEARTBEAT = 0x01, 0x02, 0x03, 0x04, 0x05
-WELCOME, GOODBYE, KEY, EXPIRED, RELEASED, DEVICE, LOCKS, HEARTBEAT_ECHO = range(0x81, 0x89)
-KEY_ASK, KEY_SYNTHETIC = 0x01, 0x02
-FEATURE_WAIT = 2
+HELLO, START, STOP, VERDICT, HEARTBEAT, TYPE, LATE_PASS = range(0x01, 0x08)
+WELCOME, GOODBYE, KEY, EXPIRED, RELEASED, DEVICE, LOCKS, HEARTBEAT_ECHO, TYPED = range(0x81, 0x8A)
+KEY_ASK, KEY_SYNTHETIC, KEY_TYPED = 0x01, 0x02, 0x04
+#: TYPE and TYPED; VERDICT_WAIT; LATE_PASS. The stand-in grants WAIT unless told otherwise, and the
+#: others only when a test names them in features.
+FEATURE_TYPING, FEATURE_WAIT, FEATURE_LATE_PASS = 1, 2, 4
 #: VERDICT's values: pass, keep, and with FEATURE_WAIT, hold the press longer.
 VERDICT_PASS, VERDICT_KEEP, VERDICT_WAIT = 0, 1, 2
 RELEASE, PRESS, REPEAT = 0, 1, 2
 RELEASED_STOPPED, RELEASED_EMERGENCY, RELEASED_BACKGROUND, RELEASED_VIRTUAL, RELEASED_SESSION_UNKNOWN = range(
 	1, 6
 )
-GOODBYE_BUSY, GOODBYE_SILENT, GOODBYE_UNANSWERED = 4, 6, 8
+GOODBYE_BUSY, GOODBYE_SILENT, GOODBYE_MALFORMED, GOODBYE_UNANSWERED = 4, 6, 7, 8
 DEVICE_HELD, DEVICE_GONE = 1, 4
+#: TYPE's modes: back as KEY flagged KEY_TYPED, to be decided; or in line already passed.
+TYPE_DECIDE, TYPE_INJECT = 0, 1
+#: TYPED's outcomes.
+(
+	TYPED_OUT,
+	TYPED_KEPT,
+	TYPED_REFUSED_STATE,
+	TYPED_REFUSED_KEY,
+	TYPED_REFUSED_FULL,
+	TYPED_NOT_DOWN,
+	TYPED_LOST,
+) = range(1, 8)
+#: The device number of keys typed with TYPE_DECIDE.
+TYPED_DEVICE = 0xFFFFFFFF
+TYPED_WAITING_LIMIT = 64
+TYPED_PER_SECOND = 100
+TYPED_BURST = 200
+#: KEY_SLEEP, which keyMap.py names, and the codes logind takes as the machine's power keys.
+NEVER_TYPED = frozenset((142, 116, 205, 0x164, 0x198))
+SYSRQ = 99
+ALTS = frozenset((56, 100))
 #: Backspace, Escape and Enter.
 CHORD = frozenset((14, 1, 28))
 #: The helper's MODIFIERS (engine/crates/keyd/src/keys.rs): the Controls, Shifts, Alts, Metas and Caps
 #: Lock, whose releases keep their place in line.
 MODIFIERS = frozenset((29, 42, 54, 56, 97, 100, 125, 126, 58))
+CAPS_LOCK = 58
+KEY_MAP = Path(__file__).resolve().parent.parent.parent / "source" / "linuxPlatform" / "keys" / "keyMap.py"
 #: The stand-in's keyboard, as the kernel would number it; a test may press keys on others too.
 DEVICE_NUMBER = 3
 DEVICE_NAME = "Stand-in keyboard"
@@ -108,6 +137,21 @@ for _row, _first in (("qwertyuiop", 16), ("asdfghjkl", 30), ("zxcvbnm", 44)):
 
 def code(name: str) -> int:
 	return CODES[name] if name in CODES else CODES[name.lower()]
+
+
+def isVirtualKey(evdev: int) -> bool:
+	"""Whether the virtual keyboard can send the code, as protocol.rs's is_virtual_key has it."""
+	return 1 <= evdev <= 0xFF or 0x160 <= evdev <= 0x21F or 0x224 <= evdev <= 0x2BF or 0x2E8 <= evdev <= 0x2FF
+
+
+@functools.cache
+def typableCodes() -> frozenset[int]:
+	"""The codes the helper types: those keyMap.py's FIXED, NUMPAD and LAYOUT tables name, read from its
+	file alone, less the ones it never types."""
+	spec = importlib.util.spec_from_file_location("lindaKeyMapTables", KEY_MAP)
+	tables = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(tables)
+	return frozenset(set(tables.FIXED) | set(tables.NUMPAD) | set(tables.LAYOUT)) - NEVER_TYPED
 
 
 class _DeviceFakeInput(rq.Request):
@@ -264,6 +308,91 @@ class NullSink:
 		self.closed = True
 
 
+class _CompositorSink:
+	"""The keyboard of the rig's Wayland session, the one its key server (waylandKeyboard.py) holds for
+	the whole run, which types in the pl layout: keys put out go to the compositor on it, virtual or not,
+	since Linda tells no devices apart there and a second keyboard would have the seat send its keymap
+	again at every switch. The lights are those of the server's own XKB state, which follows every key
+	put out on it, the stand-in's and a test's own presses alike."""
+
+	#: The rig's LINDA_RIG_COMPOSITOR this sink is for.
+	compositor = ""
+
+	def __init__(self) -> None:
+		import waylandKeyboard
+
+		running = os.environ.get("LINDA_RIG_COMPOSITOR")
+		if running != self.compositor:
+			raise RuntimeError(f"{type(self).__name__} needs the rig's {self.compositor}, not {running}")
+		self._lightNames = list(waylandKeyboard.LIGHTS)
+		self._lock = threading.Lock()
+		# One connection for the stand-in's life, which the server answers line by line, so that a key costs
+		# a round trip and not a connection.
+		self._server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+		# A stalled compositor fails the test, instead of hanging it and every one after.
+		self._server.settimeout(10)
+		self._server.connect(waylandKeyboard.socketPath())
+		self._answers = self._server.makefile("r", encoding="utf-8")
+		#: (code, down, virtual) of each key put out, in order.
+		self.sent: list[tuple[int, bool, bool]] = []
+		#: (code, down) of each press and release the client kept, in order.
+		self.kept: list[tuple[int, bool]] = []
+
+	def _ask(self, request: str) -> str:
+		with self._lock:
+			self._server.sendall(request.encode() + b"\n")
+			answer = self._answers.readline().strip()
+		if answer != "ok" and not answer.startswith("ok "):
+			# The request's first word alone: the rest names a key.
+			raise RuntimeError(f"the rig's key server answered {answer!r} to {request.split()[0]!r}")
+		return answer[3:]
+
+	def send(self, evdev: int, down: bool, virtual: bool) -> None:
+		self._ask(f"key {evdev} {int(down)}")
+		self.sent.append((evdev, down, virtual))
+
+	def keep(self, evdev: int, down: bool) -> None:
+		self.kept.append((evdev, down))
+
+	def lights(self) -> int:
+		lit = dict(
+			zip(self._lightNames, (value == "1" for value in self._ask("lights").split()), strict=True)
+		)
+		return (1 if lit["num"] else 0) | (2 if lit["caps"] else 0) | (4 if lit["scroll"] else 0)
+
+	def passed(self) -> list[tuple[int, bool]]:
+		"""(code, down) of each key put out on the virtual keyboard."""
+		return [(evdev, down) for evdev, down, virtual in self.sent if virtual]
+
+	def close(self) -> None:
+		with self._lock:
+			self._answers.close()
+			self._server.close()
+
+
+class MutterSink(_CompositorSink):
+	"""Keys put out under rig Mutter, through its RemoteDesktop session's virtual keyboard, which the key
+	server gave the pl keymap with SetKeymap."""
+
+	compositor = "mutter"
+
+
+class SwaySink(_CompositorSink):
+	"""Keys put out under rig sway, through the key server's zwp_virtual_keyboard_v1, which carries the pl
+	keymap and sends its own modifiers, since wlroots keeps no XKB state for such a keyboard."""
+
+	compositor = "sway"
+
+
+def compositorSink() -> MutterSink | SwaySink:
+	"""The sink of the rig's compositor."""
+	sinks = {sink.compositor: sink for sink in (MutterSink, SwaySink)}
+	running = os.environ.get("LINDA_RIG_COMPOSITOR")
+	if running not in sinks:
+		raise RuntimeError(f"the rig runs no compositor a sink is made for: {running}")
+	return sinks[running]()
+
+
 @dataclass
 class _Entry:
 	seq: int
@@ -275,6 +404,12 @@ class _Entry:
 	verdict: bool | None = None
 	waited: bool = False
 	device: int = DEVICE_NUMBER
+	#: The TYPE's tag, for a typed key.
+	tag: int | None = None
+	#: Typed with TYPE_INJECT: in line already passed, never asked about and never unanswered.
+	injected: bool = False
+	#: (device, code) of a kept press that LATE_PASS puts out just before this one.
+	lateKept: tuple[int, int] | None = None
 
 
 class StandIn:
@@ -369,6 +504,24 @@ class StandIn:
 		self.starts = 0
 		self.admitted = threading.Event()
 		self.gone = threading.Event()
+		#: (device, code, value, flags) of each KEY sent the client served now, by its sequence number.
+		self._told: dict[int, tuple[int, int, int, int]] = {}
+		#: The sequence number of each press told whose release has been told, and of that release.
+		self._releaseOf: dict[int, int] = {}
+		self._pressOf: dict[tuple[int, int], int] = {}
+		#: The presses kept by a verdict that counted, by sequence number.
+		self._keptSeqs: set[int] = set()
+		#: The kept presses a LATE_PASS has named.
+		self._latePassNamed: set[int] = set()
+		#: (kept, waiting, whether it applied) of each LATE_PASS well formed.
+		self.latePasses: list[tuple[int, int, bool]] = []
+		#: The codes the client has typed down, with the typed SysRq rules' state of the virtual keyboard.
+		self._typedDown: set[int] = set()
+		self._sysrqActive = False
+		self._typedTokens = float(TYPED_BURST)
+		self._typedFilled = 0.0
+		#: (tag, seq, outcome) of each TYPED sent, in order.
+		self.typed: list[tuple[int, int, int]] = []
 
 	# Running.
 
@@ -561,16 +714,26 @@ class StandIn:
 	def _sendDevice(self, status: int, device: int = DEVICE_NUMBER) -> None:
 		self._sendClient(struct.pack("<BIBB", DEVICE, device, status, 0) + DEVICE_NAME.encode())
 
-	def _enter(self, evdev: int, value: int, flags: int, device: int = DEVICE_NUMBER) -> None:
+	def _enter(
+		self, evdev: int, value: int, flags: int, device: int = DEVICE_NUMBER, tag: int | None = None
+	) -> None:
 		self._seq += 1
 		now = time.monotonic()
 		if value != REPEAT:
 			self._line.append(
-				_Entry(self._seq, evdev, value == PRESS, now, self.verdictTimeout, device=device)
+				_Entry(self._seq, evdev, value == PRESS, now, self.verdictTimeout, device=device, tag=tag)
 			)
-		self._note("key", self._seq, evdev, value, flags)
-		self._sendClient(struct.pack("<BQIHBB", KEY, self._seq, device, evdev, value, flags))
+		self._tell(self._seq, device, evdev, value, flags)
 		self._advance(now)
+
+	def _tell(self, seq: int, device: int, evdev: int, value: int, flags: int) -> None:
+		self._told[seq] = (device, evdev, value, flags)
+		if value == PRESS:
+			self._pressOf[(device, evdev)] = seq
+		elif value == RELEASE and (press := self._pressOf.pop((device, evdev), None)) is not None:
+			self._releaseOf[press] = seq
+		self._note("key", seq, evdev, value, flags)
+		self._sendClient(struct.pack("<BQIHBB", KEY, seq, device, evdev, value, flags))
 
 	def _advance(self, now: float) -> None:
 		"""Put out every key at the head of the line that is decided or overdue, then every release
@@ -589,8 +752,7 @@ class StandIn:
 				waiting.add(key)
 			elif key not in waiting and entry.code not in MODIFIERS and key in self._passedOut:
 				self._line.remove(entry)
-				self._passedOut.discard(key)
-				self._virtual(entry.code, False)
+				self._releaseOut(entry)
 
 	def _advanceHead(self, now: float) -> None:
 		while self._line:
@@ -609,29 +771,69 @@ class StandIn:
 					self._run = (self._run[0], head.arrival)
 				if head.arrival + head.bound - self._run[0] >= self.unansweredSpan:
 					self._line.popleft()
-					self._virtual(head.code, True)
+					self._pressOut(head)
 					self._dropClient(sendGoodbye=(GOODBYE_UNANSWERED, "presses went unanswered"))
 					return
-			elif head.press:
+			elif head.press and not head.injected:
 				# Answered in time, which ends any run.
 				self._run = None
 			self._line.popleft()
-			held = (head.device, head.code)
 			if head.press:
-				if head.verdict:
-					self._kept.add(held)
-					self._passedOut.discard(held)
-					self._keep(head.code, True)
-				else:
-					self._kept.discard(held)
-					self._passedOut.add(held)
-					self._virtual(head.code, True)
-			elif held in self._kept:
-				self._kept.discard(held)
-				self._keep(head.code, False)
+				self._pressOut(head)
 			else:
-				self._passedOut.discard(held)
-				self._virtual(head.code, False)
+				self._releaseOut(head)
+
+	def _pressOut(self, head: _Entry) -> None:
+		"""A decided press leaves the line: kept, or put on the virtual keyboard."""
+		held = (head.device, head.code)
+		typed = head.tag is not None
+		late = head.lateKept
+		if late is not None and late in self._kept:
+			# Whatever becomes of the press, the kept key goes out in its place, and from now its release
+			# is passed as though its press had been.
+			self._kept.discard(late)
+			self._passedOut.add(late)
+			self._note("late pass out", head.seq)
+			self._virtual(late[1], True)
+		if head.verdict:
+			self._kept.add(held)
+			self._passedOut.discard(held)
+			if typed:
+				self._sendTyped(head, TYPED_KEPT)
+			else:
+				self._keep(head.code, True)
+		elif typed and self._sysrqRefuses(head.code):
+			# Keys ahead of it changed what is down since its TYPE came.
+			self._typedDown.discard(head.code)
+			self._sendTyped(head, TYPED_REFUSED_KEY)
+		elif typed and held in self._passedOut:
+			# Typed down again while down: the virtual keyboard has it down already, as the kernel's input
+			# core drops a press of a key that is down.
+			self._sendTyped(head, TYPED_OUT)
+		else:
+			self._kept.discard(held)
+			self._passedOut.add(held)
+			self._virtual(head.code, True)
+			if typed:
+				self._sendTyped(head, TYPED_OUT)
+
+	def _releaseOut(self, entry: _Entry) -> None:
+		held = (entry.device, entry.code)
+		typed = entry.tag is not None
+		if held in self._kept:
+			self._kept.discard(held)
+			if typed:
+				self._sendTyped(entry, TYPED_KEPT)
+			else:
+				self._keep(entry.code, False)
+		elif typed and held not in self._passedOut:
+			# Its press was refused as it was to go out.
+			self._sendTyped(entry, TYPED_NOT_DOWN)
+		else:
+			self._passedOut.discard(held)
+			self._virtual(entry.code, False)
+			if typed:
+				self._sendTyped(entry, TYPED_OUT)
 
 	def _virtual(self, evdev: int, down: bool) -> None:
 		holders = self._virtualDown.get(evdev, 0)
@@ -643,6 +845,11 @@ class StandIn:
 		else:
 			del self._virtualDown[evdev]
 		if holders == (1 if down else 0):
+			# The kernel's SysRq handler for the virtual keyboard, which typed presses are checked against.
+			if down and evdev == SYSRQ and ALTS & self._virtualDown.keys():
+				self._sysrqActive = True
+			elif not down and evdev in ALTS and not ALTS & self._virtualDown.keys():
+				self._sysrqActive = False
 			self._toX(evdev, down, virtual=True)
 
 	def _letGo(
@@ -652,6 +859,13 @@ class StandIn:
 		taps: tuple[str | int, ...] = (),
 		device: int = DEVICE_NUMBER,
 	) -> None:
+		# A key typed for one moment must not land in the next, unlike the user's own keys still waiting.
+		for entry in [entry for entry in self._line if entry.tag is not None]:
+			self._line.remove(entry)
+			self._sendTyped(entry, TYPED_LOST)
+		for entry in self._line:
+			# The kept key of a LATE_PASS goes out only at its press's turn, which letting go is not.
+			entry.lateKept = None
 		if dropUndecided:
 			self._line.clear()
 		else:
@@ -667,6 +881,7 @@ class StandIn:
 				self._toX(evdev, value == PRESS, virtual=True)
 				if told:
 					self._seq += 1
+					self._told[self._seq] = (device, evdev, value, 0)
 					self._note("tap", self._seq, evdev, value)
 					self._sendClient(struct.pack("<BQIHBB", KEY, self._seq, device, evdev, value, 0))
 		for evdev in sorted(self._virtualDown):
@@ -674,6 +889,8 @@ class StandIn:
 		self._virtualDown.clear()
 		self._kept.clear()
 		self._passedOut.clear()
+		self._typedDown.clear()
+		self._sysrqActive = False
 		self._run = None
 		self._startWaiting = False
 		if self.capturing:
@@ -771,6 +988,11 @@ class StandIn:
 			return
 		self._client = caller
 		self.granted = asked & self.features
+		self._told.clear()
+		self._releaseOf.clear()
+		self._pressOf.clear()
+		self._keptSeqs.clear()
+		self._latePassNamed.clear()
 		self._lastHeard = time.monotonic()
 		self._lights = None
 		self.gone.clear()
@@ -852,12 +1074,122 @@ class StandIn:
 							self._note("wait", seq)
 						break
 					entry.verdict = bool(value)
+					if entry.verdict:
+						self._keptSeqs.add(seq)
 					self.verdicts.append((seq, bool(value), now - entry.arrival))
 					self._note("verdict", seq, bool(value))
 					break
 			else:
 				self._note("late verdict", seq, value)
 			self._advance(now)
+		elif kind == TYPE and len(data) == 9 and self.granted & FEATURE_TYPING:
+			_kind, tag, evdev, value, mode = struct.unpack("<BIHBB", data)
+			if value not in (0, 1) or mode not in (TYPE_DECIDE, TYPE_INJECT) or not isVirtualKey(evdev):
+				self._malformed(data)
+				return
+			self._type(tag, evdev, value == 1, mode, now)
+		elif kind == LATE_PASS and len(data) == 17 and self.granted & FEATURE_LATE_PASS:
+			_kind, kept, waiting = struct.unpack("<BQQ", data)
+			if not self._latePassWellFormed(kept, waiting):
+				self._malformed(data)
+				return
+			self._latePass(kept, waiting)
+			self._advance(now)
 		else:
-			self._note("malformed", data)
-			self._dropClient(sendGoodbye=(7, "malformed"))
+			self._malformed(data)
+
+	def _malformed(self, data: bytes) -> None:
+		# The type alone: the rest of a TYPE names a key.
+		self._note("malformed", data[:1])
+		self._dropClient(sendGoodbye=(GOODBYE_MALFORMED, "malformed"))
+
+	# Typing, with FEATURE_TYPING.
+
+	def _sendTyped(self, entry: _Entry | None, outcome: int, tag: int | None = None) -> None:
+		"""TYPED for the typed key entry, or for a refused one, which never had an entry, by its tag."""
+		tag = entry.tag if entry is not None else tag
+		seq = 0 if entry is None or entry.injected else entry.seq
+		self.typed.append((tag, seq, outcome))
+		self._note("typed", tag, seq, outcome)
+		self._sendClient(struct.pack("<BIQB", TYPED, tag, seq, outcome))
+
+	def _sysrqRefuses(self, evdev: int) -> bool:
+		"""Whether the SysRq rules refuse a typed press of evdev now."""
+		down = self._virtualDown.keys()
+		return (
+			self._sysrqActive or (evdev == SYSRQ and bool(ALTS & down)) or (evdev in ALTS and SYSRQ in down)
+		)
+
+	def _typeRefusal(self, evdev: int, down: bool, now: float) -> int | None:
+		if not self.capturing or self._client is None:
+			return TYPED_REFUSED_STATE
+		if evdev not in typableCodes() or (down and self._sysrqRefuses(evdev)):
+			return TYPED_REFUSED_KEY
+		if not down and evdev not in self._typedDown:
+			return TYPED_NOT_DOWN
+		self._typedTokens = min(
+			float(TYPED_BURST), self._typedTokens + (now - self._typedFilled) * TYPED_PER_SECOND
+		)
+		self._typedFilled = now
+		waiting = sum(1 for entry in self._line if entry.tag is not None)
+		if waiting >= TYPED_WAITING_LIMIT or self._typedTokens < 1:
+			return TYPED_REFUSED_FULL
+		return None
+
+	def _type(self, tag: int, evdev: int, down: bool, mode: int, now: float) -> None:
+		refusal = self._typeRefusal(evdev, down, now)
+		if refusal is not None:
+			self._sendTyped(None, refusal, tag=tag)
+			return
+		self._typedTokens -= 1
+		if down:
+			self._typedDown.add(evdev)
+		else:
+			self._typedDown.discard(evdev)
+		if mode == TYPE_DECIDE:
+			self._enter(
+				evdev, PRESS if down else RELEASE, KEY_TYPED | (KEY_ASK if down else 0), TYPED_DEVICE, tag
+			)
+			return
+		self._note("inject", tag)
+		self._line.append(
+			_Entry(
+				0,
+				evdev,
+				down,
+				now,
+				verdict=False if down else None,
+				device=TYPED_DEVICE,
+				tag=tag,
+				injected=True,
+			)
+		)
+		self._advance(now)
+
+	# The late pass, with FEATURE_LATE_PASS.
+
+	def _latePassWellFormed(self, kept: int, waiting: int) -> bool:
+		first, second = self._told.get(kept), self._told.get(waiting)
+		if first is None or second is None:
+			return False
+		_device, evdev, value, flags = first
+		if value != PRESS or evdev not in MODIFIERS - {CAPS_LOCK} or flags & KEY_TYPED:
+			return False
+		if kept in self._latePassNamed:
+			return False
+		_device, _evdev, value, flags = second
+		if value != PRESS or not flags & KEY_ASK:
+			return False
+		self._latePassNamed.add(kept)
+		return True
+
+	def _latePass(self, kept: int, waiting: int) -> None:
+		release = self._releaseOf.get(kept)
+		downAtWaiting = kept < waiting and (release is None or release > waiting)
+		entry = next((e for e in self._line if e.seq == waiting and e.press and e.verdict is None), None)
+		applies = kept in self._keptSeqs and downAtWaiting and entry is not None
+		if applies:
+			device, evdev, _value, _flags = self._told[kept]
+			entry.lateKept = (device, evdev)
+		self.latePasses.append((kept, waiting, applies))
+		self._note("late pass", kept, waiting, applies)
