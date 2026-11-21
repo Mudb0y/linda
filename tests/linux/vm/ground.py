@@ -481,16 +481,19 @@ class Ground:
 	def altTab(self, tabs: int = 1) -> None:
 		"""Alt+Tab on the emulated keyboard, with Tab pressed tabs times while Alt is held."""
 		self.qemuKey("alt", True)
-		time.sleep(0.1)
-		for _tab in range(tabs):
-			self.machine.send_key("tab", log=False)
-			time.sleep(0.15)
-		self.qemuKey("alt", False)
+		try:
+			time.sleep(0.1)
+			for _tab in range(tabs):
+				self.machine.send_key("tab", log=False)
+				time.sleep(0.15)
+		finally:
+			self.qemuKey("alt", False)
 
 	def activate(self, title: str, timeout: float = 5) -> dict:
 		"""Make the window titled title the active one, as AT-SPI says, and answer it: by the
 		compositor's driver where it can, and otherwise with Alt+Tab, each time one Tab more, which
-		reaches every window once whatever the order the desktop keeps them in."""
+		reaches every window once whatever the order the desktop keeps them in, so long as each switch
+		is seen to end before the next begins."""
 		if self.focus("activate", title)["activated"]:
 			return self.waitFor(
 				lambda: (w := self.activeWindow()) and w["title"] == title and w,
@@ -499,19 +502,28 @@ class Ground:
 			)
 		count = len(self.focus("windows"))
 		for tabs in range(count):
-			active = self.activeWindow()
-			if active is not None and active["title"] == title:
-				return active
+			before = self.activeWindow()
+			if before is not None and before["title"] == title:
+				return before
 			self.altTab(tabs + 1)
-			try:
-				return self.waitFor(
-					lambda: (w := self.activeWindow()) and w["title"] == title and w,
-					f"{title} to be active",
-					timeout if tabs + 1 == count else 1.5,
-				)
-			except AssertionError:
-				continue
+			after = self._activeChange(before, timeout)
+			if after is not None and after["title"] == title:
+				return after
 		raise AssertionError(f"Alt+Tab never made {title} active; AT-SPI lists {self.focus('windows')}")
+
+	def _activeChange(self, before: dict | None, timeout: float) -> dict | None:
+		"""The program's window AT-SPI says is active once it is another than before, or None when none
+		is within timeout. The desktop's own surfaces are passed over: GNOME's switcher is active while
+		Alt is held, and the window switched to is reported only some 1.5 s after it closes."""
+		was = before and (before["pid"], before["title"])
+		deadline = time.monotonic() + timeout
+		while True:
+			active = self.activeWindow()
+			if active is not None and not active.get("shell") and (active["pid"], active["title"]) != was:
+				return active
+			if time.monotonic() >= deadline:
+				return None
+			time.sleep(0.1)
 
 	# Linda.
 

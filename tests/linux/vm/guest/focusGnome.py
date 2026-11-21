@@ -14,6 +14,9 @@ from gi.repository import Atspi, Gio, GLib
 
 SHELL = "org.gnome.Shell"
 SHELL_PATH = "/org/gnome/Shell"
+#: The shell's own application on the AT-SPI desktop, whose "Main stage" is active while the Alt+Tab
+#: switcher is up.
+SHELL_APPLICATION = "gnome-shell"
 #: Milliseconds an AT-SPI call may take, and one made while a program starts, before it is given up.
 ATSPI_TIMEOUT = 2000
 ATSPI_STARTUP_TIMEOUT = 5000
@@ -79,6 +82,7 @@ def windows() -> list[dict]:
 						"role": window.get_role_name(),
 						"active": states.contains(Atspi.StateType.ACTIVE),
 						"showing": states.contains(Atspi.StateType.SHOWING),
+						"shell": name == SHELL_APPLICATION,
 					}
 				)
 			except GLib.Error:

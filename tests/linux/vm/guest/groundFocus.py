@@ -11,10 +11,11 @@ focusGnome.py beside this file.
 
 All but devices run in the session, through guest/groundSession.py, and answer one JSON value on
 standard output. ready exits with status 0 once the desktop takes keys for its windows, and 1 until
-then. active answers the active top-level window as windows lists it, or null. activate answers
-{"activated": true} when the kind's module moved the focus itself, and {"activated": false} when it
-cannot, which tells the ground to move it with keys. facts answers what the kind's module knows about
-the desktop, for the log.
+then. windows lists each top-level window, with "shell" true for the desktop's own surfaces, which
+are no program's window. active answers the active top-level window as windows lists it, or null.
+activate answers {"activated": true} when the kind's module moved the focus itself, and
+{"activated": false} when it cannot, which tells the ground to move it with keys. facts answers what
+the kind's module knows about the desktop, for the log.
 
 devices runs as root and answers the names of the input devices the processes of user UID hold open,
 which in a Wayland session are the compositor's: the device a key is sent to must be among them, or
