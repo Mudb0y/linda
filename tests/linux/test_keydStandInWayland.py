@@ -716,6 +716,33 @@ def test_aLatePassThatCannotApplyChangesNothing(socketPath: str, served: Served)
 	assert not client.closed.is_set()
 
 
+def test_aLatePassNamingAPressKeptBeforeALetGoChangesNothing(socketPath: str, served: Served):
+	sink = NullSink()
+	keyboard, client = served(socketPath, sink, decide=keepReaderKeys)
+	keyboard.down("Insert")
+	keyboard.down("alt")
+	client.waitFor(lambda: len(keyboard.verdicts) == 2)
+	alt = client.pressSeq(ALT)
+	client.send(bytes((STOP,)))
+	client.waitFor(lambda: any(m == (RELEASED, RELEASED_STOPPED) for m in client.messages))
+	# Let go of while nothing captures, so the client is never told.
+	keyboard.up("alt")
+	keyboard.up("Insert")
+	client.held.clear()
+	client.start()
+	assert client.held.wait(5)
+	keyboard.down("Tab")
+	client.waitFor(lambda: len(client.told()) == 3)
+	tab = client.pressSeq(TAB)
+	client.latePass(alt, tab)
+	client.verdict(tab, VERDICT_PASS)
+	keyboard.up("Tab")
+	keyboard.waitFor(lambda: len(sink.passed()) == 2)
+	assert keyboard.latePasses == [(alt, tab, False)]
+	assert sink.passed() == [(TAB, True), (TAB, False)]
+	assert not client.closed.is_set()
+
+
 @pytest.mark.parametrize(
 	"named",
 	["zero", "never sent", "not a modifier", "Caps Lock", "a release", "typed", "waiting not asked", "twice"],

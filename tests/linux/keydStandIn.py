@@ -895,6 +895,8 @@ class StandIn:
 			self._toX(evdev, False, virtual=True)
 		self._virtualDown.clear()
 		self._kept.clear()
+		# Capture waits for every key to be up, so nothing kept now is down when it captures again.
+		self._keptSeqs.clear()
 		self._passedOut.clear()
 		self._typedDown.clear()
 		self._sysrqActive = False
