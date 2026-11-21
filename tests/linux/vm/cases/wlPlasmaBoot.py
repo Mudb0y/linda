@@ -230,6 +230,21 @@ def run(ground: "Ground") -> None:
 			)
 			typedTo(ground, keyboard, then)
 
+	with ground.subtest("kdotool moves the focus to a window by its title"):
+		first = ground.activeWindow()
+		assert first is not None and first["title"] in (GTK3, QT), first
+		for title in (GTK3 if first["title"] == QT else QT, first["title"]):
+			answer = ground.run(["ground-focus", "activate", title])
+			ground.machine.log(f"activating {title}: {answer.stdout.strip()} {answer.stderr.strip()!r}")
+			assert json.loads(answer.stdout) == {"activated": True}, answer
+			# focusPlasma.py falls back to a script of its own and says so; this asks for kdotool.
+			assert "kdotool could not" not in answer.stderr, answer
+			ground.waitFor(
+				lambda title=title: (w := ground.activeWindow()) and w["title"] == title,
+				f"{title} to be active",
+			)
+			typedTo(ground, keyboard, title)
+
 	with ground.subtest(
 		"linda-keyd admits a client of the autostarted runner and passes keys to the Qt window"
 	):
