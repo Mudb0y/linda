@@ -27,7 +27,14 @@ pub const KEY_CAPSLOCK: u16 = 58;
 pub const KEY_A: u16 = 30;
 pub const KEY_INSERT: u16 = 110;
 pub const KEY_KP0: u16 = 82;
+pub const KEY_LEFTALT: u16 = 56;
+pub const KEY_RIGHTALT: u16 = 100;
+pub const KEY_SYSRQ: u16 = 99;
 pub const KEY_POWER: u16 = 116;
+pub const KEY_SLEEP: u16 = 142;
+pub const KEY_SUSPEND: u16 = 205;
+pub const KEY_POWER2: u16 = 0x164;
+pub const KEY_RESTART: u16 = 0x198;
 pub const KEY_MAX: u16 = 0x2ff;
 pub const KEY_CNT: usize = KEY_MAX as usize + 1;
 
@@ -77,6 +84,26 @@ pub const KEYBOARD_KEYS: std::ops::RangeInclusive<u16> = 1..=31;
 /// one of those.
 pub fn is_virtual_key(code: u16) -> bool {
     matches!(code, 1..=0xff | 0x160..=0x21f | 0x224..=0x2bf | 0x2e8..=KEY_MAX)
+}
+
+/// The codes the client may type with TYPE, in rising order: those the FIXED, NUMPAD and LAYOUT
+/// tables of source/linuxPlatform/keys/keyMap.py name, which are the keys Linda knows, without
+/// KEY_SLEEP. Generated from those tables by `python3 tests/linux/test_keydTypedKeys.py`, under the
+/// rig, and held to them by that file's test. logind takes the power keys of any keyboard, the
+/// virtual one included, as the machine's, so none of them is here.
+pub const TYPEABLE: [u16; 139] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
+    51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74,
+    75, 76, 77, 78, 79, 80, 81, 82, 83, 86, 87, 88, 89, 96, 97, 98, 99, 100, 102, 103, 104, 105,
+    106, 107, 108, 109, 110, 111, 113, 114, 115, 119, 121, 125, 126, 127, 128, 140, 155, 156, 157,
+    158, 159, 163, 164, 165, 166, 172, 173, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193,
+    194, 200, 201, 217, 226,
+];
+
+/// Whether the client may type this code.
+pub fn typeable(code: u16) -> bool {
+    TYPEABLE.binary_search(&code).is_ok()
 }
 
 /// A set of key codes, as the kernel's key bitmaps hold them.
@@ -367,6 +394,38 @@ pub mod tests {
                 .chain(CHORD.into_iter().flatten().copied())
                 .all(is_virtual_key)
         );
+    }
+
+    #[test]
+    fn only_keys_the_virtual_keyboard_sends_and_no_power_key_may_be_typed() {
+        assert!(
+            TYPEABLE.windows(2).all(|w| w[0] < w[1]),
+            "not in rising order"
+        );
+        assert!(TYPEABLE.iter().all(|c| is_virtual_key(*c)));
+        for code in [
+            KEY_POWER,
+            KEY_SLEEP,
+            KEY_SUSPEND,
+            KEY_POWER2,
+            KEY_RESTART,
+            0,
+            0x110,
+        ] {
+            assert!(!typeable(code), "{code:#x}");
+        }
+        for code in [
+            1,
+            KEY_A,
+            KEY_LEFTALT,
+            KEY_RIGHTALT,
+            KEY_SYSRQ,
+            KEY_INSERT,
+            KEY_KP0,
+            226,
+        ] {
+            assert!(typeable(code), "{code}");
+        }
     }
 
     #[test]
