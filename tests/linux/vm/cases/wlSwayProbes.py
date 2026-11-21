@@ -17,7 +17,7 @@ import shlex
 from typing import TYPE_CHECKING
 
 from ground import AT_KEYBOARD, VIRTIO_KEYBOARD, VIRTUAL_KEYBOARD, WINDOW_TITLE, Mark
-from wl.helperSafety import CAPS, NUM, appKeyvals, lights, restartHelper, typedKeys
+from wl.helperSafety import CAPS, appKeyvals, lights, restartHelper, typedKeys
 
 if TYPE_CHECKING:
 	from ground import FakeKeyboard, Ground, KeydClient
@@ -60,24 +60,29 @@ def keypad(ground: "Ground") -> list[str]:
 	return appKeyvals(ground.waitForKeys("app", typedKeys("KEY_KP1"), mark))
 
 
+def numLock(ground: "Ground", on: bool) -> None:
+	"""Put the desktop's Num Lock as asked, judged by what the numpad types, not by the lights."""
+	for _press in range(2):
+		if (keypad(ground) == ["KP_1"]) == on:
+			return
+		ground.press("num_lock")
+		ground.settle(0.3)
+	assert (keypad(ground) == ["KP_1"]) == on, f"Num Lock would not go {'on' if on else 'off'}"
+
+
 def keyboardAdded(ground: "Ground", desktop: str) -> None:
 	with ground.subtest("E6: a keyboard added, and the desktop's own Num Lock"):
-		ground.press("num_lock")
-		ground.waitFor(lambda: lights(ground, VIRTIO_KEYBOARD) & NUM, "Num Lock on in the desktop")
-		before = keypad(ground)
+		numLock(ground, True)
+		before = lights(ground, VIRTIO_KEYBOARD)
 		ground.keyboard("Ground added keyboard")
 		ground.settle(0.5)
 		seen = {
-			"keypadBefore": before,
+			"lightsBefore": before,
 			"lightsAfter": lights(ground, VIRTIO_KEYBOARD),
 			"keypadAfter": keypad(ground),
 		}
 		ground.machine.log(f"E6 {desktop} a keyboard added with Num Lock on: {json.dumps(seen)}")
-		assert before == ["KP_1"], seen
-		if seen["keypadAfter"] == ["KP_1"]:
-			ground.press("num_lock")
-		ground.waitFor(lambda: not lights(ground, VIRTIO_KEYBOARD) & NUM, "Num Lock off in the desktop")
-		assert keypad(ground) != ["KP_1"], "Num Lock would not go off"
+		numLock(ground, False)
 
 
 def allLights(ground: "Ground", virtual: bool = True) -> dict[str, int]:

@@ -11,12 +11,13 @@ Each experiment's figures go to the log as one JSON object, after "E6 plasma" an
 case fails only when an experiment could not be made; what it found is written down.
 """
 
+import itertools
 import json
 import shlex
 from typing import TYPE_CHECKING
 
 from ground import VIRTIO_KEYBOARD, VIRTUAL_KEYBOARD, WINDOW_TITLE, Mark, keyEvents
-from wl.helperSafety import NUM, appKeyvals, lights, typedKeys
+from wl.helperSafety import appKeyvals, lights, typedKeys
 
 if TYPE_CHECKING:
 	from ground import FakeKeyboard, Ground, KeydClient
@@ -29,6 +30,8 @@ MONITOR_LOG = "/tmp/ground/keyMonitor.jsonl"
 #: The keysyms of the Linda key, as package KM would grab them: Insert, the numpad's Insert and Caps
 #: Lock.
 LINDA_KEYS = [0xFF63, 0xFF9E, 0xFFE5]
+#: Seconds within which a KeyEvent the same as the one before is the same key event sent again.
+TWICE = 0.05
 ORCA = "/run/current-system/sw/bin/orca"
 #: Seconds Orca is given to start far enough to ask for the name.
 ORCA_START = 60
@@ -58,24 +61,29 @@ def keypad(ground: "Ground") -> list[str]:
 	return appKeyvals(ground.waitForKeys("app", typedKeys("KEY_KP1"), mark))
 
 
+def numLock(ground: "Ground", on: bool) -> None:
+	"""Put the desktop's Num Lock as asked, judged by what the numpad types, not by the lights."""
+	for _press in range(2):
+		if (keypad(ground) == ["KP_1"]) == on:
+			return
+		ground.press("num_lock")
+		ground.settle(0.3)
+	assert (keypad(ground) == ["KP_1"]) == on, f"Num Lock would not go {'on' if on else 'off'}"
+
+
 def keyboardAdded(ground: "Ground", desktop: str) -> None:
 	with ground.subtest("E6: a keyboard added, and the desktop's own Num Lock"):
-		ground.press("num_lock")
-		ground.waitFor(lambda: lights(ground, VIRTIO_KEYBOARD) & NUM, "Num Lock on in the desktop")
-		before = keypad(ground)
+		numLock(ground, True)
+		before = lights(ground, VIRTIO_KEYBOARD)
 		ground.keyboard("Ground added keyboard")
 		ground.settle(0.5)
 		seen = {
-			"keypadBefore": before,
+			"lightsBefore": before,
 			"lightsAfter": lights(ground, VIRTIO_KEYBOARD),
 			"keypadAfter": keypad(ground),
 		}
 		ground.machine.log(f"E6 {desktop} a keyboard added with Num Lock on: {json.dumps(seen)}")
-		assert before == ["KP_1"], seen
-		if seen["keypadAfter"] == ["KP_1"]:
-			ground.press("num_lock")
-		ground.waitFor(lambda: not lights(ground, VIRTIO_KEYBOARD) & NUM, "Num Lock off in the desktop")
-		assert keypad(ground) != ["KP_1"], "Num Lock would not go off"
+		numLock(ground, False)
 
 
 def ask(ground: "Ground", op: str, **fields: object) -> dict:
@@ -89,10 +97,35 @@ def keyEventsSince(ground: "Ground", since: Mark) -> list[dict]:
 	return [r for r in ground.readJsonLines(MONITOR_LOG) if r["kind"] == "key" and r["t"] >= since.t]
 
 
+def folded(records: list[dict]) -> list[dict]:
+	"""KeyEvents with each one the compositor sent twice running counted once: mutter 51 sends a
+	watcher every key event twice, though it keeps one grabber for each connection, and a compositor
+	that sends it once loses nothing by this."""
+	kept: list[dict] = []
+	for r in records:
+		if (
+			kept
+			and (kept[-1]["key"], kept[-1]["value"]) == (r["key"], r["value"])
+			and r["t"] - kept[-1]["t"] < TWICE
+		):
+			continue
+		kept.append(r)
+	return kept
+
+
 def heard(ground: "Ground", since: Mark, settle: float = 1.0) -> list[tuple[str, int]]:
 	"""The KeyEvents the plain process was sent after since, once settle seconds have passed."""
 	ground.settle(settle)
-	return keyEvents(keyEventsSince(ground, since))
+	return keyEvents(folded(keyEventsSince(ground, since)))
+
+
+def sentTwice(records: list[dict]) -> list[float]:
+	"""For each KeyEvent sent a second time running, the seconds between the two."""
+	return [
+		round(b["t"] - a["t"], 4)
+		for a, b in itertools.pairwise(records)
+		if (a["key"], a["value"]) == (b["key"], b["value"])
+	]
 
 
 def waitForKeyEvents(ground: "Ground", expected: list[tuple[str, int]], since: Mark) -> list[dict]:
@@ -100,7 +133,7 @@ def waitForKeyEvents(ground: "Ground", expected: list[tuple[str, int]], since: M
 
 	def arrived() -> bool:
 		found[:] = keyEventsSince(ground, since)
-		return [(r["key"], r["value"]) for r in found][: len(expected)] == expected
+		return [(r["key"], r["value"]) for r in folded(found)][: len(expected)] == expected
 
 	try:
 		ground.waitFor(arrived, f"KeyEvents {expected}", 5)
@@ -145,6 +178,8 @@ def keyMonitor(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient",
 				"keyEventAfterWrite": round(events[0]["t"] - written[0]["t"], 4),
 				"programAfterWrite": round(app[0]["t"] - written[0]["t"], 4),
 				"program": appKeyvals(app),
+				"sent": [(r["key"], r["value"]) for r in events],
+				"sentTwiceApart": sentTwice(events),
 			}
 
 		with ground.subtest("E12: the Linda key's grab keeps Insert with T from the program"):
@@ -176,6 +211,7 @@ def keyMonitor(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient",
 				"keyEventAfterVirtual": round(events[0]["t"] - virtual[0]["t"], 4),
 				"programAfterVirtual": round(app[0]["t"] - virtual[0]["t"], 4),
 				"program": appKeyvals(app),
+				"sentTwiceApart": sentTwice(events),
 				"keptKeyEvents": heard(ground, kept),
 			}
 			ground.machine.log(f"E12 {desktop} through the helper: {seen['throughHelper']}")

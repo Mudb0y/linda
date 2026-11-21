@@ -24,9 +24,10 @@ keyboard of the seat.
 
 experiment runs E6's four probes in a row and prints them as one JSON object: with every light off,
 first with no preset and then with the complement, and then with Num Lock on in the desktop, the same
-two. Num Lock is pressed on a uinput keyboard of its own, "Ground light presser", made first, and is
-pressed again before a probe whenever the reference keyboard has lost it, and at the end to leave the
-desktop as it was.
+two. Num Lock is pressed on a uinput keyboard of its own, "Ground light presser", made first, once to
+put it on and once at the end to put it off again. Whether it is on is known from the reference
+keyboard's light at the start and the presses since, not from the lights later: a desktop may take
+the lights off its keyboards and keep the lock.
 
 monitor runs in the session as its user: a plain process, no screen reader, which on request asks for
 org.gnome.Orca.KeyboardMonitor and calls the compositor's org.freedesktop.a11y.KeyboardMonitor. It
@@ -300,18 +301,23 @@ def waitLights(want: int, mask: int) -> bool:
 	return False
 
 
-def ensureNumLock(presser: evdev.UInput, on: bool) -> list[str]:
-	"""Press Num Lock until the reference keyboard shows it as asked; answers what was done."""
-	done = []
-	for _attempt in range(2):
-		if bool(lights(REFERENCE) & NUM) == on:
-			return done
-		pressNumLock(presser)
-		done.append("pressed")
-		if waitLights(NUM if on else 0, NUM):
-			return done
-	done.append("gave up")
-	return done
+class NumLock:
+	"""The desktop's Num Lock, followed by the presses made on the presser from the reference's light
+	at the start, since a desktop may leave the lights off a keyboard while the lock is on: sway turns
+	every keyboard's lights off as one is added."""
+
+	def __init__(self, presser: evdev.UInput) -> None:
+		self.presser = presser
+		self.on = bool(lights(REFERENCE) & NUM)
+
+	def make(self, on: bool) -> dict:
+		"""Press Num Lock if it is not as asked; answers whether it was pressed and whether the
+		reference keyboard's light then showed it."""
+		if self.on == on:
+			return {"pressed": False, "lit": bool(lights(REFERENCE) & NUM) == on}
+		pressNumLock(self.presser)
+		self.on = on
+		return {"pressed": True, "lit": waitLights(NUM if on else 0, NUM)}
 
 
 def experiment(reader: str | None, seconds: float) -> dict:
@@ -320,18 +326,20 @@ def experiment(reader: str | None, seconds: float) -> dict:
 	presser.device.close()
 	presserOpened = waitOpened(presserNode, reader, 10)
 	time.sleep(PRESSER_SETTLE)
+	numLock = NumLock(presser)
+	started = numLock.on
 	runs = []
-	for numLock in (False, True):
+	for on in (False, True):
 		for preset in ("none", "complement"):
-			pressed = ensureNumLock(presser, numLock)
+			made = numLock.make(on)
 			result = probe(preset, reader, seconds)
-			result.update(numLock=numLock, numLockPresses=pressed)
+			result.update(numLock=on, numLockMade=made)
 			runs.append(result)
 			# A desktop that writes lights at the end of a keyboard's life, or late, has done so by now.
 			time.sleep(0.3)
-	restored = ensureNumLock(presser, False)
+	restored = numLock.make(False)
 	presser.close()
-	return {"presserOpened": presserOpened, "runs": runs, "restored": restored}
+	return {"presserOpened": presserOpened, "numLockAtStart": started, "runs": runs, "restored": restored}
 
 
 # The plain process that asks for Orca's key-monitor name.
