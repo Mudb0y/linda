@@ -932,16 +932,51 @@ def _letters(text: str) -> str:
 	return "".join(character for character in text.casefold() if character.isalnum())
 
 
+_word = re.compile(r"[^\W_]+")
+
+
+def _runsCollapsed(text: str) -> str:
+	return "".join(character for i, character in enumerate(text) if i == 0 or text[i - 1] != character)
+
+
+def _keyPerLine(text: str) -> str:
+	"""The lines that end in a word of one letter or digit, by that word, with a run of one character
+	taken once, as a press and its release would write it. NVDA's record headers are passed over: their
+	thread number is such a word."""
+	keys = []
+	for line in text.splitlines():
+		if NVDA_LOG_RECORD_HEADER.match(line):
+			continue
+		words = _word.findall(line.casefold())
+		if words and len(words[-1]) == 1:
+			keys.append(words[-1])
+	return _runsCollapsed("".join(keys))
+
+
 def textsHoldingMarker(marker: str, texts: dict[str, str]) -> list[str]:
 	"""The names of the texts, such as log files by name, that hold marker, a string a test typed.
 
-	Held in any case, and also with anything at all between its letters, as a log that wrote each key
-	on a line of its own would hold it.
+	Matched in any case, three ways: as it is; with only punctuation and white space between its
+	letters; and as the last words of successive lines, as a log that wrote each key on a line of its
+	own, after words such as "Input: kb(desktop):" or "key pressed", would hold it. Letters with words
+	between them on one line are not matched, as any long log holds a marker's letters in order by
+	chance.
 	"""
-	if len(_letters(marker)) < MARKER_LENGTH or _letters(marker) != marker.casefold():
-		raise ValueError(f"a marker is {MARKER_LENGTH} or more letters and digits and nothing else")
 	wanted = marker.casefold()
-	return [name for name, text in texts.items() if wanted in text.casefold() or wanted in _letters(text)]
+	if (
+		len(_letters(marker)) < MARKER_LENGTH
+		or _letters(marker) != wanted
+		or _runsCollapsed(wanted) != wanted
+	):
+		raise ValueError(
+			f"a marker is {MARKER_LENGTH} or more letters and digits and nothing else,"
+			" with no character twice in a row"
+		)
+	return [
+		name
+		for name, text in texts.items()
+		if wanted in text.casefold() or wanted in _letters(text) or wanted in _keyPerLine(text)
+	]
 
 
 def assertMarkerAbsent(marker: str, texts: dict[str, str]) -> None:

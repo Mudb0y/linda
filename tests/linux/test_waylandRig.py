@@ -79,6 +79,29 @@ def test_markerCheckFindsWhatWasTyped() -> None:
 		harness.assertMarkerAbsent("kqzmxjwv", texts)
 	with pytest.raises(ValueError):
 		harness.textsHoldingMarker("short", texts)
+	with pytest.raises(ValueError):
+		harness.textsHoldingMarker("kqzmmxjwv", texts)
+
+
+@pytest.mark.parametrize(
+	"line",
+	[
+		# NVDA's own line for each gesture, under the record header whose thread number ends in a digit.
+		"IO - inputCore.InputManager.executeGesture (12:00:00.000) - MainThread (1):\nInput: kb(desktop):{}",
+		"DEBUG - key pressed {}",
+		"key 107 {}",
+		"key down {0}\nkey up {0}",
+		"Input: kb(desktop):shift+{}",
+	],
+)
+def test_markerCheckFindsAKeyPerLine(line: str) -> None:
+	marker = "kqzmxjwv"
+	log = (
+		"INFO - started\n" + "".join(line.format(character) + "\n" for character in marker) + "INFO - done\n"
+	)
+	assert harness.textsHoldingMarker(marker, {"nvda.log": log, "keyd": "key 30 a\nkey 48 b\n"}) == [
+		"nvda.log"
+	]
 
 
 def _pump(seconds: float) -> None:
