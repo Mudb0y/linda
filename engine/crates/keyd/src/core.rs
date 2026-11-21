@@ -22,8 +22,8 @@
 //!   front, and when the virtual keyboard fails. A switch of consoles counts as the session leaving
 //!   the front from the moment the kernel makes it; only logind's word captures again. A session
 //!   logind places on no console, which it does when it finds no consoles on seat0, is taken to be
-//!   on the console the kernel had in front when logind named it, and leaves the front whenever the
-//!   kernel puts another there: logind, knowing of no consoles, never says it has.
+//!   on the console the kernel had in front when logind first named it, and leaves the front
+//!   whenever the kernel puts another there: logind, knowing of no consoles, never says it has.
 //! - The emergency chord is looked for on each key as it is read, before the key goes anywhere.
 //! - A keyboard that vanishes has a release put in line for every key it held down.
 //! - A virtual keyboard that fails is destroyed, and the kernel releases what it held.
@@ -209,9 +209,11 @@ pub struct Core<D: Devices> {
     /// The kernel has put another console in front than the one of the session logind last named,
     /// and logind has said nothing since. Nothing is captured meanwhile.
     console_moved: bool,
-    /// For a session in front on no console, the console the kernel had in front when logind named
-    /// it, or the first the kernel named after.
-    found_on: Option<u32>,
+    /// For a session in front on no console, that session and the console the kernel had in front
+    /// when logind first named it, or the first the kernel named after. It is kept while logind
+    /// cannot be heard or names nobody, so that a session named again after logind faltered on a
+    /// text console is not taken to be on that console.
+    found_on: Option<(String, u32)>,
     /// The run of unanswered presses, by when its first and its last press were read, as
     /// UNANSWERED_SPAN in the protocol defines it.
     unanswered: Option<(Instant, Instant)>,
@@ -503,10 +505,15 @@ impl<D: Devices> Core<D> {
         self.console_moved = false;
         if front != self.front {
             log!("in front on seat0: {front:?}");
-            self.found_on = match front {
-                Front::Session { vt: 0, .. } => self.console,
-                _ => None,
-            };
+            match &front {
+                Front::Session { id, vt: 0, .. }
+                    if self.found_on.as_ref().is_none_or(|(s, _)| s != id) =>
+                {
+                    self.found_on = self.console.map(|c| (id.clone(), c));
+                }
+                Front::Session { vt, .. } if *vt != 0 => self.found_on = None,
+                _ => {}
+            }
             self.front = front;
         }
         let away: Vec<(ConnId, String)> = self
@@ -607,15 +614,18 @@ impl<D: Devices> Core<D> {
     /// helper lets go at once, and captures again only once logind speaks again.
     pub fn console_changed(&mut self, n: u32, now: Instant) {
         self.console = Some(n);
-        match self.front {
-            Front::Session { vt: 0, .. } => match self.found_on {
-                None => self.found_on = Some(n),
-                Some(c) if c != n => log!(
-                    "console {n} is in front, not console {c}, on which the session in front was found"
-                ),
-                Some(_) => {}
+        match &self.front {
+            Front::Session { id, vt: 0, .. } => match &self.found_on {
+                Some((s, c)) if s == id => {
+                    if *c != n {
+                        log!(
+                            "console {n} is in front, not console {c}, on which the session in front was found"
+                        );
+                    }
+                }
+                _ => self.found_on = Some((id.clone(), n)),
             },
-            Front::Session { vt, .. } if vt != n && !self.console_moved => {
+            Front::Session { vt, .. } if *vt != n && !self.console_moved => {
                 log!("console {n} is in front, before logind has said so");
                 self.console_moved = true;
             }
@@ -633,7 +643,11 @@ impl<D: Devices> Core<D> {
     fn session_in_front(&self) -> Option<&str> {
         match &self.front {
             Front::Session { id, vt: 0, .. }
-                if self.console.is_none_or(|c| Some(c) == self.found_on) =>
+                if self.console.is_none_or(|c| {
+                    self.found_on
+                        .as_ref()
+                        .is_some_and(|(s, f)| s == id && *f == c)
+                }) =>
             {
                 Some(id)
             }

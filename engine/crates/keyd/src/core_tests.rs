@@ -1921,6 +1921,33 @@ fn a_session_on_no_console_is_on_the_console_in_front_when_logind_first_names_it
     t.assert_let_go();
 }
 
+#[test]
+fn a_session_on_no_console_keeps_its_console_while_logind_falters_on_a_text_console() {
+    for between in [Front::Unknown, Front::Nobody] {
+        let (mut t, k) = on_no_console(&[1]);
+        assert!(t.w.grabbed(k));
+        t.console(3);
+        t.assert_let_go();
+        // logind does not answer in time, or names nobody, then names the same session again.
+        t.logind(between.clone());
+        t.pass(Duration::from_secs(2));
+        t.logind(on_console(SESSION, 1000, 0));
+        assert!(
+            !t.w.is_open(k),
+            "grabbed with text console 3 in front after {between:?}"
+        );
+        t.console(1);
+        for _ in 0..5 {
+            t.pass(SESSION_RECHECK);
+            t.logind(on_console(SESSION, 1000, 0));
+            assert!(
+                t.w.grabbed(k),
+                "not grabbed back on console 1 after {between:?}"
+            );
+        }
+    }
+}
+
 // Sleep.
 
 #[test]
