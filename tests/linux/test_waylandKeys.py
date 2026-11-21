@@ -12,8 +12,11 @@ of them:
 """
 
 import contextlib
+import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -24,6 +27,7 @@ import desktopSession
 import harness
 import keydStandIn
 import pytest
+import waylandKeyboard
 from desktopSession import PREFIX_MARK, DesktopSession
 from keydStandIn import StandIn
 from test_waylandMenu import KeyProbe, _holdInOrder
@@ -343,3 +347,131 @@ def test_menuFromTheLindaKeyWithN(linda: WaylandLinda):
 	linda.stepHolding("Escape", "Key probe")
 	linda.typeMarker()
 	linda.quit()
+
+
+#: The sway layout feed's snapshot, read in a child with Linda's tree, as Linda's route starts it.
+SWAY_FEED_CHILD = r"""
+import time
+from linuxPlatform.keys import swayLayout
+
+feed = swayLayout.create(None)
+changes = []
+first = feed.start(changes.append)
+time.sleep(0.5)
+feed.stop()
+last = changes[-1] if changes else first
+result = {"names": list(last.names), "group": last.group, "source": last.source}
+"""
+
+
+def compositorKeymap() -> list[str]:
+	"""The keymap sway gives a client's keyboard, as tests/linux/waylandKeymapDump.py prints it."""
+	dumped = subprocess.run(
+		[sys.executable, str(harness.HERE / "waylandKeymapDump.py")],
+		capture_output=True,
+		text=True,
+		timeout=30,
+		check=True,
+	)
+	return dumped.stdout.splitlines()
+
+
+def feedKeymap(tmp_path: Path) -> tuple[list[str], dict]:
+	"""What the sway feed's snapshot compiles to, in the dump's terms, and the snapshot."""
+	import waylandKeymapDump
+	from xkbcommon import xkb
+
+	done = harness.runChild(tmp_path, SWAY_FEED_CHILD, timeout=60)
+	done.assertClean()
+	snapshot = done.value
+	rules, model, layout, variant, options = snapshot["names"]
+	keymap = xkb.Context().keymap_new_from_names(
+		rules=rules, model=model, layout=layout, variant=variant, options=options or None
+	)
+	codes = waylandKeymapDump.namedCodes(waylandKeymapDump.KEY_MAP)
+	return waylandKeymapDump.describe(keymap.get_as_string(), codes), snapshot
+
+
+def swayActiveLayout() -> int:
+	"""sway's active layout index of the newest keyboard, the one the feed follows once there is no
+	keyboard of linda-keyd's."""
+	inputs = json.loads(
+		subprocess.run(
+			["swaymsg", "-t", "get_inputs"], capture_output=True, text=True, timeout=5, check=True
+		).stdout
+	)
+	return next(device for device in inputs if device.get("type") == "keyboard")["xkb_active_layout_index"]
+
+
+class SecondKeyboard:
+	"""A virtual keyboard of the test's own, with two layouts, pl and us; the rig's keyboard has pl alone."""
+
+	def __init__(self) -> None:
+		from pywayland.protocol.wayland import WlSeat
+		from xkbcommon import xkb
+
+		protocol = waylandKeyboard.loadProtocol(
+			os.environ["LINDA_VIRTUAL_KEYBOARD_PROTOCOL"], "virtual_keyboard_unstable_v1"
+		)
+		self.display, registry, found = waylandKeyboard.connectWayland()
+		manager = protocol.ZwpVirtualKeyboardManagerV1
+		seatName, seatVersion = found["wl_seat"]
+		seat = registry.bind(seatName, WlSeat, min(seatVersion, 7))
+		self.keyboard = registry.bind(found[manager.name][0], manager, 1).create_virtual_keyboard(seat)
+		text = xkb.Context().keymap_new_from_names(layout="pl,us").get_as_string()
+		fd = waylandKeyboard._keymapFile(text)
+		self.keyboard.keymap(waylandKeyboard.WL_KEYMAP_FORMAT_XKB_V1, fd, len(text.encode()) + 1)
+		os.close(fd)
+		self.keyboard.modifiers(0, 0, 0, 0)
+		self.display.roundtrip()
+
+	def tap(self, evdev: int) -> None:
+		"""A key down and up, after which the seat's keymap is this keyboard's."""
+		for state in (waylandKeyboard.PRESSED, waylandKeyboard.RELEASED):
+			self.keyboard.key(int(time.monotonic() * 1000) & 0xFFFFFFFF, evdev, state)
+			self.display.roundtrip()
+
+	def close(self) -> None:
+		self.keyboard.destroy()
+		self.display.roundtrip()
+		self.display.disconnect()
+
+
+@pytest.mark.rigSession("sway")
+def test_swaysKeymapIsTheFeedsForPlAndAfterASwitch(tmp_path: Path):
+	"""Experiment E5, sway's half: the keysyms sway gives programs for every code keyMap.py names are
+	those the layout feed's snapshot compiles to, for the rig's pl keyboard, and for a keyboard with pl
+	and us after sway switched it to us."""
+	harness.requireRig()
+	dumped = compositorKeymap()
+	fed, snapshot = feedKeymap(tmp_path)
+	assert snapshot["source"] == "sway" and snapshot["names"][2] == "pl", snapshot
+	assert fed == dumped
+	second = SecondKeyboard()
+	try:
+		leftShift = 42
+		second.tap(leftShift)
+		subprocess.run(
+			["swaymsg", "input 0:0:wlr_virtual_keyboard_v1 xkb_switch_layout 1"],
+			capture_output=True,
+			timeout=5,
+			check=True,
+		)
+		second.tap(leftShift)
+		time.sleep(SETTLE)
+		dumped = compositorKeymap()
+		fed, snapshot = feedKeymap(tmp_path)
+		print(f"{harness.rigSession()}: E5 after the switch: feed {snapshot}, sway's layouts {dumped[0]!r}")
+		assert snapshot["names"][2:4] == ["pl,us", ","], snapshot
+		assert snapshot["group"] == swayActiveLayout() == 1
+		assert fed == dumped
+	finally:
+		subprocess.run(
+			["swaymsg", "input 0:0:wlr_virtual_keyboard_v1 xkb_switch_layout 0"],
+			check=False,
+			capture_output=True,
+			timeout=5,
+		)
+		second.close()
+		# The rig's keyboard is the seat's again once it types.
+		waylandKeyboard.press("Shift_L", gap=0)
