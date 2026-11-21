@@ -459,6 +459,19 @@ del os.environ["XKB_DEFAULT_LAYOUT"]
 write(system, "kxkbrc", "[Layout]\nLayoutList=de,us\nModel=pc105\n")
 write(home, "kxkbrc", "# The user's own\n[Layout][$i]\nVariantList=nodeadkeys,\n")
 result["cascade"] = started(desktopLayout.PlasmaLayoutFeed())
+clear()
+os.environ["XKB_DEFAULT_VARIANT"] = "dvorak"
+os.environ["XKB_DEFAULT_OPTIONS"] = "grp:alt_shift_toggle"
+write(home, "kxkbrc", "[Layout]\nLayoutList=pl\nResetOldOptions=true\n")
+result["environmentUnused"] = started(desktopLayout.PlasmaLayoutFeed())
+write(home, "kxkbrc", "[Layout]\nOptions=caps:none\nResetOldOptions=Yes\n")
+result["variantWithoutLayout"] = started(desktopLayout.PlasmaLayoutFeed())
+os.environ["XKB_DEFAULT_LAYOUT"] = "fr"
+result["environmentLayout"] = started(desktopLayout.PlasmaLayoutFeed())
+write(home, "kxkbrc", "[Layout]\nLayoutList=pl\nOptions=caps:none\nResetOldOptions=off\n")
+result["environmentOptions"] = started(desktopLayout.PlasmaLayoutFeed())
+for name in ("XKB_DEFAULT_LAYOUT", "XKB_DEFAULT_VARIANT", "XKB_DEFAULT_OPTIONS"):
+	del os.environ[name]
 result["threads"] = feedThreads()
 """
 
@@ -489,6 +502,17 @@ def test_plasmaSnapshots(tmp_path: Path):
 		"environment": snap(("evdev", "pc104", "fr", "", ""), repeat=KDE_REPEAT, source="kde"),
 		"cascade": snap(
 			("evdev", "pc105", "de,us", "nodeadkeys,", ""), group=1, repeat=KDE_REPEAT, source="kde"
+		),
+		# KWin's applyEnvironmentRules takes the variant only with the layout, and the options only
+		# when ResetOldOptions, read as KConfig reads a bool, is false; xkbcommon then drops a variant
+		# that came without a layout.
+		"environmentUnused": snap(("evdev", "pc104", "pl", "", ""), repeat=KDE_REPEAT, source="kde"),
+		"variantWithoutLayout": snap(("evdev", "pc104", "us", "", "caps:none"), repeat=KDE_REPEAT, source="kde"),
+		"environmentLayout": snap(
+			("evdev", "pc104", "fr", "dvorak", "caps:none"), repeat=KDE_REPEAT, source="kde"
+		),
+		"environmentOptions": snap(
+			("evdev", "pc104", "pl", "", "grp:alt_shift_toggle"), repeat=KDE_REPEAT, source="kde"
 		),
 		"threads": [],
 	}

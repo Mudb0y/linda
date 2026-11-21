@@ -490,18 +490,32 @@ def _number(text: str | None, default: float) -> float:
 	return value if math.isfinite(value) else default
 
 
+def _kconfigTrue(value: str | None) -> bool:
+	"""A bool as KConfig's readEntry reads one: anything present but a negative word."""
+	return value is not None and value.lower() not in ("false", "no", "off", "0")
+
+
 def kdeNames(layout: dict[str, str]) -> tuple[str, str, str, str, str]:
 	"""The names KWin compiles from kxkbrc's Layout group, with the XKB_DEFAULT variables filling
 	what it leaves empty, as KWin's applyEnvironmentRules does. KWin reads no Use key, and takes
 	Options only with ResetOldOptions."""
 	env = os.environ
-	options = layout.get("Options", "") if layout.get("ResetOldOptions", "").lower() == "true" else ""
+	layouts = layout.get("LayoutList")
+	variants = layout.get("VariantList", "")
+	if not layouts:
+		layouts = env.get("XKB_DEFAULT_LAYOUT")
+		# KWin takes the variant with the layout, and xkbcommon drops a variant that has no layout.
+		variants = env.get("XKB_DEFAULT_VARIANT", "") if layouts else ""
+	if _kconfigTrue(layout.get("ResetOldOptions")):
+		options = layout.get("Options", "")
+	else:
+		options = env.get("XKB_DEFAULT_OPTIONS", "")
 	return (
 		env.get("XKB_DEFAULT_RULES") or DEFAULT_RULES,
 		layout.get("Model") or KDE_DEFAULT_MODEL,
-		layout.get("LayoutList") or env.get("XKB_DEFAULT_LAYOUT") or DEFAULT_LAYOUT,
-		layout.get("VariantList") or env.get("XKB_DEFAULT_VARIANT", ""),
-		options or env.get("XKB_DEFAULT_OPTIONS", ""),
+		layouts or DEFAULT_LAYOUT,
+		variants,
+		options,
 	)
 
 
