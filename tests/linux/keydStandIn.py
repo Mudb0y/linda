@@ -12,6 +12,9 @@ display sets them, reads the emergency chord itself, lets go of everything when 
 silent, and can be made to refuse, say goodbye, let go, lose its keyboard or vanish. It grants the
 feature WAIT, a verdict that holds a press longer, unless told not to.
 
+The X display is its default sink. A test of a session with no X keyboard behind Linda gives it
+another, as NullSink, which puts keys nowhere and takes the lights from a layout of its own.
+
 It is written from the protocol's documentation, not from Linda's client, so that the two are held
 to the same text rather than to each other.
 """
@@ -25,8 +28,9 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Self
+from typing import Protocol, Self
 
+from xkbcommon import xkb
 from Xlib import XK, X, display
 from Xlib.ext import xinput, xtest
 from Xlib.protocol import rq
@@ -188,6 +192,78 @@ class _XKeyboard:
 		self._display.close()
 
 
+class Sink(Protocol):
+	"""Where the stand-in puts keys out, and reads the lights of the locks from. A sink may also have
+	keep(evdev, down), which the stand-in calls for each press and release the client kept."""
+
+	def send(self, evdev: int, down: bool, virtual: bool) -> None:
+		"""A key put out: virtual on the helper's virtual keyboard, otherwise on the real keyboard while
+		nothing holds it."""
+
+	def lights(self) -> int:
+		"""The lock lights as the protocol has them: bit n is the kernel's LED code n."""
+
+	def close(self) -> None: ...
+
+
+#: The kernel's LED codes, as the protocol numbers the lights, by xkbcommon's names for them.
+_LED_BITS = (("Num Lock", 1), ("Caps Lock", 2), ("Scroll Lock", 4))
+
+
+class NullSink:
+	"""A sink with nothing behind it, for a session where Linda has no X keyboard: it records each key
+	put out and each key the client kept, and follows the keys put out in an xkbcommon state of its own
+	for a named layout, as a desktop would, so the lights it reports are those the layout gives."""
+
+	def __init__(
+		self, layout: str = "us", variant: str = "", options: str = "", model: str = "pc105"
+	) -> None:
+		self._keymap = xkb.Context().keymap_new_from_names(
+			rules="evdev",
+			model=model or None,
+			layout=layout or None,
+			variant=variant or None,
+			options=options or None,
+		)
+		self._state = self._keymap.state_new()
+		self._lock = threading.Lock()
+		#: (code, down, virtual) of each key put out, in order.
+		self.sent: list[tuple[int, bool, bool]] = []
+		#: (code, down) of each press and release the client kept, in order.
+		self.kept: list[tuple[int, bool]] = []
+		self.closed = False
+
+	def send(self, evdev: int, down: bool, virtual: bool) -> None:
+		with self._lock:
+			self.sent.append((evdev, down, virtual))
+			self._state.update_key(
+				evdev + 8, xkb.KeyDirection.XKB_KEY_DOWN if down else xkb.KeyDirection.XKB_KEY_UP
+			)
+
+	def keep(self, evdev: int, down: bool) -> None:
+		with self._lock:
+			self.kept.append((evdev, down))
+
+	def lights(self) -> int:
+		lights = 0
+		with self._lock:
+			for name, bit in _LED_BITS:
+				try:
+					if self._state.led_name_is_active(name):
+						lights |= bit
+				except xkb.XKBLEDDoesNotExist:
+					pass
+		return lights
+
+	def passed(self) -> list[tuple[int, bool]]:
+		"""(code, down) of each key put out on the virtual keyboard."""
+		with self._lock:
+			return [(evdev, down) for evdev, down, virtual in self.sent if virtual]
+
+	def close(self) -> None:
+		self.closed = True
+
+
 @dataclass
 class _Entry:
 	seq: int
@@ -219,10 +295,12 @@ class StandIn:
 		features: int = FEATURE_WAIT,
 		waitTimeout: float = 0.6,
 		announcedHeartbeatTimeout: float | None = None,
+		sink: Sink | None = None,
 	) -> None:
 		"""
 		:param toX: Whether keys go on to the X display; without, they go nowhere, and only what the
 			client did with them is recorded.
+		:param sink: Where keys go on to in place of the X display, which opens no X connection.
 		:param announcedVerdictTimeout: The bound WELCOME gives, when it is to be another than the one
 			kept, as for a client that cannot keep it.
 		:param features: Those it grants of the features a client asks for.
@@ -246,7 +324,9 @@ class StandIn:
 		self.heartbeatTimeout = heartbeatTimeout
 		self.unansweredSpan = unansweredSpan
 		self.unansweredGap = unansweredGap
-		self._x = _XKeyboard() if toX else None
+		if sink is not None and not toX:
+			raise ValueError("a stand-in with a sink puts keys out on it; toX=False puts them nowhere")
+		self._sink: Sink | None = sink if sink is not None else _XKeyboard() if toX else None
 		self._lock = threading.RLock()
 		self._wakeRead, self._wakeWrite = os.pipe()
 		self._listener: socket.socket | None = None
@@ -280,6 +360,9 @@ class StandIn:
 		self.events: list[tuple] = []
 		#: (seq, keep, seconds from the key's reading to its verdict) of each verdict in time.
 		self.verdicts: list[tuple[int, bool, float]] = []
+		#: Every verdict the client gave, by the sequence number it named: VERDICT_PASS, VERDICT_KEEP and
+		#: VERDICT_WAIT in the order they came, whether or not they came in time to count.
+		self.given: dict[int, list[int]] = {}
 		#: (seq, seconds from the key's reading) of each WAIT that held a press longer.
 		self.waits: list[tuple[int, float]] = []
 		self.heartbeats: list[float] = []
@@ -316,10 +399,10 @@ class StandIn:
 				self._listener = None
 		if os.path.exists(self.path):
 			os.unlink(self.path)
-		if self._x is not None:
+		if self._sink is not None:
 			for evdev in sorted({evdev for _device, evdev in self._down}):
-				self._x.send(evdev, False, virtual=False)
-			self._x.close()
+				self._sink.send(evdev, False, virtual=False)
+			self._sink.close()
 		os.close(self._wakeRead)
 		os.close(self._wakeWrite)
 
@@ -393,8 +476,13 @@ class StandIn:
 
 	def _toX(self, evdev: int, down: bool, virtual: bool = False) -> None:
 		self._note("x", evdev, down)
-		if self._x is not None:
-			self._x.send(evdev, down, virtual)
+		if self._sink is not None:
+			self._sink.send(evdev, down, virtual)
+
+	def _keep(self, evdev: int, down: bool) -> None:
+		keep = getattr(self._sink, "keep", None)
+		if keep is not None:
+			keep(evdev, down)
 
 	# What the stand-in does as the helper.
 
@@ -455,7 +543,7 @@ class StandIn:
 			time.sleep(0.01)
 
 	def emitted(self) -> list[tuple[int, bool]]:
-		"""(code, down) of each key the X display had from the stand-in, captured or not."""
+		"""(code, down) of each key the sink had from the stand-in, captured or not."""
 		return [(evdev, down) for _t, what, *rest in self.events if what == "x" for evdev, down in [rest]]
 
 	# The protocol.
@@ -533,12 +621,14 @@ class StandIn:
 				if head.verdict:
 					self._kept.add(held)
 					self._passedOut.discard(held)
+					self._keep(head.code, True)
 				else:
 					self._kept.discard(held)
 					self._passedOut.add(held)
 					self._virtual(head.code, True)
 			elif held in self._kept:
 				self._kept.discard(held)
+				self._keep(head.code, False)
 			else:
 				self._passedOut.discard(held)
 				self._virtual(head.code, False)
@@ -616,11 +706,11 @@ class StandIn:
 				if (
 					self._client is not None
 					and self.capturing
-					and self._x is not None
+					and self._sink is not None
 					and now >= self._nextLights
 				):
 					self._nextLights = now + 0.05
-					lights = self._x.lights()
+					lights = self._sink.lights()
 					if lights != self._lights:
 						self._lights = lights
 						self._sendClient(struct.pack("<BH", LOCKS, lights))
@@ -747,6 +837,7 @@ class StandIn:
 			)
 		):
 			_kind, seq, value = struct.unpack("<BQB", data)
+			self.given.setdefault(seq, []).append(value)
 			for entry in self._line:
 				# A press waits for its verdict until it is taken out of line: at its bound, or later,
 				# behind a press before it that holds the line; until then a verdict counts, as the helper
