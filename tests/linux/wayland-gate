@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs tests/linux/test_wayland*.py in the rig four times: under headless
+# Runs tests/linux/test_wayland*.py, and the stand-in for linda-keyd's own
+# tests under the compositors, in the rig four times: under headless
 # Mutter and under headless sway, each once with no X display at all and once
 # with the compositor's own Xwayland. From the dev shell, outside the rig:
 #   nix develop ROOT -c ROOT/tests/linux/wayland-gate SCRATCH [PYTEST_ARGUMENT...]
@@ -21,6 +22,11 @@ shift
 here=$(dirname "$(realpath -e -- "$0")")
 files=("$here"/test_wayland*.py)
 [ -e "${files[0]}" ] || fail "no test_wayland*.py beside the gate"
+# Named for the stand-in, beside test_keydStandIn.py, rather than for the
+# session it is run in.
+standIn=$here/test_keydStandInWayland.py
+[ -e "$standIn" ] || fail "no $standIn"
+files+=("$standIn")
 
 run=$(date +%s)-$$
 echo "wayland-gate: ${#files[@]} files, under Mutter and sway, with and without Xwayland"
@@ -31,7 +37,7 @@ for compositor in mutter sway; do
 		[ "$xwayland" = 1 ] && name=$compositor-xwayland
 		status=0
 		# Only these choose the session: one the caller had set must not carry in.
-		env -u LINDA_RIG_SESSION -u LINDA_RIG_WM LINDA_RIG_COMPOSITOR="$compositor" LINDA_RIG_XWAYLAND="$xwayland" \
+		env -u LINDA_RIG_SESSION -u LINDA_RIG_WM -u LINDA_RIG_MUTTER_SETTINGS LINDA_RIG_COMPOSITOR="$compositor" LINDA_RIG_XWAYLAND="$xwayland" \
 			"$here/rig" --bind "$scratch" python3 -m pytest -q -p no:cacheprovider \
 			--basetemp="$scratch/wayland-gate-$run-$name" "$@" "${files[@]}" || status=$?
 		if [ "$status" = 0 ]; then
