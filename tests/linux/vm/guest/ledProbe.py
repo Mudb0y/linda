@@ -91,7 +91,7 @@ def keyName(code: int) -> str:
 	return name[0] if isinstance(name, list) else name
 
 
-def device(name: str) -> evdev.InputDevice:
+def inputDevice(name: str) -> evdev.InputDevice:
 	for path in evdev.list_devices():
 		found = evdev.InputDevice(path)
 		if found.name == name:
@@ -101,7 +101,7 @@ def device(name: str) -> evdev.InputDevice:
 
 
 def lights(name: str) -> int:
-	found = device(name)
+	found = inputDevice(name)
 	try:
 		return sum(1 << led for led in found.leds())
 	finally:
@@ -207,6 +207,10 @@ def probe(preset: str, reader: str | None, seconds: float) -> dict:
 	if bits is None and preset != "none":
 		bits = int(preset)
 	candidates = readers()
+	# Read, not grabbed: the kernel hands every reader of a keyboard each change of its lights.
+	reference = inputDevice(REFERENCE)
+	while reference.read_one() is not None:
+		pass
 	device = keyboard(PROBE)
 	created = time.monotonic()
 	node = device.device.path
@@ -238,9 +242,17 @@ def probe(preset: str, reader: str | None, seconds: float) -> dict:
 	final = lights(PROBE)
 	referenceAfter = lights(REFERENCE)
 	device.close()
+	referenceLeds = []
+	while (event := reference.read_one()) is not None:
+		if event.type == ecodes.EV_LED:
+			referenceLeds.append({"t": event.timestamp(), "code": event.code, "value": event.value})
+	reference.close()
 
 	def since(t: float | None) -> float | None:
 		return None if t is None else round(t - created, 4)
+
+	for event in referenceLeds:
+		event["after"] = since(event["t"])
 
 	openers = sorted(
 		(
@@ -265,6 +277,7 @@ def probe(preset: str, reader: str | None, seconds: float) -> dict:
 		"presetBits": bits,
 		"referenceBefore": referenceBefore,
 		"referenceAfter": referenceAfter,
+		"referenceLeds": referenceLeds,
 		"node": node,
 		"created": created,
 		"atCreate": atCreate,
