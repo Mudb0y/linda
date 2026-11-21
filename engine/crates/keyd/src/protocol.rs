@@ -221,7 +221,19 @@
 //!   tables, without KEY_SLEEP (142). Never KEY_POWER (116), KEY_SUSPEND (205), KEY_POWER2 (0x164)
 //!   or KEY_RESTART (0x198): logind takes the virtual keyboard's power keys as the machine's.
 //! - Never a press of SysRq (99) while an Alt is down on the virtual keyboard, nor of an Alt while
-//!   SysRq is down there, so that no typed key reaches the kernel's SysRq handler.
+//!   SysRq is down there. And never any typed press while the kernel's SysRq handler may be active
+//!   for the virtual keyboard: from a press of SysRq that went out there while an Alt was down
+//!   there, whoever's keys they were, until no Alt is down there any more. The kernel keeps that
+//!   state for each input device, makes it active at a press of SysRq while an Alt is down, ends it
+//!   only when that Alt is let go of, and meanwhile takes every press on the device as a SysRq
+//!   command: Alt+Print, a screenshot of the window on many desktops, is SysRq to the kernel, and
+//!   while the user still holds that Alt a typed b would restart the machine where the kernel
+//!   allows that command. The user's own keys share the virtual keyboard, so it can be their press
+//!   that makes it active. These are checked as the TYPE comes and again as the typed press goes
+//!   out, since keys ahead of it in line may change what is down; a press they refuse at either
+//!   moment goes nowhere and is answered TYPED_REFUSED_KEY. A typed release is never refused by
+//!   them, since a release is no command. So no typed press is taken as a SysRq command, and no
+//!   typed SysRq makes the handler active.
 //! - At most [`TYPED_WAITING_LIMIT`] typed keys in line at once, and no more than
 //!   [`TYPED_PER_SECOND`] a second over time, in bursts of up to [`TYPED_BURST`].
 //! - Whenever the helper lets go, for whatever reason, typed keys not yet out are dropped and
