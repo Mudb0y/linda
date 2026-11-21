@@ -32,6 +32,7 @@ STREAM_GAP = 0.05
 #: Seconds of the stream typed on the text console before chvt brings the session back.
 STREAM_LEAD = 0.2
 TRIALS = 3
+CONTROL_TRIALS = 2
 CONSOLE_TEXT = "/tmp/ground/console.txt"
 TYPED = "/tmp/ground/typed.json"
 
@@ -191,7 +192,35 @@ def switchBack(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient",
 			trials.append(result)
 			ground.machine.log(f"E15 {desktop} trial {trial}: " + json.dumps(result))
 			assert result["typedAfterHeld"], f"the stream ended before the helper held again: {result}"
-	ground.machine.log(f"E15 {desktop} " + json.dumps({"session": session, "text": text, "trials": trials}))
+	# The same with no capture, to tell what the desktop loses by itself from what the helper adds.
+	mark = ground.mark()
+	client.stop()
+	client.waitFor("RELEASED", mark, lambda r: r["reason"] == "STOPPED")
+	alone = []
+	for trial in range(1, CONTROL_TRIALS + 1):
+		with ground.subtest(
+			f"E15: keys typed from the moment of a switch back with nothing held, trial {trial}"
+		):
+			ground.shell(f"chvt {text}")
+			ground.settle(1)
+			before = len(ground.shell(f"cat {CONSOLE_TEXT}"))
+			back = ground.mark()
+			switched = float(
+				ground.shell(
+					f"ground-keyboard call {shlex.quote(UHID)} {shlex.quote(steps)} > {TYPED} & "
+					f"sleep {STREAM_LEAD}; ground-record now; chvt {session}; wait"
+				).split()[0]
+			)
+			written = json.loads(ground.shell(f"cat {TYPED}"))["written"]
+			ground.settle(1)
+			console = ground.shell(f"cat {CONSOLE_TEXT}")[before:]
+			result = streamFates(ground, client, back, switched, switched, written, console)
+			alone.append(result)
+			ground.machine.log(f"E15 {desktop} with nothing held, trial {trial}: " + json.dumps(result))
+	ground.machine.log(
+		f"E15 {desktop} "
+		+ json.dumps({"session": session, "text": text, "trials": trials, "nothingHeld": alone})
+	)
 
 
 def streamFates(

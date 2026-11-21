@@ -237,6 +237,8 @@ def keyMonitor(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient",
 			mark = ground.mark()
 			keyboard.tap("KEY_B")
 			seen["oursWithOrca"] = heard(ground, mark)
+		# Yielded as package KM would yield: its grabs dropped first, while it may still drop them.
+		seen["grabsDropped"] = ask(ground, "grabs", modifiers=[], keystrokes=[])
 		seen["release"] = ask(ground, "release")
 		ground.settle(2)
 		seen["afterRelease"] = ask(ground, "state")
@@ -244,11 +246,21 @@ def keyMonitor(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient",
 			mark = ground.mark()
 			keyboard.tap("KEY_B")
 			seen["oursAfterRelease"] = heard(ground, mark)
+			# Orca asked for its grabs while it waited for the name; whether it holds any once it has it.
+			mark = ground.mark()
+			keyboard.chord("KEY_INSERT", "KEY_T")
+			ground.settle(1)
+			seen["insertTWithOrcaOwning"] = keyEvents(ground.keys("app", mark))
 		seen["watchAfterRelease"] = ask(ground, "watch")
+		# Asked back with replacement, from Orca, which asked for the name allowing none.
+		seen["ownAgain"] = ask(ground, "own", flags=3)
+		seen["afterOwnAgain"] = ask(ground, "state")
 		ground.machine.log(
 			f"E12 {desktop} with Orca: {seen['orcaStarted']}; ours meanwhile {seen.get('oursWithOrca')}; "
 			f"released {seen['release']}, then {seen['afterRelease']}; ours after "
-			f"{seen.get('oursAfterRelease')}; a watch asked again {seen['watchAfterRelease']}"
+			f"{seen.get('oursAfterRelease')}; Insert with T at the program {seen.get('insertTWithOrcaOwning')}; "
+			f"a watch asked again {seen['watchAfterRelease']}; the name asked back {seen['ownAgain']}, then "
+			f"{seen['afterOwnAgain']}"
 		)
 		if ground.running("orca"):
 			ground.session({"op": "signal", "name": "orca", "signal": "SIGTERM"})

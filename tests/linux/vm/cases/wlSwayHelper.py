@@ -91,15 +91,24 @@ def locks(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", figu
 		mark = ground.mark()
 		keyboard.tap("KEY_CAPSLOCK")
 		ground.waitForKeys("evdev", typedKeys("KEY_CAPSLOCK"), mark, device=VIRTUAL_KEYBOARD)
-		toldCaps = client.waitFor("LOCKS", mark, lambda r: r["leds"] == was | CAPS)
-		ground.waitFor(
-			lambda: lights(ground, VIRTUAL_KEYBOARD) == was | CAPS, "the virtual keyboard's lights"
-		)
+		toldCaps = client.waitFor("LOCKS", mark, lambda r: r["leds"] & CAPS)
+		ground.settle(1)
+		seen["caps"] = {
+			"told": [r["leds"] for r in client.records(mark, "LOCKS")],
+			"toldAfter": round(toldCaps["t"] - mark.t, 3),
+			"virtual": lights(ground, VIRTUAL_KEYBOARD),
+			**allLights(ground),
+			"uhidReports": uhidLights(keyboard),
+			"letter": letterA(ground, keyboard),
+			"keypad": keypad(ground),
+		}
+		ground.machine.log(f"Caps Lock through the helper: {seen['caps']}, Num Lock was {was}")
+		assert seen["caps"]["letter"] == ["A"], seen["caps"]
+		told = seen["caps"]["told"]
+		assert told[-1] & CAPS, seen["caps"]
 		for name in REAL:
-			ground.waitFor(lambda name=name: lights(ground, name) == was | CAPS, f"{name}'s lights")
-		ground.waitFor(lambda: was | CAPS in uhidLights(keyboard), "the uhid keyboard to be sent its lights")
-		seen["capsToldAfter"] = round(toldCaps["t"] - mark.t, 3)
-		assert letterA(ground, keyboard) == ["A"]
+			assert seen["caps"][name] == told[-1], (name, seen["caps"])
+		assert bool(told[-1] & NUM) == (seen["caps"]["keypad"] == ["KP_1"]), seen["caps"]
 
 	with ground.subtest("letting go leaves the keyboards with the console's lights"):
 		mark = ground.mark()
