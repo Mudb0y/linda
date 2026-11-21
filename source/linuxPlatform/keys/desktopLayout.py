@@ -539,7 +539,7 @@ class PlasmaLayoutFeed(_ThreadedFeed):
 			return self._read()
 		for sender, path, interface, member, argument, handler in (
 			(KDE_SERVICE, KDE_PATH, KDE_INTERFACE, "layoutChanged", None, self._onLayoutChanged),
-			(KDE_SERVICE, KDE_PATH, KDE_INTERFACE, "layoutsReconfigured", None, self._onReconfigured),
+			(KDE_SERVICE, KDE_PATH, KDE_INTERFACE, "layoutListChanged", None, self._onReconfigured),
 			(_DBUS, _DBUS_PATH, _DBUS, "NameOwnerChanged", KDE_SERVICE, self._onReconfigured),
 		):
 			self._subscriptions.append(

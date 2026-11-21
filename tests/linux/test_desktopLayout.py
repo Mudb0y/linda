@@ -141,7 +141,7 @@ if kind == "kde":
 		<method name="setLayout"><arg direction="in" type="u"/><arg direction="out" type="b"/></method>
 		<method name="reconfigureForTest"/>
 		<signal name="layoutChanged"><arg type="u"/></signal>
-		<signal name="layoutsReconfigured"/>
+		<signal name="layoutListChanged"/>
 	</interface></node>'''
 	state = {"layout": int(sys.argv[2])}
 else:
@@ -160,7 +160,7 @@ def onCall(connection, sender, path, interface, method, parameters, invocation):
 		connection.emit_signal(None, PATH, INTERFACE, "layoutChanged", GLib.Variant("(u)", (state["layout"],)))
 		invocation.return_value(GLib.Variant("(b)", (True,)))
 	elif method == "reconfigureForTest":
-		connection.emit_signal(None, PATH, INTERFACE, "layoutsReconfigured", None)
+		connection.emit_signal(None, PATH, INTERFACE, "layoutListChanged", None)
 		invocation.return_value(None)
 	else:
 		values = {name: GLib.Variant("s", value) for name, value in properties.items()}
