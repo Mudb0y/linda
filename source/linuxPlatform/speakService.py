@@ -10,9 +10,9 @@ bus's queue. Orca asks for its name without taking it either, and does not start
 the queue, so NVDA gives the name up as soon as an Orca process connects to the bus and asks for
 it again, behind Orca, once Orca has it or has gone.
 
-In a Wayland session NVDA says once, when it finds Orca with the name, that both will speak: there
-the desktop's own screen reader switch starts Orca, and someone who had Orca on to get speech before
-starting NVDA hears two readers. The way to turn Orca off is named only on the desktops whose switch
+In a Wayland session NVDA says once, when it finds Orca with the name, or Orca 51 and later with
+the name they serve instead, that both will speak: there the desktop's own screen reader switch
+starts Orca, and someone who had Orca on to get speech before starting NVDA hears two readers. The way to turn Orca off is named only on the desktops whose switch
 is known.
 
 The bus is served on a thread of its own, so that a call is answered whatever NVDA's main thread is
@@ -36,6 +36,8 @@ from linuxPlatform import displayServer
 BUS_NAME = "org.gnome.Orca.Service"
 OBJECT_PATH = "/org/gnome/Orca/Service"
 INTERFACE = "org.gnome.Orca.Service"
+#: The name Orca 51 and later serve in place of BUS_NAME, which they leave alone.
+ORCA1_BUS_NAME = "org.gnome.Orca1.Service"
 MODULE_INTERFACE = "org.gnome.Orca.Module"
 #: The speech module, under the name Orca gives it.
 SPEECH_MODULE = "SpeechAndVerbosityManager"
@@ -300,6 +302,7 @@ class _Service:
 				),
 			)
 		self._requestName()
+		self._noteOrcaWithName(ORCA1_BUS_NAME)
 		return True
 
 	def _disconnect(self) -> None:
@@ -348,11 +351,12 @@ class _Service:
 		if reply in (2, 3):
 			self._noteOrcaWithName()
 
-	def _noteOrcaWithName(self) -> None:
-		"""Say once in a Wayland session that both readers speak, if the name's owner is Orca.
+	def _noteOrcaWithName(self, name: str = BUS_NAME, owner: str | None = None) -> None:
+		"""Say once in a Wayland session that both readers speak, if the owner of name is Orca.
 
-		NVDA asks for the name whenever it does not have it, Orca's taking it included, so its being
-		put in the queue is the one moment to look.
+		NVDA asks for BUS_NAME whenever it does not have it, Orca's taking it included, so its being
+		put in the queue is the one moment to look at that name. Orca 51 and later never take it, and
+		are looked for under ORCA1_BUS_NAME at connecting and whenever that name gets an owner.
 		"""
 		global _orcaNoticed
 		if not displayServer.isWayland() or _orcaNoticed:
@@ -360,16 +364,17 @@ class _Service:
 		from gi.repository import GLib
 
 		try:
-			(owner,) = self._callBus("GetNameOwner", GLib.Variant("(s)", (BUS_NAME,)), "(s)")
+			if owner is None:
+				(owner,) = self._callBus("GetNameOwner", GLib.Variant("(s)", (name,)), "(s)")
 			(pid,) = self._callBus("GetConnectionUnixProcessID", GLib.Variant("(s)", (owner,)), "(u)")
 		except GLib.Error:
-			# The owner has gone already.
+			# Nobody has the name, or its owner has gone already.
 			return
 		if not _isOrca(pid):
 			return
 		_orcaNoticed = True
 		compositor = displayServer.compositor()
-		log.info(f"Speak service: Orca has {BUS_NAME} in this Wayland session on {compositor}; saying so")
+		log.info(f"Speak service: Orca has {name} in this Wayland session on {compositor}; saying so")
 		import queueHandler
 
 		queueHandler.queueFunction(queueHandler.eventQueue, _sayOrcaNotice, compositor)
@@ -394,6 +399,10 @@ class _Service:
 		from gi.repository import GLib
 
 		name, oldOwner, newOwner = parameters.unpack()
+		if name == ORCA1_BUS_NAME:
+			if newOwner:
+				self._noteOrcaWithName(name, newOwner)
+			return
 		if name == BUS_NAME:
 			if self._yieldingTo and newOwner and newOwner != connection.get_unique_name():
 				# Orca has it: wait behind it, to answer again once it has gone.

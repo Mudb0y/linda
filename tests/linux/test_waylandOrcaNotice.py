@@ -1,7 +1,7 @@
 """What NVDA says on finding Orca with its service's name in a Wayland session: that both will speak,
 once in a run, with the way to turn Orca off on the desktops whose switch is known, and nothing in an
-X session. The session is forced to Wayland in the X rig, and Orca is a stand-in that owns the name
-under the program name orca.
+X session. The session is forced to Wayland in the X rig, and Orca is a stand-in that owns the name,
+or the one Orca 51 serves instead, under the program name orca.
 
 nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_waylandOrcaNotice.py
 """
@@ -27,7 +27,9 @@ SETTLE = 1.0
 
 BUS_NAME = "org.gnome.Orca.Service"
 OBJECT_PATH = "/org/gnome/Orca/Service"
-INTERFACE = "org.gnome.Orca.Service"
+#: Orca 51 and later serve their own name and path in place of the old ones, which they leave alone.
+ORCA1_BUS_NAME = "org.gnome.Orca1.Service"
+ORCA1_OBJECT_PATH = "/org/gnome/Orca1/Service"
 GTK = ("gtkFixture", "Fixture window")
 AT_START = ("Fixture window", "Press me button Does nothing Alt plus P")
 
@@ -37,11 +39,11 @@ GNOME_NOTICE = f"{NOTICE} If Orca was turned on with Super plus Alt plus S, pres
 KDE_NOTICE = f"{NOTICE} If Orca was turned on with Meta plus Alt plus S, press it again to turn it off."
 ANSWERING = f"Speak service: NVDA now answers {BUS_NAME}"
 WAITING = f"Speak service: NVDA is waiting for the name {BUS_NAME}"
-FOUND = f"Speak service: Orca has {BUS_NAME} in this Wayland session"
+FOUND = "Speak service: Orca has "
 
-#: Another owner of the name: it waits as long as its argument says, as Orca does between connecting
-#: to the bus and asking for its name, asks for the name as Orca does, without taking it, and prints
-#: the bus's reply.
+#: Another owner of a name, given with its path: it waits as long as its first argument says, as Orca
+#: does between connecting to the bus and asking for its name, asks for the name as Orca does, without
+#: taking it, and prints the bus's reply.
 OWNER = f"""\
 #!{sys.executable}
 import sys
@@ -49,7 +51,8 @@ import time
 
 from gi.repository import Gio, GLib
 
-XML = '''<node><interface name="{INTERFACE}"><method name="PresentMessage">
+delay, name, path = sys.argv[1:]
+XML = f'''<node><interface name="{{name}}"><method name="PresentMessage">
 <arg direction="in" type="s"/><arg direction="out" type="b"/></method></interface></node>'''
 
 
@@ -58,11 +61,11 @@ def onCall(connection, sender, path, interface, method, parameters, invocation):
 
 
 bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-bus.register_object("{OBJECT_PATH}", Gio.DBusNodeInfo.new_for_xml(XML).interfaces[0], onCall, None, None)
-time.sleep(float(sys.argv[1]))
+bus.register_object(path, Gio.DBusNodeInfo.new_for_xml(XML).interfaces[0], onCall, None, None)
+time.sleep(float(delay))
 (reply,) = bus.call_sync(
 	"org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName",
-	GLib.Variant("(su)", ("{BUS_NAME}", 1)), GLib.VariantType("(u)"), 0, -1, None,
+	GLib.Variant("(su)", (name, 1)), GLib.VariantType("(u)"), 0, -1, None,
 ).unpack()
 print("reply", reply, flush=True)
 GLib.MainLoop().run()
@@ -115,13 +118,20 @@ def start(desktop: DesktopSession, env: dict[str, str | None]) -> harness.Launch
 	return desktop.startNVDA(SESSION_CONFIG, env=env)
 
 
-def startOwner(owners: list[subprocess.Popen], directory: Path, name: str, delay: float) -> subprocess.Popen:
-	"""Start another owner of the name as the program name, and wait for the bus's reply to it."""
+def startOwner(
+	owners: list[subprocess.Popen],
+	directory: Path,
+	name: str,
+	delay: float,
+	busName: str = BUS_NAME,
+	objectPath: str = OBJECT_PATH,
+) -> subprocess.Popen:
+	"""Start another owner of busName as the program name, and wait for the bus's reply to it."""
 	program = directory / name
 	program.write_text(OWNER, encoding="utf-8")
 	program.chmod(0o755)
 	owner = subprocess.Popen(
-		[str(program), str(delay)],
+		[str(program), str(delay), busName, objectPath],
 		stdout=subprocess.PIPE,
 		stderr=subprocess.DEVNULL,
 		text=True,
@@ -204,15 +214,42 @@ def test_elsewhereOnlyTheFirstSentenceAndOnlyForOrca(desktop: DesktopSession, ow
 	finish(desktop, nvda)
 
 
+def test_orca51BeforeNVDA(desktop: DesktopSession, owners, tmp_path: Path):
+	startOwner(owners, tmp_path, "orca", 0, ORCA1_BUS_NAME, ORCA1_OBJECT_PATH)
+	nvda = start(desktop, waylandOn("GNOME"))
+	desktop.expect(*AT_START, GNOME_NOTICE, since=0, timeout=STARTUP_BOUND)
+	time.sleep(SETTLE)
+	assert noticesSpoken(desktop) == [GNOME_NOTICE], nvda.describe()
+	assert nvda.text("nvda.log").count(f"{FOUND}{ORCA1_BUS_NAME}") == 1, nvda.describe()
+	finish(desktop, nvda)
+
+
+def test_orca51AfterNVDA(desktop: DesktopSession, owners, tmp_path: Path):
+	nvda = start(desktop, waylandOn("KDE"))
+	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
+	waitForLogCount(nvda, ANSWERING, 1)
+	assert noticesSpoken(desktop) == []
+
+	mark = desktop.mark()
+	startOwner(owners, tmp_path, "orca", 0.5, ORCA1_BUS_NAME, ORCA1_OBJECT_PATH)
+	desktop.expect(KDE_NOTICE, since=mark, timeout=HANDOVER_BOUND)
+	time.sleep(SETTLE)
+	assert noticesSpoken(desktop) == [KDE_NOTICE], nvda.describe()
+	finish(desktop, nvda)
+
+
 def test_nothingIsSaidInAnXSession(desktop: DesktopSession, owners, tmp_path: Path):
 	orca = startOwner(owners, tmp_path, "orca", 0)
+	orca51 = startOwner(owners, tmp_path, "orca", 0, ORCA1_BUS_NAME, ORCA1_OBJECT_PATH)
 	nvda = start(desktop, X_SESSION)
 	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
 	waitForLogCount(nvda, WAITING, 1)
 
 	stopOwner(orca)
+	stopOwner(orca51)
 	waitForLogCount(nvda, ANSWERING, 1)
 	startOwner(owners, tmp_path, "orca", 0.5)
+	startOwner(owners, tmp_path, "orca", 0, ORCA1_BUS_NAME, ORCA1_OBJECT_PATH)
 	waitForLogCount(nvda, WAITING, 2)
 	time.sleep(SETTLE)
 	assert noticesSpoken(desktop) == [], nvda.describe()
