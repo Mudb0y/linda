@@ -10,6 +10,11 @@ bus's queue. Orca asks for its name without taking it either, and does not start
 the queue, so NVDA gives the name up as soon as an Orca process connects to the bus and asks for
 it again, behind Orca, once Orca has it or has gone.
 
+In a Wayland session NVDA says once, when it finds Orca with the name, that both will speak: there
+the desktop's own screen reader switch starts Orca, and someone who had Orca on to get speech before
+starting NVDA hears two readers. The way to turn Orca off is named only on the desktops whose switch
+is known.
+
 The bus is served on a thread of its own, so that a call is answered whatever NVDA's main thread is
 doing; what is spoken is queued to the main thread.
 
@@ -22,8 +27,11 @@ LINDA_SPEAK_SERVICE=off in the environment leaves the service out.
 
 import os
 import threading
+import time
 
 from logHandler import log
+
+from linuxPlatform import displayServer
 
 BUS_NAME = "org.gnome.Orca.Service"
 OBJECT_PATH = "/org/gnome/Orca/Service"
@@ -45,6 +53,12 @@ ORCA_PROGRAMS = frozenset({"orca", ".orca-wrapped"})
 BUS_TIMEOUT_MS = 2000
 #: Seconds the main thread waits for the service's thread to end.
 STOP_TIMEOUT = 2.0
+#: The shortcut that switches the desktop's screen reader, by displayServer.compositor(): GNOME 49 and
+#: later and Plasma 6.8 start and stop Orca with it.
+ORCA_SWITCHES = {"gnome": "Super+Alt+S", "kde": "Meta+Alt+S"}
+#: Seconds after start-up the notice waits for the first focus at most, and how often it looks.
+FIRST_FOCUS_WAIT = 5.0
+FIRST_FOCUS_POLL_MS = 100
 
 _DBUS = "org.freedesktop.DBus"
 _DBUS_PATH = "/org/freedesktop/DBus"
@@ -150,6 +164,67 @@ def _queueMessage(text: str) -> None:
 	import queueHandler
 
 	queueHandler.queueFunction(queueHandler.eventQueue, _present, text)
+
+
+def orcaNotice(compositor: str) -> str:
+	"""What NVDA says on finding Orca with the name in a Wayland session on that compositor."""
+	# Translators: Said once on Linux in a Wayland session, when NVDA finds the Orca screen reader
+	# running beside it, so that both speak everything.
+	notice = _("Orca is running too, so both will speak.")
+	switch = ORCA_SWITCHES.get(compositor)
+	if switch is None:
+		# Elsewhere no switch is known, and naming one might start Orca again.
+		return notice
+	# Translators: Follows the sentence saying that Orca is running too, on desktops whose screen reader
+	# switch starts and stops Orca. {shortcut} is that shortcut, such as Super+Alt+S.
+	advice = _("If Orca was turned on with {shortcut}, press it again to turn it off.").format(
+		shortcut=switch
+	)
+	return f"{notice} {advice}"
+
+
+#: Whether the service has found Orca with the name in a Wayland session; it says so once in a run.
+#: Used on the service's thread.
+_orcaNoticed = False
+#: Whether the first focus has been reported, and the notice waiting for it. Used on the main thread.
+_firstFocusReported = False
+_noticeWaiting: str | None = None
+
+
+def _sayOrcaNotice(compositor: str) -> None:
+	global _noticeWaiting
+	_noticeWaiting = orcaNotice(compositor)
+	if _firstFocusReported:
+		_sayWaitingNotice()
+
+
+def _sayWaitingNotice() -> None:
+	global _noticeWaiting
+	text, _noticeWaiting = _noticeWaiting, None
+	if text is not None:
+		import ui
+
+		ui.message(text)
+
+
+def _onPostNvdaStartup() -> None:
+	_waitForFirstFocus(time.monotonic() + FIRST_FOCUS_WAIT)
+
+
+def _waitForFirstFocus(deadline: float) -> None:
+	"""Let the notice be said once the first focus has been reported, whose foreground event would
+	cancel it; on Linux that focus may come from AT-SPI after start-up has ended."""
+	global _firstFocusReported
+	import api
+	import core
+	import eventHandler
+
+	focus = eventHandler.lastQueuedFocusObject
+	if (focus is None or focus != api.getFocusObject()) and time.monotonic() < deadline:
+		core.callLater(FIRST_FOCUS_POLL_MS, _waitForFirstFocus, deadline)
+		return
+	_firstFocusReported = True
+	_sayWaitingNotice()
 
 
 class _Service:
@@ -270,6 +345,34 @@ class _Service:
 			log.warning(f"Speak service: could not ask for {BUS_NAME}: {e}")
 			return
 		log.debug(f"Speak service: NVDA {_REQUEST_REPLIES.get(reply, reply)} {BUS_NAME}")
+		if reply in (2, 3):
+			self._noteOrcaWithName()
+
+	def _noteOrcaWithName(self) -> None:
+		"""Say once in a Wayland session that both readers speak, if the name's owner is Orca.
+
+		NVDA asks for the name whenever it does not have it, Orca's taking it included, so its being
+		put in the queue is the one moment to look.
+		"""
+		global _orcaNoticed
+		if not displayServer.isWayland() or _orcaNoticed:
+			return
+		from gi.repository import GLib
+
+		try:
+			(owner,) = self._callBus("GetNameOwner", GLib.Variant("(s)", (BUS_NAME,)), "(s)")
+			(pid,) = self._callBus("GetConnectionUnixProcessID", GLib.Variant("(s)", (owner,)), "(u)")
+		except GLib.Error:
+			# The owner has gone already.
+			return
+		if not _isOrca(pid):
+			return
+		_orcaNoticed = True
+		compositor = displayServer.compositor()
+		log.info(f"Speak service: Orca has {BUS_NAME} in this Wayland session on {compositor}; saying so")
+		import queueHandler
+
+		queueHandler.queueFunction(queueHandler.eventQueue, _sayOrcaNotice, compositor)
 
 	def _releaseName(self) -> None:
 		from gi.repository import GLib
@@ -379,6 +482,10 @@ def start() -> None:
 		return
 	if _service is not None:
 		return
+	if displayServer.isWayland():
+		import core
+
+		core.postNvdaStartup.register(_onPostNvdaStartup)
 	_service = _Service()
 	_service.thread.start()
 
@@ -390,6 +497,9 @@ def stop() -> None:
 	_service = None
 	if service is None:
 		return
+	import core
+
+	core.postNvdaStartup.unregister(_onPostNvdaStartup)
 	service.stop()
 	service.thread.join(STOP_TIMEOUT)
 	if service.thread.is_alive():
