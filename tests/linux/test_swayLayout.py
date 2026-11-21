@@ -46,6 +46,7 @@ ALLOWED_RECORDS = [
 		r"Keyboard layout: sway did not list its inputs: \w+",
 		r"Keyboard layout: \d+ sway sockets with a running sway, so none is taken",
 		r"Keyboard layout: the registry [\w.]+ could not be read",
+		r"Keyboard layout: the kernel's input devices could not be read: \w+",
 	)
 ]
 
@@ -101,9 +102,40 @@ def keyboard(identifier, names, active=0, libinput=True, sendEvents="enabled", d
 
 LINDA = "19561:28260:Linda_virtual_keyboard"
 AT = "1:1:AT_Translated_Set_2_keyboard"
+LOGITECH = "1133:49970:Logitech_USB_Keyboard"
+THINKPAD = "6058:20564:ThinkPad_Extra_Buttons"
 POWER = "0:1:Power_Button"
 PROGRAM = "0:0:wlr_virtual_keyboard_v1"
 POINTER = {"identifier": "2:7:SynPS/2_Synaptics_TouchPad", "name": "SynPS/2 Synaptics TouchPad", "type": "pointer"}
+#: A full keyboard's KEY bitmap as a 64-bit kernel lists it.
+FULL_KEYS = "1000000000007 ff9f207ac14057ff febeffdfffefffff fffffffffffffffe"
+
+
+def kernelDevice(identifier, keys=FULL_KEYS, types="120013", sysfs="/devices/platform/i8042/serio0/input/input3", name=None):
+	# As the kernel lists a device in /proc/bus/input/devices.
+	vendor, product, swayName = identifier.split(":", 2)
+	name = swayName.replace("_", " ") if name is None else name
+	return (
+		f"I: Bus=0003 Vendor={int(vendor):04x} Product={int(product):04x} Version=0111\n"
+		f'N: Name="{name}"\nP: Phys=\nS: Sysfs={sysfs}\nU: Uniq=\nH: Handlers=kbd event3 \nB: PROP=0\n'
+		f"B: EV={types}\nB: KEY={keys}\nB: MSC=10\n\n"
+	)
+
+
+def kernelDevices(*devices):
+	path = os.path.join(tempfile.mkdtemp(prefix="devices", dir="/tmp"), "devices")
+	with open(path, "wb") as file:
+		file.write("".join(devices).encode())
+	swayLayout.INPUT_DEVICES = path
+
+
+POWER_DEVICE = kernelDevice(POWER, "10000000000000 0", "3", "/devices/LNXSYSTM:00/LNXPWRBN:00/input/input2")
+kernelDevices(
+	kernelDevice(AT),
+	POWER_DEVICE,
+	kernelDevice(LINDA, sysfs="/devices/virtual/input/input31"),
+	kernelDevice("1133:49970:USB_Keyboard", sysfs="/devices/pci0000:00/0000:00:14.0/usb3/3-1/input/input5"),
+)
 
 
 def swayCommand(text):
@@ -384,12 +416,31 @@ cases = {
 	"programKeyboard": [keyboard(LINDA, ["English (US)"]), keyboard(PROGRAM, ["Polish"], libinput=False), keyboard(AT, ["English (US)"])],
 	"variant": [keyboard(LINDA, ["Polish (programmer Dvorak)", "German (no dead keys)"]), keyboard(AT, ["Polish"])],
 	"noRepeat": [keyboard(LINDA, ["Polish"], rate=0)],
+	# A USB keyboard named alone: its Consumer Control node is a keyboard to sway and stays on US.
+	"consumerControl": [keyboard(LINDA, ["English (US)"]), keyboard(LOGITECH, ["Polish"]), keyboard(LOGITECH + "_Consumer_Control", ["English (US)"])],
+	# A ThinkPad's keyboard named alone: its Extra Buttons stay on US.
+	"thinkPad": [keyboard(LINDA, ["English (US)"]), keyboard(AT, ["Polish"]), keyboard(THINKPAD, ["English (US)"]), keyboard(POWER, ["English (US)"])],
+	# A keyboard the kernel's list does not have is taken as one the helper may hold.
+	"notInKernelList": [keyboard(LINDA, ["English (US)"]), keyboard(AT, ["Polish"]), keyboard("1133:1:Elsewhere", ["English (US)"])],
 }
+kernelDevices(
+	kernelDevice(AT),
+	POWER_DEVICE,
+	kernelDevice("1133:49970:USB_Keyboard", sysfs="/devices/pci0000:00/0000:00:14.0/usb3/3-2/3-2:1.0/input/input4"),
+	kernelDevice(LOGITECH, sysfs="/devices/pci0000:00/0000:00:14.0/usb3/3-1/3-1:1.0/input/input5"),
+	kernelDevice(LOGITECH + "_Consumer_Control", "1f 0 0 0 0 0 10000002", "13", "/devices/pci0000:00/0000:00:14.0/usb3/3-1/3-1:1.1/input/input6"),
+	kernelDevice(THINKPAD, "18040000 0 10000000000000 0 1501b00002c05 0 e000000000000 0", "33", "/devices/platform/thinkpad_acpi/input/input7"),
+)
 result = {}
 for name, inputs in cases.items():
 	sway = FakeSway(inputs)
 	result[name] = started(swayLayout.SwayLayoutFeed(sway.path))
 	sway.close()
+# Where the kernel's list cannot be read, the firmware's buttons alone are left out.
+swayLayout.INPUT_DEVICES = "/proc/no-such-list"
+sway = FakeSway(cases["consumerControl"])
+result["noKernelList"] = started(swayLayout.SwayLayoutFeed(sway.path))
+sway.close()
 result["threads"] = feedThreads()
 """,
 	)
@@ -401,7 +452,76 @@ result["threads"] = feedThreads()
 		"programKeyboard": snap(names("us")),
 		"variant": snap(names("pl,de", "dvp,nodeadkeys"), notice=NOTICE),
 		"noRepeat": snap(names("pl"), repeat=[False, 0.6, 0.04]),
+		"consumerControl": snap(names("us"), notice=NOTICE),
+		"thinkPad": snap(names("us"), notice=NOTICE),
+		"notInKernelList": snap(names("us")),
+		"noKernelList": snap(names("us")),
 		"threads": [],
+	}
+	assert (
+		"Keyboard layout: the kernel's input devices could not be read: FileNotFoundError"
+		in moduleRecords(result)
+	)
+
+
+def test_keyboardsTheHelperMayHold(tmp_path: Path):
+	"""The kernel's list read as the helper's assess reads a device, and each device named as sway
+	names it."""
+	result = runFeed(
+		tmp_path,
+		r"""
+kernelDevices(
+	kernelDevice(AT),
+	POWER_DEVICE,
+	kernelDevice(LINDA, sysfs="/devices/virtual/input/input31"),
+	# Another remapper's keyboard, made through uinput.
+	kernelDevice("4062:1:keyd_virtual_keyboard", sysfs="/devices/virtual/input/input40"),
+	# A Bluetooth keyboard through uhid has a parent.
+	kernelDevice("1133:45890:K380", sysfs="/devices/virtual/misc/uhid/0005:046D:B342.0001/input/input25"),
+	# A keyboard with a touchpad.
+	kernelDevice("1133:16420:Logitech_K400", types="17"),
+	kernelDevice("1:2:Lid_Switch", "0", "21"),
+	# What a 32-bit kernel lists.
+	kernelDevice("1:3:Old_Keyboard", "7 ff9f207a c14057ff febeffdf ffefffff ffffffff fffffffe"),
+	# sway strips the name and puts _ for spaces and every byte that is not printable ASCII.
+	kernelDevice("2:4:x", name=" Klawiatura Ł\tdwa  "),
+	# Two nodes of one identifier: either the helper may hold makes it held.
+	kernelDevice("5:5:Twin", "10000002", "13"),
+	kernelDevice("5:5:Twin"),
+	"I: Bus=0003 Vendor=zz Product=0001\nN: Name=\"Broken\"\n\n",
+)
+kernel = swayLayout.kernelKeyboards()
+held = {
+	identifier: swayLayout.isHeldKeyboard(keyboard(identifier, ["Polish"]), kernel)
+	for identifier in (AT, POWER, LINDA, "1133:49970:Not_In_The_List", "0:7:Not_In_The_List")
+}
+held["program"] = swayLayout.isHeldKeyboard(keyboard(PROGRAM, ["Polish"], libinput=False), kernel)
+held["noList"] = swayLayout.isHeldKeyboard(keyboard("1:1:Anything", ["Polish"]), None)
+result = {"kernel": kernel, "held": held}
+""",
+	)
+	assert result.value == {
+		"kernel": {
+			"1:1:AT_Translated_Set_2_keyboard": True,
+			"0:1:Power_Button": False,
+			"19561:28260:Linda_virtual_keyboard": False,
+			"4062:1:keyd_virtual_keyboard": False,
+			"1133:45890:K380": True,
+			"1133:16420:Logitech_K400": False,
+			"1:2:Lid_Switch": False,
+			"1:3:Old_Keyboard": True,
+			"2:4:Klawiatura____dwa": True,
+			"5:5:Twin": True,
+		},
+		"held": {
+			"1:1:AT_Translated_Set_2_keyboard": True,
+			"0:1:Power_Button": False,
+			"19561:28260:Linda_virtual_keyboard": False,
+			"1133:49970:Not_In_The_List": True,
+			"0:7:Not_In_The_List": False,
+			"program": False,
+			"noList": True,
+		},
 	}
 
 
@@ -771,7 +891,7 @@ def test_swayNoticeWhenTheVirtualKeyboardIsNotTheUsers(tmp_path: Path, layout: s
 		result = runFeed(
 			tmp_path,
 			rf"""
-feed = swayLayout.SwayLayoutFeed(os.environ["SWAYSOCK"], identifier={RIG_KEYBOARD!r}, isHeld=lambda entry: True)
+feed = swayLayout.SwayLayoutFeed(os.environ["SWAYSOCK"], identifier={RIG_KEYBOARD!r}, isHeld=lambda entry, kernel: True)
 result = started(feed)
 """,
 			env={"SWAYSOCK": os.environ["SWAYSOCK"]},

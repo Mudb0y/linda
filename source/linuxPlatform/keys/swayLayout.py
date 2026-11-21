@@ -53,6 +53,14 @@ EVENT_INPUT = 0x80000015
 #: A reply larger than this is not sway's.
 _MAX_PAYLOAD = 16 * 1024 * 1024
 
+#: The kernel's list of input devices, which anyone may read.
+INPUT_DEVICES = "/proc/bus/input/devices"
+_EV_KEY = 1
+#: EV_REL, EV_ABS and EV_SW: a device with any is no keyboard the helper takes.
+_NOT_KEYBOARD_TYPES = 1 << 2 | 1 << 3 | 1 << 5
+#: KEYBOARD_KEYS in engine/crates/keyd/src/keys.rs, the codes from 1 to 31.
+_KEYBOARD_KEYS = sum(1 << code for code in range(1, 32))
+
 #: The interval given with keys that do not repeat, as desktopLayout's KDE feed gives it.
 _NO_REPEAT_INTERVAL = 0.04
 
@@ -213,11 +221,81 @@ def _layoutNames(entry: dict) -> list[str]:
 	return [n if isinstance(n, str) else "" for n in names]
 
 
-def isHeldKeyboard(entry: dict) -> bool:
+def _swayName(name: bytes) -> str:
+	"""A device's name as sway puts it in an identifier (input_device_get_identifier)."""
+	name = name.strip(b" \f\n\r\t\v")
+	return "".join(chr(b) if 0x20 < b < 0x7F else "_" for b in name)
+
+
+def _mayHold(sysfs: bytes | None, types: bytes | None, keys: bytes | None) -> bool:
+	"""The helper's test of a keyboard (assess in engine/crates/keyd/src/keys.rs) as far as the
+	kernel's list shows it, without its seat or its buttons."""
+	if sysfs is None or os.path.dirname(sysfs) == b"/devices/virtual/input":
+		return False
+	try:
+		eventTypes = int(types or b"0", 16)
+		# Codes 1 to 31 are in the last word whether the kernel's long has 32 bits or 64.
+		low = int((keys or b"0").split()[-1], 16)
+	except (ValueError, IndexError):
+		return False
+	return (
+		bool(eventTypes & 1 << _EV_KEY)
+		and not eventTypes & _NOT_KEYBOARD_TYPES
+		and low & _KEYBOARD_KEYS == _KEYBOARD_KEYS
+	)
+
+
+def kernelKeyboards() -> dict[str, bool] | None:
+	"""Each identifier sway would give an input device the kernel lists, with whether linda-keyd may
+	hold a device of it; None when the list cannot be read."""
+	try:
+		with open(INPUT_DEVICES, "rb") as file:
+			text = file.read()
+	except OSError as e:
+		log.debug(f"Keyboard layout: the kernel's input devices could not be read: {type(e).__name__}")
+		return None
+	found: dict[str, bool] = {}
+	for block in text.split(b"\n\n"):
+		identity: dict[bytes, bytes] = {}
+		name = sysfs = types = keys = None
+		for line in block.split(b"\n"):
+			if line.startswith(b"I: "):
+				identity = dict(p.split(b"=", 1) for p in line[3:].split() if b"=" in p)
+			elif line.startswith(b'N: Name="') and line.endswith(b'"'):
+				name = line[9:-1]
+			elif line.startswith(b"S: Sysfs="):
+				sysfs = line[9:].strip()
+			elif line.startswith(b"B: EV="):
+				types = line[6:].strip()
+			elif line.startswith(b"B: KEY="):
+				keys = line[7:].strip()
+		try:
+			vendor = int(identity[b"Vendor"], 16)
+			product = int(identity[b"Product"], 16)
+		except (KeyError, ValueError):
+			continue
+		if name is None:
+			continue
+		identifier = f"{vendor}:{product}:{_swayName(name)}"
+		found[identifier] = found.get(identifier, False) or _mayHold(sysfs, types, keys)
+	return found
+
+
+def isHeldKeyboard(entry: dict, kernel: dict[str, bool] | None) -> bool:
 	"""Whether a keyboard sway lists may be one linda-keyd holds: a device libinput reads, not a
-	program's virtual keyboard, not one of the firmware's buttons, whose vendor is 0, and not
-	linda-keyd's own."""
-	return "libinput" in entry and bool(entry.get("vendor")) and entry.get("identifier") != VIRTUAL_IDENTIFIER
+	program's virtual keyboard, and not linda-keyd's own, which the kernel's list says the helper would
+	take. sway types every node with a key as a keyboard, a keyboard's separate media and system keys
+	and the firmware's buttons among them, and those keep the default layout a configuration that names
+	only the user's keyboard leaves linda-keyd's on. Where the kernel's list does not have the device,
+	only the firmware's buttons, whose vendor is 0, are left out.
+
+	:param kernel: kernelKeyboards() of the same moment.
+	"""
+	identifier = entry.get("identifier")
+	if "libinput" not in entry or not isinstance(identifier, str) or identifier == VIRTUAL_IDENTIFIER:
+		return False
+	held = kernel.get(identifier) if kernel is not None else None
+	return bool(entry.get("vendor")) if held is None else held
 
 
 def _repeat(entry: dict) -> tuple[bool, float, float] | None:
@@ -248,11 +326,12 @@ class SwayLayoutFeed:
 		path: str,
 		*,
 		identifier: str = VIRTUAL_IDENTIFIER,
-		isHeld: Callable[[dict], bool] = isHeldKeyboard,
+		isHeld: Callable[[dict, dict[str, bool] | None], bool] = isHeldKeyboard,
 	) -> None:
 		"""
 		:param identifier: The identifier sway gives the keyboard keys are typed through.
-		:param isHeld: Whether a keyboard sway lists, other than that one, may be one linda-keyd holds.
+		:param isHeld: Whether a keyboard sway lists, other than that one, may be one linda-keyd holds,
+			given kernelKeyboards().
 		"""
 		self._path = path
 		self._identifier = identifier
@@ -266,6 +345,8 @@ class SwayLayoutFeed:
 		#: The last listing, and its entry the snapshot came from.
 		self._inputs: list = []
 		self._chosen: dict | None = None
+		#: kernelKeyboards() as it was at the last listing.
+		self._kernel: dict[str, bool] | None = None
 		#: Whether a listing was asked for and has not come.
 		self._listing = False
 		#: The layout taken in place of descriptions the registry does not have, by those descriptions.
@@ -337,7 +418,7 @@ class SwayLayoutFeed:
 		):
 			# The group alone, as fast as may be: the new state is in the event.
 			inputs = [device if entry is chosen else entry for entry in self._inputs]
-			self._publish(self._take(inputs))
+			self._publish(self._take(inputs, listed=False))
 			return
 		if event.get("change") == "xkb_layout":
 			# Another keyboard's group, which nothing here turns on.
@@ -352,17 +433,23 @@ class SwayLayoutFeed:
 			e for e in inputs if isinstance(e, dict) and e.get("type") == "keyboard" and _layoutNames(e)
 		]
 		virtual = next((e for e in keyboards if e.get("identifier") == self._identifier), None)
-		held = [e for e in keyboards if e is not virtual and self._isHeld(e)]
+		held = [e for e in keyboards if e is not virtual and self._isHeld(e, self._kernel)]
 		if virtual is not None:
 			return _Choice(virtual, True, [_layoutNames(e) for e in held])
 		# Until linda-keyd's keyboard is listed, what the user's keyboard types is the likeliest.
 		entry = held[0] if held else keyboards[0] if keyboards else None
 		return _Choice(entry, False, [_layoutNames(e) for e in held])
 
-	def _take(self, inputs: object) -> LayoutSnapshot:
-		"""The snapshot for a listing, which becomes the one events are applied to."""
+	def _take(self, inputs: object, *, listed: bool = True) -> LayoutSnapshot:
+		"""The snapshot for a listing, which becomes the one events are applied to.
+
+		:param listed: Whether sway listed these inputs, rather than a group change being applied to the
+			last listing; devices come and go only with a listing.
+		"""
 		if not isinstance(inputs, list):
 			raise TypeError("sway's listing of inputs is not a list")
+		if listed:
+			self._kernel = kernelKeyboards()
 		choice = self._choose(inputs)
 		self._inputs = inputs
 		self._chosen = choice.entry
