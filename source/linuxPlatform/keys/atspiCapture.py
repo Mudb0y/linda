@@ -174,6 +174,11 @@ class AtspiCaptureFeed:
 		self._wakeWrite: int | None = None
 		self._ready = threading.Event()
 		self._listening = False
+		#: Whether the feed's thread has stopped listening and is ending: closing its connection and
+		#: ending its looks, which a new thread must not do beside it.
+		self._ending = False
+		#: Held by start and stop, which the route's thread and the environment's keeper both call.
+		self._starting = threading.Lock()
 
 	# What the kernel source reads, from any thread.
 
@@ -648,25 +653,42 @@ class AtspiCaptureFeed:
 
 	# The thread and the bus.
 
-	def start(self) -> None:
+	def start(self) -> bool:
 		"""Connect to the accessibility bus and follow the foreground on a thread of the feed's own,
 		waiting up to START_TIMEOUT for the connection. Without one, canLook stays False until start is
-		called again, as it does once the connection closes."""
-		thread = self._thread
-		if thread is not None and thread.is_alive():
-			return
-		from gi.repository import GLib
+		called again, as it does once the connection closes.
 
-		self._forgetConnection()
-		self._context = GLib.MainContext.new()
-		self._loop = GLib.MainLoop.new(self._context, False)
-		if self._wakeWrite is None:
-			self._wakeRead, self._wakeWrite = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
-		self._ready.clear()
-		self._thread = threading.Thread(target=self._run, name="lindaAtspiCapture", daemon=True)
-		self._thread.start()
-		if not self._ready.wait(START_TIMEOUT):
-			log.debugWarning("AT-SPI capture feed: still connecting to the accessibility bus")
+		:return: Whether the feed's thread is listening or still connecting. When it is not, a warning
+			has said why.
+		"""
+		with self._starting:
+			thread = self._thread
+			if thread is not None and thread.is_alive():
+				if not self._ending:
+					return True
+				# canLook went False before the thread let go of its connection, so a start called at
+				# once, as when the last found no bus, would otherwise find it alive and do nothing.
+				thread.join(STOP_TIMEOUT)
+				if thread.is_alive():
+					log.warning(
+						"AT-SPI capture feed: its connection before has not ended, so browse mode's keys are "
+						"not captured"
+					)
+					return False
+			from gi.repository import GLib
+
+			self._forgetConnection()
+			self._context = GLib.MainContext.new()
+			self._loop = GLib.MainLoop.new(self._context, False)
+			if self._wakeWrite is None:
+				self._wakeRead, self._wakeWrite = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+			self._ready.clear()
+			self._ending = False
+			self._thread = threading.Thread(target=self._run, name="lindaAtspiCapture", daemon=True)
+			self._thread.start()
+			if not self._ready.wait(START_TIMEOUT):
+				log.debugWarning("AT-SPI capture feed: still connecting to the accessibility bus")
+			return not self._ending
 
 	def _forgetConnection(self) -> None:
 		"""Forget what was heard on the connection before: the answers to reads still out on it never
@@ -690,19 +712,20 @@ class AtspiCaptureFeed:
 			self._publish()
 
 	def stop(self) -> None:
-		thread = self._thread
-		if thread is None:
-			return
-		from gi.repository import GLib
+		with self._starting:
+			thread = self._thread
+			if thread is None:
+				return
+			from gi.repository import GLib
 
-		source = GLib.idle_source_new()
-		source.set_callback(lambda *_args: self._loop.quit() or GLib.SOURCE_REMOVE)
-		source.attach(self._context)
-		thread.join(STOP_TIMEOUT)
-		if thread.is_alive():
-			log.debugWarning("AT-SPI capture feed: its thread did not end in time")
-			return
-		self._thread = None
+			source = GLib.idle_source_new()
+			source.set_callback(lambda *_args: self._loop.quit() or GLib.SOURCE_REMOVE)
+			source.attach(self._context)
+			thread.join(STOP_TIMEOUT)
+			if thread.is_alive():
+				log.debugWarning("AT-SPI capture feed: its thread did not end in time")
+				return
+			self._thread = None
 
 	def _run(self) -> None:
 		self._context.push_thread_default()
@@ -715,6 +738,7 @@ class AtspiCaptureFeed:
 		except Exception:
 			log.exception("AT-SPI capture feed failed")
 		finally:
+			self._ending = True
 			self._listening = False
 			self._ready.set()
 			self._endLooks()
@@ -814,6 +838,8 @@ class AtspiCaptureFeed:
 			"AT-SPI capture feed: its connection to the accessibility bus closed, so browse mode's keys are "
 			f"not captured: {error.message if error is not None else 'no reason given'}"
 		)
+		self._ending = True
+		self._listening = False
 		self._loop.quit()
 
 	def _onWake(self, *_args) -> bool:

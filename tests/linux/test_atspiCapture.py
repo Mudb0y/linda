@@ -550,6 +550,136 @@ def test_activeStateCountsOnlyForTopLevels(tmp_path: Path) -> None:
 	)
 
 
+#: The child of the tests of start: a feed on a GLib thread of its own, as the real one, with a made-up
+#: connection, so that no bus is needed, whose thread takes ENDING seconds to let its connection go
+#: once it has stopped listening, as closing a real one may. LOOKED says whether a look asked now ends.
+STARTS = textwrap.dedent(
+	"""\
+	import logging
+	import threading
+	import time
+
+	from logHandler import log
+	from linuxPlatform.keys.atspiCapture import STOP_TIMEOUT, AtspiCaptureFeed
+
+
+	class Feed(AtspiCaptureFeed):
+		def __init__(self, connects):
+			super().__init__()
+			self.connects = list(connects)
+			self.ending = 1.0
+
+		def _connect(self):
+			from gi.repository import GLib
+
+			if not self.connects.pop(0):
+				return False
+			channel = GLib.IOChannel.unix_new(self._wakeRead)
+			watch = GLib.io_create_watch(channel, GLib.IOCondition.IN)
+			watch.set_callback(self._onWake)
+			watch.attach(self._context)
+			return True
+
+		def _disconnect(self):
+			time.sleep(self.ending)
+			super()._disconnect()
+
+
+	class Warnings(logging.Handler):
+		def __init__(self):
+			super().__init__(logging.WARNING)
+			self.lines = []
+
+		def emit(self, record):
+			self.lines.append(record.getMessage())
+
+
+	warnings = Warnings()
+	log.addHandler(warnings)
+
+
+	def looked(feed):
+		ended = threading.Event()
+		feed.requestLook(1, time.monotonic(), lambda _number, _known: ended.set())
+		return ended.wait(2)
+
+
+	def closeUnder(feed):
+		feed._later(0, lambda: feed._onClosed(None, True, None))
+		closed = time.monotonic()
+		while feed.canLook:
+			assert time.monotonic() - closed < 2, "the closing was never followed"
+			time.sleep(0.001)
+	"""
+)
+
+
+def runStarts(tmp_path: Path, code: str) -> object:
+	return runLogic(tmp_path, STARTS + textwrap.dedent(code))
+
+
+def test_startStraightAfterAStartThatFoundNoBus(tmp_path: Path) -> None:
+	assert runStarts(
+		tmp_path,
+		"""\
+		feed = Feed([False, True])
+		feed.start()
+		assert not feed.canLook
+		# Its thread is still letting go as start returns, and this start must not be lost to it.
+		feed.start()
+		listening = feed.canLook
+		result = [listening, looked(feed)]
+		feed.stop()
+		""",
+	) == [True, True]
+
+
+def test_startStraightAfterTheConnectionClosed(tmp_path: Path) -> None:
+	assert runStarts(
+		tmp_path,
+		"""\
+		feed = Feed([True, True])
+		feed.start()
+		assert feed.canLook and looked(feed)
+		closeUnder(feed)
+		feed.start()
+		listening = feed.canLook
+		result = [listening, looked(feed)]
+		feed.stop()
+		""",
+	) == [True, True]
+
+
+def test_startSaysWhenTheThreadBeforeDoesNotEnd(tmp_path: Path) -> None:
+	value = runStarts(
+		tmp_path,
+		"""\
+		feed = Feed([True, True])
+		feed.ending = STOP_TIMEOUT + 1
+		feed.start()
+		closeUnder(feed)
+		warnings.lines.clear()
+		started = time.monotonic()
+		refused = feed.start()
+		took = time.monotonic() - started
+		said = warnings.lines[:]
+		# The thread ends in its own time, and the next start finds it gone.
+		while feed._thread.is_alive():
+			time.sleep(0.01)
+		feed.ending = 0
+		again = feed.start()
+		result = {"refused": refused, "took": took, "said": said, "again": [again, feed.canLook, looked(feed)]}
+		feed.stop()
+		""",
+	)
+	assert value["refused"] is False, value
+	assert value["said"] == [
+		"AT-SPI capture feed: its connection before has not ended, so browse mode's keys are not captured"
+	], value
+	assert value["took"] < 2.0 + 0.5, value
+	assert value["again"] == [True, True, True], value
+
+
 #: The child of the alternation test: the feed started, the anchor set in each window in turn while it
 #: is the foreground, and the keyboard moved between it and the next window by marco, each move checked
 #: 200 ms after the X server says it happened, while the main thread computes all the while.
