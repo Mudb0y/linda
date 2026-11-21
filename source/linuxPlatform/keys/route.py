@@ -62,6 +62,11 @@ HOLD_RELEASE_WAIT = 0.2
 class RoutedKeySource:
 	"""A KeySource that is the X source, with the kernel source on top of it whenever the route gives."""
 
+	#: How the log begins each line saying the keys are read without the helper, and each saying they
+	#: stay so: a route that reads them otherwise words its own.
+	_withoutKernel = "Keys are read from the X display"
+	_staysWithout = "Keys stay with the X display"
+
 	def __init__(
 		self,
 		route: str,
@@ -146,6 +151,13 @@ class RoutedKeySource:
 			self._nextTry = time.monotonic() + RETRY_INTERVAL
 		else:
 			why = "until linda-keyd holds the keyboard"
+		self._startBase(why)
+		self._thread = threading.Thread(target=self._supervise, name="keyRoute", daemon=True)
+		self._thread.start()
+
+	def _startBase(self, why: str) -> None:
+		"""Start what reads keys for NVDA's whole life, the X source, and say in the log why the helper is
+		not in use yet."""
 		from . import x11
 
 		source = x11.X11KeySource(self._virtualKeyboard, self._isDecided, self._wake.set)
@@ -153,9 +165,7 @@ class RoutedKeySource:
 		with self._lock:
 			self._x = source
 			self._replay(source)
-		log.info(f"Keys are read from the X display: {why}")
-		self._thread = threading.Thread(target=self._supervise, name="keyRoute", daemon=True)
-		self._thread.start()
+		log.info(f"{self._withoutKernel}: {why}")
 
 	def stop(self) -> None:
 		self._stopping = True
@@ -354,9 +364,25 @@ class RoutedKeySource:
 		if not os.path.exists(self._socketPath):
 			return None, f"linda-keyd is not running, as there is no {self._socketPath}"
 		try:
-			connection, welcome = keydClient.connect(self._socketPath, wait)
+			connection, welcome = self._connect(wait)
 		except keydClient.Refused as e:
+			self._refused(e)
 			return None, f"linda-keyd did not admit NVDA: {e}"
+		return self._newKernel(connection, welcome), "linda-keyd admitted NVDA"
+
+	def _connect(self, wait: float):
+		"""The helper's connection and welcome, asking for the features this route uses.
+
+		:raise keydClient.Refused: When the helper does not admit NVDA.
+		"""
+		return keydClient.connect(self._socketPath, wait)
+
+	def _refused(self, error: keydClient.Refused) -> None:
+		"""The helper did not admit NVDA. The X display has the keys meanwhile and the log says why, so
+		nothing more is said here."""
+
+	def _newKernel(self, connection, welcome) -> KeySource:
+		"""A kernel source on a connection the helper admitted, reporting to this route."""
 		from . import kernel
 
 		# The kernel source sends a document's keys where the X source's grabs would, by the X source's
@@ -364,7 +390,7 @@ class RoutedKeySource:
 		x = self._x
 		source = kernel.KernelKeySource(connection, welcome, None, None, x)
 		source.setCallbacks(partial(self._onKernelLost, source), partial(self._onKernelHeld, source))
-		return source, "linda-keyd admitted NVDA"
+		return source
 
 	def _replay(self, source: KeySource) -> None:
 		with self._lock:
@@ -508,6 +534,17 @@ class RoutedKeySource:
 		# display instead.
 		self._say(_("NVDA now reads keys from the X display"))
 
+	def _sayEmergency(self) -> None:
+		self._say(
+			# Translators: Said on Linux after the emergency chord, Backspace, Escape and Enter held
+			# together, made linda-keyd, the program that takes the keyboard in the kernel for NVDA, let
+			# go of it. NVDA then reads keys the way it does without that program.
+			_(
+				"NVDA has let go of the keyboard, and now reads keys from the X display. "
+				"Use the command to take the keyboard back when you want it to take them again",
+			),
+		)
+
 	def _supervise(self) -> None:
 		while not self._stopping:
 			now = time.monotonic()
@@ -541,35 +578,27 @@ class RoutedKeySource:
 					self._dropKernel()
 				self._letGo = True
 				self._takingBack = False
-				log.info(f"Keys are read from the X display: linda-keyd was given up: {why}")
-				self._say(
-					# Translators: Said on Linux after the emergency chord, Backspace, Escape and Enter held
-					# together, made linda-keyd, the program that takes the keyboard in the kernel for NVDA, let
-					# go of it. NVDA then reads keys the way it does without that program.
-					_(
-						"NVDA has let go of the keyboard, and now reads keys from the X display. "
-						"Use the command to take the keyboard back when you want it to take them again",
-					),
-				)
+				log.info(f"{self._withoutKernel}: linda-keyd was given up: {why}")
+				self._sayEmergency()
 				continue
 			if kernel is not self._kernel:
 				continue
 			if not self._dropKernel():
 				self._nextTry = time.monotonic() + RETRY_INTERVAL
-				record = f"Keys stay with the X display: linda-keyd was given up before it held the keyboard: {why}"
+				record = f"{self._staysWithout}: linda-keyd was given up before it held the keyboard: {why}"
 				# Said once, not at every look two seconds apart.
 				if record != self._logged:
 					self._logged = record
 					log.info(record)
 				continue
 			self._nextTry = time.monotonic() + RETRY_INTERVAL
-			log.info(f"Keys are read from the X display: linda-keyd was given up: {why}")
+			log.info(f"{self._withoutKernel}: linda-keyd was given up: {why}")
 			self._sayFellBack()
 		# After what the lost sources said, so that an emergency chord is the last word on them.
 		self._watchVirtual()
 		if self._route == "x11":
 			if self._kernel is not None and self._dropKernel():
-				log.info("Keys are read from the X display: the key route is set to the X display")
+				log.info(f"{self._withoutKernel}: the key route is set to the X display")
 			return
 		if not self._wantsKernel() or time.monotonic() < self._nextTry:
 			return
@@ -579,7 +608,7 @@ class RoutedKeySource:
 			self._blocked = self._socketIdentity()
 			if (why := self._virtualProblem()) != self._logged:
 				self._logged = why
-				log.info(f"Keys stay with the X display: {why}")
+				log.info(f"{self._staysWithout}: {why}")
 			return
 		kernel, why = self._admit(ADMISSION_WAIT)
 		if self._stopping:
@@ -590,7 +619,7 @@ class RoutedKeySource:
 			self._nextTry = time.monotonic() + RETRY_INTERVAL
 			if kernel is None and why != self._logged:
 				self._logged = why
-				log.info(f"Keys stay with the X display: {why}")
+				log.info(f"{self._staysWithout}: {why}")
 			if self._takingBack:
 				self._takingBack = False
 				# Translators: Said on Linux when the user asked NVDA to take the keyboard back and linda-keyd,
