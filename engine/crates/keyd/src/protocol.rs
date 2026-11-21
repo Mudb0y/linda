@@ -243,12 +243,23 @@
 //! a key it then passes needs: Alt+Tab, when Alt went down under the screen reader's key. LATE_PASS
 //! names a kept press and then a press waiting for its verdict. The kept key goes on the virtual
 //! keyboard immediately before the waiting press, in that press's place in line and whatever
-//! becomes of it, and its release, once read, is passed as though its press had been. The client
-//! sends it just before the VERDICT that passes the waiting press.
-//! - The first must be a press the client kept, of one of the
-//!   [`MODIFIERS`](crate::keys::MODIFIERS) but Caps Lock, whose key is still down and which no
-//!   earlier LATE_PASS named; the second must be waiting for its verdict. Anything else is
-//!   malformed.
+//! becomes of it, and its release, read already or still to come, is passed as though its press had
+//! been. The client sends it just before the VERDICT that passes the waiting press.
+//! - Malformed, and the end of the connection, is only what the client knows as it sends: a
+//!   sequence number of 0 or one never sent; a first that is not a press of one of the
+//!   [`MODIFIERS`](crate::keys::MODIFIERS) but Caps Lock, or is flagged [`KEY_TYPED`], or that an
+//!   earlier LATE_PASS named already; a second that is not a press flagged [`KEY_ASK`].
+//! - What else would keep it from applying can change while it is on its way, so it changes
+//!   nothing, as a late VERDICT does not: the first was not kept after all (the client passed it,
+//!   or it was passed at its bound with EXPIRED and a keep that came after was ignored); its key
+//!   was not down when the second was read (pressed after it, or let go of before it); or the
+//!   second is no longer waiting for its verdict (answered, passed at its bound, or let go of). The
+//!   waiting press then goes out alone, or has gone already, and the kept key stays kept, its
+//!   release with it.
+//! - A kept key let go of after the second was read, before or after the LATE_PASS came, still goes
+//!   out just before the second, and its release behind it: a modifier's release waits in line
+//!   behind every press read before it.
+//! - No message answers LATE_PASS, whether it changed anything or not.
 //! - If the helper lets go before the waiting press's turn, the kept key never goes out.
 //!
 //! TYPE_INJECT would not do: an injected key joins the end of the line, after the press it has to
@@ -492,8 +503,8 @@ pub const TYPE: u8 = 0x06;
 pub const TYPE_DECIDE: u8 = 0;
 /// TYPE's mode in which the key goes in line already passed.
 pub const TYPE_INJECT: u8 = 1;
-/// `<BQQ`, with [`FEATURE_LATE_PASS`]: type, the sequence number of a kept press whose key is still
-/// down, then that of the press waiting for its verdict which it goes out just before.
+/// `<BQQ`, with [`FEATURE_LATE_PASS`]: type, the sequence number of a press the client kept, then
+/// that of the press waiting for its verdict which the kept key goes out just before.
 pub const LATE_PASS: u8 = 0x07;
 
 // The helper's messages.
