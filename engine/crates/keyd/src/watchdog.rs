@@ -1,8 +1,9 @@
 //! The watchdogs. Inside the helper, a thread of its own watches the loop: when the loop stops
 //! turning, or the oldest key in line stays undecided long past its bound, while a keyboard is
-//! grabbed, the thread lets go of every keyboard itself and ends the helper, so that the kernel
-//! destroys the virtual keyboard and with it every key it held down. Outside, systemd's watchdog
-//! kills a helper whose loop stops feeding it, which covers the thread itself.
+//! grabbed or a key is down on the virtual keyboard, the thread lets go of every keyboard itself,
+//! destroys the virtual keyboard, which releases every key it held down, and ends the helper.
+//! Outside, systemd's watchdog kills a helper whose loop stops feeding it, which covers the thread
+//! itself.
 
 use std::fmt;
 use std::io;
@@ -143,7 +144,7 @@ impl fmt::Display for Stall {
     }
 }
 
-/// Starts the watchdog thread. When it finds the loop stalled while a keyboard is grabbed, it lets
+/// Starts the watchdog thread. When it finds the loop stalled while `guard` holds anything, it lets
 /// go through `guard` and then runs `end`, which in the helper ends the process.
 pub fn spawn(
     progress: Arc<Progress>,

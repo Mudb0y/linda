@@ -2018,6 +2018,60 @@ fn a_virtual_keyboard_that_stops_taking_keys_is_destroyed_and_everything_let_go(
 }
 
 #[test]
+fn the_watchdog_destroys_a_virtual_keyboard_holding_a_key_with_no_keyboard_grabbed() {
+    use crate::device::Devices;
+    use crate::watchdog::{self, Progress};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+
+    let w = World::new();
+    let mut devices = w.devices();
+    let guard = devices.guard();
+    let mut v = devices.create_virtual().unwrap();
+    assert!(!guard.holding());
+    v.emit(KEY_LEFTSHIFT, 1).unwrap();
+    assert!(!w.any_grabbed());
+    assert!(
+        guard.holding(),
+        "a key down on the virtual keyboard is not counted"
+    );
+    v.emit(KEY_LEFTSHIFT, 0).unwrap();
+    assert!(!guard.holding());
+    v.emit(KEY_LEFTSHIFT, 1).unwrap();
+    let progress = Progress::new();
+    let stopped = Instant::now();
+    progress.turned(stopped, None);
+    let ended = Arc::new(AtomicBool::new(false));
+    let e = ended.clone();
+    watchdog::spawn(
+        progress,
+        guard.clone(),
+        Box::new(move || e.store(true, SeqCst)),
+    )
+    .unwrap()
+    .join()
+    .unwrap();
+    assert!(ended.load(SeqCst));
+    assert!(stopped.elapsed() > STALL_LIMIT);
+    assert!(w.released_by_guard());
+    assert!(w.virtual_down().is_empty());
+    assert_eq!(
+        w.emitted(),
+        vec![
+            (KEY_LEFTSHIFT, 1),
+            (KEY_LEFTSHIFT, 0),
+            (KEY_LEFTSHIFT, 1),
+            (KEY_LEFTSHIFT, 0)
+        ]
+    );
+    assert!(!guard.holding());
+    assert!(
+        v.emit(KEY_A, 1).is_err(),
+        "a destroyed virtual keyboard still takes keys"
+    );
+}
+
+#[test]
 fn a_keyboard_another_program_holds_is_tried_again() {
     let mut t = T::new();
     let k = t.w.plug("keyboard");

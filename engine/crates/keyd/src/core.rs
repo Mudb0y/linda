@@ -272,9 +272,11 @@ impl<D: Devices> Core<D> {
         std::mem::take(&mut self.out)
     }
 
-    /// Whether any keyboard is grabbed.
+    /// Whether any keyboard is grabbed, or any key is down on the virtual keyboard: either way the
+    /// loop must keep turning, or the watchdog thread takes it for stopped.
     pub fn holding(&self) -> bool {
         self.keyboards.values().any(|k| k.state == KState::Held)
+            || self.pressed.iter().any(|n| *n > 0)
     }
 
     /// When the oldest press still waiting for its verdict was read.

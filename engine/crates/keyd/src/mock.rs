@@ -64,6 +64,8 @@ struct Virt {
     /// included.
     emitted: Vec<(u16, i32)>,
     down: KeySet,
+    /// Destroyed by the guard, from outside the loop, which still has it: it takes no more keys.
+    destroyed: bool,
     from_desktop: VecDeque<u16>,
     wake: Option<Arc<Wake>>,
 }
@@ -366,6 +368,7 @@ impl Devices for MockDevices {
         assert!(!s.virt.exists, "two virtual keyboards at once");
         let wake = Arc::new(Wake::new());
         s.virt.exists = true;
+        s.virt.destroyed = false;
         s.virt.made += 1;
         s.virt.wake = Some(wake.clone());
         Ok(MockVirtual {
@@ -491,7 +494,7 @@ impl VirtualKeyboard for MockVirtual {
 
     fn emit(&mut self, code: u16, value: i32) -> io::Result<()> {
         let mut s = self.world.lock();
-        if s.fail_emit {
+        if s.fail_emit || s.virt.destroyed {
             return Err(io::Error::from_raw_os_error(libc::ENODEV));
         }
         s.virt.emitted.push((code, value));
@@ -527,13 +530,21 @@ struct MockGuard(World);
 
 impl Guard for MockGuard {
     fn holding(&self) -> bool {
-        self.0.any_grabbed()
+        self.0.any_grabbed() || !self.0.lock().virt.down.is_empty()
     }
 
     fn release_all(&self) {
         let mut s = self.0.lock();
         for d in s.devices.values_mut() {
             d.grabbed = false;
+        }
+        if s.virt.exists {
+            let held: Vec<u16> = s.virt.down.iter().collect();
+            for code in held {
+                s.virt.emitted.push((code, 0));
+            }
+            s.virt.down = KeySet::new();
+            s.virt.destroyed = true;
         }
         s.released_by_guard = true;
     }

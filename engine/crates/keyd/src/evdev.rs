@@ -115,6 +115,9 @@ pub struct Grabs {
     slots: [AtomicI32; MAX_GRABBED],
     /// The virtual keyboard, while it exists.
     virt: AtomicI32,
+    /// How many keys the virtual keyboard holds down: a key held there while no keyboard is grabbed
+    /// repeats in the desktop as surely as one held while a keyboard is.
+    virtual_keys: AtomicUsize,
     release: Release,
 }
 
@@ -143,6 +146,7 @@ impl Grabs {
         let g = Arc::new(Grabs {
             slots: std::array::from_fn(|_| AtomicI32::new(-1)),
             virt: AtomicI32::new(-1),
+            virtual_keys: AtomicUsize::new(0),
             release: Release {
                 fired: Mutex::new(false),
                 go: Condvar::new(),
@@ -209,6 +213,11 @@ impl Grabs {
         self.virt.store(fd, SeqCst);
     }
 
+    /// The kernel released whatever the virtual keyboard held as it went.
+    fn virtual_destroyed(&self) {
+        self.virtual_keys.store(0, SeqCst);
+    }
+
     fn register(&self, fd: RawFd) -> Option<usize> {
         self.slots
             .iter()
@@ -237,7 +246,7 @@ const REVOKE_WAIT: Duration = Duration::from_millis(100);
 
 impl Guard for Grabs {
     fn holding(&self) -> bool {
-        self.slots.iter().any(|s| s.load(SeqCst) >= 0)
+        self.virtual_keys.load(SeqCst) > 0 || self.slots.iter().any(|s| s.load(SeqCst) >= 0)
     }
 
     /// EVIOCREVOKE ends the grab and makes the open file useless for good, so that a loop that
@@ -245,6 +254,28 @@ impl Guard for Grabs {
     /// unregistered only after it is let go and before it is closed, so every grab is in the table.
     fn release_all(&self) {
         self.release(REVOKE_WAIT);
+    }
+}
+
+/// The keys the virtual keyboard holds down, as the count in [`Grabs`] has them. A press is counted
+/// before it is written, so that none can be down uncounted, and a release only once it has gone
+/// whole; a key whose release did not go counts until the device is destroyed.
+#[derive(Default)]
+struct VirtualDown(KeySet);
+
+impl VirtualDown {
+    fn writing(&mut self, grabs: &Grabs, code: u16, value: i32) {
+        if value == 1 && !self.0.contains(code) {
+            self.0.insert(code);
+            grabs.virtual_keys.fetch_add(1, SeqCst);
+        }
+    }
+
+    fn written(&mut self, grabs: &Grabs, code: u16, value: i32) {
+        if value == 0 && self.0.contains(code) {
+            self.0.remove(code);
+            grabs.virtual_keys.fetch_sub(1, SeqCst);
+        }
     }
 }
 
@@ -532,6 +563,7 @@ impl Devices for Evdev {
             kept: self.uinput.clone(),
             dir: PathBuf::new(),
             leds: 0,
+            down: VirtualDown::default(),
         };
         let mut name = [0u8; 64];
         ioctl_read(v.file.as_fd(), ui_get_sysname(name.len()), &mut name)?;
@@ -748,6 +780,7 @@ pub struct EvVirtual {
     dir: PathBuf,
     /// The lights as the desktop set them, from which the kernel sends only changes.
     leds: u16,
+    down: VirtualDown,
 }
 
 impl VirtualKeyboard for EvVirtual {
@@ -777,6 +810,7 @@ impl VirtualKeyboard for EvVirtual {
 
     fn emit(&mut self, code: u16, value: i32) -> io::Result<()> {
         let b = event_bytes(&[(EV_KEY, code, value), (EV_SYN, SYN_REPORT, 0)]);
+        self.down.writing(&self.grabs, code, value);
         let n = (&self.file).write(&b)?;
         if n != b.len() {
             return Err(io::Error::other(format!(
@@ -784,6 +818,7 @@ impl VirtualKeyboard for EvVirtual {
                 b.len()
             )));
         }
+        self.down.written(&self.grabs, code, value);
         Ok(())
     }
 
@@ -816,6 +851,7 @@ impl Drop for EvVirtual {
             log!("the virtual keyboard would not be destroyed, so /dev/uinput is closed");
             drop(self.kept.lock().unwrap_or_else(|e| e.into_inner()).take());
         }
+        self.grabs.virtual_destroyed();
     }
 }
 
@@ -965,5 +1001,55 @@ mod tests {
         let mut revoked = REVOKED.lock().unwrap().clone();
         revoked.sort();
         assert_eq!(revoked, vec![-4000, 3001, 3002]);
+    }
+
+    static DESTROYED: std::sync::Mutex<Vec<RawFd>> = std::sync::Mutex::new(Vec::new());
+
+    #[test]
+    fn a_key_down_on_the_virtual_keyboard_holds_the_watchdog_with_nothing_grabbed() {
+        use crate::watchdog::{self, Progress};
+        fn revoke(_fd: RawFd) {}
+        fn destroy(fd: RawFd) {
+            DESTROYED.lock().unwrap().push(fd);
+        }
+        let g = Grabs::with(revoke, destroy);
+        g.set_virtual(5000);
+        let mut down = VirtualDown::default();
+        assert!(!g.holding());
+        // As the virtual keyboard writes a press of Shift, a second press of it, a press of A and
+        // Shift's release.
+        down.writing(&g, 42, 1);
+        assert!(g.holding());
+        down.written(&g, 42, 1);
+        down.writing(&g, 42, 1);
+        down.written(&g, 42, 1);
+        down.writing(&g, 30, 1);
+        down.written(&g, 30, 1);
+        down.writing(&g, 42, 0);
+        assert!(g.holding(), "counted up before the release went");
+        down.written(&g, 42, 0);
+        assert!(g.holding(), "A is still down");
+        down.writing(&g, 30, 0);
+        down.written(&g, 30, 0);
+        assert!(!g.holding());
+        // A release that never went counts the key down still.
+        down.writing(&g, 42, 1);
+        down.written(&g, 42, 1);
+        down.writing(&g, 42, 0);
+        assert!(g.holding());
+        let progress = Progress::new();
+        let stopped = Instant::now();
+        progress.turned(stopped, None);
+        let ended = Arc::new(AtomicBool::new(false));
+        let e = ended.clone();
+        watchdog::spawn(progress, g.clone(), Box::new(move || e.store(true, SeqCst)))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(ended.load(SeqCst));
+        assert!(stopped.elapsed() > crate::protocol::STALL_LIMIT);
+        assert_eq!(*DESTROYED.lock().unwrap(), vec![5000]);
+        g.virtual_destroyed();
+        assert!(!g.holding());
     }
 }

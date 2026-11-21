@@ -94,8 +94,9 @@ pub trait VirtualKeyboard {
 
 /// Shared with the watchdog thread, which uses it when the helper's loop has stopped.
 pub trait Guard: Send + Sync {
-    /// Whether any keyboard is grabbed.
+    /// Whether any keyboard is grabbed, or any key is down on the virtual keyboard.
     fn holding(&self) -> bool;
-    /// Lets go of every grabbed keyboard at once, from any thread, whatever the loop is doing.
+    /// Lets go of every grabbed keyboard at once, and destroys the virtual keyboard, which releases
+    /// every key it holds down, from any thread, whatever the loop is doing.
     fn release_all(&self);
 }
