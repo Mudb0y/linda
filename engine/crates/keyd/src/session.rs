@@ -1264,10 +1264,12 @@ mod tests {
     }
 
     /// logind and polkit as Fake has them, the caller ending as logind is asked about it when
-    /// `ending` names it, and the pidfd polkit was given kept.
+    /// `ending` names it, or as polkit is when `ending_at_polkit` does, and the pidfd polkit was
+    /// given kept.
     struct Watched {
         fake: Fake,
         ending: Option<libc::pid_t>,
+        ending_at_polkit: Option<libc::pid_t>,
         polkit_had: Option<Option<i64>>,
     }
 
@@ -1297,6 +1299,9 @@ mod tests {
             pidfd: Option<BorrowedFd>,
         ) -> Result<bool, String> {
             self.polkit_had = Some(pidfd.map(crate::peer::tests::pid_in));
+            if let Some(child) = self.ending_at_polkit.take() {
+                kill_and_reap(child);
+            }
             self.fake.authorized(peer, start)
         }
     }
@@ -1305,6 +1310,7 @@ mod tests {
         Watched {
             fake: Fake::usual(),
             ending: None,
+            ending_at_polkit: None,
             polkit_had: None,
         }
     }
@@ -1338,6 +1344,41 @@ mod tests {
         let (child, _) = waiting_child();
         let mut w = watched();
         w.ending = Some(child);
+        assert_eq!(judge(&mut w, &Process::Unheld), Ok("2".into()));
+    }
+
+    #[test]
+    fn a_caller_that_ends_while_polkit_is_asked_is_turned_away_whoever_takes_its_number() {
+        let (child, process) = waiting_child();
+        let mut w = watched();
+        w.ending_at_polkit = Some(child);
+        let allowance = Mutex::new(Allowance::new());
+        let e = admit_judging(
+            &mut w,
+            &PEER,
+            &process,
+            &started,
+            &proc_of(IN_SESSION),
+            &allowance,
+        )
+        .unwrap_err();
+        assert_eq!(
+            e,
+            (
+                Goodbye::NotInFront,
+                "process 300 ended while it was being admitted".into()
+            )
+        );
+        assert_eq!(w.polkit_had, Some(Some(i64::from(child))));
+        assert!(
+            allowance.lock().unwrap().span.is_none(),
+            "the admission was logged as if the process that took its place were the caller"
+        );
+        // And without the pidfd, the same is admitted: the start time it took over reads the same,
+        // and polkit before 124 judges by number and start time alone.
+        let (child, _) = waiting_child();
+        let mut w = watched();
+        w.ending_at_polkit = Some(child);
         assert_eq!(judge(&mut w, &Process::Unheld), Ok("2".into()));
     }
 
