@@ -88,7 +88,7 @@ DEVICE_HELD, DEVICE_WAITING, DEVICE_BUSY, DEVICE_GONE, DEVICE_IGNORED = range(1,
 GOODBYE_NAMES = {
 	GOODBYE_VERSION: "it speaks another version of the protocol",
 	GOODBYE_NOT_IN_FRONT: "NVDA is not a process of the session in front",
-	GOODBYE_NOT_AUTHORIZED: "polkit does not allow it",
+	GOODBYE_NOT_AUTHORIZED: "NVDA is not allowed to use it",
 	GOODBYE_BUSY: "it serves another client of this session",
 	GOODBYE_NO_ANSWER: "logind or polkit did not answer it in time",
 	GOODBYE_SILENT: "NVDA was silent too long",
