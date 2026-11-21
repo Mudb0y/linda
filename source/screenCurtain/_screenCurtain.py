@@ -21,7 +21,25 @@ from NVDAState import _TrackNVDAInitialization
 from winBindings import magnification
 
 if sys.platform != "win32":
+	import platformFeatures
 	from linuxPlatform import gammaCurtain
+
+	def _isSupported() -> bool:
+		return platformFeatures.isSupported(platformFeatures.Feature.SCREEN_CURTAIN)
+
+	def _sayUnsupported() -> None:
+		postNvdaStartup.unregister(_sayUnsupported)
+		import speech
+		import ui
+
+		ui.message(
+			# Translators: Said once as NVDA starts on Linux when the Screen Curtain is switched on in its
+			# settings but cannot work in this session, so that the screen is not black.
+			_("Screen Curtain is not available in this Wayland session. The screen can be seen."),
+			# As the curtain's own word that it was lost: whoever relies on it must hear this first.
+			speechPriority=speech.priorities.Spri.NOW,
+		)
+
 
 # homogeneous matrix for a 4-space transformation (red, green, blue, opacity).
 # https://docs.microsoft.com/en-gb/windows/win32/gdiplus/-gdiplus-using-a-color-matrix-to-transform-a-single-color-use
@@ -170,7 +188,13 @@ class ScreenCurtain:
 		super().__init__()
 		self._settings: ScreenCurtainSettings = cast(ScreenCurtainSettings, config.conf["screenCurtain"])
 		self._enabled: bool = False
-		if self.settings["enabled"]:
+		if sys.platform != "win32" and self.settings["enabled"] and not _isSupported():
+			# The setting is kept, for a session where the curtain works again, as one brought from X.
+			if _TrackNVDAInitialization.isInitializationComplete():
+				_sayUnsupported()
+			else:
+				postNvdaStartup.register(_sayUnsupported)
+		elif self.settings["enabled"]:
 			try:
 				self.enable()
 			except RuntimeError:

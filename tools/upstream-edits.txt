@@ -752,6 +752,10 @@ source/screenCurtain/_screenCurtain.py
   it found, in place of the Magnification API; enabling is tried once, as
   an X server either has ramps to set or does not, and enabled reads false
   once the curtain was lost, as when the X server closed its connection
+  Linux runtime: a curtain switched on in the settings is not enabled
+  where platformFeatures says the curtain is unsupported, as in a Wayland
+  session, which logs no error and opens no alert, and NVDA says once after
+  its start that the screen can be seen; the setting is kept
 source/speech/sayAll.py
   Linux runtime: a text reader whose first position cannot be made, as on
   an object without a caret, ends the request to keep the session awake
