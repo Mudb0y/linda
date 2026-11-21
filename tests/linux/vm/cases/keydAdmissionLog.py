@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 UHID = "Ground uhid keyboard"
 CLIENT_LINE = re.compile(
-	r'process (?P<pid>\d+) is "(?P<comm>[^"]*)", run as "(?P<program>[^"]*)", in "(?P<unit>[^"]*)"$'
+	r'^linda-keyd: process (?P<pid>\d+) is "(?P<comm>[^"]*)", run as "(?P<program>[^"]*)", in "(?P<unit>[^"]*)"$'
 )
 
 
@@ -44,7 +44,7 @@ def run(ground: "Ground") -> None:
 			mark = ground.mark()
 			assert client.connect()["welcome"]
 			admitted = ground.waitForHelperLog(f"admitted process {pid} ", mark)
-			said = [(t, line) for t, line in ground.helperLog(mark) if line.startswith(f"process {pid} is ")]
+			said = [(t, line) for t, line in ground.helperLog(mark) if f": process {pid} is " in line]
 			assert len(said) == 1, said
 			ground.machine.log(f"the helper: {said[0][1]!r}, then {admitted[1]!r}")
 			found = CLIENT_LINE.match(said[0][1])
