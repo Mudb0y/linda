@@ -15,8 +15,8 @@ PROTOCOL_VERSION = 1
 #: The largest message either side sends.
 MAX_MESSAGE = 256
 
-HELLO, START, STOP, VERDICT, HEARTBEAT = 0x01, 0x02, 0x03, 0x04, 0x05
-WELCOME, GOODBYE, KEY, EXPIRED, RELEASED, DEVICE, LOCKS, HEARTBEAT_ECHO = range(0x81, 0x89)
+HELLO, START, STOP, VERDICT, HEARTBEAT, TYPE, LATE_PASS = range(0x01, 0x08)
+WELCOME, GOODBYE, KEY, EXPIRED, RELEASED, DEVICE, LOCKS, HEARTBEAT_ECHO, TYPED, VIRTUAL = range(0x81, 0x8B)
 
 _HELLO = struct.Struct("<BHI")
 _VERDICT = struct.Struct("<BQB")
@@ -28,10 +28,16 @@ _EXPIRED = struct.Struct("<BQ")
 _RELEASED = struct.Struct("<BB")
 _DEVICE = struct.Struct("<BIBB")
 _LOCKS = struct.Struct("<BH")
+_TYPE = struct.Struct("<BIHBB")
+_LATE_PASS = struct.Struct("<BQQ")
+_TYPED = struct.Struct("<BIQB")
+_VIRTUAL = struct.Struct("<BB")
 
 KEY_RELEASE, KEY_PRESS, KEY_REPEAT = 0, 1, 2
-#: HELLO's and WELCOME's feature: VERDICT may hold a press for longer, up to VERDICT_WAIT_TIMEOUT.
-FEATURE_WAIT = 2
+#: HELLO's and WELCOME's features: TYPE and TYPED; VERDICT may hold a press for longer, up to
+#: VERDICT_WAIT_TIMEOUT; LATE_PASS; VIRTUAL. The helper grants only FEATURE_WAIT so far, and the other
+#: three's messages are malformed until WELCOME grants them.
+FEATURE_TYPING, FEATURE_WAIT, FEATURE_LATE_PASS, FEATURE_VIRTUAL_SEEN = 1, 2, 4, 8
 #: The value of VERDICT that holds a press longer, with FEATURE_WAIT.
 VERDICT_WAIT = 2
 #: Seconds from the helper's reading of a press held by VERDICT_WAIT after which it passes the key on;
@@ -42,6 +48,21 @@ VERDICT_WAIT_TIMEOUT = 0.6
 KEY_ASK, KEY_SYNTHETIC, KEY_TYPED = 0x01, 0x02, 0x04
 #: LOCKS's bits, the kernel's LED codes.
 LOCK_NUM, LOCK_CAPS, LOCK_SCROLL = 1 << 0, 1 << 1, 1 << 2
+#: TYPE's modes: the key comes back as KEY, flagged KEY_TYPED, to be decided; or goes in line passed.
+TYPE_DECIDE, TYPE_INJECT = 0, 1
+#: TYPED's outcomes.
+(
+	TYPED_OUT,
+	TYPED_KEPT,
+	TYPED_REFUSED_STATE,
+	TYPED_REFUSED_KEY,
+	TYPED_REFUSED_FULL,
+	TYPED_NOT_DOWN,
+	TYPED_LOST,
+) = range(1, 8)
+#: VIRTUAL's statuses: the desktop wrote the new virtual keyboard's lights; it had not by
+#: VIRTUAL_SETTLE; the virtual keyboard was older than this client's START.
+VIRTUAL_SEEN, VIRTUAL_UNSEEN, VIRTUAL_OLD = 1, 2, 3
 
 #: RELEASED's reasons.
 RELEASED_STOPPED, RELEASED_EMERGENCY, RELEASED_BACKGROUND, RELEASED_VIRTUAL, RELEASED_SESSION_UNKNOWN = range(
@@ -83,6 +104,15 @@ RELEASED_NAMES = {
 	RELEASED_BACKGROUND: "this session is no longer the one in front",
 	RELEASED_VIRTUAL: "its virtual keyboard failed",
 	RELEASED_SESSION_UNKNOWN: "it cannot tell which session is in front",
+}
+TYPED_NAMES = {
+	TYPED_OUT: "went out",
+	TYPED_KEPT: "was kept",
+	TYPED_REFUSED_STATE: "was refused, as the helper is not capturing for this session",
+	TYPED_REFUSED_KEY: "was refused, as the helper does not type that key now",
+	TYPED_REFUSED_FULL: "was refused, as too many typed keys were waiting or came too fast",
+	TYPED_NOT_DOWN: "was refused, as its key was not typed down",
+	TYPED_LOST: "was lost, as the helper let go first",
 }
 DEVICE_NAMES = {
 	DEVICE_HELD: "held",
@@ -153,7 +183,20 @@ class HeartbeatEcho:
 	counter: int
 
 
-Message = Welcome | Goodbye | Key | Expired | Released | Device | Locks | HeartbeatEcho
+@dataclass(frozen=True)
+class Typed:
+	tag: int
+	#: The KEY the TYPE was sent as, or 0.
+	seq: int
+	outcome: int
+
+
+@dataclass(frozen=True)
+class Virtual:
+	status: int
+
+
+Message = Welcome | Goodbye | Key | Expired | Released | Device | Locks | HeartbeatEcho | Typed | Virtual
 
 
 class Malformed(ValueError):
@@ -213,6 +256,11 @@ def decode(data: bytes) -> Message | None:
 	if kind == WELCOME:
 		_kind, version, features, verdict, interval, timeout, span = _fixed(_WELCOME, data, "WELCOME")
 		return Welcome(version, features, verdict / 1000, interval / 1000, timeout / 1000, span / 1000)
+	if kind == TYPED:
+		_kind, tag, seq, outcome = _fixed(_TYPED, data, "TYPED")
+		return Typed(tag, seq, outcome)
+	if kind == VIRTUAL:
+		return Virtual(_fixed(_VIRTUAL, data, "VIRTUAL")[1])
 	return None
 
 
@@ -240,10 +288,25 @@ def heartbeat(counter: int) -> bytes:
 	return _HEARTBEAT.pack(HEARTBEAT, counter & 0xFFFFFFFF)
 
 
-def connect(path: str, timeout: float) -> tuple[socket.socket, Welcome]:
+def typeKey(tag: int, code: int, down: bool, mode: int) -> bytes:
+	"""TYPE, once WELCOME has granted FEATURE_TYPING.
+
+	:param mode: TYPE_DECIDE or TYPE_INJECT.
+	"""
+	return _TYPE.pack(TYPE, tag & 0xFFFFFFFF, code, int(down), mode)
+
+
+def latePass(kept: int, before: int) -> bytes:
+	"""LATE_PASS, once WELCOME has granted FEATURE_LATE_PASS: the kept press numbered kept goes out
+	just ahead of the waiting press numbered before."""
+	return _LATE_PASS.pack(LATE_PASS, kept, before)
+
+
+def connect(path: str, timeout: float, features: int = FEATURE_WAIT) -> tuple[socket.socket, Welcome]:
 	"""Connect to the helper and be admitted.
 
 	:param timeout: Seconds to wait for its answer: logind and polkit are asked first.
+	:param features: The features to ask for; the welcome says which were granted.
 	:return: The connection, non-blocking, and the helper's welcome.
 	:raise Refused: When the helper is not there, turns NVDA away or does not answer in time.
 	"""
@@ -252,7 +315,7 @@ def connect(path: str, timeout: float) -> tuple[socket.socket, Welcome]:
 		try:
 			sock.settimeout(timeout)
 			sock.connect(path)
-			sock.send(hello(FEATURE_WAIT))
+			sock.send(hello(features))
 			deadline = time.monotonic() + timeout
 			while True:
 				sock.settimeout(max(0.001, deadline - time.monotonic()))

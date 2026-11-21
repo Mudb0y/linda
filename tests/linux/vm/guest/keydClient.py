@@ -21,6 +21,10 @@ A request is one JSON object, answered by one:
   once first (connect with FEATURE_WAIT in "features"), and without "after" nothing more. At first
   every press is passed at once.
 - {"op": "heartbeats", "on": BOOL}: sends a HEARTBEAT every interval WELCOME gave, or stops.
+- {"op": "type", "tag": N, "key": KEY, "down": BOOL, "mode": "decide" or "inject"}: sends TYPE, of
+  KEY by its evdev name or of "code" instead, which the helper takes only once WELCOME has granted
+  FEATURE_TYPING (connect with it in "features").
+- {"op": "latePass", "kept": SEQ, "before": SEQ}: sends LATE_PASS, with FEATURE_LATE_PASS granted.
 - {"op": "send", "hex": HEX}: sends those bytes as one message, rubbish or not.
 - {"op": "close"}: closes the connection.
 - {"op": "die"}: ends the process at once, without closing anything itself.
@@ -42,10 +46,11 @@ DIRECTORY = "/tmp/ground/keyd"
 SOCKET_PATH = "/run/linda-keyd/socket"
 MAX_MESSAGE = 256
 
-HELLO, START, STOP, VERDICT, HEARTBEAT = 0x01, 0x02, 0x03, 0x04, 0x05
+HELLO, START, STOP, VERDICT, HEARTBEAT, TYPE, LATE_PASS = range(0x01, 0x08)
 VERDICT_WAIT = 2
-FEATURE_WAIT = 2
-WELCOME, GOODBYE, KEY, EXPIRED, RELEASED, DEVICE, LOCKS, HEARTBEAT_ECHO = range(0x81, 0x89)
+FEATURE_TYPING, FEATURE_WAIT, FEATURE_LATE_PASS, FEATURE_VIRTUAL_SEEN = 1, 2, 4, 8
+TYPE_MODES = {"decide": 0, "inject": 1}
+WELCOME, GOODBYE, KEY, EXPIRED, RELEASED, DEVICE, LOCKS, HEARTBEAT_ECHO, TYPED, VIRTUAL = range(0x81, 0x8B)
 KEY_ASK, KEY_SYNTHETIC, KEY_TYPED = 0x01, 0x02, 0x04
 RELEASED_REASONS = {
 	1: "STOPPED",
@@ -69,6 +74,24 @@ GOODBYE_REASONS = {
 }
 DEVICE_STATUSES = {1: "HELD", 2: "WAITING", 3: "BUSY", 4: "GONE", 5: "IGNORED"}
 IGNORED_REASONS = {0: None, 1: "POINTER", 2: "SWITCHES", 3: "BUTTONS", 4: "VIRTUAL", 5: "OTHER_SEAT"}
+TYPED_OUTCOMES = {
+	1: "OUT",
+	2: "KEPT",
+	3: "REFUSED_STATE",
+	4: "REFUSED_KEY",
+	5: "REFUSED_FULL",
+	6: "NOT_DOWN",
+	7: "LOST",
+}
+VIRTUAL_STATUSES = {1: "SEEN", 2: "UNSEEN", 3: "OLD"}
+
+
+def typeKey(tag: int, code: int, down: bool, mode: int) -> bytes:
+	return struct.pack("<BIHBB", TYPE, tag & 0xFFFFFFFF, code, int(down), mode)
+
+
+def latePass(kept: int, before: int) -> bytes:
+	return struct.pack("<BQQ", LATE_PASS, kept, before)
 
 
 def keyName(code: int) -> str:
@@ -109,6 +132,7 @@ def decode(message: bytes) -> dict:
 			"value": value,
 			"ask": bool(flags & KEY_ASK),
 			"synthetic": bool(flags & KEY_SYNTHETIC),
+			"typed": bool(flags & KEY_TYPED),
 			"flags": flags,
 		}
 	if kind == EXPIRED:
@@ -129,6 +153,12 @@ def decode(message: bytes) -> dict:
 		return {"type": "LOCKS", "leds": struct.unpack("<BH", message)[1]}
 	if kind == HEARTBEAT_ECHO:
 		return {"type": "HEARTBEAT_ECHO", "counter": struct.unpack("<BI", message)[1]}
+	if kind == TYPED:
+		_, tag, seq, outcome = struct.unpack("<BIQB", message)
+		return {"type": "TYPED", "tag": tag, "seq": seq, "outcome": TYPED_OUTCOMES.get(outcome, outcome)}
+	if kind == VIRTUAL:
+		status = struct.unpack("<BB", message)[1]
+		return {"type": "VIRTUAL", "status": VIRTUAL_STATUSES.get(status, status)}
 	return {"type": "UNKNOWN", "hex": message.hex()}
 
 
@@ -251,6 +281,18 @@ class Client:
 			self.rules = request.get("keys", {})
 		elif op == "heartbeats":
 			self.heartbeating = request["on"]
+		elif op == "type":
+			code = request["code"] if "code" in request else ecodes.ecodes[request["key"]]
+			mode = TYPE_MODES[request.get("mode", "decide")]
+			self.send(
+				typeKey(request["tag"], code, request["down"], mode),
+				{"type": "TYPE", "tag": request["tag"], "code": code, "down": request["down"], "mode": mode},
+			)
+		elif op == "latePass":
+			self.send(
+				latePass(request["kept"], request["before"]),
+				{"type": "LATE_PASS", "kept": request["kept"], "before": request["before"]},
+			)
 		elif op == "send":
 			self.send(bytes.fromhex(request["hex"]), {"type": "RAW", "hex": request["hex"]})
 		elif op == "close":
