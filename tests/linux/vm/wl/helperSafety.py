@@ -66,6 +66,9 @@ WATCHDOG = 2.0
 #: What the journal's stamps and a loaded host add to a bound the helper keeps; the X cases allow the
 #: same.
 SLACK = 0.3
+#: Seconds after the virtual keyboard's Shift is released by its end within which the desktop must
+#: stop applying it to keys from a real keyboard.
+SHIFT_CLEARS = 1.0
 #: The emergency chord's promise: keys reach the program from the keyboard itself within this.
 CHORD_BACK = 1.0
 OPENED = "/tmp/ground/virtualOpened.jsonl"
@@ -130,6 +133,21 @@ def deviceAdded(ground: "Ground", name: str, since: "Mark") -> float:
 
 def appKeyvals(records: list[dict]) -> list[str]:
 	return [r["keyval"] for r in records if r["value"] == 1]
+
+
+def logTimeline(ground: "Ground", client: "KeydClient", since: "Mark", zero: float, what: str) -> None:
+	"""Every key the test typed since, as each layer had it, in seconds from zero: the evdev recorder's
+	by the kernel's stamp and by its own reading, the client's and the program's."""
+	lines = [
+		f"evdev {r['device']}: {r['key']} {r['value']} {r['t'] - zero:+.3f} read {r['received'] - zero:+.3f}"
+		for r in ground.keys("evdev", since)
+	]
+	lines += [f"client: {r['key']} {r['value']} {r['t'] - zero:+.3f}" for r in client.keys(since)]
+	lines += [
+		f"program: {r['key']} {r['value']} {r['keyval']} {r['t'] - zero:+.3f}"
+		for r in ground.keys("app", since)
+	]
+	ground.machine.log(f"{what}, each key in seconds from it:\n" + "\n".join(lines))
 
 
 def waitForKeyFrom(ground: "Ground", key: str, since: "Mark", device: str) -> list[dict]:
@@ -682,6 +700,7 @@ def watchdogThread(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClie
 		keyboard.run({"release": "KEY_LEFTSHIFT"}, {"tap": "KEY_Q"})
 		back = waitForKeyFrom(ground, "KEY_Q", after, UHID)
 		app = ground.waitForKeys("app", typedKeys("KEY_Q"), after)
+		logTimeline(ground, client, mark, stoppedAt, "the loop stopped")
 		assert appKeyvals(app) == ["q"], app
 		assert back[0]["t"] - stoppedAt > STALL, back
 		ended = ground.waitForHelperLog("Main process exited", mark)
@@ -737,9 +756,14 @@ def stopped(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 		assert fromKeyboard, "no key reached a reader from the keyboard itself after the stop"
 		back = fromKeyboard[0]["t"]
 		app = [r for r in ground.keys("app", mark) if r["key"] == "KEY_Q"]
-		assert app and set(appKeyvals(app)) == {"q"}, app
+		logTimeline(ground, client, mark, stoppedAt, "the helper stopped")
 		for t, line in ground.helperLog(mark):
 			ground.machine.log(f"{t - stoppedAt:+.3f} s: {line}")
+		# Shift was down on the virtual keyboard when the kernel destroyed it, and GNOME may apply it to
+		# a key from the real keyboard that comes just after; it must not stay applied.
+		shifted = [r for r in app if r["value"] == 1 and r["keyval"] == "Q"]
+		assert app and set(appKeyvals(app)) <= {"q", "Q"}, app
+		assert not [r for r in shifted if r["t"] > release[1]["received"] + SHIFT_CLEARS], shifted
 		typedAfterBack = [r for r in written if r["value"] == 1 and r["t"] >= back - STREAM_GAP]
 		figures["stopped"] = {
 			"shiftReleasedAfterStop": round(release[1]["received"] - stoppedAt, 3),
@@ -748,6 +772,10 @@ def stopped(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 			"tapsTyped": len([r for r in written if r["value"] == 1]),
 			"tapsTypedFromBack": len(typedAfterBack),
 			"tapsAtProgram": len(appKeyvals(app)),
+			"shiftedAtProgram": len(shifted),
+			"lastShiftedAfterShiftReleaseRead": (
+				round(shifted[-1]["t"] - release[1]["received"], 3) if shifted else None
+			),
 		}
 		ground.machine.log(f"a stopped helper, seconds from the stop: {figures['stopped']}")
 		# Keys typed while the helper was stopped were in its hands, and died with it: none is typed
