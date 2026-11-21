@@ -182,13 +182,20 @@ def drain(device: evdev.UInput) -> list[dict]:
 	return events
 
 
-def waitOpened(node: str, seconds: float) -> dict | None:
+def isDesktop(opener: dict, reader: str | None) -> bool:
+	return reader is not None and bool(opener["comm"]) and re.search(reader, opener["comm"]) is not None
+
+
+def waitOpened(node: str, reader: str | None, seconds: float) -> dict | None:
+	"""The desktop's reader once it holds node open, or with no reader, the first process that does."""
 	deadline = time.monotonic() + seconds
 	candidates = readers()
 	while time.monotonic() < deadline:
 		for pid in candidates:
 			if holding(pid, node):
-				return {**described(pid), "t": time.monotonic()}
+				opener = {**described(pid), "t": time.monotonic()}
+				if reader is None or isDesktop(opener, reader):
+					return opener
 		time.sleep(WATCH_INTERVAL)
 	return None
 
@@ -214,14 +221,18 @@ def probe(preset: str, reader: str | None, seconds: float) -> dict:
 		written = setLights(device, bits)
 		echo = drain(device)
 	events: list[dict] = []
-	opened: dict[int, float] = {}
+	# Each reader's open came after the look before the one that found it, and before that one ended.
+	opened: dict[int, tuple[float, float]] = {}
 	deadline = created + seconds
+	lastLook = created
 	while time.monotonic() < deadline:
 		select.select([device.fd], [], [], WATCH_INTERVAL)
 		events += drain(device)
+		look = time.monotonic()
 		for pid in candidates:
 			if pid not in opened and holding(pid, node):
-				opened[pid] = time.monotonic()
+				opened[pid] = (lastLook, time.monotonic())
+		lastLook = look
 	events += drain(device)
 	final = lights(PROBE)
 	referenceAfter = lights(REFERENCE)
@@ -231,16 +242,18 @@ def probe(preset: str, reader: str | None, seconds: float) -> dict:
 		return None if t is None else round(t - created, 4)
 
 	openers = sorted(
-		({**described(pid), "t": t, "after": since(t)} for pid, t in opened.items()), key=lambda o: o["t"]
+		(
+			{**described(pid), "notBefore": early, "t": t, "notBeforeAfter": since(early), "after": since(t)}
+			for pid, (early, t) in opened.items()
+		),
+		key=lambda o: o["t"],
 	)
 	for event in [*atCreate, *echo, *events]:
 		event["after"] = since(event["t"])
 		event["readAfter"] = since(event["read"])
-	desktop = next(
-		(o for o in openers if reader is not None and o["comm"] and re.search(reader, o["comm"])), None
-	)
+	desktop = next((o for o in openers if isDesktop(o, reader)), None)
 	leds = [e for e in events if e["type"] == ecodes.EV_LED]
-	byDesktop = [e for e in leds if desktop is not None and e["t"] >= desktop["t"]]
+	byDesktop = [e for e in leds if desktop is not None and e["t"] > desktop["notBefore"]]
 	changed = 0
 	for e in byDesktop:
 		was = (bits or 0) & 1 << e["code"]
@@ -264,7 +277,7 @@ def probe(preset: str, reader: str | None, seconds: float) -> dict:
 		"openers": openers,
 		"desktop": desktop,
 		"events": events,
-		"ledsBeforeDesktop": [e for e in leds if desktop is None or e["t"] < desktop["t"]],
+		"ledsBeforeDesktop": [e for e in leds if desktop is None or e["t"] <= desktop["notBefore"]],
 		"ledsByDesktop": byDesktop,
 		"desktopChangedBits": changed,
 		"final": final,
@@ -305,7 +318,7 @@ def experiment(reader: str | None, seconds: float) -> dict:
 	presser = keyboard(PRESSER)
 	presserNode = presser.device.path
 	presser.device.close()
-	presserOpened = waitOpened(presserNode, 10)
+	presserOpened = waitOpened(presserNode, reader, 10)
 	time.sleep(PRESSER_SETTLE)
 	runs = []
 	for numLock in (False, True):

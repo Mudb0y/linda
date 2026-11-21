@@ -17,7 +17,7 @@ import shlex
 from typing import TYPE_CHECKING
 
 from ground import AT_KEYBOARD, VIRTIO_KEYBOARD, VIRTUAL_KEYBOARD, WINDOW_TITLE, Mark
-from wl.helperSafety import CAPS, appKeyvals, lights, restartHelper, typedKeys
+from wl.helperSafety import CAPS, NUM, appKeyvals, lights, restartHelper, typedKeys
 
 if TYPE_CHECKING:
 	from ground import FakeKeyboard, Ground, KeydClient
@@ -51,6 +51,33 @@ def lightProbe(ground: "Ground", desktop: str) -> None:
 				f"{run['referenceBefore']} before and {run['referenceAfter']} after"
 			)
 			assert run["desktop"] is not None, f"the desktop never opened the probe: {run['openers']}"
+
+
+def keypad(ground: "Ground") -> list[str]:
+	"""What the program had the numpad's 1 as, from QEMU's keyboard: KP_1 with Num Lock on."""
+	mark = ground.mark()
+	ground.press("kp_1")
+	return appKeyvals(ground.waitForKeys("app", typedKeys("KEY_KP1"), mark))
+
+
+def keyboardAdded(ground: "Ground", desktop: str) -> None:
+	with ground.subtest("E6: a keyboard added, and the desktop's own Num Lock"):
+		ground.press("num_lock")
+		ground.waitFor(lambda: lights(ground, VIRTIO_KEYBOARD) & NUM, "Num Lock on in the desktop")
+		before = keypad(ground)
+		ground.keyboard("Ground added keyboard")
+		ground.settle(0.5)
+		seen = {
+			"keypadBefore": before,
+			"lightsAfter": lights(ground, VIRTIO_KEYBOARD),
+			"keypadAfter": keypad(ground),
+		}
+		ground.machine.log(f"E6 {desktop} a keyboard added with Num Lock on: {json.dumps(seen)}")
+		assert before == ["KP_1"], seen
+		if seen["keypadAfter"] == ["KP_1"]:
+			ground.press("num_lock")
+		ground.waitFor(lambda: not lights(ground, VIRTIO_KEYBOARD) & NUM, "Num Lock off in the desktop")
+		assert keypad(ground) != ["KP_1"], "Num Lock would not go off"
 
 
 def allLights(ground: "Ground", virtual: bool = True) -> dict[str, int]:
@@ -214,6 +241,7 @@ def run(ground: "Ground") -> None:
 	ground.activate(WINDOW_TITLE)
 	ground.waitForHelper()
 	lightProbe(ground, "sway")
+	keyboardAdded(ground, "sway")
 	keyboard = ground.uhidKeyboard(UHID)
 	client = ground.keydClient("main")
 	assert client.connect()["welcome"]
