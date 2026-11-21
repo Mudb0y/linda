@@ -422,6 +422,8 @@ class _Entry:
 	tag: int | None = None
 	#: Typed with TYPE_INJECT: in line already passed, never asked about and never unanswered.
 	injected: bool = False
+	#: A press made up after a loss of events, of a key found down.
+	madeUp: bool = False
 	#: (device, code) of each kept press that LATE_PASS puts out just before this one, in the order the
 	#: LATE_PASSes came.
 	lateKept: list[tuple[int, int]] = field(default_factory=list)
@@ -493,6 +495,9 @@ class StandIn:
 		self._kept: set[tuple[int, int]] = set()
 		#: (device, code) of each key whose press went out passed and whose release has not.
 		self._passedOut: set[tuple[int, int]] = set()
+		#: (device, code) of each made-up modifier passed and not yet on the virtual keyboard, in the order
+		#: told: they go there just before the next press that does.
+		self._heldBack: list[tuple[int, int]] = []
 		self._virtualDown: dict[int, int] = {}
 		self._lastHeard = 0.0
 		#: (reading of the first press, reading of the last) of the run of unanswered presses.
@@ -736,7 +741,16 @@ class StandIn:
 		now = time.monotonic()
 		if value != REPEAT:
 			self._line.append(
-				_Entry(self._seq, evdev, value == PRESS, now, self.verdictTimeout, device=device, tag=tag)
+				_Entry(
+					self._seq,
+					evdev,
+					value == PRESS,
+					now,
+					self.verdictTimeout,
+					device=device,
+					tag=tag,
+					madeUp=value == PRESS and bool(flags & KEY_SYNTHETIC),
+				)
 			)
 		self._tell(self._seq, device, evdev, value, flags)
 		self._advance(now)
@@ -809,7 +823,7 @@ class StandIn:
 				self._kept.discard(late)
 				self._passedOut.add(late)
 				self._note("late pass out", head.seq)
-				self._virtual(late[1], True)
+				self._pressVirtual(late[1])
 		if head.verdict:
 			self._kept.add(held)
 			self._passedOut.discard(held)
@@ -818,17 +832,23 @@ class StandIn:
 			else:
 				self._keep(head.code, True)
 		elif typed and self._sysrqRefuses(head.code):
-			# Keys ahead of it changed what is down since its TYPE came.
-			self._typedDown.discard(head.code)
+			# Keys ahead of it changed what is down since its TYPE came. It stays typed down, as the
+			# client typed it, so that its release finds it, and is answered at its own turn.
 			self._sendTyped(head, TYPED_REFUSED_KEY)
-		elif typed and held in self._passedOut:
-			# Typed down again while down: the virtual keyboard has it down already, as the kernel's input
-			# core drops a press of a key that is down.
-			self._sendTyped(head, TYPED_OUT)
+		elif head.madeUp and head.code in READER_MODIFIERS:
+			# To a program it is a key like any other, which would come typed late, under whatever
+			# modifiers were found with it; its release goes nowhere either.
+			self._kept.discard(held)
+		elif head.madeUp and head.code != CAPS_LOCK:
+			# Alone it would be a lone tap, Alt moving the focus to the menu bar, where the key typed with
+			# it was lost; Caps Lock's press is what toggles the lock.
+			self._kept.discard(held)
+			self._passedOut.add(held)
+			self._heldBack.append(held)
 		else:
 			self._kept.discard(held)
 			self._passedOut.add(held)
-			self._virtual(head.code, True)
+			self._pressVirtual(head.code)
 			if typed:
 				self._sendTyped(head, TYPED_OUT)
 
@@ -841,14 +861,25 @@ class StandIn:
 				self._sendTyped(entry, TYPED_KEPT)
 			else:
 				self._keep(entry.code, False)
-		elif typed and held not in self._passedOut:
-			# Its press was refused as it was to go out.
-			self._sendTyped(entry, TYPED_NOT_DOWN)
-		else:
+		elif held in self._passedOut:
 			self._passedOut.discard(held)
-			self._virtual(entry.code, False)
+			if held in self._heldBack:
+				# It never reached the virtual keyboard, so neither does its release.
+				self._heldBack.remove(held)
+			else:
+				self._virtual(entry.code, False)
 			if typed:
 				self._sendTyped(entry, TYPED_OUT)
+		elif typed:
+			# Its press was refused as it was to go out.
+			self._sendTyped(entry, TYPED_NOT_DOWN)
+
+	def _pressVirtual(self, evdev: int) -> None:
+		"""A press on the virtual keyboard, after the modifiers held back, which it goes out under."""
+		heldBack, self._heldBack = self._heldBack, []
+		for _device, modifier in heldBack:
+			self._virtual(modifier, True)
+		self._virtual(evdev, True)
 
 	def _virtual(self, evdev: int, down: bool) -> None:
 		holders = self._virtualDown.get(evdev, 0)
@@ -895,6 +926,8 @@ class StandIn:
 					# Passed on, as no verdict is coming.
 					entry.verdict = False
 			self._advance(time.monotonic())
+		# Never on the virtual keyboard, they need no release, and must not go out as taps.
+		self._heldBack.clear()
 		told = reason in (RELEASED_STOPPED, RELEASED_EMERGENCY, RELEASED_BACKGROUND)
 		for name in taps:
 			evdev = name if isinstance(name, int) else code(name)
@@ -1011,6 +1044,10 @@ class StandIn:
 			return
 		self._client = caller
 		self.granted = asked & self.features
+		# Numbered afresh for each client, and each starts with a full bucket, as the helper's Client.
+		self._seq = 0
+		self._typedTokens = float(TYPED_BURST)
+		self._typedFilled = time.monotonic()
 		self._told.clear()
 		self._releaseOf.clear()
 		self._pressOf.clear()
@@ -1082,6 +1119,10 @@ class StandIn:
 			)
 		):
 			_kind, seq, value = struct.unpack("<BQB", data)
+			if seq == 0 or seq > self._seq:
+				# A verdict on a key never sent this client.
+				self._malformed(data)
+				return
 			self.given.setdefault(seq, []).append(value)
 			for entry in self._line:
 				# A press waits for its verdict until it is taken out of line: at its bound, or later,
@@ -1137,34 +1178,45 @@ class StandIn:
 		self._sendClient(struct.pack("<BIQB", TYPED, tag, seq, outcome))
 
 	def _sysrqRefuses(self, evdev: int) -> bool:
-		"""Whether the SysRq rules refuse a typed press of evdev now."""
+		"""Whether the SysRq rules refuse a typed press of evdev now. An Alt held back counts as down, since
+		it goes out just before the next press does."""
 		down = self._virtualDown.keys()
-		return (
-			self._sysrqActive or (evdev == SYSRQ and bool(ALTS & down)) or (evdev in ALTS and SYSRQ in down)
-		)
+		alt = bool(ALTS & down) or any(modifier in ALTS for _device, modifier in self._heldBack)
+		return self._sysrqActive or (evdev == SYSRQ and alt) or (evdev in ALTS and SYSRQ in down)
 
 	def _typeRefusal(self, evdev: int, down: bool, now: float) -> int | None:
+		"""Why a TYPE is refused as it comes, in the order the helper's type_key asks, or None. A release is
+		only ever refused for the state or for a key not typed down: refused for a full line or an empty
+		bucket, it would leave its key down on the virtual keyboard, repeating."""
 		if not self.capturing or self._client is None:
 			return TYPED_REFUSED_STATE
-		if evdev not in typableCodes() or (down and self._sysrqRefuses(evdev)):
+		if not down:
+			return None if evdev in self._typedDown else TYPED_NOT_DOWN
+		if evdev not in typableCodes() or evdev in self._typedDown or self._sysrqRefuses(evdev):
 			return TYPED_REFUSED_KEY
-		if not down and evdev not in self._typedDown:
-			return TYPED_NOT_DOWN
+		if sum(1 for entry in self._line if entry.tag is not None) >= TYPED_WAITING_LIMIT:
+			return TYPED_REFUSED_FULL
+		return None
+
+	def _takeTyped(self, now: float) -> bool:
+		"""Takes a key out of the bucket, if one is there."""
 		self._typedTokens = min(
 			float(TYPED_BURST), self._typedTokens + (now - self._typedFilled) * TYPED_PER_SECOND
 		)
 		self._typedFilled = now
-		waiting = sum(1 for entry in self._line if entry.tag is not None)
-		if waiting >= TYPED_WAITING_LIMIT or self._typedTokens < 1:
-			return TYPED_REFUSED_FULL
-		return None
+		if self._typedTokens < 1:
+			return False
+		self._typedTokens -= 1
+		return True
 
 	def _type(self, tag: int, evdev: int, down: bool, mode: int, now: float) -> None:
 		refusal = self._typeRefusal(evdev, down, now)
+		# A release counts toward the rate, but is never refused by it.
+		if refusal is None and not self._takeTyped(now) and down:
+			refusal = TYPED_REFUSED_FULL
 		if refusal is not None:
 			self._sendTyped(None, refusal, tag=tag)
 			return
-		self._typedTokens -= 1
 		if down:
 			self._typedDown.add(evdev)
 		else:

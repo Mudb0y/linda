@@ -29,6 +29,7 @@ from keydStandIn import (
 	FEATURE_WAIT,
 	GOODBYE,
 	GOODBYE_MALFORMED,
+	GOODBYE_UNANSWERED,
 	HELLO,
 	KEY,
 	KEY_ASK,
@@ -60,6 +61,7 @@ from keydStandIn import (
 	VERDICT,
 	VERDICT_KEEP,
 	VERDICT_PASS,
+	VERDICT_WAIT,
 	WELCOME,
 	NullSink,
 	StandIn,
@@ -388,8 +390,13 @@ def test_typingRefusesKeysByTheRules(socketPath: str, served: Served):
 	for tag, evdev in enumerate((POWER, SLEEP, POWER2, 205, 0x198, 0x200), 1):
 		client.type(tag, evdev, True)
 	client.type(10, B, False)
-	client.waitFor(lambda: len(client.typed()) == 7)
-	assert client.typed() == [(tag, 0, TYPED_REFUSED_KEY) for tag in range(1, 7)] + [(10, 0, TYPED_NOT_DOWN)]
+	# A release is not of a key typed down, whatever its code, as the helper's type_key asks.
+	client.type(11, POWER, False)
+	client.waitFor(lambda: len(client.typed()) == 8)
+	assert client.typed() == [(tag, 0, TYPED_REFUSED_KEY) for tag in range(1, 7)] + [
+		(10, 0, TYPED_NOT_DOWN),
+		(11, 0, TYPED_NOT_DOWN),
+	]
 	assert sink.sent == [] and not client.closed.is_set()
 	assert (
 		keydStandIn.typableCodes() >= {A, SHIFT, ALTGR, INSERT, TAB, 82}
@@ -496,8 +503,249 @@ def test_typingRefusesKeysTooFast(socketPath: str, served: Served):
 	outcomes = [outcome for _tag, _seq, outcome in client.typed()]
 	out = outcomes.count(TYPED_OUT)
 	assert outcomes.count(TYPED_REFUSED_FULL) > 0
-	assert TYPED_BURST <= out <= TYPED_BURST + took * TYPED_PER_SECOND + 1, (out, took)
+	# Each key earned lets a press out, and its release goes out with or without one.
+	assert TYPED_BURST <= out <= TYPED_BURST + 2 * (took * TYPED_PER_SECOND + 1), (out, took)
 	assert set(outcomes) <= {TYPED_OUT, TYPED_REFUSED_FULL, TYPED_NOT_DOWN}
+
+
+def test_aTypedPressOfAKeyTypedDownIsRefused(socketPath: str, served: Served):
+	"""A key goes down once, and its one release brings it up."""
+	sink = NullSink()
+	_keyboard, client = served(socketPath, sink)
+	client.type(1, A, True)
+	client.type(2, A, True)
+	client.type(3, A, True, TYPE_DECIDE)
+	client.type(4, A, False)
+	client.type(5, A, False)
+	client.waitFor(lambda: len(client.typed()) == 5)
+	assert [client.outcome(tag) for tag in range(1, 6)] == [
+		TYPED_OUT,
+		TYPED_REFUSED_KEY,
+		TYPED_REFUSED_KEY,
+		TYPED_OUT,
+		TYPED_NOT_DOWN,
+	]
+	assert sink.passed() == [(A, True), (A, False)]
+	assert not client.closed.is_set()
+
+
+def test_aTypedKeyAndTheSameKeyHeldAreOneKey(socketPath: str, served: Served):
+	sink = NullSink()
+	keyboard, client = served(socketPath, sink)
+	keyboard.down("a")
+	keyboard.waitFor(lambda: sink.passed() == [(A, True)])
+	client.type(1, A, True)
+	client.waitFor(lambda: client.outcome(1) == TYPED_OUT)
+	keyboard.up("a")
+	time.sleep(0.2)
+	# Up on the virtual keyboard only once both are let go of.
+	assert sink.passed() == [(A, True)]
+	client.type(2, A, False)
+	client.waitFor(lambda: client.outcome(2) == TYPED_OUT)
+	assert sink.passed() == [(A, True), (A, False)]
+
+
+def test_aTypedModifiersReleaseKeepsItsPlace(socketPath: str, served: Served):
+	sink = NullSink()
+	keyboard, client = served(socketPath, sink, decide=holding(X))
+	client.type(1, SHIFT, True)
+	client.waitFor(lambda: client.outcome(1) == TYPED_OUT)
+	keyboard.down("x")
+	client.waitFor(lambda: client.told())
+	client.type(2, SHIFT, False)
+	time.sleep(0.2)
+	assert client.outcome(2) is None and sink.passed() == [(SHIFT, True)]
+	client.verdict(client.pressSeq(X), VERDICT_PASS)
+	client.waitFor(lambda: client.outcome(2) == TYPED_OUT)
+	keyboard.up("x")
+	keyboard.waitFor(lambda: len(sink.passed()) == 4)
+	assert sink.passed() == [(SHIFT, True), (X, True), (SHIFT, False), (X, False)]
+
+
+def test_aTypedReleaseIsNeverRefusedForAFullLine(socketPath: str, served: Served):
+	"""It counts toward the line, so the press after it is refused, but it is never refused itself: the
+	key would stay down on the virtual keyboard, repeating."""
+	sink = NullSink()
+	keyboard, client = served(socketPath, sink, decide=holding(X))
+	keyboard.down("x")
+	client.waitFor(lambda: client.told())
+	client.type(1, B, True)
+	for tag in range(2, TYPED_WAITING_LIMIT):
+		client.type(tag, A, tag % 2 == 0)
+	client.type(TYPED_WAITING_LIMIT, C, True)
+	# The line is full: a press is refused, the releases of B and C are not, and the press after them is.
+	client.type(100, Q, True)
+	client.type(101, B, False)
+	client.type(102, C, False)
+	client.type(103, W, True)
+	client.waitFor(lambda: len(client.typed()) == 2)
+	time.sleep(0.2)
+	assert client.typed() == [(100, 0, TYPED_REFUSED_FULL), (103, 0, TYPED_REFUSED_FULL)]
+	client.verdict(client.pressSeq(X), VERDICT_PASS)
+	client.waitFor(lambda: len(client.typed()) == TYPED_WAITING_LIMIT + 4)
+	assert client.outcome(101) == client.outcome(102) == TYPED_OUT
+	keyboard.up("x")
+	keyboard.waitFor(lambda: (X, False) in sink.passed())
+	assert (B, False) in sink.passed() and (C, False) in sink.passed()
+
+
+def test_aTypedReleaseIsNeverRefusedForAnEmptyBucket(
+	socketPath: str, served: Served, monkeypatch: pytest.MonkeyPatch
+):
+	# No key earned back, so that the bucket stays empty however long the test takes.
+	monkeypatch.setattr(keydStandIn, "TYPED_PER_SECOND", 0)
+	sink = NullSink()
+	_keyboard, client = served(socketPath, sink)
+	client.type(1, SHIFT, True)
+	# The rest of the burst, ending with A down.
+	for tag in range(2, TYPED_BURST + 1):
+		client.type(tag, A, tag % 2 == 0)
+	client.waitFor(lambda: len(client.typed()) == TYPED_BURST)
+	assert {outcome for _tag, _seq, outcome in client.typed()} == {TYPED_OUT}
+	client.type(500, B, True)
+	client.type(501, A, False)
+	client.type(502, SHIFT, False)
+	client.type(503, A, True)
+	client.waitFor(lambda: len(client.typed()) == TYPED_BURST + 4)
+	assert [client.outcome(tag) for tag in (500, 501, 502, 503)] == [
+		TYPED_REFUSED_FULL,
+		TYPED_OUT,
+		TYPED_OUT,
+		TYPED_REFUSED_FULL,
+	]
+	assert sink.passed()[-2:] == [(A, False), (SHIFT, False)]
+
+
+def reconnect(keyboard: StandIn, client: Client, served: Served) -> Client:
+	"""client gone, and another admitted and capturing in its place."""
+	client.close()
+	keyboard.waitFor(lambda: not keyboard.admitted.is_set())
+	again = Client(keyboard.path, ALL)
+	served.pairs = [(k, again if k is keyboard else c) for k, c in served.pairs]
+	assert again.held.wait(5)
+	return again
+
+
+def test_eachClientStartsWithAFullBucket(socketPath: str, served: Served, monkeypatch: pytest.MonkeyPatch):
+	monkeypatch.setattr(keydStandIn, "TYPED_PER_SECOND", 0)
+	sink = NullSink()
+	keyboard, client = served(socketPath, sink)
+	for tag in range(TYPED_BURST + 1):
+		client.type(tag, A, tag % 2 == 0)
+	client.waitFor(lambda: len(client.typed()) == TYPED_BURST + 1)
+	assert client.outcome(TYPED_BURST) == TYPED_REFUSED_FULL
+	again = reconnect(keyboard, client, served)
+	again.type(1, A, True)
+	again.type(2, A, False)
+	again.waitFor(lambda: len(again.typed()) == 2)
+	assert again.typed() == [(1, 0, TYPED_OUT), (2, 0, TYPED_OUT)]
+
+
+def test_aTypedPressRefusedAsItWentOutIsStillTypedDown(socketPath: str, served: Served):
+	"""The client typed it down: a second press is refused, and its release is taken and answered at its
+	own turn as one whose press was refused as it went out."""
+	sink = NullSink()
+	keyboard, client = served(socketPath, sink, decide=holding(X))
+	keyboard.down("x")
+	client.waitFor(lambda: client.told())
+	keyboard.down("alt")
+	client.type(1, SYSRQ, True)
+	time.sleep(0.1)
+	client.verdict(client.pressSeq(X), VERDICT_PASS)
+	client.waitFor(lambda: client.outcome(1) is not None)
+	keyboard.up("alt")
+	keyboard.up("x")
+	keyboard.waitFor(lambda: (ALT, False) in sink.passed())
+	client.type(2, SYSRQ, True)
+	client.type(3, SYSRQ, False)
+	client.type(4, SYSRQ, True)
+	client.type(5, SYSRQ, False)
+	client.waitFor(lambda: len(client.typed()) == 5)
+	assert [client.outcome(tag) for tag in range(1, 6)] == [
+		TYPED_REFUSED_KEY,
+		TYPED_REFUSED_KEY,
+		TYPED_NOT_DOWN,
+		TYPED_OUT,
+		TYPED_OUT,
+	]
+	assert [(evdev, down) for evdev, down in sink.passed() if evdev == SYSRQ] == [
+		(SYSRQ, True),
+		(SYSRQ, False),
+	]
+
+
+def test_anAltHeldBackRefusesATypedSysRq(socketPath: str, served: Served):
+	"""A modifier found down after a loss of events and passed goes on the virtual keyboard only just
+	before the next press does, and an Alt so held back counts as down for SysRq's rules."""
+	sink = NullSink()
+	keyboard, client = served(socketPath, sink)
+	keyboard.madeUpPress("alt")
+	keyboard.waitFor(lambda: len(keyboard.verdicts) == 1)
+	time.sleep(0.1)
+	assert sink.passed() == []
+	client.type(1, SYSRQ, True)
+	client.waitFor(lambda: client.outcome(1) is not None)
+	assert client.outcome(1) == TYPED_REFUSED_KEY
+	client.type(2, A, True)
+	client.waitFor(lambda: client.outcome(2) == TYPED_OUT)
+	assert sink.passed() == [(ALT, True), (A, True)]
+	client.type(3, A, False)
+	client.waitFor(lambda: client.outcome(3) == TYPED_OUT)
+	keyboard.up("alt")
+	keyboard.waitFor(lambda: len(sink.passed()) == 4)
+	assert sink.passed()[2:] == [(A, False), (ALT, False)]
+
+
+def test_aMadeUpModifierLetGoOfBeforeAnyPressNeverGoesOut(socketPath: str, served: Served):
+	sink = NullSink()
+	keyboard, _client = served(socketPath, sink)
+	keyboard.madeUpPress("alt")
+	keyboard.madeUpPress("Insert")
+	keyboard.waitFor(lambda: len(keyboard.verdicts) == 2)
+	keyboard.up("alt")
+	keyboard.press("b")
+	keyboard.up("Insert")
+	keyboard.waitFor(lambda: len(sink.passed()) == 2)
+	time.sleep(0.2)
+	# Neither the lone Alt nor the Insert, which would come to a program typed late.
+	assert sink.passed() == [(code("b"), True), (code("b"), False)]
+
+
+def test_keysAreNumberedFromOneForEachClient(socketPath: str, served: Served):
+	sink = NullSink()
+	keyboard, client = served(socketPath, sink)
+	keyboard.press("a")
+	client.waitFor(lambda: len(client.told()) == 2)
+	assert [seq for seq, *_rest in client.told()] == [1, 2]
+	again = reconnect(keyboard, client, served)
+	keyboard.press("b")
+	again.waitFor(lambda: len(again.told()) == 2)
+	assert [seq for seq, *_rest in again.told()] == [1, 2]
+
+
+@pytest.mark.parametrize("value", [VERDICT_PASS, VERDICT_KEEP, VERDICT_WAIT])
+@pytest.mark.parametrize("named", ["zero", "never sent"])
+def test_aVerdictOnAKeyNeverSentEndsTheConnection(socketPath: str, served: Served, value: int, named: str):
+	sink = NullSink()
+	keyboard, client = served(socketPath, sink)
+	keyboard.press("a")
+	client.waitFor(lambda: len(client.told()) == 2)
+	client.verdict(0 if named == "zero" else 3, value)
+	client.waitFor(lambda: client.closed.is_set())
+	assert client.goodbye() == GOODBYE_MALFORMED
+
+
+def test_anUnansweredTypedPressCountsTowardTheSpan(socketPath: str, served: Served):
+	sink = NullSink()
+	_keyboard, client = served(
+		socketPath, sink, decide=lambda _evdev, _flags: None, verdictTimeout=0.1, unansweredSpan=0.5
+	)
+	for tag, name in enumerate("qwertyuiop"):
+		client.type(2 * tag, code(name), True, TYPE_DECIDE)
+		client.type(2 * tag + 1, code(name), False, TYPE_DECIDE)
+		time.sleep(0.05)
+	client.waitFor(lambda: client.closed.is_set())
+	assert client.goodbye() == GOODBYE_UNANSWERED
 
 
 @pytest.mark.parametrize(
