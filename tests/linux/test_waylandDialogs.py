@@ -184,6 +184,7 @@ def test_onXRaiseAndSetFocusDoWhatTheyDid(tmp_path: Path) -> None:
 			linda.waitForState(lambda state: state["shown"] and not state["active"], SETTINGS)
 			raised = linda.command("raise", SETTINGS)
 			assert linda.waitFor("upstreamRaise", since=raised)["title"].startswith(SETTINGS)
+			linda.waitForState(lambda state: state["active"], SETTINGS)
 			linda.command("settings")
 			time.sleep(ACTIVATION_BOUND)
 			assert not linda.records("presentAgain", since=opened)
