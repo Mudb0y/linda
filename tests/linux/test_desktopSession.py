@@ -278,9 +278,16 @@ def test_chordWithANameTheStandInLacks(desktop: DesktopSession, standIn: StandIn
 @wayland
 def test_typedTextIsTypedInThePlLayout(desktop: DesktopSession, standIn: StandIn | None):
 	"""Capitals, AltGr's letters and the punctuation on Shift, as the compositor's pl keymap gives them."""
-	text = "Źdźbło: ą, Ę? (x_y)"
+	text = "Źdźbło: ą, Ę? (x_y) 2+2*$"
 	assert _typeIntoTheGtkEntry(desktop, text) == text
 	assert not desktopSession.capsLockIsOn()
+	if standIn is not None:
+		expected = []
+		for character in text:
+			codes = desktopSession.characterCodes(character)
+			expected += [(code, True) for code in codes] + [(code, False) for code in reversed(codes)]
+		# After Alt+N's four.
+		assert _putOut(standIn)[4:] == expected
 
 
 @pytest.mark.parametrize("standIn", [False], ids=["display"], indirect=True)
