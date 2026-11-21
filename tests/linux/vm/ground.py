@@ -1,10 +1,14 @@
 """What a key capture test in cases/ is written with: pressing keys, hearing Linda and reading the
-recorders, in the guest guest.nix describes.
+recorders, in the guest guest.nix describes, or in a Wayland guest.
 
 A case is a file in cases/ with a function run(ground), which default.nix makes a flake check of its
 own (with cases/NAME.nix, if there is one, as a NixOS module added to its guest); it runs in the NixOS test driver, on the host, and reaches the guest through the driver's
 machine. Everything that happens in the guest is stamped with the guest's CLOCK_MONOTONIC, which
 Ground.mark reads, so a test asks for what happened after a mark.
+
+A case whose name begins wlGnome, wlSway or wlPlasma boots that desktop's guest instead of the X one
+(default.nix). Such a guest says how to wait for it in /etc/ground/guest.json, as GUEST describes, and
+the X guest has no such file: without it everything here is as the X session needs it.
 
 Keys come two ways. Ground.press sends QEMU's own key events, which reach the guest kernel as the
 emulated keyboard's; names are QEMU's sendkey names, as "insert-t", "f10", "ret". Ground.keyboard
@@ -21,7 +25,8 @@ hooks give the package, and whose records synthDrivers/_transcriptRecords.py rea
 
 The recorders say what reached each layer, key by key: "evdev" what the kernel gave an ordinary
 reader of each keyboard node (what the X server's libinput reads), "x" what the X server received,
-"app" what reached the test window. Each record is a dict as guest/keyRecorder.py describes.
+"app" what reached the test window, and "app4" what reached the GTK 4 one. Each record is a dict as
+guest/keyRecorder.py describes. A Wayland guest has no "x" layer: no client there sees every key.
 """
 
 import importlib.util
@@ -41,7 +46,16 @@ LOGS = {
 	"evdev": f"{GROUND}/evdev.jsonl",
 	"x": f"{GROUND}/x.jsonl",
 	"app": f"{GROUND}/app.jsonl",
+	"app4": f"{GROUND}/app4.jsonl",
 }
+#: How a Wayland guest is waited for, a JSON object: "kind", the desktop, which guest/groundFocus.py
+#: drives; "socket", the compositor's socket; "started", a shell command run as root that succeeds
+#: once the desktop has finished starting; "ready", a command run in the session that succeeds once
+#: the desktop takes keys for its windows; "devices", a command run as root that prints a JSON list
+#: of the names of the input devices the compositor has.
+GUEST = "/etc/ground/guest.json"
+#: Seconds a Wayland guest may take from its display manager to each step of starting.
+WAYLAND_START_TIMEOUT = 300
 LINDA_DIRECTORY = f"{GROUND}/linda"
 #: Reads of a file made before one that is not garbled is given up on.
 READ_ATTEMPTS = 3
@@ -121,9 +135,10 @@ class FakeKeyboard:
 			)
 		ready = shlex.quote(f"{GROUND}/keyboards/{name}.ready")
 		ground.waitFor(lambda: ground.machine.execute(f"test -e {ready}")[0] == 0, f"the keyboard {name}")
-		# A key sent before the X server has the device is lost (Documentation/input/uinput.rst).
+		# A key sent before the X server, or the compositor, has the device is lost
+		# (Documentation/input/uinput.rst).
 		ground.waitForDevice("evdev", name)
-		ground.waitForDevice("x", name)
+		ground.waitForDisplayDevice(name)
 
 	def run(self, *steps: dict) -> list[dict]:
 		"""Run steps in the guest, at the guest's own timing; answers the events written, with times."""
@@ -146,7 +161,7 @@ class FakeKeyboard:
 	def vanish(self) -> None:
 		"""Destroy the keyboard at once, with whatever keys it holds down."""
 		self.run({"vanish": True})
-		self.ground.waitForDevice("x", self.name, change="removed")
+		self.ground.waitForDisplayDevice(self.name, change="removed")
 
 	def records(self, since: "Mark | None" = None) -> list[dict]:
 		"""What the keyboard wrote, and for a uhid one what the kernel set its lights to."""
@@ -277,28 +292,71 @@ class Ground:
 		self.transcriptRecords = _loadFile("_transcriptRecords", transcriptRecords)
 		self.lindaStarted = False
 		self.keyboards: list[FakeKeyboard] = []
+		#: GUEST's contents in a Wayland guest, None in the X one.
+		self.guest: dict | None = None
+		#: Seconds on the host's clock from starting the guest to each step of its start, by name.
+		self.bootTimes: dict[str, float] = {}
 
 	# The guest and its session.
 
 	def boot(self) -> None:
-		"""Start the guest and wait until the X session runs with marco and both recorders listen."""
+		"""Start the guest and wait until its session runs and the recorders listen: in the X guest
+		until marco manages the screen, in a Wayland guest until its desktop is ready as GUEST says."""
 		machine = self.machine
+		started = time.monotonic()
 		machine.start()
 		machine.wait_for_unit("ground-record-evdev.service")
 		machine.wait_for_unit("display-manager.service")
-		self.waitFor(
-			lambda: self.machine.execute('ground-session call \'{"op": "ping"}\'')[0] == 0, "the session", 120
-		)
-		self.waitFor(
-			lambda: "window id" in self.run(["xprop", "-root", "_NET_SUPPORTING_WM_CHECK"]).stdout,
-			"marco to manage the screen",
-			60,
-		)
-		self.start("recorder-x", ["ground-record", "x", LOGS["x"]])
-		self.waitFor(lambda: any(r["kind"] == "ready" for r in self.records("x")), "the X recorder", 30)
+		status, text = machine.execute(f"cat {GUEST}")
+		self.guest = json.loads(text) if status == 0 else None
+		if self.guest is None:
+			self.waitFor(
+				lambda: self.machine.execute('ground-session call \'{"op": "ping"}\'')[0] == 0,
+				"the session",
+				120,
+			)
+			self.waitFor(
+				lambda: "window id" in self.run(["xprop", "-root", "_NET_SUPPORTING_WM_CHECK"]).stdout,
+				"marco to manage the screen",
+				60,
+			)
+			self.start("recorder-x", ["ground-record", "x", LOGS["x"]])
+			self.waitFor(lambda: any(r["kind"] == "ready" for r in self.records("x")), "the X recorder", 30)
+		else:
+			self._bootWayland(started)
 		self.waitFor(
 			lambda: any(r["kind"] == "ready" for r in self.records("evdev")), "the evdev recorder", 30
 		)
+		self.bootTimes["recorders"] = time.monotonic() - started
+
+	def _bootWayland(self, started: float) -> None:
+		guest = self.guest
+		steps = (
+			(
+				"socket",
+				f"the compositor's socket {guest['socket']}",
+				lambda: self.machine.execute(f"test -S {shlex.quote(guest['socket'])}")[0] == 0,
+			),
+			(
+				"session",
+				"the session runner",
+				lambda: self.machine.execute('ground-session call \'{"op": "ping"}\'')[0] == 0,
+			),
+			(
+				"started",
+				f"the {guest['kind']} desktop to finish starting",
+				lambda: self.machine.execute(guest["started"])[0] == 0,
+			),
+			(
+				"ready",
+				f"the {guest['kind']} desktop to be ready",
+				lambda: self.run(guest["ready"]).returncode == 0,
+			),
+		)
+		for name, what, condition in steps:
+			self.waitFor(condition, what, WAYLAND_START_TIMEOUT)
+			self.bootTimes[name] = time.monotonic() - started
+			self.machine.log(f"{what}: {self.bootTimes[name]:.1f} s after the guest was started")
 
 	def shell(self, command: str) -> str:
 		"""Run command in the guest as root and answer its output, failing when it fails, without the
@@ -384,19 +442,76 @@ class Ground:
 
 	# The test window.
 
-	def openWindow(self, title: str = WINDOW_TITLE, *, name: str = "window", grab: bool = False) -> None:
-		"""Start a test window, guest/testWindow.py, as the session's program name, and wait until its
-		text field has the focus, and with grab, until it has taken the keyboard for itself."""
+	def openWindow(
+		self, title: str = WINDOW_TITLE, *, name: str = "window", grab: bool = False, gtk4: bool = False
+	) -> None:
+		"""Start a test window, guest/testWindow.py, or with gtk4 guest/testWindow4.py, which records to
+		"app4", as the session's program name, and wait until its text field has the focus, and with
+		grab, until it has taken the keyboard for itself. In a Wayland guest the window is the
+		compositor's own client, never Xwayland's."""
 		mark = Mark(0, self.now())
-		self.start(name, ["ground-window", LOGS["app"], title, *(["grab"] if grab else [])])
+		log = "app4" if gtk4 else "app"
+		program = ["ground-window4", LOGS[log], title] if gtk4 else ["ground-window", LOGS[log], title]
+		self.start(
+			name,
+			[*program, *(["grab"] if grab else [])],
+			env={"GDK_BACKEND": "wayland"} if self.guest is not None else None,
+		)
 		self.waitFor(
-			lambda: any(r["kind"] == "ready" for r in self.records("app", mark)), "the test window", 30
+			lambda: any(r["kind"] == "ready" for r in self.records(log, mark)), "the test window", 30
 		)
 		if grab:
 			grabbed = self.waitFor(
 				lambda: [r for r in self.records("app", mark) if r["kind"] == "grab"], "the keyboard grab"
 			)
 			assert grabbed[0]["status"] == "success", grabbed
+
+	# The focus in a Wayland guest.
+
+	def focus(self, op: str, *args: str) -> Any:
+		"""Ask the guest's compositor driver, guest/groundFocus.py, in the session."""
+		answer = self.run(["ground-focus", op, *args])
+		assert answer.returncode in (0, 1) and answer.stdout, answer
+		return json.loads(answer.stdout)
+
+	def activeWindow(self) -> dict | None:
+		"""The top-level window AT-SPI says is active, as groundFocus.py lists it, or None."""
+		return self.focus("active")
+
+	def altTab(self, tabs: int = 1) -> None:
+		"""Alt+Tab on the emulated keyboard, with Tab pressed tabs times while Alt is held."""
+		self.qemuKey("alt", True)
+		time.sleep(0.1)
+		for _tab in range(tabs):
+			self.machine.send_key("tab", log=False)
+			time.sleep(0.15)
+		self.qemuKey("alt", False)
+
+	def activate(self, title: str, timeout: float = 5) -> dict:
+		"""Make the window titled title the active one, as AT-SPI says, and answer it: by the
+		compositor's driver where it can, and otherwise with Alt+Tab, each time one Tab more, which
+		reaches every window once whatever the order the desktop keeps them in."""
+		if self.focus("activate", title)["activated"]:
+			return self.waitFor(
+				lambda: (w := self.activeWindow()) and w["title"] == title and w,
+				f"{title} to be active",
+				timeout,
+			)
+		count = len(self.focus("windows"))
+		for tabs in range(count):
+			active = self.activeWindow()
+			if active is not None and active["title"] == title:
+				return active
+			self.altTab(tabs + 1)
+			try:
+				return self.waitFor(
+					lambda: (w := self.activeWindow()) and w["title"] == title and w,
+					f"{title} to be active",
+					timeout if tabs + 1 == count else 1.5,
+				)
+			except AssertionError:
+				continue
+		raise AssertionError(f"Alt+Tab never made {title} active; AT-SPI lists {self.focus('windows')}")
 
 	# Linda.
 
@@ -549,11 +664,11 @@ class Ground:
 	def plugUsbKeyboard(self, id: str = "usbkbd") -> None:
 		"""Plug a USB keyboard into the guest, which then has QEMU's keys, until it is unplugged."""
 		self.machine.send_monitor_command(f"device_add usb-kbd,id={id},bus=usb-bus.0")
-		self.waitForDevice("x", USB_KEYBOARD)
+		self.waitForDisplayDevice(USB_KEYBOARD)
 
 	def unplugUsbKeyboard(self, id: str = "usbkbd") -> None:
 		self.machine.send_monitor_command(f"device_del {id}")
-		self.waitForDevice("x", USB_KEYBOARD, change="removed")
+		self.waitForDisplayDevice(USB_KEYBOARD, change="removed")
 
 	def uhidKeyboard(self, name: str) -> FakeKeyboard:
 		"""Make a keyboard through the guest's uhid, which the key capture helper takes."""
@@ -616,7 +731,7 @@ class Ground:
 	# The recorders.
 
 	def records(self, source: str, since: Mark | None = None) -> list[dict]:
-		"""Every record of source ("evdev", "x" or "app") read after since."""
+		"""Every record of source ("evdev", "x", "app" or "app4") read after since."""
 		records = self.readJsonLines(LOGS[source])
 		return [r for r in records if since is None or r["received"] >= since.t]
 
@@ -661,6 +776,22 @@ class Ground:
 			timeout,
 		)
 
+	def displayDevices(self) -> list[str]:
+		"""The names of the input devices a Wayland guest's compositor has open."""
+		return json.loads(self.shell(shlex.join(self.guest["devices"])))
+
+	def waitForDisplayDevice(self, name: str, *, change: str = "added", timeout: float = 10) -> None:
+		"""Wait until the X server, or in a Wayland guest the compositor, has the device, or with
+		change "removed", no longer has it."""
+		if self.guest is None:
+			self.waitForDevice("x", name, change=change, timeout=timeout)
+			return
+		self.waitFor(
+			lambda: (name in self.displayDevices()) == (change == "added"),
+			f"the compositor to see {name} {change}",
+			timeout,
+		)
+
 	def delays(self, earlier: list[dict], later: list[dict]) -> list[tuple[str, int, float]]:
 		"""For each key record in later, the seconds since the same key and value in earlier, matched
 		in order: how long a key took from one layer to the next. A fake keyboard's written events
@@ -682,12 +813,19 @@ class Ground:
 	def diagnostics(self) -> str:
 		"""What is worth reading when a test fails: the session's jobs, Linda's log, the recorders, and
 		the helper's journal and its clients' records."""
+		desktop = (
+			""
+			if self.guest is None
+			else "; echo '== the desktop, from the journal'; "
+			"journalctl -b -o short-monotonic --no-pager _UID=1000 | tail -n 120"
+		)
 		return self.machine.execute(
 			f'for f in {GROUND}/session.log {GROUND}/jobs/*; do echo "== $f"; tail -c 3000 "$f"; done; '
 			f"echo '== nvda.log'; tail -c 8000 {LINDA_DIRECTORY}/nvda.log; "
 			f'for f in {" ".join(LOGS.values())}; do echo "== $f"; tail -n 40 "$f"; done; '
 			f'for f in {KEYD_DIRECTORY}/*.jsonl; do echo "== $f"; tail -n 40 "$f"; done; '
-			f"echo '== {KEYD_UNIT}'; journalctl -o short-monotonic --no-pager -u {KEYD_UNIT} | tail -n 80",
+			f"echo '== {KEYD_UNIT}'; journalctl -o short-monotonic --no-pager -u {KEYD_UNIT} | tail -n 80"
+			+ desktop,
 		)[1]
 
 

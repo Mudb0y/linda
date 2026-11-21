@@ -1,12 +1,14 @@
 # The programs the test guest runs for the test script: the session runner, the fake keyboard, the
-# key recorder, the test window, the key capture helper's client and what pokes at the helper from
-# outside, each from guest/ under a name of its own, wrapped for GTK.
+# key recorder, the test windows, the key capture helper's client, what pokes at the helper from
+# outside, the compositor's driver and the shell probe, each from guest/ (the probe from wl/) under a
+# name of its own, wrapped for GTK.
 {
   stdenv,
   python3,
   wrapGAppsHook3,
   gobject-introspection,
   gtk3,
+  gtk4,
   at-spi2-core,
 }:
 
@@ -21,6 +23,9 @@ let
     ground-keyboard = "fakeKeyboard.py";
     ground-record = "keyRecorder.py";
     ground-window = "testWindow.py";
+    ground-window4 = "testWindow4.py";
+    ground-focus = "groundFocus.py";
+    ground-shell-probe = "shellProbe.py";
     ground-keyd-client = "keydClient.py";
     ground-poke = "poke.py";
   };
@@ -35,12 +40,14 @@ stdenv.mkDerivation {
   buildInputs = [
     python
     gtk3
+    gtk4
     at-spi2-core
   ];
   installPhase = ''
     runHook preInstall
     mkdir -p $out/bin $out/libexec
     cp *.py $out/libexec/
+    cp ${./wl/shellProbe.py} $out/libexec/shellProbe.py
     ${builtins.concatStringsSep "\n" (
       map (name: ''
         makeWrapper ${python.interpreter} $out/bin/${name} --add-flags $out/libexec/${programs.${name}}

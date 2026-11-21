@@ -1,5 +1,6 @@
 # The key capture tests, each a NixOS test whose guest has a real kernel keyboard path: one flake
-# check, vm-NAME, for each file NAME.py in cases/, and vm, which builds them all.
+# check, vm-NAME, for each file NAME.py in cases/; vm, which builds every case of the X guest; and
+# vm-wayland, which builds every case of a Wayland guest.
 {
   pkgs,
   lib,
@@ -50,6 +51,36 @@ let
     name: ./cases + "/${name}.nix"
   );
 
+  # A case's guest is chosen by its name: one beginning wl boots the Wayland guest its prefix names,
+  # and every other case boots guest.nix, the X session.
+  waylandGuests = {
+    wlGnome = ./guestGnome.nix;
+    wlSway = ./guestSway.nix;
+    wlPlasma = ./guestPlasma.nix;
+  };
+  isWayland = lib.hasPrefix "wl";
+  guestOf =
+    name:
+    let
+      prefix = lib.findFirst (prefix: lib.hasPrefix prefix name) null (lib.attrNames waylandGuests);
+    in
+    if !isWayland name then
+      ./guest.nix
+    else if prefix != null && builtins.pathExists waylandGuests.${prefix} then
+      waylandGuests.${prefix}
+    else
+      throw "the case ${name} names no Wayland guest that exists: its name must begin with one of ${lib.concatStringsSep ", " (lib.attrNames waylandGuests)}, and that guest's file must be written";
+
+  # The Wayland cases' shared code, wl/, as the package wl.
+  loadWayland = ''
+    spec = importlib.util.spec_from_file_location(
+        "wl", "${./wl}/__init__.py", submodule_search_locations=["${./wl}"]
+    )
+    wl = importlib.util.module_from_spec(spec)
+    sys.modules["wl"] = wl
+    spec.loader.exec_module(wl)
+  '';
+
   check =
     name:
     pkgs.testers.runNixOSTest {
@@ -58,7 +89,7 @@ let
       # module that is given guestPackages.
       nodes.machine = {
         imports = [
-          (import ./guest.nix { inherit tools; })
+          (import (guestOf name) { inherit tools; })
           keydModule
         ]
         ++ lib.optional (caseModules ? ${name}) caseModules.${name};
@@ -68,7 +99,8 @@ let
       };
       # The driver's type check cannot follow ground, which the script loads from the store.
       skipTypeCheck = true;
-      globalTimeout = 900;
+      # A desktop shell's guest takes minutes longer to boot than the X one.
+      globalTimeout = if isWayland name then 1500 else 900;
       testScript = ''
         # Each file by its own path, so that a change to one case runs that case again and no other.
         import importlib.util
@@ -77,6 +109,9 @@ let
         ground = importlib.util.module_from_spec(spec)
         sys.modules["ground"] = ground
         spec.loader.exec_module(ground)
+      ''
+      + lib.optionalString (isWayland name) loadWayland
+      + ''
         ground.main(
             machine,
             subtest,
@@ -92,6 +127,7 @@ let
 in
 lib.mapAttrs' (name: value: lib.nameValuePair "vm-${name}" value) checks
 // {
-  vm = pkgs.linkFarm "linda-keys-vm" checks;
+  vm = pkgs.linkFarm "linda-keys-vm" (lib.filterAttrs (name: _: !isWayland name) checks);
+  vm-wayland = pkgs.linkFarm "linda-keys-vm-wayland" (lib.filterAttrs (name: _: isWayland name) checks);
   linda-with-test-hooks = lindaWithHooks;
 }
