@@ -1,0 +1,650 @@
+"""The AT-SPI capture feed: where a document's keys go, kept from AT-SPI with no X server.
+
+The logic tests drive the feed in a child with made-up window events, bus answers and times. Under the
+X rig the feed follows marco's switches between GTK 3, GTK 4, Qt 6 and Firefox windows while the
+child's main thread, NVDA's, is kept busy. Under a Wayland rig, headless Mutter, the feed hears new
+windows become active with no other listener running. Run under the rig:
+
+	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_atspiCapture.py
+"""
+
+import json
+import os
+import textwrap
+from pathlib import Path
+
+import harness
+from desktopSession import APPS
+
+WAYLAND = os.environ.get("XDG_SESSION_TYPE") == "wayland"
+
+#: Ahead of each logic test: a feed whose bus calls and timers are kept for the test to answer and
+#: fire, three windows of two programs, and one of NVDA's own.
+LOGIC = textwrap.dedent(
+	"""\
+	import os
+	import time
+
+	from linuxPlatform.keys import x11
+	from linuxPlatform.keys.atspiCapture import (
+		FOCUS_MOVE_GRACE,
+		LOOK_ROUND_TRIP,
+		ROOT_PATH,
+		STATE_ACTIVE,
+		STATE_SHOWING,
+		STATE_VISIBLE,
+		WINDOW_QUIET,
+		AtspiCaptureFeed,
+	)
+
+
+	class Feed(AtspiCaptureFeed):
+		def __init__(self, **kwargs):
+			super().__init__(**kwargs)
+			self.requests = []
+			self.timers = []
+			self.ended = []
+			#: What the feed takes for now wherever it reads the clock itself.
+			self.clock = t
+
+		def _now(self):
+			return self.clock
+
+		def _request(self, kind, target, then):
+			self.requests.append((kind, target, then))
+
+		def _later(self, seconds, call):
+			self.timers.append((seconds, call))
+
+		def answer(self, kind, target, value):
+			for index, (k, t, then) in enumerate(self.requests):
+				if (k, t) == (kind, target):
+					del self.requests[index]
+					then(value)
+					return
+			raise AssertionError(f"no {kind} asked of {target}: {self.requests}")
+
+		def asked(self, kind):
+			return [t for k, t, _then in self.requests if k == kind]
+
+		def fire(self):
+			timers, self.timers = self.timers, []
+			for _seconds, call in timers:
+				call()
+
+		def done(self, number, known):
+			self.ended.append((number, known))
+
+
+	def states(*numbers):
+		words = [0, 0]
+		for number in numbers:
+			words[number // 32] |= 1 << (number % 32)
+		return words
+
+
+	FIRST = (":1.10", "/org/a11y/atspi/accessible/1")
+	SECOND = (":1.10", "/org/a11y/atspi/accessible/2")
+	OTHER = (":1.20", "/org/a11y/atspi/accessible/1")
+	OWN = (":1.30", "/org/a11y/atspi/accessible/1")
+	#: Past the quiet after a window event, as the feed's own arithmetic has it.
+	QUIET = WINDOW_QUIET + 1e-6
+	t = time.monotonic()
+
+
+	def feedWithProcesses():
+		feed = Feed()
+		for busName, process in ((":1.10", 100), (":1.20", 200), (":1.30", os.getpid())):
+			feed._processKnown(busName, process)
+		return feed
+
+
+	def anchoredOnFirst(t):
+		feed = feedWithProcesses()
+		feed._onWindowEvent(FIRST, True, t)
+		feed.setCapture("browse", 100)
+		return feed
+	"""
+)
+
+
+def runLogic(tmp_path: Path, code: str) -> object:
+	done = harness.runChild(tmp_path, LOGIC + textwrap.dedent(code), timeout=60)
+	assert done.error is None, f"{done.error}\n{done.stderr[-4000:]}"
+	return done.value
+
+
+def test_focusAwayAndBack(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		feed = anchoredOnFirst(t)
+		s = feed.captureState
+		assert s.window and s.windowProcess == 100 and s.focused, s
+		assert (s.mode, s.dormant, s.documentUntil, s.processID, s.top) == ("browse", None, None, 100, 0), s
+		anchor = s.window
+		feed._onWindowEvent(FIRST, False, t + 1)
+		feed._onWindowEvent(OTHER, True, t + 1.01)
+		s = feed.captureState
+		assert (s.window, s.focused, s.mode, s.dormant) == (anchor, False, "browse", "browse"), s
+		# NVDA's focus follows to the other program, which has no document.
+		feed.setCapture("off")
+		s = feed.captureState
+		assert (s.window, s.focused, s.mode, s.dormant, s.processID) == (anchor, False, "off", "browse", 100), s
+		feed._onWindowEvent(OTHER, False, t + 2)
+		feed._onWindowEvent(FIRST, True, t + 2.01)
+		s = feed.captureState
+		assert (s.window, s.focused, s.mode, s.dormant) == (anchor, True, "browse", None), s
+		assert s.documentUntil == t + 2.01 + x11.DOCUMENT_GRACE, s
+		assert any(seconds == x11.DOCUMENT_GRACE for seconds, _call in feed.timers), feed.timers
+		# NVDA's focus is back in the document.
+		feed.setCapture("browse", 100)
+		s = feed.captureState
+		assert (s.window, s.focused, s.mode, s.documentUntil) == (anchor, True, "browse", None), s
+		""",
+	)
+
+
+def test_documentLetGoAfterTheGrace(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		feed = anchoredOnFirst(t)
+		feed._onWindowEvent(OTHER, True, t + 1)
+		feed.setCapture("off")
+		feed._onWindowEvent(FIRST, True, t + 2)
+		until = feed.captureState.documentUntil
+		assert until == t + 2 + x11.DOCUMENT_GRACE
+		assert feed.captureNow(until - 0.01).mode == "browse"
+		s = feed.captureNow(until)
+		assert (s.window, s.focused, s.mode, s.documentUntil, s.processID) == (0, False, "off", None, 100), s
+		feed._expireDocument(until)
+		s = feed.captureState
+		assert (s.window, s.focused, s.mode, s.dormant, s.documentUntil) == (0, False, "off", None, None), s
+		""",
+	)
+
+
+def test_secondWindowOfTheSameProgram(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		feed = anchoredOnFirst(t)
+		anchor = feed.captureState.window
+		feed._onWindowEvent(FIRST, False, t + 1)
+		feed._onWindowEvent(SECOND, True, t + 1.01)
+		s = feed.captureState
+		assert (s.window, s.focused, s.dormant) == (anchor, False, "browse"), s
+		# NVDA's focus is in a document of the second window: its keys are captured there.
+		feed.setCapture("browse", 100)
+		s = feed.captureState
+		assert s.window and s.window != anchor and s.focused and s.windowProcess == 100, s
+		second = s.window
+		feed._onWindowEvent(SECOND, False, t + 2)
+		feed._onWindowEvent(FIRST, True, t + 2.01)
+		assert not feed.captureState.focused
+		# NVDA has not followed yet and says nothing of a document: the anchor stays.
+		feed.setCapture("off")
+		assert (feed.captureState.window, feed.captureState.mode) == (second, "off")
+		""",
+	)
+
+
+def test_anotherProgramsWindow(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		feed = anchoredOnFirst(t)
+		anchor = feed.captureState.window
+		feed._onWindowEvent(FIRST, False, t + 1)
+		feed._onWindowEvent(OTHER, True, t + 1.01)
+		# NVDA's mode is still the first program's document's: no reason to take the other's keys.
+		feed.setCapture("browse", 100)
+		s = feed.captureState
+		assert (s.window, s.focused, s.mode, s.dormant) == (anchor, False, "browse", "browse"), s
+		# NVDA's focus reached a document of the other program.
+		feed.setCapture("browse", 200)
+		s = feed.captureState
+		assert s.window not in (0, anchor) and s.focused and s.windowProcess == 200 and s.processID == 200, s
+		""",
+	)
+
+
+def test_foregroundProgramGoes(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		feed = anchoredOnFirst(t)
+		feed.noteFocusMayMove(t + 1)
+		feed.requestLook(1, t + 1.01, feed.done)
+		feed._takeLooks(t + 1.01)
+		feed._applicationGone(":1.10", t + 1.05)
+		s = feed.captureState
+		assert (s.window, s.windowProcess, s.focused) == (0, None, False), s
+		assert feed.foreground is None
+		feed._serviceLooks(t + 1.05 + QUIET)
+		assert feed.ended == [(1, True)], feed.ended
+		# Its bus name may be given to another program later, whose process is asked anew.
+		feed._onWindowEvent(FIRST, True, t + 2)
+		assert feed.asked("process") == [":1.10"], feed.requests
+		""",
+	)
+
+
+def test_foregroundWindowGoes(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		feed = anchoredOnFirst(t)
+		anchor = feed.captureState.window
+		# GTK 4 says a window that has just shown is not showing, so its state is asked.
+		feed._onStateChanged(FIRST, "showing", 0, t + 1)
+		feed.answer("state", FIRST, states(STATE_ACTIVE, STATE_SHOWING, STATE_VISIBLE))
+		assert feed.captureState.focused
+		feed._onStateChanged(FIRST, "visible", 0, t + 2)
+		feed.answer("state", FIRST, states(STATE_ACTIVE, STATE_SHOWING))
+		s = feed.captureState
+		assert (s.window, s.focused, s.dormant) == (anchor, False, "browse"), s
+		assert feed.foreground is None
+		feed._onWindowEvent(FIRST, True, t + 3)
+		assert feed.captureState.focused
+		feed._onStateChanged(FIRST, "defunct", 1, t + 4)
+		s = feed.captureState
+		assert (s.window, s.focused) == (0, False), s
+		assert feed.foreground is None
+		""",
+	)
+
+
+def test_windowLeftSaysItIsActiveLate(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		feed = anchoredOnFirst(t)
+		feed._onWindowEvent(FIRST, False, t + 1)
+		feed._onWindowEvent(OTHER, True, t + 1.001)
+		# Qt, a tenth of a second after the window that took the keyboard from it said so.
+		feed._onWindowEvent(FIRST, True, t + 1.1)
+		feed._onWindowEvent(FIRST, False, t + 1.101)
+		assert feed.foreground[:2] == OTHER, feed.foreground
+		assert not feed.captureState.focused
+		feed.answer("state", OTHER, states(STATE_ACTIVE, STATE_SHOWING, STATE_VISIBLE))
+		assert feed.foreground[:2] == OTHER
+		# A window that said it was active and went quiet is asked before it is believed.
+		feed._onWindowEvent(FIRST, True, t + 2)
+		feed._onWindowEvent(OTHER, True, t + 2.5)
+		feed._onWindowEvent(OTHER, False, t + 3)
+		assert feed.foreground[:2] == FIRST and feed.captureState.focused
+		feed.answer("state", FIRST, states(STATE_SHOWING, STATE_VISIBLE))
+		assert feed.foreground is None and not feed.captureState.focused
+		""",
+	)
+
+
+def test_ownWindowIsNeverTheAnchor(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		feed = feedWithProcesses()
+		feed._onWindowEvent(OWN, True, t)
+		feed.setCapture("browse", 100)
+		s = feed.captureState
+		assert (s.window, s.focused, s.mode) == (0, False, "browse"), s
+		assert feed.foreground == (*OWN, os.getpid())
+		""",
+	)
+
+
+def test_noAnchorBeforeTheProcessIsKnown(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		feed = Feed()
+		feed._onWindowEvent(OTHER, True, t)
+		assert feed.asked("process") == [":1.20"], feed.requests
+		feed.setCapture("browse", 200)
+		assert feed.captureState.window == 0
+		feed.answer("process", ":1.20", 200)
+		feed.setCapture("browse", 200)
+		s = feed.captureState
+		assert s.window and s.focused and s.windowProcess == 200, s
+		""",
+	)
+
+
+def test_lookEndsUnknownAtTheGrace(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		assert FOCUS_MOVE_GRACE == 0.3
+		assert FOCUS_MOVE_GRACE + x11.CAPTURE_TIMEOUT <= x11.DOCUMENT_WAIT
+		feed = anchoredOnFirst(t)
+		assert feed.settled(t + 1)
+		feed.noteFocusMayMove(t + 1)
+		assert not feed.settled(t + 1.01)
+		deadline = feed.requestLook(1, t + 1.01, feed.done)
+		assert deadline == t + 1 + FOCUS_MOVE_GRACE, deadline
+		feed._takeLooks(t + 1.01)
+		assert not feed.asked("roundTrip"), feed.requests
+		feed._serviceLooks(t + 1.29)
+		assert feed.ended == []
+		feed._serviceLooks(t + 1 + FOCUS_MOVE_GRACE)
+		assert feed.ended == [(1, False)], feed.ended
+		assert feed.settled(t + 1 + FOCUS_MOVE_GRACE)
+		# Nothing moved: the state is what it was.
+		assert feed.captureState.focused
+		""",
+	)
+
+
+def test_lookEndsKnownAtTheWindowEvent(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		feed = anchoredOnFirst(t)
+		feed._onWindowEvent(FIRST, False, t + 1)
+		feed._onWindowEvent(OTHER, True, t + 1.01)
+		# Alt+Tab back to the document, and a letter typed at once.
+		feed.noteFocusMayMove(t + 2)
+		deadline = feed.requestLook(1, t + 2.01, feed.done)
+		feed._takeLooks(t + 2.01)
+		feed._onWindowEvent(OTHER, False, t + 2.1)
+		feed._serviceLooks(t + 2.1)
+		feed._onWindowEvent(FIRST, True, t + 2.11)
+		feed._serviceLooks(t + 2.11 + WINDOW_QUIET - 0.001)
+		assert feed.ended == [], "ended before the switch settled"
+		feed._serviceLooks(t + 2.11 + QUIET)
+		assert feed.ended == [(1, True)], feed.ended
+		assert feed.captureState.focused
+		assert t + 2.11 + QUIET < deadline
+		# A look asked once a window event has come takes a round trip.
+		feed.requestLook(2, t + 2.2, feed.done)
+		feed._takeLooks(t + 2.2)
+		assert feed.asked("roundTrip") == [None], feed.requests
+		""",
+	)
+
+
+def test_settledLookTakesOneRoundTrip(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		feed = anchoredOnFirst(t)
+		deadline = feed.requestLook(1, t + 1, feed.done)
+		assert deadline == t + 1 + LOOK_ROUND_TRIP
+		feed._takeLooks(t + 1)
+		feed._serviceLooks(t + 1.01)
+		assert feed.ended == []
+		feed.clock = t + 1.02
+		feed.answer("roundTrip", None, True)
+		assert feed.ended == [(1, True)], feed.ended
+		# A read that may move the foreground holds a look that is otherwise done.
+		feed._onStateChanged(FIRST, "showing", 0, t + 2)
+		deadline = feed.requestLook(2, t + 3, feed.done)
+		feed._takeLooks(t + 3)
+		feed.clock = t + 3.005
+		feed.answer("roundTrip", None, True)
+		assert feed.ended == [(1, True)], feed.ended
+		feed.answer("state", FIRST, states(STATE_ACTIVE, STATE_SHOWING, STATE_VISIBLE))
+		feed._serviceLooks(t + 3.01)
+		assert feed.ended == [(1, True), (2, True)], feed.ended
+		# A round trip that does not come back in time ends the look unknown.
+		deadline = feed.requestLook(3, t + 4, feed.done)
+		feed._takeLooks(t + 4)
+		feed._serviceLooks(deadline)
+		assert feed.ended[-1] == (3, False), feed.ended
+		""",
+	)
+
+
+def test_newWindowThatSaysNothing(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		new = (":1.40", "/org/linda/Probe/a11y/1")
+		feed = feedWithProcesses()
+		feed._onWindowEvent(OTHER, True, t)
+		# GTK 4 at times sends only this for a window that then becomes active.
+		feed._onStateChanged(new, "showing", 0, t + 1)
+		feed.answer("parent", new, ROOT_PATH)
+		assert len(feed.timers) == 1, feed.timers
+		feed.fire()
+		feed.answer("state", new, states(STATE_SHOWING, STATE_VISIBLE))
+		feed.fire()
+		feed.answer("state", new, states(STATE_ACTIVE, STATE_SHOWING, STATE_VISIBLE))
+		assert feed.foreground == (*new, None), feed.foreground
+		assert feed.asked("process") == [":1.40"], feed.requests
+		assert feed.timers == []
+		# A window event after it showed says where the keyboard is; the new window is not asked again.
+		later = (":1.50", "/org/linda/Probe/a11y/1")
+		feed._onStateChanged(later, "showing", 1, t + 2)
+		feed.answer("parent", later, ROOT_PATH)
+		feed._onWindowEvent(OTHER, True, t + 2.05)
+		feed.fire()
+		assert not feed.asked("state"), feed.requests
+		assert feed.foreground[:2] == OTHER
+		""",
+	)
+
+
+def test_activeStateCountsOnlyForTopLevels(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		cell = (":1.20", "/org/a11y/atspi/accessible/77")
+		feed = anchoredOnFirst(t)
+		feed._onStateChanged(cell, "active", 1, t + 1)
+		feed.answer("parent", cell, "/org/a11y/atspi/accessible/76")
+		assert feed.foreground[:2] == FIRST
+		feed._onStateChanged(cell, "active", 1, t + 2)
+		assert not feed.requests, "a cell was asked about twice"
+		# GTK can give a window back the keyboard, as a dialog over it closes, with only this.
+		feed._onStateChanged(OTHER, "active", 1, t + 3)
+		feed.answer("parent", OTHER, ROOT_PATH)
+		assert feed.foreground[:2] == OTHER and not feed.captureState.focused
+		feed._onStateChanged(OTHER, "active", 0, t + 4)
+		feed._onStateChanged(FIRST, "active", 1, t + 4.01)
+		assert feed.captureState.focused
+		""",
+	)
+
+
+#: The child of the alternation test: the feed started, the anchor set in each window in turn while it
+#: is the foreground, and the keyboard moved between it and the next window by marco, each move checked
+#: 200 ms after the X server says it happened, while the main thread computes all the while.
+ALTERNATION = textwrap.dedent(
+	"""\
+	import subprocess
+	import threading
+	import time
+
+	from linuxPlatform.keys.atspiCapture import AtspiCaptureFeed
+
+	ALTERNATIONS = 100
+	CHECK_AFTER = 0.2
+
+
+	def active():
+		\"\"\"The X server's active window, by its title and its process.\"\"\"
+		shown = subprocess.run(
+			["xdotool", "getactivewindow", "getwindowpid", "getwindowname"],
+			capture_output=True,
+			text=True,
+			check=False,
+		).stdout.splitlines()
+		if len(shown) != 2 or not shown[0].isdecimal():
+			return None, None
+		return shown[1], int(shown[0])
+
+
+	def activate(title):
+		\"\"\"Have marco give title the keyboard, and say when the X server had it there, and its process.\"\"\"
+		deadline = time.monotonic() + 10
+		while True:
+			subprocess.run(["wmctrl", "-F", "-a", title], capture_output=True, check=False)
+			for _ in range(20):
+				name, pid = active()
+				if name == title:
+					return time.monotonic(), pid
+				time.sleep(0.01)
+			assert time.monotonic() < deadline, f"{title} did not become active"
+
+
+	def awaitForeground(pid, timeout=5):
+		deadline = time.monotonic() + timeout
+		while (feed.foreground or (None, None, None))[2] != pid:
+			assert time.monotonic() < deadline, f"the feed never heard process {pid} come to the front"
+			time.sleep(0.005)
+
+
+	PIDS = {}
+	feed = AtspiCaptureFeed()
+	feed.start()
+	assert feed.canLook
+	results = {"wrong": [], "lags": []}
+
+
+	def drive():
+		try:
+			for title in TITLES:
+				_at, PIDS[title] = activate(title)
+			for alternation in range(ALTERNATIONS):
+				block, step = divmod(alternation, ALTERNATIONS // len(TITLES))
+				anchor = TITLES[block]
+				other = TITLES[(block + 1) % len(TITLES)]
+				if step == 0:
+					activate(anchor)
+					awaitForeground(PIDS[anchor])
+					feed.setCapture("browse", PIDS[anchor])
+					window = feed.captureState.window
+					assert window and feed.captureState.focused, feed.captureState
+				target = other if step % 2 == 0 else anchor
+				switched, pid = activate(target)
+				while (feed.foreground or (None, None, None))[2] != pid and time.monotonic() < switched + CHECK_AFTER:
+					time.sleep(0.002)
+				results["lags"].append(time.monotonic() - switched)
+				time.sleep(max(0.0, switched + CHECK_AFTER - time.monotonic()))
+				state = feed.captureState
+				seen = (feed.foreground or (None, None, None))[2]
+				if (state.focused, state.window, seen) != (target == anchor, window, pid):
+					results["wrong"].append([alternation, target, state.focused, state.window, window, seen, pid])
+		except BaseException as e:
+			results["error"] = repr(e)
+		finally:
+			results["finished"] = True
+
+
+	driver = threading.Thread(target=drive)
+	driver.start()
+	busy = 0
+	while not results.get("finished"):
+		sum(i * i for i in range(20000))
+		busy += 1
+	driver.join()
+	feed.stop()
+	results["busyRounds"] = busy
+	result = results
+	"""
+)
+
+if not WAYLAND:
+	import webSession
+	from desktopSession import DesktopSession
+
+	def test_followsAlternationsWhileTheMainThreadIsBusy(tmp_path: Path) -> None:
+		with DesktopSession(tmp_path / "desktop") as desktop:
+			desktop.startApp(desktop.fixture("gtkFixture"), title="Fixture window")
+			desktop.startApp(desktop.fixture("gtk4"), title="GTK4 fixture")
+			desktop.startApp(desktop.fixture("qtFixture"), title="Qt fixture window")
+			firefox = webSession.startFirefox(desktop, "basic.html")
+			titles = ["Fixture window", "GTK4 fixture", "Qt fixture window", firefox.window]
+			done = harness.runChild(tmp_path, f"TITLES = {json.dumps(titles)}\n" + ALTERNATION, timeout=600)
+		assert done.error is None, f"{done.error}\n{done.stderr[-4000:]}"
+		results = done.value
+		assert "error" not in results, results
+		lags = sorted(results["lags"])
+		assert len(lags) == 100, len(lags)
+		assert results["wrong"] == [], f"{results['wrong']}; lags {lags[len(lags) // 2]:.3f} {lags[-1]:.3f}"
+		assert results["busyRounds"] > 0, "the main thread was never busy"
+		print(
+			f"feed lag after the X server: median {lags[50] * 1000:.0f} ms, worst {lags[-1] * 1000:.0f} ms, "
+			f"main thread busy for {results['busyRounds']} rounds"
+		)
+
+
+#: The child of the Wayland test: the feed started with no other listener in the session, and a
+#: program started, whose window it must hear come to the front, and then its program end.
+NEW_WINDOW = textwrap.dedent(
+	"""\
+	import os
+	import subprocess
+	import time
+
+	from linuxPlatform.keys.atspiCapture import AtspiCaptureFeed
+
+	def isOurs(pid):
+		\"\"\"Whether pid is the program's process or one it started, as a wrapper starts the real one.\"\"\"
+		for _level in range(8):
+			if pid == app.pid:
+				return True
+			try:
+				with open(f"/proc/{pid}/stat") as f:
+					pid = int(f.read().rsplit(")", 1)[1].split()[1])
+			except (OSError, ValueError, IndexError):
+				return False
+		return False
+
+
+	feed = AtspiCaptureFeed()
+	feed.start()
+	assert feed.canLook
+	app = subprocess.Popen(COMMAND, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+	started = time.monotonic()
+	try:
+		while not ((foreground := feed.foreground) and foreground[2] and isOurs(foreground[2])):
+			assert app.poll() is None, f"the program ended: {app.returncode}"
+			assert time.monotonic() - started < 30, f"never heard its window come to the front: {foreground}"
+			time.sleep(0.01)
+		heard = time.monotonic() - started
+		feed.setCapture("browse", foreground[2])
+		state = feed.captureState
+		assert state.window and state.focused and state.windowProcess == foreground[2], state
+	finally:
+		app.terminate()
+		app.wait(10)
+	ended = time.monotonic()
+	while feed.foreground is not None or feed.captureState.focused:
+		assert time.monotonic() - ended < 2, f"its end was not heard: {feed.foreground}"
+		time.sleep(0.005)
+	gone = time.monotonic() - ended
+	feed.stop()
+	result = {"heard": heard, "gone": gone}
+	"""
+)
+
+if WAYLAND:
+
+	def runNewWindow(tmp_path: Path, command: list[str]) -> dict:
+		done = harness.runChild(tmp_path, f"COMMAND = {json.dumps(command)}\n" + NEW_WINDOW, timeout=120)
+		assert done.error is None, f"{done.error}\n{done.stderr[-4000:]}"
+		print(
+			f"heard the window {done.value['heard']:.2f} s after start, its end {done.value['gone'] * 1000:.0f} ms after"
+		)
+		return done.value
+
+	def test_hearsANewGtk4WindowWithNoOtherListener(tmp_path: Path) -> None:
+		runNewWindow(tmp_path, ["python3", str(APPS / "gtk4.py")])
+
+	def test_hearsANewElectronWindowWithNoOtherListener(tmp_path: Path) -> None:
+		profile = tmp_path / "electron"
+		profile.mkdir()
+		runNewWindow(
+			tmp_path,
+			[
+				"electron",
+				"--ozone-platform=wayland",
+				"--disable-gpu",
+				f"--user-data-dir={profile}",
+				str(APPS / "electronChat"),
+			],
+		)
