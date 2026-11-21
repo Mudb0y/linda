@@ -453,7 +453,7 @@ def typeKey(vk: int, extended: bool, isUp: bool, scan: int | None = None) -> Non
 	if _source is None:
 		from logHandler import log
 
-		log.debugWarning(f"No keyboard to type virtual key {vk:#x} on")
+		log.debugWarning("No keyboard to type a key on")
 		return
 	_source.typeKey(vk, extended, isUp)
 
@@ -483,7 +483,7 @@ def vkKeyScan(char: str) -> tuple[int, int]:
 		return int(char.isupper()), ord(char.upper())
 	raise NoLinuxImplementation(
 		"keyboard layout lookup",
-		f"which key types {char!r} depends on the keyboard layout",
+		"which key types this character depends on the keyboard layout",
 	)
 
 
@@ -499,7 +499,7 @@ def mapVirtualKeyToChar(vkCode: int) -> int:
 		return _source.charForVk(vkCode)
 	raise NoLinuxImplementation(
 		"keyboard layout lookup",
-		f"what virtual key {vkCode:#x} types depends on the keyboard layout",
+		"what a virtual key types depends on the keyboard layout",
 	)
 
 
@@ -512,7 +512,7 @@ def getKeyState(vkCode: int) -> int:
 		return _source.keyState(vkCode)
 	raise NoLinuxImplementation(
 		"keyboard state",
-		f"the state of virtual key {vkCode:#x} needs the live keyboard",
+		"the state of a key needs the live keyboard",
 	)
 
 

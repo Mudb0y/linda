@@ -856,7 +856,7 @@ class X11KeySource:
 		with self._lock:
 			keycode = self._translator.keycodeFor(vkCode, extended) if self._translator else None
 			if keycode is None:
-				log.debugWarning(f"No key on this keyboard sends virtual key {vkCode:#x}")
+				log.debugWarning("No key on this keyboard sends the virtual key asked for")
 				return
 		self._post(lambda: self._fake(keycode, isUp))
 
@@ -2498,7 +2498,7 @@ class X11KeySource:
 			translator = self._translator
 			keycode = translator.keycodeFor(vkCode, extended) if translator else None
 		if keycode is None:
-			log.debugWarning(f"No key on this keyboard sends virtual key {vkCode:#x}")
+			log.debugWarning("No key on this keyboard sends the virtual key asked for")
 			return
 		if isUp:
 			if keycode not in self._typedDown:
