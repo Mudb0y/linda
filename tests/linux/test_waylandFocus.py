@@ -480,3 +480,105 @@ def test_windowThatNeverHasTheKeyboardIsNotSpoken(
 	assert not window.isActive(), "sway gave the window the keyboard"
 	assert linda.spokenSince(mark) == [], linda.spokenSince(mark)
 	assert "says it is active" not in linda.launch.text("nvda.log")[logBefore:]
+
+
+#: Reads shown top-levels that all say active through handler._probeShown, with a client that answers for
+#: them, as no compositor in the rig makes two windows say active at once: Mutter does for a parent and
+#: the modal dialog GNOME Shell attaches to it, and headless Mutter attaches none.
+GUARDS = """
+	import types
+
+	import core
+	import eventHandler
+	from linuxPlatform.atspi import client as atspiClient
+	from linuxPlatform.atspi import handler
+	from linuxPlatform.atspi.client import ROOT_PATH, Node
+
+	core.callLater = lambda *args, **kwargs: None
+	core.requestPump = lambda: None
+	BUS = ":1.42"
+	application = Node(BUS, ROOT_PATH, None)
+	parents = {}
+
+
+	class Client:
+		def parent(self, node):
+			return parents[node.key]
+
+		def states(self, node):
+			return frozenset({"active", "showing", "visible"})
+
+
+	atspiClient._client = Client()
+
+
+	def node(path, parent):
+		made = Node(BUS, path, None)
+		parents[made.key] = parent
+		return made
+
+
+	parent = node("/parent", application)
+	dialog = node("/dialog", application)
+	inDialog = node("/dialog/button", dialog)
+	inParent = node("/parent/button", parent)
+	other = node("/other", application)
+	T = 1000.0
+
+
+	def begin(*shown, foreground=None, activatedAt=0.0, focus=None):
+		handler._shown.clear()
+		handler._shownProbes.clear()
+		handler._topLevels.clear()
+		handler._probePumpAt = None
+		handler._activatedAt = activatedAt
+		handler._setForeground(foreground)
+		eventHandler.lastQueuedFocusObject = focus and types.SimpleNamespace(node=focus)
+		handler._shown.extend(shown)
+
+
+	def found(at, events=()):
+		return [event[1].path for event in handler._probeShown(list(events), at)]
+
+
+	def readUntilDone(start):
+		taken = []
+		at = start
+		while handler._shownProbes:
+			taken += found(at)
+			at += 0.25
+		return taken
+
+
+	result = {}
+	# The parent shows, its attached dialog shows after it, and only the dialog's activation is heard: the
+	# dialog keeps the foreground through every read of the parent.
+	begin((parent, T), (dialog, T + 0.05))
+	taken = found(T + 0.06)
+	taken += found(T + 0.08, [("window:activate", dialog, 0, 0, None)])
+	handler._setForeground(dialog)
+	eventHandler.lastQueuedFocusObject = types.SimpleNamespace(node=inDialog)
+	taken += readUntilDone(T + 0.2)
+	result["dialogAnnounced"] = {"taken": taken, "foreground": handler._foreground.path}
+	# A window activated before the parent showed is no reason to leave the parent alone.
+	begin((parent, T), foreground=other, activatedAt=T - 5, focus=other)
+	taken = found(T + 0.1)
+	result["announcedBefore"] = {"taken": taken, "foreground": handler._foreground.path}
+	# Already the foreground, as a rescan found it with no window:activate.
+	begin((parent, T), foreground=parent)
+	result["foreground"] = {"taken": found(T + 0.1), "left": len(handler._shownProbes)}
+	# The focus is already inside it, with no foreground known.
+	begin((parent, T), focus=inParent)
+	result["focusInside"] = {"taken": found(T + 0.1), "left": len(handler._shownProbes)}
+"""
+
+
+def test_shownWindowsLeaveTheFocusWhereItBelongs(tmp_path: Path) -> None:
+	done = harness.runChild(tmp_path, GUARDS, prepare="config", timeout=120)
+	done.assertClean()
+	assert done.value == {
+		"dialogAnnounced": {"taken": [], "foreground": "/dialog"},
+		"announcedBefore": {"taken": ["/parent"], "foreground": "/parent"},
+		"foreground": {"taken": [], "left": 0},
+		"focusInside": {"taken": [], "left": 0},
+	}, done.value
