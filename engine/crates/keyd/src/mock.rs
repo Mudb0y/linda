@@ -80,6 +80,9 @@ struct State {
     fail_create: bool,
     never_appears: bool,
     fail_emit: bool,
+    /// One key event the virtual keyboard refuses once, as uinput does when its write is
+    /// interrupted, and takes the next.
+    fail_emit_once: Option<(u16, i32)>,
     /// How long the next read of any keyboard hangs, standing in for a helper that stops.
     hang_reads: Option<Duration>,
     released_by_guard: bool,
@@ -273,6 +276,10 @@ impl World {
 
     pub fn fail_emit(&self, fail: bool) {
         self.lock().fail_emit = fail;
+    }
+
+    pub fn fail_emit_once(&self, code: u16, value: i32) {
+        self.lock().fail_emit_once = Some((code, value));
     }
 
     pub fn hang_next_read(&self, d: Duration) {
@@ -496,6 +503,10 @@ impl VirtualKeyboard for MockVirtual {
         let mut s = self.world.lock();
         if s.fail_emit || s.virt.destroyed {
             return Err(io::Error::from_raw_os_error(libc::ENODEV));
+        }
+        if s.fail_emit_once == Some((code, value)) {
+            s.fail_emit_once = None;
+            return Err(io::Error::from_raw_os_error(libc::EINTR));
         }
         s.virt.emitted.push((code, value));
         match value {

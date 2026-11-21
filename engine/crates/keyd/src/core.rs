@@ -1041,6 +1041,12 @@ impl<D: Devices> Core<D> {
                 _ => TYPED_NOT_DOWN,
             };
         }
+        // A write the virtual keyboard failed may have been an Alt's release, which the kernel's
+        // SysRq handler then never saw: no typed press is safe until the helper has let go.
+        if self.virtual_broken {
+            self.passed.insert(key, false);
+            return TYPED_LOST;
+        }
         let refused = if !self.may_type() {
             Some(TYPED_REFUSED_STATE)
         } else if self.sysrq_refuses(e.code) {

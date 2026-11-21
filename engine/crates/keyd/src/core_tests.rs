@@ -4388,6 +4388,25 @@ fn the_sysrq_rules_are_checked_again_as_the_typed_press_goes_out() {
 }
 
 #[test]
+fn no_typed_press_goes_out_after_the_virtual_keyboard_failed_to_take_an_alt_release() {
+    let (mut t, k) = T::typing();
+    t.press(k, KEY_LEFTALT);
+    t.pass_last();
+    t.press(k, KEY_SYSRQ);
+    let sysrq = t.last_seq();
+    t.release(k, KEY_SYSRQ);
+    t.release(k, KEY_LEFTALT);
+    t.type_key(1, KEY_B, true);
+    assert_eq!(t.typed(), vec![]);
+    // The kernel never sees Alt go up, so its SysRq handler stays active and would take b as a
+    // command, though the helper counts Alt as up.
+    t.w.fail_emit_once(KEY_LEFTALT, 0);
+    t.verdict(sysrq, false);
+    assert_eq!(t.typed(), vec![(1, TYPED_LOST)]);
+    assert!(t.w.emitted().iter().all(|e| e.0 != KEY_B));
+}
+
+#[test]
 fn a_made_up_alt_held_back_counts_as_down_for_typed_sysrq() {
     let (mut t, k) = T::typing();
     t.made_up_and_passed(k, &[KEY_LEFTALT]);
