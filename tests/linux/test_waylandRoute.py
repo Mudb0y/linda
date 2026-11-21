@@ -58,11 +58,15 @@ BUSY = (
 	"If you started no other screen reader, something may be reading your keys."
 )
 REPLACED = "Another program took NVDA's place with linda-keyd and reads every key now."
+TURNED_AWAY = (
+	"NVDA cannot take keys in this Wayland session: linda-keyd turned it away, and the log says why. "
+	"It reads the screen meanwhile."
+)
 UNHEARD = "NVDA cannot hear one of the keyboards, so its keys reach programs without NVDA."
 NO_SENDER = "NVDA cannot type into programs here."
 US_NOTICE = "NVDA cannot find this desktop's keyboard layout, so it reads keys as US English."
 #: GOODBYE's and DEVICE's numbers, as protocol.rs gives them.
-GOODBYE_NOT_IN_FRONT, GOODBYE_BUSY, GOODBYE_REPLACED = 2, 4, 9
+GOODBYE_VERSION, GOODBYE_NOT_IN_FRONT, GOODBYE_NOT_AUTHORIZED, GOODBYE_BUSY, GOODBYE_REPLACED = 1, 2, 3, 4, 9
 DEVICE_BUSY, DEVICE_IGNORED = 3, 5
 
 #: The route in a child, built by createSource, its NVDA keeping every captured press and recording each
@@ -428,6 +432,64 @@ def test_busyAndReplacedAreEachSaidOnce(tmp_path: Path):
 	assert replaced["said"] == [HINT, REPLACED]
 
 
+REFUSED_CHILD = r"""
+keyboard.refusal = (REASON, "turned away")
+source = startRoute(waitForKernel=False)
+time.sleep(5)
+refused = {"said": list(said), "refused": admissions().count("refused"), "kernel": source.isKernel}
+keyboard.refusal = None
+wait(lambda: source.isKernel, 5, "the route did not take the helper's keys")
+time.sleep(0.3)
+taken = list(said)
+# Once the route has been taken, losing the helper has its own line, and a refusal adds none.
+keyboard.refusal = (REASON, "turned away")
+keyboard.vanish()
+time.sleep(0.3)
+keyboard.comeBack()
+time.sleep(4)
+source.stop()
+result = {"refused": refused, "taken": taken, "said": said, "refusedAfter": admissions().count("refused")}
+"""
+
+
+@pytest.mark.parametrize("reason", [GOODBYE_VERSION, GOODBYE_NOT_IN_FRONT, GOODBYE_NOT_AUTHORIZED])
+def test_aRefusalAtStartIsSaidOnce(tmp_path: Path, reason: int):
+	"""Turned away for any reason but BUSY, NVDA has no keys at all, which is said once; and that it has
+	the keyboard once the helper admits it."""
+	value = runRouteChild(tmp_path, f"REASON = {reason}\n" + REFUSED_CHILD, standIn={})
+	refused = value["refused"]
+	assert refused["refused"] >= 2
+	assert refused["said"] == [TURNED_AWAY]
+	assert not refused["kernel"]
+	assert value["taken"] == [TURNED_AWAY, HAS_KEYBOARD, HINT]
+	assert value["refusedAfter"] > refused["refused"]
+	assert value["said"] == [TURNED_AWAY, HAS_KEYBOARD, HINT, LOST]
+
+
+STALE_SOCKET_CHILD = r"""
+import socket
+
+# What a helper that stopped without removing its socket leaves: a socket file nothing listens on.
+stale = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+stale.bind(path)
+stale.close()
+source = startRoute(waitForKernel=False)
+time.sleep(5)
+before = {"said": list(said), "left": os.path.exists(path), "kernel": source.isKernel}
+standIn()
+wait(lambda: source.isKernel, 5, "the route did not take the helper's keys")
+time.sleep(0.3)
+source.stop()
+result = {"before": before, "said": said}
+"""
+
+
+def test_aSocketWithNoHelperIsSaidAsNoHelper(tmp_path: Path):
+	value = runRouteChild(tmp_path, STALE_SOCKET_CHILD)
+	assert value["before"] == {"said": [NO_HELPER], "left": True, "kernel": False}
+	assert value["said"] == [NO_HELPER, HAS_KEYBOARD, HINT]
+
+
 LOSSES_CHILD = r"""
 source = startRoute()
 for _ in range(4):
@@ -471,7 +533,8 @@ def test_aBlockHoldsUntilTheUserTakesTheKeyboardBack(tmp_path: Path):
 	)
 	assert value["held"] == {"asked": 0, "kernel": False, "blocked": True}
 	assert value["blocked"] is None
-	assert value["said"] == ["NVDA has the keyboard again", HINT]
+	# The refusal at start is said; then only take-back's own line, not "has the keyboard" as well.
+	assert value["said"] == [TURNED_AWAY, "NVDA has the keyboard again", HINT]
 
 
 DEVICE_CHILD = r"""

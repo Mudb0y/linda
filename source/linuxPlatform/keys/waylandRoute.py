@@ -68,6 +68,8 @@ class WaylandRoute(RoutedKeySource):
 		#: Lines to say, from threads that must not wait on NVDA's speech: said by the route's own thread.
 		self._toSay: collections.deque[str] = collections.deque()
 		self._saidNoHelper = False
+		self._saidTurnedAway = False
+		self._everTaken = False
 		self._saidHasKeyboard = False
 		self._hinted = False
 		self._saidUnheard = False
@@ -114,16 +116,19 @@ class WaylandRoute(RoutedKeySource):
 				environment.setCapture(*self._capture)
 		log.info(f"{self._withoutKernel}: {why}")
 		if not os.path.exists(self._socketPath):
-			self._saidNoHelper = True
-			self._say(
-				# Translators: Said on Linux as NVDA starts in a Wayland session where linda-keyd, the program
-				# that takes the keyboard in the kernel, is not running: NVDA has no keys at all there without
-				# it.
-				_(
-					"NVDA cannot take keys in this Wayland session until linda-keyd runs. "
-					"It reads the screen meanwhile. The readme says how to install linda-keyd.",
-				),
-			)
+			self._sayNoHelper()
+
+	def _sayNoHelper(self) -> None:
+		self._saidNoHelper = True
+		self._say(
+			# Translators: Said on Linux as NVDA starts in a Wayland session where linda-keyd, the program
+			# that takes the keyboard in the kernel, is not running: NVDA has no keys at all there without
+			# it.
+			_(
+				"NVDA cannot take keys in this Wayland session until linda-keyd runs. "
+				"It reads the screen meanwhile. The readme says how to install linda-keyd.",
+			),
+		)
 
 	def stop(self) -> None:
 		super().stop()
@@ -165,6 +170,7 @@ class WaylandRoute(RoutedKeySource):
 	def _refused(self, error: keydClient.Refused) -> None:
 		goodbye = error.goodbye
 		if goodbye is None or goodbye.reason != keydClient.GOODBYE_BUSY:
+			self._refusedBeforeTaken(goodbye)
 			return
 		identity = self._socketIdentity()
 		if identity in self._saidBusyFor:
@@ -176,6 +182,34 @@ class WaylandRoute(RoutedKeySource):
 			_(
 				"Another program holds linda-keyd for this session, so NVDA has no keys. "
 				"If you started no other screen reader, something may be reading your keys.",
+			),
+		)
+
+	def _refusedBeforeTaken(self, goodbye: keydClient.Goodbye | None) -> None:
+		"""Until the route is first taken, a refusal leaves NVDA with no keys at all, which must be said
+		once; once taken, losing the helper has lines of its own."""
+		if self._everTaken:
+			return
+		if self._takingBack:
+			# The user asked, and is told it failed in the base class's words; the keys that come later
+			# without asking must still be said.
+			self._saidNoHelper = True
+			return
+		if goodbye is None:
+			# Nothing answered on the socket, as when the helper left it behind as it stopped.
+			if not self._saidNoHelper:
+				self._sayNoHelper()
+			return
+		if self._saidTurnedAway:
+			return
+		self._saidTurnedAway = self._saidNoHelper = True
+		self._say(
+			# Translators: Said on Linux in a Wayland session when linda-keyd, the program that takes the
+			# keyboard in the kernel, refuses NVDA, as when this user may not use it: NVDA has no keys at
+			# all there without it. The log is NVDA's log, which names the reason.
+			_(
+				"NVDA cannot take keys in this Wayland session: linda-keyd turned it away, and the log says "
+				"why. It reads the screen meanwhile.",
 			),
 		)
 
@@ -246,9 +280,13 @@ class WaylandRoute(RoutedKeySource):
 		)
 
 	def _watchVirtual(self) -> None:
-		taken = self._isKernel
+		taken, takingBack = self._isKernel, self._takingBack
 		super()._watchVirtual()
 		if self._isKernel and not taken:
+			self._everTaken = True
+			if takingBack:
+				# The base class said it has the keyboard again.
+				self._saidHasKeyboard = True
 			self._tookKeyboard()
 
 	def _tookKeyboard(self) -> None:
