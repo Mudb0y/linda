@@ -218,6 +218,16 @@ def test_nothingRunning():
 	assert (status, stdout, stderr) == (1, controlSocket._SAID[controlSocket.NOT_RUNNING] + "\n", "")
 
 
+def test_callerWithNoDisplayIsToldToAskFromTheSession(launches, tmp_path: Path):
+	# As from a console or over ssh, while a copy runs in the graphical session.
+	nvda = _startCopy(launches, tmp_path, "graphical", {"WAYLAND_DISPLAY": None})
+	nobody = {name: None for name in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE", "LINDA_SESSION_TYPE")}
+	status, stdout, stderr, _seconds = _takeKeyboard(env=nobody)
+	assert (status, stdout, stderr) == (1, controlSocket._SAID[controlSocket.NO_DISPLAY] + "\n", "")
+	assert nvda.process.poll() is None
+	_quit(nvda)
+
+
 def test_takesNoOtherArgument():
 	status, stdout, stderr, _seconds = _takeKeyboard("--debug-logging")
 	assert (status, stdout) == (2, "")

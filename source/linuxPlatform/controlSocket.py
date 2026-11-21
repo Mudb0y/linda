@@ -208,6 +208,8 @@ class _Connection:
 ANSWERED, FAILED, NO_ANSWER, UNREACHABLE = "answered", "failed", "noAnswer", "unreachable"
 #: takeKeyboard's outcome when nothing was reachable because no copy holds a lock either.
 NOT_RUNNING = "notRunning"
+#: takeKeyboard's outcome when the caller's environment names no display to find a copy by.
+NO_DISPLAY = "noDisplay"
 _SAID = {
 	ANSWERED: "The running copy of NVDA was asked to take the keyboard back, and says how it went.",
 	FAILED: (
@@ -217,6 +219,10 @@ _SAID = {
 	NO_ANSWER: "The running copy of NVDA does not answer. Start NVDA again instead, which replaces it.",
 	UNREACHABLE: "The running copy of NVDA cannot be asked to take the keyboard back. Start NVDA again instead.",
 	NOT_RUNNING: "NVDA is not running. Start it instead.",
+	NO_DISPLAY: (
+		"This terminal names no display, so the running copy of NVDA cannot be found. "
+		"Run this in a terminal of the graphical session instead."
+	),
 }
 
 
@@ -269,7 +275,13 @@ def takeKeyboard() -> NoReturn:
 	it went, and exit with status 0 if it answered that it had."""
 	from . import displayServer, singleInstance
 
-	names = singleInstance.displayNames(displayServer.kind())
+	kind = displayServer.kind()
+	# From a console or over ssh. The lock this would look at is then no copy's, and saying that none
+	# runs would be wrong while one runs in the graphical session.
+	if kind == "none":
+		print(_SAID[NO_DISPLAY], flush=True)
+		sys.exit(1)
+	names = singleInstance.displayNames(kind)
 	try:
 		lockPaths = [singleInstance.lockFilePath(singleInstance.APP_NAME, name) for name in names]
 		outcome = ask([socketPath(path) for path in lockPaths])
