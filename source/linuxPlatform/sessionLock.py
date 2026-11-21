@@ -15,7 +15,8 @@ logind decides where the environment cannot: for a saver whose environment canno
 which its capabilities make undumpable, and for every saver when this process has no XDG_SESSION_ID,
 as under GNOME, whose user manager starts the shell and the programs of autostart outside any login
 session. The saver is then this session's when logind puts it in this process's session, taking for
-either that is in none the user's display session, and its environment names no other.
+either that is in none the user's display session, and the first of XDG_SESSION_ID and DISPLAY that
+both the saver's environment and this process have names no other.
 The session bus is the user's, shared by every session they have, so a saver of another session
 drives nothing here. Being active is not enough, as no saver says whether it locked:
 mate-screensaver 1.28 sends ActiveChanged(true) as it merely blanks the screen, and GNOME Shell as
