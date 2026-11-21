@@ -37,6 +37,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
 
 from logHandler import log
 from xkbcommon import xkb
@@ -46,6 +47,9 @@ from Xlib.protocol import rq
 
 from . import CaptureMode, GestureKey, KeyEvent, keydClient, keyMap, x11
 from .keydClient import KEY_PRESS, KEY_RELEASE, KEY_REPEAT, LOCK_CAPS, LOCK_NUM, LOCK_SCROLL
+
+if TYPE_CHECKING:
+	from .environment import KernelEnvironment, Layout
 
 #: What becomes of a press: NVDA's to decide and kept without an answer, as an NVDA key's; NVDA's to
 #: decide and passed without one, as browse mode's; kept at once, while the keyboard is held for input
@@ -89,6 +93,18 @@ LOCK_LIGHTS = {
 	keyMap.VK["NUMLOCK"]: LOCK_NUM,
 	keyMap.VK["SCROLL"]: LOCK_SCROLL,
 }
+#: Keysym of each lock: its light. With an environment a key is a lock by what the layout makes it,
+#: not by where it is: under caps:escape the Caps Lock key changes no light, and nothing would put a
+#: light flipped by its key code back.
+LOCK_KEYSYMS = {
+	xkb.keysym_from_name("Caps_Lock"): LOCK_CAPS,
+	xkb.keysym_from_name("Num_Lock"): LOCK_NUM,
+	xkb.keysym_from_name("Scroll_Lock"): LOCK_SCROLL,
+}
+#: The longest an environment's look at the focus may take and still leave NVDA CAPTURE_TIMEOUT for the
+#: key before DOCUMENT_WAIT from its coming, the last moment this source answers a press it waits on;
+#: the helper's VERDICT_WAIT_TIMEOUT is beyond that.
+LOOK_GRACE_MOST = x11.DOCUMENT_WAIT - x11.CAPTURE_TIMEOUT
 #: Modifiers kept whatever NVDA says when it decides them, which change nothing but the state the next
 #: key comes in, so that a chord goes on being NVDA's, as the X source keeps them. The locks are not
 #: among them here: kept, a lock would not change, where on X the server changed it as it went down.
@@ -115,6 +131,9 @@ XKB_REPEAT_KEYS = 1
 #: their own, which opens a menu.
 MODIFIERS_PASSED_UNDER_NVDA = X.ShiftMask | X.ControlMask
 MODIFIERS_KEPT_UNDER_NVDA = X.Mod1Mask | X.Mod4Mask
+#: Alt and Super, a chord with which, passed on, commonly moves the focus to another window, as their
+#: release does once Alt+Tab's switcher or Super's overview has had them.
+FOCUS_MOVING_MODS = X.Mod1Mask | X.Mod4Mask
 _DEPRESSED = xkb.StateComponent.XKB_STATE_MODS_DEPRESSED
 
 
@@ -280,6 +299,12 @@ class _Press:
 	looked: threading.Event | None = None
 	#: Whether the document's window had the focus as far as was known when it came.
 	focusedAtFirst: bool = False
+	#: With an environment, for a press that waits on its look at the focus: when the environment said
+	#: the look will have ended, when this source learned that it had, and whether it found where the
+	#: focus is.
+	lookUntil: float | None = None
+	lookEnded: float | None = None
+	lookKnown: bool = False
 	lock: threading.Lock = field(default_factory=threading.Lock)
 
 	def decide(self, passed: bool) -> bool:
@@ -318,6 +343,7 @@ class KernelKeySource:
 		onLost: Callable[[str, bool], None] | None = None,
 		onHeld: Callable[[], None] | None = None,
 		xSource: x11.X11KeySource | None = None,
+		environment: "KernelEnvironment | None" = None,
 	) -> None:
 		"""
 		:param onLost: Called once, on the source's own thread, when the helper lets go of the keyboard
@@ -327,7 +353,12 @@ class KernelKeySource:
 			before any key of that keyboard is read.
 		:param xSource: The X source beside this one, whose grabs say where a document's keys go; without
 			it, none are captured.
+		:param environment: Where the layout and a document's keys come from with no X server, as in a
+			Wayland session; without it, they come from the X server and xSource.
+		:raise ValueError: When given both xSource and environment.
 		"""
+		if environment is not None and xSource is not None:
+			raise ValueError("a kernel source follows the X server or an environment, not both")
 		self._sock = connection
 		self._welcome = welcome
 		self._onLost = onLost
@@ -418,6 +449,19 @@ class KernelKeySource:
 		self._nextRepeat: float | None = None
 		#: The interpreter's switch interval before this source changed it, while it has.
 		self._switchBefore: float | None = None
+		self._environment = environment
+		self._attached = False
+		self._attachLock = threading.Lock()
+		#: Look number: whether it found where the focus is, as the environment said, until the thread
+		#: that answers keys acts on it.
+		self._lookEnds: dict[int, bool] = {}
+		self._looksUnknown = 0
+		#: Key code: the light of each key the environment's layout makes a lock, replaced whole with it.
+		self._lockKeys: dict[int, int] = {}
+		#: Whether the helper has said which lights are on, after which the layout's guess is not taken.
+		self._locksHeard = False
+		#: With an environment, the GOODBYE_ reason the helper gave as it ended the connection, if it did.
+		self.lostReason: int | None = None
 
 	def start(
 		self,
@@ -432,6 +476,9 @@ class KernelKeySource:
 		self._deliver = deliver
 		self._modeNow = modeNow
 		log.debug(f"linda-keyd {'holds' if self._canWait else 'cannot hold'} a press longer when asked")
+		if self._environment is not None:
+			self._startAttached()
+			return
 		if not os.environ.get("DISPLAY"):
 			raise RuntimeError("there is no X display to read the keyboard layout from")
 		self._connectX()
@@ -451,9 +498,114 @@ class KernelKeySource:
 			sys.setswitchinterval(SWITCH_INTERVAL)
 		self._post(lambda: self._send(keydClient.start()))
 
+	def _startAttached(self) -> None:
+		"""Start as start does, the layout and a document's keys the environment's: it has the layout
+		before the helper is asked to capture, so that no key comes before there are tables to read it.
+
+		:raise Exception: When the environment cannot give a layout.
+		"""
+		with self._attachLock:
+			self._attached = True
+		try:
+			self._environment.attach(self)
+		except Exception:
+			self._detach()
+			raise
+		if self._tables is None:
+			self._detach()
+			raise RuntimeError("the keyboard layout is not known, so keys cannot be read")
+		now = time.monotonic()
+		self._lastEcho = now
+		self._nextBeat = now
+		self._decider = threading.Thread(target=self._decide, name="KernelKeySource decider", daemon=True)
+		self._decider.start()
+		self._thread = threading.Thread(target=self._run, name="KernelKeySource", daemon=True)
+		self._thread.start()
+		if sys.getswitchinterval() > SWITCH_INTERVAL:
+			self._switchBefore = sys.getswitchinterval()
+			sys.setswitchinterval(SWITCH_INTERVAL)
+		self._post(lambda: self._send(keydClient.start()))
+
+	def _detach(self) -> None:
+		"""Have the environment stop telling this source anything, once."""
+		with self._attachLock:
+			if not self._attached:
+				return
+			self._attached = False
+		try:
+			self._environment.detach(self)
+		except Exception:  # noqa: BLE001
+			x11._logError("Detaching the kernel key source from its environment")
+
+	def useLayout(self, layout: "Layout") -> None:
+		"""Read keys in layout from now on, as the environment has it: compiled here, on the caller's
+		thread, so that the thread that answers keys only reads what is made.
+
+		:raise Exception: When the layout cannot be compiled.
+		"""
+		names = tuple(layout.names)
+		group = (0, 0, layout.group)
+		tables = self._tables
+		if tables is not None and names == tables.names:
+			keymap = tables.keymap
+		else:
+			rules, model, name, variant, options = names
+			keymap = xkb.Context().keymap_new_from_names(
+				rules=rules or None,
+				model=model or None,
+				layout=name or None,
+				variant=variant or None,
+				options=options or None,
+			)
+		perKey = bytearray(32)
+		lockKeys: dict[int, int] = {}
+		state = keymap.state_new()
+		state.update_mask(0, 0, 0, *group)
+		for keycode in range(keymap.min_keycode(), min(keymap.max_keycode(), 255) + 1):
+			if keymap.key_repeats(keycode):
+				perKey[keycode >> 3] |= 1 << (keycode & 7)
+			try:
+				index = state.key_get_layout(keycode)
+			except xkb.XKBError:
+				continue
+			syms = keymap.key_get_syms_by_level(keycode, index, 0)
+			light = LOCK_KEYSYMS.get(syms[0]) if syms else None
+			if light is not None:
+				lockKeys[keycode] = light
+		defaults = _Repeat()
+		enabled, delay, interval = (
+			layout.repeat if layout.repeat is not None else (True, defaults.delay, defaults.interval)
+		)
+		self._repeatSettings = _Repeat(
+			enabled=bool(enabled),
+			delay=max(delay, 0.001),
+			interval=max(interval, 0.001),
+			perKey=bytes(perKey),
+		)
+		self._lockKeys = lockKeys
+		self._useTables(_tables(keymap, names, group))
+		if layout.locksGuess is not None:
+			guess = layout.locksGuess & (LOCK_CAPS | LOCK_NUM | LOCK_SCROLL)
+			if self._thread is None:
+				self._locks = guess
+			else:
+				# The thread that answers keys has the locks; the helper's word, come meanwhile, stands.
+				self._post(lambda: None if self._locksHeard else setattr(self, "_locks", guess))
+		if tables is None or names != tables.names:
+			log.debug(f"Keyboard layout {names[2] or 'us'} {names[3]}".rstrip() + f", from {layout.source}")
+
+	def lookDone(self, number: int, known: bool) -> None:
+		"""The environment's answer to its look number: whether it found where the focus is. From any
+		thread."""
+		if 0 < number <= self._looksAsked:
+			self._lookEnds[number] = known
+			self._wake()
+
 	def stop(self) -> None:
 		"""Let go of the helper, which lets go of the keyboards, and tell NVDA every key it holds is up."""
 		self._stopping = True
+		if self._environment is not None:
+			self._detach()
 		self._wake()
 		self._wakeLayout()
 		threads = [thread for thread in (self._thread, self._layoutThread) if thread is not None]
@@ -765,6 +917,8 @@ class KernelKeySource:
 		"""The X source's capture state, with the focus as this source's own watch has it where the two
 		differ, the watch being the sooner to read the X server's word: what the X source makes of the
 		focus coming back to the window, once it reads it, is made of it here as the X source makes it."""
+		if self._environment is not None:
+			return self._environment.captureNow(now)
 		state = self._captureState()
 		window, focused = self._focusSeen
 		if not state.window or window != state.window:
@@ -794,6 +948,8 @@ class KernelKeySource:
 		)
 
 	def _captureState(self) -> x11.CaptureState:
+		if self._environment is not None:
+			return self._environment.captureState
 		return self._x.captureState if self._x is not None else x11.NO_CAPTURE
 
 	@staticmethod
@@ -965,7 +1121,12 @@ class KernelKeySource:
 				self._onExpired(seq)
 			case keydClient.Locks(leds=leds):
 				self._locks = leds & (LOCK_CAPS | LOCK_NUM | LOCK_SCROLL)
+				if self._environment is not None:
+					self._locksHeard = True
+					self._tell(self._environment.noteLocks, self._locks, now)
 			case keydClient.Device():
+				if self._environment is not None:
+					self._tell(self._environment.noteDevice, message.status)
 				status = keydClient.DEVICE_NAMES.get(message.status, f"in state {message.status}")
 				log.info(f"linda-keyd: keyboard {message.device} {message.name!r} {status}")
 				if message.status == keydClient.DEVICE_HELD and not self._holding:
@@ -979,6 +1140,8 @@ class KernelKeySource:
 			case keydClient.Released(reason=reason):
 				self._onReleased(reason)
 			case keydClient.Goodbye():
+				if self._environment is not None:
+					self.lostReason = message.reason
 				self._loseHelper(f"it said goodbye: {message.describe()}")
 			case _:
 				# A message of a later version or feature, which this client did not ask for.
@@ -1006,6 +1169,8 @@ class KernelKeySource:
 		self._releaseAll()
 		self._lost = True
 		self._holding = False
+		if self._environment is not None:
+			self._detach()
 		try:
 			self._sock.close()
 		except OSError:
@@ -1057,6 +1222,9 @@ class KernelKeySource:
 		"""
 		due = None
 		first = True
+		if self._lookEnds and not self._pending:
+			# Answers to looks whose presses were decided without them.
+			self._lookEnds.clear()
 		for press in list(self._pending):
 			if self._lost:
 				# A verdict that could not be sent lost the helper, and every press with it.
@@ -1069,6 +1237,16 @@ class KernelKeySource:
 				and press.passed is None
 				and self._looksDone >= press.focusLook
 			):
+				self._looked(press, now)
+			if (
+				self._environment is not None
+				and press.looked is not None
+				and press.lookEnded is None
+				and press.passed is None
+				and press.focusLook in self._lookEnds
+			):
+				press.lookKnown = self._lookEnds.pop(press.focusLook)
+				press.lookEnded = now
 				self._looked(press, now)
 			if press.passed is None:
 				if first and press.started is None:
@@ -1104,6 +1282,8 @@ class KernelKeySource:
 		"""
 		if not self._canWait:
 			return press.arrival + self._answerWithin.get(press.kind, self._answerWithin[NVDA_KIND])
+		if self._environment is not None and press.looked is not None:
+			return self._answerAfterLook(press)
 		latest = press.arrival + x11.DOCUMENT_WAIT
 		if press.started is None:
 			return latest
@@ -1114,7 +1294,23 @@ class KernelKeySource:
 		that waits for NVDA's focus, early for any other, as this thread may be late itself."""
 		if not self._canWait:
 			return None
+		if self._environment is not None and press.looked is not None and press.lookEnded is None:
+			return press.arrival
 		return press.arrival if press.document else press.arrival + self._answerWithin[NVDA_KIND]
+
+	def _answerAfterLook(self, press: _Press) -> float:
+		"""When this source answers by itself a press that waits on the environment's look at the focus:
+		while the look is open, CAPTURE_TIMEOUT after it will have ended, which leaves a look that ends
+		late NVDA's time for the key; once it has ended, NVDA has its time from then, the press having
+		reached NVDA no sooner. Never beyond DOCUMENT_WAIT from its coming, as for any other."""
+		latest = press.arrival + x11.DOCUMENT_WAIT
+		if press.lookEnded is None:
+			until = press.lookUntil if press.lookUntil is not None else press.arrival
+			return min(latest, until + x11.CAPTURE_TIMEOUT)
+		if press.started is None:
+			return latest
+		begun = max(press.started, press.lookEnded)
+		return min(latest, begun + (x11.DOCUMENT_WAIT if press.document else x11.CAPTURE_TIMEOUT))
 
 	def _settle(self, press: _Press) -> None:
 		"""Act on a press's verdict: tell the helper, and follow what it changes."""
@@ -1143,11 +1339,50 @@ class KernelKeySource:
 		if self._nvdaHeld.get(press.keycode) is press:
 			# The NVDA key pressed twice to pass it on: no chord comes of it.
 			del self._nvdaHeld[press.keycode]
+		if self._environment is not None:
+			self._passedOn(press)
+			return
 		light = LOCK_KEYCODES.get(press.keycode)
 		if light is not None:
 			# The X server locks or unlocks as the key reaches it, and the light the helper reports
 			# follows a moment later; a key typed in between has it already.
 			self._locks ^= light
+
+	def _passedOn(self, press: _Press) -> None:
+		"""What _passed does with an environment, which hears of it: a lock by what the layout makes the
+		key, and a chord that may move the focus."""
+		environment = self._environment
+		now = time.monotonic()
+		keycode = press.keycode
+		light = self._lockKeys.get(keycode)
+		if light is not None:
+			# The compositor locks or unlocks as the key reaches it, and the light follows a moment later.
+			self._locks ^= light
+			self._tell(environment.notePassedLock, light, now)
+		self._tell(environment.notePassed, keycode, False)
+		if (
+			press.effective & FOCUS_MOVING_MODS
+			and not self._tables.keyMods.get(keycode, 0) & FOCUS_MOVING_MODS
+		):
+			self._tell(environment.noteFocusMayMove, now)
+		if self._presses.get(keycode) is not press:
+			# Released before it was decided, its release goes out after it.
+			self._passedUp(press, now)
+
+	def _passedUp(self, press: _Press, now: float) -> None:
+		"""Tell the environment of the release of a press passed on."""
+		self._tell(self._environment.notePassed, press.keycode, True)
+		tables = self._tables
+		if tables is not None and tables.keyMods.get(press.keycode, 0) & FOCUS_MOVING_MODS:
+			self._tell(self._environment.noteFocusMayMove, now)
+
+	def _tell(self, note: Callable[..., None], *args: object) -> None:
+		"""Call one of the environment's notes from the thread that answers keys, which must go on
+		whatever it raises."""
+		try:
+			note(*args)
+		except Exception:  # noqa: BLE001
+			x11._logError("Telling the kernel key source's environment")
 
 	def _onExpired(self, seq: int) -> None:
 		# By number only, as a key typed is kept out of the log; a count of these says how often NVDA
@@ -1221,14 +1456,41 @@ class KernelKeySource:
 		focus reads the X server's events as they come, on a thread of its own, and a key typed a few
 		milliseconds after the focus moved, as the first after Alt+Tab, came here sooner than the event
 		that the focus had moved was read, and went where the focus had been."""
+		if self._environment is not None:
+			self._askEnvironment(press, focused)
+			return
 		self._looksAsked += 1
 		press.focusLook = self._looksAsked
 		press.focusedAtFirst = focused
 		press.looked = threading.Event()
 		self._wakeLayout()
 
+	def _askEnvironment(self, press: _Press, focused: bool) -> None:
+		"""Have the environment look where the focus is before the press is decided, as _lookAtFocus has
+		the layout's thread do; the press waits until the deadline it gives."""
+		self._looksAsked += 1
+		number = press.focusLook = self._looksAsked
+		press.focusedAtFirst = focused
+		press.looked = threading.Event()
+		try:
+			press.lookUntil = self._environment.requestLook(number, press.arrival)
+		except Exception:  # noqa: BLE001
+			x11._logError("Asking the kernel key source's environment where the focus is")
+			press.lookUntil = press.arrival
+			self._lookEnds[number] = False
+
 	def _looked(self, press: _Press, now: float) -> None:
 		"""Decide by the focus as it is now known a press that waited for the layout's thread to read it."""
+		if self._environment is not None and not press.lookKnown:
+			self._looksUnknown += 1
+			# A count, as which key it was is the user's typing.
+			log.debug(
+				f"Where the focus is was not found out for a key, {self._looksUnknown} so far; passed on"
+			)
+			press.kind = press.own = PASS_KIND
+			press.decide(True)
+			press.looked.set()
+			return
 		capture = self._captureNow(now)
 		focused = self._grabsTake(capture)
 		if focused != press.focusedAtFirst:
@@ -1332,6 +1594,15 @@ class KernelKeySource:
 			and self._layoutThread.is_alive()
 			and self._turnsOnFocus(keycode, effective, capture)
 		)
+		if self._environment is not None:
+			looks = (
+				not decided
+				and not held
+				and kind == own
+				and own in (PASS_KIND, CAPTURE_KIND)
+				and self._environment.canLook
+				and self._turnsOnFocus(keycode, effective, capture)
+			)
 		if looks:
 			kind = own = CAPTURE_KIND
 		press = _Press(seq, keycode, now, kind, own, effective, under=under, device=device, asked=not decided)
@@ -1420,6 +1691,9 @@ class KernelKeySource:
 			self._retire(press, now)
 			if self._nvdaHeld.get(keycode) is press:
 				del self._nvdaHeld[keycode]
+		if self._environment is not None and press is not None and press.settled and press.passed:
+			# Its press was told of as passed already; one undecided yet tells of both once it is passed.
+			self._passedUp(press, now)
 		levelShift = keycode in tables.levelShift
 		self._decisions.put(
 			_Item(
@@ -1516,6 +1790,11 @@ class KernelKeySource:
 			press.settled = True
 			if press.looked is not None:
 				press.looked.set()
+			if self._environment is not None and not dropUndecided and press.follows is None:
+				# The helper passes on what it has not had a verdict on as it lets go.
+				self._tell(self._environment.notePassed, press.keycode, False)
+				if self._presses.get(press.keycode) is not press:
+					self._passedUp(press, now)
 		self._holders.clear()
 		if self._tables is not None:
 			for keycode in sorted(self._presses):
