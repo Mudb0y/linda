@@ -79,6 +79,8 @@ CHORD = frozenset((14, 1, 28))
 #: The helper's MODIFIERS (engine/crates/keyd/src/keys.rs): the Controls, Shifts, Alts, Metas and Caps
 #: Lock, whose releases keep their place in line.
 MODIFIERS = frozenset((29, 42, 54, 56, 97, 100, 125, 126, 58))
+#: The helper's READER_MODIFIERS: Insert and the numpad's Insert.
+READER_MODIFIERS = frozenset((110, 82))
 CAPS_LOCK = 58
 KEY_MAP = Path(__file__).resolve().parent.parent.parent / "source" / "linuxPlatform" / "keys" / "keyMap.py"
 #: The stand-in's keyboard, as the kernel would number it; a test may press keys on others too.
@@ -93,6 +95,7 @@ CODES = {
 	"Return": 28,
 	"Control_L": 29,
 	"control": 29,
+	"ctrl": 29,
 	"Shift_L": 42,
 	"shift": 42,
 	"Alt_L": 56,
@@ -112,7 +115,9 @@ CODES = {
 	"KP_Down": 80,
 	"KP_Next": 81,
 	"KP_Insert": 82,
+	"KP_Enter": 96,
 	"ISO_Level3_Shift": 100,
+	"AltGr": 100,
 	"Home": 102,
 	"Up": 103,
 	"Prior": 104,
@@ -125,6 +130,7 @@ CODES = {
 	"Delete": 111,
 	"Super_L": 125,
 	"super": 125,
+	"Super_R": 126,
 	"F11": 87,
 	"F12": 88,
 }
@@ -135,8 +141,12 @@ for _row, _first in (("qwertyuiop", 16), ("asdfghjkl", 30), ("zxcvbnm", 44)):
 	CODES.update({letter: _first + index for index, letter in enumerate(_row)})
 
 
+_CODES_BY_FOLDED = {name.casefold(): evdev for name, evdev in CODES.items()}
+
+
 def code(name: str) -> int:
-	return CODES[name] if name in CODES else CODES[name.lower()]
+	"""The code of the key named name, whatever its case; KeyError for a name it has no key by."""
+	return _CODES_BY_FOLDED[name.casefold()]
 
 
 def isVirtualKey(evdev: int) -> bool:

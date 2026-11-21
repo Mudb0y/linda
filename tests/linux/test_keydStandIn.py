@@ -202,6 +202,46 @@ def test_nullSinkHasTheKeysOfAKeyboardNothingHolds(noX: list, socketPath: str):
 	assert sink.lights() == CAPS
 
 
+def test_chordsByTheDesktopDriversNamesGoThroughPress(noX: list, socketPath: str):
+	"""ctrl, AltGr, KP_Enter and Super_R, which tests press through the desktop driver, are the stand-in's
+	own names, in any case."""
+	sink = NullSink()
+	keyboard, client = serve(socketPath, sink, lambda evdev: VERDICT_PASS)
+	try:
+		keyboard.press("ctrl+AltGr+KP_Enter", "super_r+A", "CTRL+altgr")
+		keyboard.waitFor(lambda: len(sink.passed()) == 14)
+	finally:
+		client.close()
+		keyboard.close()
+	assert noX == []
+	control, altGr, enter, superR, a = 29, 100, 96, 126, 30
+	assert sink.passed() == [
+		(control, True),
+		(altGr, True),
+		(enter, True),
+		(enter, False),
+		(altGr, False),
+		(control, False),
+		(superR, True),
+		(a, True),
+		(a, False),
+		(superR, False),
+		(control, True),
+		(altGr, True),
+		(altGr, False),
+		(control, False),
+	]
+
+
+def test_namesFoldTogetherOnlyIntoOneKey():
+	folded: dict[str, int] = {}
+	for name, evdev in keydStandIn.CODES.items():
+		assert folded.setdefault(name.casefold(), evdev) == evdev, name
+	assert code("kp_enter") == code("KP_Enter") == 96 and code("Super_R") == code("SUPER_R") == 126
+	with pytest.raises(KeyError):
+		code("NoSuchKey")
+
+
 def test_aSinkIsRefusedWithoutX(socketPath: str):
 	with pytest.raises(ValueError):
 		StandIn(socketPath, sink=NullSink(), toX=False)

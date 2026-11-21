@@ -20,6 +20,7 @@ from pathlib import Path
 import chromiumSession
 import desktopSession
 import harness
+import keydStandIn
 import pytest
 import waylandKeyboard
 import webSession
@@ -41,21 +42,6 @@ X_WINDOW_MANAGERS = ("marco", "Xvfb")
 wayland = pytest.mark.rigSession("wayland")
 
 
-class _CompositorSink:
-	"""The stand-in's keys put out on the rig's Wayland keyboard, the virtual keyboard's and the real
-	one's alike, with the lights of the XKB state the keyboard keeps."""
-
-	def send(self, evdev: int, down: bool, virtual: bool) -> None:
-		waylandKeyboard.key(evdev, down)
-
-	def lights(self) -> int:
-		lit = waylandKeyboard.lights()
-		return (1 if lit["num"] else 0) | (2 if lit["caps"] else 0) | (4 if lit["scroll"] else 0)
-
-	def close(self) -> None:
-		pass
-
-
 @pytest.fixture(params=[False, True], ids=["display", "standIn"])
 def standIn(request: pytest.FixtureRequest) -> Iterator[StandIn | None]:
 	"""None, for keys pressed on the rig's display, or a stand-in with no client, which puts every key
@@ -63,7 +49,7 @@ def standIn(request: pytest.FixtureRequest) -> Iterator[StandIn | None]:
 	if not request.param:
 		yield None
 		return
-	sink = None if desktopSession.compositor() is None else _CompositorSink()
+	sink = None if desktopSession.compositor() is None else keydStandIn.compositorSink()
 	# The pytest directory's path is too long for a socket's.
 	with tempfile.TemporaryDirectory() as directory, StandIn(Path(directory) / "keyd", sink=sink) as keyboard:
 		yield keyboard
@@ -261,18 +247,50 @@ def test_typedTextReachesTheGtkEntry(desktop: DesktopSession, standIn: StandIn |
 		]
 
 
-def test_chordWithANameTheStandInLacks(desktop: DesktopSession, standIn: StandIn | None):
-	"""xdotool's "ctrl", which the stand-in has no key by, selects all of the entry's text."""
+def _recordStandInPresses(standIn: StandIn | None, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+	"""The chords the session hands to StandIn.press from now on, each still pressed."""
+	chords: list[str] = []
+	if standIn is not None:
+		press = standIn.press
+
+		def recorded(*given: str, **options) -> None:
+			chords.extend(given)
+			press(*given, **options)
+
+		monkeypatch.setattr(standIn, "press", recorded)
+	return chords
+
+
+def test_chordByTheDriversNameGoesThroughTheStandIn(
+	desktop: DesktopSession, standIn: StandIn | None, monkeypatch: pytest.MonkeyPatch
+):
+	"""xdotool's "ctrl", which the stand-in names too, selects all of the entry's text."""
 	assert _typeIntoTheGtkEntry(desktop, "Bob") == "Bob"
+	chords = _recordStandInPresses(standIn, monkeypatch)
 	desktop.press("ctrl+a")
 	desktop.typeText("Al")
 	_waitFor(
 		lambda: _entryText("Fixture window") == "Al", KEY_BOUND, "Ctrl+A did not select the entry's text"
 	)
 	if standIn is not None:
+		assert chords == ["ctrl+a"]
 		control, a = 29, 30
 		# After Alt+N's four and Bob's eight.
 		assert _putOut(standIn)[12:16] == [(control, True), (a, True), (a, False), (control, False)]
+
+
+def test_chordWithANameTheStandInLacks(
+	desktop: DesktopSession, standIn: StandIn | None, monkeypatch: pytest.MonkeyPatch
+):
+	"""xdotool's "question", a key symbol the stand-in has no key by, is pressed key by key."""
+	assert _typeIntoTheGtkEntry(desktop, "Bob") == "Bob"
+	chords = _recordStandInPresses(standIn, monkeypatch)
+	desktop.press("question")
+	_waitFor(lambda: _entryText("Fixture window") == "Bob?", KEY_BOUND, "question did not type ?")
+	if standIn is not None:
+		assert chords == []
+		shift, slash = 42, 53
+		assert _putOut(standIn)[12:16] == [(shift, True), (slash, True), (slash, False), (shift, False)]
 
 
 @wayland
