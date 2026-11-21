@@ -142,6 +142,72 @@ WINDOWS = textwrap.dedent(
 	'''
 )
 
+#: A witness on a connection and in a process of its own, which registers nothing: given an application's
+#: bus name, it prints "ready" once it listens, and then the time, on the clock every process shares, of
+#: the first word on the accessibility bus that a window of that application went or that it ended. That
+#: is the soonest the feed could have known, whatever the toolkit was doing before it said so.
+WITNESS = textwrap.dedent(
+	"""\
+	import sys
+	import time
+
+	from gi.repository import Gio, GLib
+
+	APPLICATION = sys.argv[1]
+	session = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+	(address,) = session.call_sync(
+		"org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus", "GetAddress", None, GLib.VariantType("(s)"),
+		Gio.DBusCallFlags.NONE, 1000, None,
+	).unpack()
+	connection = Gio.DBusConnection.new_for_address_sync(
+		address,
+		Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+		None,
+		None,
+	)
+	loop = GLib.MainLoop()
+
+
+	def went(*_arguments):
+		print("went", time.monotonic(), flush=True)
+		loop.quit()
+
+
+	def stateChanged(_connection, _sender, _path, _interface, _member, parameters):
+		state = parameters.get_child_value(0).get_string()
+		if parameters.get_child_value(1).get_int32() == (1 if state == "defunct" else 0):
+			went()
+
+
+	def ownerChanged(_connection, _sender, _path, _interface, _member, parameters):
+		name, _old, new = parameters.unpack()
+		if name == APPLICATION and not new:
+			went()
+
+
+	for member in ("Deactivate", "Destroy"):
+		connection.signal_subscribe(
+			APPLICATION, "org.a11y.atspi.Event.Window", member, None, None, Gio.DBusSignalFlags.NONE, went
+		)
+	for state in ("defunct", "showing", "visible"):
+		connection.signal_subscribe(
+			APPLICATION, "org.a11y.atspi.Event.Object", "StateChanged", None, state,
+			Gio.DBusSignalFlags.NONE, stateChanged,
+		)
+	connection.signal_subscribe(
+		"org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged", None, APPLICATION,
+		Gio.DBusSignalFlags.NONE, ownerChanged,
+	)
+	# Once this answers, the bus has every match rule above.
+	connection.call_sync(
+		"org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetId", None, None,
+		Gio.DBusCallFlags.NONE, 1000, None,
+	)
+	print("ready", flush=True)
+	loop.run()
+	"""
+)
+
 #: Ahead of every child: the feed, made to keep a record of the window events and active states each
 #: application sent it, the toolkits' programs, Firefox, and the compositor's hand on the keyboard.
 COMMON = textwrap.dedent(
@@ -306,9 +372,10 @@ COMMON = textwrap.dedent(
 			self.process.wait(10)
 
 
-	class Firefox:
-		\"\"\"Firefox with a fresh profile on a page of its own, as a native Wayland client. The page says
-		on standard output when it is closed, Firefox's own word of when its window goes.\"\"\"
+	class Firefox(Program):
+		\"\"\"Firefox with a fresh profile on a page of its own, as a native Wayland client. The page says on
+		standard output when it gains and loses the keyboard and as it goes, Firefox's own word for each,
+		which waitFor waits for as Program's does.\"\"\"
 
 		def __init__(self, title):
 			profile = os.path.join(SCRATCH, "firefox-" + title.replace(" ", "-"))
@@ -320,7 +387,7 @@ COMMON = textwrap.dedent(
 			with open(page, "w") as f:
 				f.write(
 					f"<title>{title}</title><p>Text of {title}</p>"
-					"<script>for (const name of ['beforeunload', 'pagehide', 'unload'])"
+					"<script>for (const name of ['focus', 'blur', 'beforeunload', 'pagehide', 'unload'])"
 					" addEventListener(name, () => dump(`linda-test ${name}\\\\n`))</script>"
 				)
 			self.process = subprocess.Popen(
@@ -335,15 +402,25 @@ COMMON = textwrap.dedent(
 			)
 			self.pid = self.process.pid
 			self.toolkit = "firefox"
-			#: When the page said each event that took it away: beforeunload, pagehide and unload.
-			self.said = {}
+			self.lines = []
+			self.changed = threading.Condition()
 			threading.Thread(target=self._read, daemon=True).start()
 
 		def _read(self):
 			for line in self.process.stdout:
 				words = line.split()
 				if len(words) == 2 and words[0] == "linda-test":
-					self.said.setdefault(words[1], time.monotonic())
+					with self.changed:
+						self.lines.append((time.monotonic(), words[1:]))
+						self.changed.notify_all()
+
+		def said(self):
+			\"\"\"When the page first said each of its words.\"\"\"
+			with self.changed:
+				first = {}
+				for at, (word,) in self.lines:
+					first.setdefault(word, at)
+				return first
 
 		def stop(self):
 			if self.process.poll() is None:
@@ -352,6 +429,32 @@ COMMON = textwrap.dedent(
 				except ProcessLookupError:
 					pass
 			self.process.wait(10)
+
+
+	class Witness:
+		\"\"\"WITNESS for one application, listening once it is made.\"\"\"
+
+		def __init__(self, busName):
+			self.process = subprocess.Popen(
+				[sys.executable, WITNESS, busName], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+			)
+			assert self.process.stdout.readline().strip() == "ready", "the witness did not start"
+			self.went = None
+			threading.Thread(target=self._read, daemon=True).start()
+
+		def _read(self):
+			words = self.process.stdout.readline().split()
+			if words[:1] == ["went"]:
+				self.went = float(words[1])
+
+		def wait(self, timeout=5):
+			deadline = time.monotonic() + timeout
+			while self.went is None and time.monotonic() < deadline:
+				time.sleep(0.01)
+			self.process.kill()
+			self.process.wait(10)
+			assert self.went is not None, "the witness heard nothing go"
+			return self.went
 
 
 	def sway(*arguments):
@@ -499,9 +602,7 @@ ALTERNATION = textwrap.dedent(
 				target = anchor
 				sent = other.send("close", name)
 				if anchor.toolkit == "firefox":
-					# Firefox says nothing of its own when the keyboard comes back, so this is from before
-					# Mutter gives it back.
-					switched = other.waitFor("closed", name, sent)[0]
+					switched = anchor.waitFor("focus", None, sent)[0]
 				else:
 					switched = anchor.waitFor("active", f"anchor{block}", sent)[0]
 			check(block * 25 + step, switched, anchor, target, window)
@@ -553,8 +654,9 @@ ALTERNATION = textwrap.dedent(
 
 #: The child of the tests that end the foreground: its window is the anchor, and then its program is
 #: killed, or the window is closed, by the program itself or by Ctrl+W in Firefox. How long the feed
-#: takes to leave it unfocused is measured from the kill, the command to close, or Firefox's page's
-#: first word that it is going.
+#: takes to leave it unfocused is measured from the kill, the command to close, or, for Firefox, whose
+#: own way from the key to taking its window down is not the feed's, from the witness's first word that
+#: its window went.
 ENDING = textwrap.dedent(
 	"""\
 	if TOOLKIT == "firefox":
@@ -568,6 +670,7 @@ ENDING = textwrap.dedent(
 		state = feed.captureState
 		assert state.window and state.focused, state
 		time.sleep(0.3)
+		said = {}
 		if HOW == "kill":
 			started = time.monotonic()
 			os.kill(pid, signal.SIGKILL)
@@ -575,29 +678,22 @@ ENDING = textwrap.dedent(
 			sys.path.append(str(harness.HERE))
 			import waylandKeyboard
 
-			pressed = time.monotonic()
+			witness = Witness(feed.foreground[0])
+			started = time.monotonic()
 			# Pressing it takes as long as the key is held and let go, while the feed is to be watched.
 			threading.Thread(target=waylandKeyboard.press, args=("ctrl+w",), daemon=True).start()
 		else:
 			started = program.send("close" if HOW == "close" else "end", "only")
 		while feed.captureState.focused or isOf(foregroundPid(), program.pid):
-			assert time.monotonic() - (started if HOW != "ctrl+w" else pressed) < 5, (
-				f"the end was never heard: {feed.captureState} {feed.foreground}"
-			)
+			assert time.monotonic() - started < 5, f"the end was never heard: {feed.captureState} {feed.foreground}"
 			time.sleep(0.001)
 		unfocused = time.monotonic()
-		said = {}
 		if HOW == "ctrl+w":
-			# The key's way to Firefox and Firefox's way to beginning to close are not the feed's, so the
-			# time is from the page's first word that it is going, which comes before the window goes.
-			# Firefox does not always send beforeunload to a page nobody touched.
-			deadline = time.monotonic() + 5
-			while "unload" not in program.said and time.monotonic() < deadline:
-				time.sleep(0.01)
-			assert program.said, "the page never said it was going"
-			said = {word: round((at - pressed) * 1000, 1) for word, at in program.said.items()}
-			said["unfocused"] = round((unfocused - pressed) * 1000, 1)
-			started = min(program.said.values())
+			pressed = started
+			started = witness.wait()
+			time.sleep(0.5)
+			said = {word: round((at - pressed) * 1000, 1) for word, at in program.said().items()}
+			said.update(went=round((started - pressed) * 1000, 1), unfocused=round((unfocused - pressed) * 1000, 1))
 		alive = program.process.poll() is None
 		after = unfocused - started
 		trace = feed.traceSince(started - 0.3)
@@ -616,8 +712,11 @@ def runFeedChild(tmp_path: Path, code: str, **names: object) -> dict:
 	windows.write_text(WINDOWS, encoding="utf-8")
 	scratch = tmp_path / "scratch"
 	scratch.mkdir()
+	witness = tmp_path / "witness.py"
+	witness.write_text(WITNESS, encoding="utf-8")
 	values = {
 		"WINDOWS": str(windows),
+		"WITNESS": str(witness),
 		"SCRATCH": str(scratch),
 		"USER_JS": (harness.HERE / "bench" / "user.js").read_text(encoding="utf-8"),
 		**names,
