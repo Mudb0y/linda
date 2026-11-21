@@ -642,9 +642,9 @@ if not WAYLAND:
 		)
 
 
-#: The child of the restart test: the feed started while a window already has the keyboard, stopped
-#: while a read is out to that window's program, which the test has paused, and started again.
-RESTART = textwrap.dedent(
+#: Ahead of the children that start the feed again: waiting for it to find the window of process PID,
+#: and a look asked as the kernel source asks one.
+AGAIN = textwrap.dedent(
 	"""\
 	import os
 	import signal
@@ -674,8 +674,13 @@ RESTART = textwrap.dedent(
 		feed.requestLook(number, asked, done)
 		assert heard.wait(2), "the look never ended"
 		return [ended[0], time.monotonic() - asked]
+	"""
+)
 
-
+#: The child of the restart test: the feed started while a window already has the keyboard, stopped
+#: while a read is out to that window's program, which the test has paused, and started again.
+RESTART = textwrap.dedent(
+	"""\
 	feed = AtspiCaptureFeed()
 	feed.start()
 	assert feed.canLook
@@ -712,16 +717,59 @@ RESTART = textwrap.dedent(
 	"""
 )
 
+#: The child of the lost bus test: a feed whose first connection fails, and whose second is closed
+#: under it, started again each time.
+BUS_LOST = textwrap.dedent(
+	"""\
+	class Feed(AtspiCaptureFeed):
+		tries = 0
+
+		def _connect(self):
+			self.tries += 1
+			return self.tries > 1 and super()._connect()
+
+
+	feed = Feed()
+	feed.start()
+	failed = feed.canLook
+	feed.start()
+	retried = feed.canLook
+	awaitForeground(feed)
+	feed._connection.close_sync(None)
+	closed = time.monotonic()
+	while feed.canLook:
+		assert time.monotonic() - closed < 2, "the closed connection was never noticed"
+		time.sleep(0.005)
+	noticed = time.monotonic() - closed
+	feed.start()
+	again = feed.canLook
+	awaitForeground(feed)
+	time.sleep(0.1)
+	after = look(feed, 1)
+	feed.stop()
+	result = {"failed": failed, "retried": retried, "noticed": noticed, "again": again, "after": after}
+	"""
+)
+
 if not WAYLAND:
 	from desktopSession import activate
 
-	def test_startsAgainAfterAStopWithAReadOut(tmp_path: Path) -> None:
+	def runAgain(tmp_path: Path, code: str) -> dict:
 		with DesktopSession(tmp_path / "desktop") as desktop:
 			fixture = desktop.startApp(desktop.fixture("gtkFixture"), title="Fixture window")
 			activate("Fixture window")
-			done = harness.runChild(tmp_path, f"PID = {fixture.pid}\n" + RESTART, timeout=120)
+			done = harness.runChild(tmp_path, f"PID = {fixture.pid}\n" + AGAIN + code, timeout=120)
 		assert done.error is None, f"{done.error}\n{done.stderr[-4000:]}"
-		results = done.value
+		return done.value
+
+	def test_startsAgainOnceTheBusIsBack(tmp_path: Path) -> None:
+		results = runAgain(tmp_path, BUS_LOST)
+		assert (results["failed"], results["retried"], results["again"]) == (False, True, True), results
+		assert results["after"][0], f"a look after the new connection ended unknown: {results}"
+		print(f"the closed connection noticed after {results['noticed'] * 1000:.0f} ms")
+
+	def test_startsAgainAfterAStopWithAReadOut(tmp_path: Path) -> None:
+		results = runAgain(tmp_path, RESTART)
 		assert results["before"][0], results
 		assert results["pipeKept"], results
 		assert results["inFlight"] >= 1, f"no read was out at the stop: {results}"

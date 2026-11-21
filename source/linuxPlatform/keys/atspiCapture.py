@@ -160,6 +160,7 @@ class AtspiCaptureFeed:
 		self._context = None
 		self._loop = None
 		self._connection = None
+		self._closedHandler: int | None = None
 		self._subscriptions: list[int] = []
 		self._lookTimer = None
 		#: Made at the first start and never closed: the answering thread may be about to write to it as
@@ -631,8 +632,10 @@ class AtspiCaptureFeed:
 
 	def start(self) -> None:
 		"""Connect to the accessibility bus and follow the foreground on a thread of the feed's own,
-		waiting up to START_TIMEOUT for the connection. Without one, canLook stays False."""
-		if self._thread is not None:
+		waiting up to START_TIMEOUT for the connection. Without one, canLook stays False until start is
+		called again, as it does once the connection closes."""
+		thread = self._thread
+		if thread is not None and thread.is_alive():
 			return
 		from gi.repository import GLib
 
@@ -729,6 +732,7 @@ class AtspiCaptureFeed:
 			)
 			return False
 		connection = self._connection
+		self._closedHandler = connection.connect("closed", self._onClosed)
 		for member in ("Activate", "Deactivate"):
 			self._subscribe(connection, WINDOW_EVENTS, member, None, self._onWindowSignal)
 		for state in WATCHED_STATES:
@@ -771,6 +775,9 @@ class AtspiCaptureFeed:
 		connection, self._connection = self._connection, None
 		if connection is None:
 			return
+		if self._closedHandler is not None:
+			connection.disconnect(self._closedHandler)
+			self._closedHandler = None
 		for subscription in self._subscriptions:
 			connection.signal_unsubscribe(subscription)
 		self._subscriptions.clear()
@@ -779,6 +786,13 @@ class AtspiCaptureFeed:
 			connection.close_sync(None)
 		except GLib.Error:
 			log.debugWarning("AT-SPI capture feed: closing its connection failed", exc_info=True)
+
+	def _onClosed(self, _connection, _vanished: bool, error) -> None:
+		log.warning(
+			"AT-SPI capture feed: its connection to the accessibility bus closed, so browse mode's keys are "
+			f"not captured: {error.message if error is not None else 'no reason given'}"
+		)
+		self._loop.quit()
 
 	def _onWake(self, *_args) -> bool:
 		try:
