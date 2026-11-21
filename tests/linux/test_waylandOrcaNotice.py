@@ -238,6 +238,7 @@ def test_orca51AfterNVDA(desktop: DesktopSession, owners, tmp_path: Path):
 	finish(desktop, nvda)
 
 
+@pytest.mark.rigSession("x11")
 def test_nothingIsSaidInAnXSession(desktop: DesktopSession, owners, tmp_path: Path):
 	orca = startOwner(owners, tmp_path, "orca", 0)
 	orca51 = startOwner(owners, tmp_path, "orca", 0, ORCA1_BUS_NAME, ORCA1_OBJECT_PATH)

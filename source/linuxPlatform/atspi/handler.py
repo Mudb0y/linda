@@ -493,6 +493,9 @@ def nodeForRelation(relation: str | tuple[int, int]) -> Node | None:
 def _processAtPoint(x: int, y: int) -> int | None:
 	from linuxPlatform import pointer
 
+	if not pointer.isAvailable():
+		# Asked at every start, for the object under the pointer, and only an X session's server can say.
+		return None
 	try:
 		return pointer.processAt(x, y)
 	# No display, or a window that went as it was asked about: every window is tried instead.

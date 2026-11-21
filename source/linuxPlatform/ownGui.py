@@ -526,6 +526,17 @@ def _popUpTrayMenu(self, menu: wx.Menu) -> bool:
 	return menuWindow.popUp(self, menu)
 
 
+def _setTrayIcon(self, icon, tooltip: str = "") -> bool:
+	"""wx.adv.TaskBarIcon.SetIcon, which on a Wayland display sets nothing.
+
+	GTK's status icon lives in X's system tray alone. On a Wayland display it has no widget, and GTK
+	complains on standard error at every start about being asked for that widget's scale.
+	"""
+	if isWaylandDisplay():
+		return False
+	return _upstreamTraySetIcon(self, icon, tooltip)
+
+
 #: When each of NVDA's top-level GTK windows last mapped, by its address, while it has not been active
 #: since and its activation is still waited for.
 _awaitingActivation: dict[int, float] = {}
@@ -854,6 +865,7 @@ _upstreamAddCaptured = None
 _upstreamDoRefresh = None
 _upstreamPopupMenu = wx.Window.PopupMenu
 _upstreamTrayPopupMenu = wx.adv.TaskBarIcon.PopupMenu
+_upstreamTraySetIcon = wx.adv.TaskBarIcon.SetIcon
 _upstreamRaise = wx.Window.Raise
 _upstreamAddPage = wx.Notebook.AddPage
 _upstreamEnable = wx.Window.Enable
@@ -876,6 +888,7 @@ def install() -> None:
 	inputGestures.InputGesturesDialog._addCaptured = _addCapturedOnceKeysReleased
 	wx.Window.PopupMenu = _popupMenuOnFirstItem
 	wx.adv.TaskBarIcon.PopupMenu = _popUpTrayMenu
+	wx.adv.TaskBarIcon.SetIcon = _setTrayIcon
 	wx.Window.Raise = _raiseOrPresentAgain
 	wx.Notebook.AddPage = _addPageOnce
 	wx.Window.Enable = _enableRestoringFocus
