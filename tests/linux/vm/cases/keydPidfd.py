@@ -160,7 +160,7 @@ def race(user: str, cgroup: str, connectorEnds: bool) -> dict:
 			_reap(connector)
 			impostor, result["attempts"], result["impostorCgroup"] = _takeNumber(connector, user, cgroup)
 			result["impostor"] = impostor
-		os.write(goIn, b"go\n")
+		_say(goIn, {"go": True})
 		result.update(_hear(out))
 	finally:
 		for pid in (holder, impostor, connector):
