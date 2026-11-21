@@ -526,8 +526,9 @@ def _popUpTrayMenu(self, menu: wx.Menu) -> bool:
 	return menuWindow.popUp(self, menu)
 
 
-#: When each of NVDA's top-level GTK windows last mapped, by its address, while that is recent.
-_mappedAt: dict[int, float] = {}
+#: When each of NVDA's top-level GTK windows that has mapped and not yet been active mapped, by its
+#: address, for as long as its activation is waited for.
+_awaitingActivation: dict[int, float] = {}
 
 
 def _needsPresentingAgain(window: wx.Window) -> bool:
@@ -543,11 +544,11 @@ def presentAgain(window: wx.TopLevelWindow) -> None:
 	"""Bring a shown window of NVDA's forward on a Wayland display, by mapping it again.
 
 	A compositor activates an already mapped window only for a request made with input the program
-	received itself; Mutter, KWin and sway give a window the keyboard as it maps. A window that mapped
-	within the last second is left to the activation that map brings.
+	received itself; Mutter, KWin and sway give a window the keyboard as it maps. A window that has just
+	mapped and not yet been active is left to the activation that map brings.
 	"""
 	widget = _widget(window)
-	if time.monotonic() - _mappedAt.get(widget, float("-inf")) < _ACTIVATION_WAIT / 1000:
+	if widget in _awaitingActivation:
 		return
 	try:
 		_gtkCalls().mapAgain(widget)
@@ -943,20 +944,22 @@ def _awaitActivation(window) -> None:
 		Gdk.WindowTypeHint.NORMAL,
 	):
 		return
-	now = time.monotonic()
-	for address, mapped in list(_mappedAt.items()):
-		if now - mapped >= _ACTIVATION_WAIT / 1000:
-			del _mappedAt[address]
-	_mappedAt[_address(window)] = now
-	activated = [window.is_active()]
+	address = _address(window)
+	mapped = _awaitingActivation[address] = time.monotonic()
+	activated = [False]
 
 	def noteActive(*_args) -> None:
-		activated[0] = activated[0] or window.is_active()
+		if window.is_active():
+			activated[0] = True
+			_awaitingActivation.pop(address, None)
 
 	handler = window.connect("notify::is-active", noteActive)
+	noteActive()
 
 	def check() -> bool:
 		window.disconnect(handler)
+		if _awaitingActivation.get(address) == mapped:
+			del _awaitingActivation[address]
 		if not activated[0] and window.get_mapped():
 			_sayNotActivated()
 		return False
