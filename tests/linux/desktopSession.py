@@ -270,6 +270,18 @@ def characterCodes(character: str) -> tuple[int, ...]:
 		raise ValueError(f"the {waylandKeyboard.LAYOUT} layout cannot type {character!r}") from None
 
 
+def _standInNames(chord: str) -> bool:
+	"""Whether the stand-in for linda-keyd has a key by each name in chord."""
+	import keydStandIn
+
+	try:
+		for name in chord.split("+"):
+			keydStandIn.code(name)
+	except KeyError:
+		return False
+	return True
+
+
 def _matches(expected: str, spoken: str) -> bool:
 	if expected.endswith(PREFIX_MARK):
 		return spoken.startswith(expected[: -len(PREFIX_MARK)])
@@ -426,12 +438,16 @@ class DesktopSession:
 		"""Press each chord in turn on the rig's display, or on the stand-in when the session has one,
 		with gap seconds after each.
 
-		Chords use xdotool's key names: "Tab", "Insert+t", "KP_Up", "alt+Tab". On the stand-in they are
-		its own press's names.
+		Chords use xdotool's key names: "Tab", "Insert+t", "KP_Up", "alt+Tab". The stand-in presses them
+		by its own press, and a chord with a name it does not have, as "ctrl" or "AltGr", key by key on
+		the keys the pl layout gives that name.
 		"""
 		for chord in chords:
 			if self.standIn is not None:
-				self.standIn.press(chord)
+				if _standInNames(chord):
+					self.standIn.press(chord)
+				else:
+					self._pressCodes(chordCodes(chord))
 			elif compositor() is not None:
 				self._pressCodes(chordCodes(chord))
 			else:

@@ -257,6 +257,20 @@ def test_typedTextReachesTheGtkEntry(desktop: DesktopSession, standIn: StandIn |
 		]
 
 
+def test_chordWithANameTheStandInLacks(desktop: DesktopSession, standIn: StandIn | None):
+	"""xdotool's "ctrl", which the stand-in has no key by, selects all of the entry's text."""
+	assert _typeIntoTheGtkEntry(desktop, "Bob") == "Bob"
+	desktop.press("ctrl+a")
+	desktop.typeText("Al")
+	_waitFor(
+		lambda: _entryText("Fixture window") == "Al", KEY_BOUND, "Ctrl+A did not select the entry's text"
+	)
+	if standIn is not None:
+		control, a = 29, 30
+		# After Alt+N's four and Bob's eight.
+		assert _putOut(standIn)[12:16] == [(control, True), (a, True), (a, False), (control, False)]
+
+
 @wayland
 def test_typedTextIsTypedInThePlLayout(desktop: DesktopSession, standIn: StandIn | None):
 	"""Capitals, AltGr's letters and the punctuation on Shift, as the compositor's pl keymap gives them."""
