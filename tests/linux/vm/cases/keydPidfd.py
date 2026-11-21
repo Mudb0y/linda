@@ -160,8 +160,8 @@ def race(user: str, cgroup: str, connectorEnds: bool) -> dict:
 		if connectorEnds:
 			_reap(connector)
 			# Its number is free from here on, and may belong to anything when the cleanup runs.
-			connector = None
-			impostor, result["attempts"], result["impostorCgroup"] = _takeNumber(connector, user, cgroup)
+			number, connector = connector, None
+			impostor, result["attempts"], result["impostorCgroup"] = _takeNumber(number, user, cgroup)
 			result["impostor"] = impostor
 		_say(goIn, {"go": True})
 		result.update(_hear(out))
