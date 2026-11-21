@@ -231,6 +231,37 @@ def test_foregroundProgramGoes(tmp_path: Path) -> None:
 	)
 
 
+def test_programEndHeardFromTheBus(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		from gi.repository import GLib
+
+
+		def ownerChanged(name, old, new):
+			feed._onNameOwnerChanged(
+				None,
+				"org.freedesktop.DBus",
+				"/org/freedesktop/DBus",
+				"org.freedesktop.DBus",
+				"NameOwnerChanged",
+				GLib.Variant("(sss)", (name, old, new)),
+			)
+
+
+		feed = anchoredOnFirst(t)
+		# A well-known name changing hands, or a program coming, says nothing of the foreground.
+		ownerChanged("org.a11y.atspi.Registry", ":1.10", "")
+		ownerChanged(":1.10", "", ":1.10")
+		assert feed.foreground[:2] == FIRST and feed.captureState.focused, feed.foreground
+		ownerChanged(":1.10", ":1.10", "")
+		s = feed.captureState
+		assert (s.window, s.focused) == (0, False), s
+		assert feed.foreground is None
+		""",
+	)
+
+
 def test_foregroundWindowGoes(tmp_path: Path) -> None:
 	runLogic(
 		tmp_path,
