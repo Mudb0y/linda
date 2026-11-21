@@ -20,6 +20,11 @@ if appDir not in sys.path:
 SAY_COMMAND = "say"
 #: As the only argument, each runs linuxPlatform.desktopRegistration instead of the screen reader.
 DESKTOP_OPTIONS = ("--register-desktop", "--unregister-desktop")
+#: As the only argument, prints linuxPlatform.sessionReport instead of starting the screen reader.
+SESSION_REPORT_OPTION = "--session-report"
+#: As the only argument, asks the running copy to take the keyboard back, through
+#: linuxPlatform.controlSocket, instead of starting the screen reader.
+TAKE_KEYBOARD_OPTION = "--take-keyboard"
 
 
 def _tell(message: str) -> None:
@@ -51,6 +56,19 @@ def _handOverToDesktopRegistration(option: str) -> NoReturn:
 	desktopRegistration.main(option)
 
 
+def _handOverToOutsideOption(option: str) -> NoReturn:
+	from linuxPlatform import bootstrap
+
+	bootstrap.install()
+	if option == SESSION_REPORT_OPTION:
+		from linuxPlatform import sessionReport
+
+		sessionReport.main()
+	from linuxPlatform import controlSocket
+
+	controlSocket.takeKeyboard()
+
+
 def main() -> NoReturn:
 	# Before NVDA's parser, which takes any argument it does not know and starts the screen reader anyway.
 	if sys.argv[1:2] == [SAY_COMMAND]:
@@ -66,6 +84,12 @@ def main() -> NoReturn:
 			_tell(f"{desktopOptions[0]} takes no other argument, so nothing was changed")
 			sys.exit(2)
 		_handOverToDesktopRegistration(sys.argv[1])
+	outsideOptions = (SESSION_REPORT_OPTION, TAKE_KEYBOARD_OPTION)
+	if givenOptions := [argument for argument in sys.argv[1:] if argument in outsideOptions]:
+		if len(sys.argv) != 2:
+			_tell(f"{givenOptions[0]} takes no other argument, so nothing was done")
+			sys.exit(2)
+		_handOverToOutsideOption(sys.argv[1])
 	from linuxPlatform import bootstrap
 
 	bootstrap.install()
@@ -73,7 +97,14 @@ def main() -> NoReturn:
 	import globalVars
 	import NVDAState
 	from argsParsing import getParser
-	from linuxPlatform import quitSignals, singleInstance, synthDriverPaths, testHooks
+	from linuxPlatform import (
+		controlSocket,
+		displayServer,
+		quitSignals,
+		singleInstance,
+		synthDriverPaths,
+		testHooks,
+	)
 
 	# nvda.pyw also checks for its virtual environment here. The Nix development shell provides
 	# NVDA's dependencies instead, and bootstrap.install() has checked the one it cannot start without.
@@ -116,11 +147,17 @@ def main() -> NoReturn:
 		if given:
 			_fail(f"{option} uses NVDA's Windows installer, which Linux does not have")
 
+	sessionKind = displayServer.kind()
+	instanceLocks: list[singleInstance.InstanceLock] = []
+	# The locks under the current name, beside which this copy can be asked to take the keyboard back.
+	ownLockPaths: list[str] = []
 	try:
-		instanceLocks = [
-			singleInstance.InstanceLock(singleInstance.lockFilePath(name))
-			for name in (singleInstance.APP_NAME, singleInstance.FORMER_APP_NAME)
-		]
+		for display in singleInstance.displayNames(sessionKind):
+			for name in (singleInstance.APP_NAME, singleInstance.FORMER_APP_NAME):
+				lock = singleInstance.InstanceLock(singleInstance.lockFilePath(name, display))
+				instanceLocks.append(lock)
+				if name == singleInstance.APP_NAME:
+					ownLockPaths.append(lock.path)
 		isAlreadyRunning = any(lock.holder() is not None for lock in instanceLocks)
 	except OSError as e:
 		_fail(f"cannot open the lock that keeps one copy per display: {e}")
@@ -137,6 +174,9 @@ def main() -> NoReturn:
 		sys.exit(0)
 	elif appArgs.check_running:
 		sys.exit(1)
+	if sessionKind == "none":
+		# wx would fail later with a line that names only X.
+		_fail("neither WAYLAND_DISPLAY nor DISPLAY names a display")
 	quitSignals.install()
 	for lock in instanceLocks:
 		try:
@@ -146,14 +186,17 @@ def main() -> NoReturn:
 		if not isLockTaken:
 			_fail(f"another copy still holds {lock.path}")
 	# Before anything else can fail: a copy killed with the screen curtain on, its guard with it, left
-	# the screen black.
-	try:
-		from linuxPlatform import gammaCurtain
+	# the screen black. Only in an X session: in a Wayland one the recorded display is at most Xwayland,
+	# whose ramps are not the screen's, and on GNOME connecting to it would start it.
+	staleCurtain = None
+	if sessionKind == "x11":
+		try:
+			from linuxPlatform import gammaCurtain
 
-		staleCurtain = gammaCurtain.liftStale()
-	except Exception as e:  # noqa: BLE001
-		# Looking for a curtain must never be what keeps the screen reader from starting.
-		staleCurtain = f"Could not look for a Screen Curtain left by a copy of NVDA that ended: {e!r}"
+			staleCurtain = gammaCurtain.liftStale()
+		except Exception as e:  # noqa: BLE001
+			# Looking for a curtain must never be what keeps the screen reader from starting.
+			staleCurtain = f"Could not look for a Screen Curtain left by a copy of NVDA that ended: {e!r}"
 	# Only now, as a copy started under the former name could still have written its configuration
 	# as it exited.
 	from linuxPlatform import xdg
@@ -208,6 +251,9 @@ def main() -> NoReturn:
 		# From then on this copy acts on SIGTERM at once, so a copy replacing it need wait no longer.
 		for lock in instanceLocks:
 			core.postNvdaStartup.register(lock.markReady)
+		# Once there is a keyboard to take back, from the main loop that answers.
+		controlSocket.prepare(ownLockPaths)
+		core.postNvdaStartup.register(controlSocket.start)
 		# Once NVDA can speak, so that a session manager waiting for it goes on as soon as it is up.
 		core.postNvdaStartup.register(sessionClient.start)
 		core.main()
@@ -219,6 +265,7 @@ def main() -> NoReturn:
 		# The lock is never released by hand: the kernel drops it as the process ends, so a new copy waits
 		# for this one to be entirely gone, as it waits on the mutex on Windows.
 		log.info("NVDA exit")
+	controlSocket.stop()
 	sessionClient.stop()
 	idleInhibitor.stop()
 	# The copy a restart started sends SIGTERM as it takes over, and as the interpreter finalises it puts

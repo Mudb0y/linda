@@ -8,16 +8,18 @@ and its runtime directory, where the single-instance lock is:
 	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_boot.py
 """
 
+import contextlib
 import json
 import os
 import re
 import select
 import signal
+import socket
 import struct
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import configobj
@@ -40,6 +42,8 @@ STARTUP_BOUND = 60.0
 SHUTDOWN_BOUND = 20.0
 #: The display the rig starts, a number no live display has.
 RIG_DISPLAY = ":99"
+#: A display no X server in the rig has.
+ABSENT_DISPLAY = ":98"
 #: What wx's calls return, as the probe logs them.
 WX_CANCEL = 16
 WX_ID_CANCEL = 5101
@@ -554,8 +558,9 @@ def test_checkRunningAndQuit(start: Start):
 
 
 def test_coreFailureIsReportedOnStandardError(start: Start):
-	# wx raises SystemExit when there is no display to open.
-	nvda = start("noDisplay", "exit", env={"DISPLAY": None})
+	# wx raises SystemExit when there is no display to open. One that is named but not there gets as far
+	# as wx: with none named at all, the launcher refuses before it.
+	nvda = start("noDisplay", "exit", env={"DISPLAY": ABSENT_DISPLAY})
 	assert nvda.waitForExit(SHUTDOWN_BOUND) == 1, nvda.describe()
 	assert re.search(r"^CRITICAL - __main__\.main .*:\ncore failure$", nvda.text("nvda.log"), re.MULTILINE), (
 		nvda.describe()
@@ -566,6 +571,80 @@ def test_coreFailureIsReportedOnStandardError(start: Start):
 		f"properly?; the log is {nvda.directory / 'nvda.log'}\n"
 	)
 	nvda.assertClean(ignoring={"returnCode", "logErrors", "stderr"})
+
+
+def test_noDisplayAtAllIsRefusedBeforeNVDAStarts(start: Start):
+	nobody = {name: None for name in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE", "LINDA_SESSION_TYPE")}
+	nvda = start("noDisplayAtAll", "exit", env=nobody)
+	assert nvda.waitForExit(SHUTDOWN_BOUND) == 1, nvda.describe()
+	assert nvda.text("stderr.txt") == "linda: neither WAYLAND_DISPLAY nor DISPLAY names a display\n"
+	assert not nvda.text("nvda.log")
+	nvda.assertClean(ignoring={"returnCode", "stderr"})
+	# Asking about a copy needs no display.
+	running = start("checkRunningWithNoDisplay", None, "--check-running", env=nobody)
+	assert running.waitForExit(SHUTDOWN_BOUND) == 1, running.describe()
+	running.assertClean(ignoring={"returnCode"})
+
+
+@contextlib.contextmanager
+def _waylandSocket() -> Iterator[dict[str, str]]:
+	"""A socket in the rig's runtime directory that is enough for the session to be taken for Wayland,
+	and the variables that name it while keeping GTK on the rig's X display. Nothing listens on it."""
+	path = Path(os.environ["XDG_RUNTIME_DIR"]) / "wayland-boot"
+	with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as compositor:
+		compositor.bind(str(path))
+		try:
+			yield {"WAYLAND_DISPLAY": path.name, "GDK_BACKEND": "x11"}
+		finally:
+			path.unlink()
+
+
+def _holderOf(display: str) -> int | None:
+	lock = singleInstance.InstanceLock(singleInstance.lockFilePath(singleInstance.APP_NAME, display))
+	try:
+		return lock.holder()
+	finally:
+		lock.close()
+
+
+@pytest.mark.rigSession("x11")
+def test_copyGivenOnlyTheWaylandSocketReplacesOneGivenBoth(start: Start):
+	with _waylandSocket() as wayland:
+		first = start("both", "wait", welcome=False, env=wayland)
+		first.waitForSpeech(SENTENCE, STARTUP_BOUND)
+		assert _holderOf(wayland["WAYLAND_DISPLAY"]) == first.process.pid
+		assert _runningCopy() == first.process.pid
+		onlyWayland = {**wayland, "DISPLAY": None}
+		running = start("checkRunning", None, "--check-running", env=onlyWayland)
+		assert running.waitForExit(SHUTDOWN_BOUND) == 0, running.describe()
+		second = start("onlyWayland", "exit", welcome=False, env=onlyWayland)
+		assert first.waitForExit(SHUTDOWN_BOUND) == 0, first.describe()
+		assert "Exiting on SIGTERM" in first.text("nvda.log")
+		first.assertClean(logNames=("nvda.log",))
+		# With GTK kept off Wayland, it has nowhere to open a window, but it got past the locks.
+		assert second.waitForExit(STARTUP_BOUND) == 1, second.describe()
+		assert "Starting NVDA version" in second.text("nvda.log")
+		assert "another copy still holds" not in second.text("stderr.txt")
+		assert "could not stop the copy already running" not in second.text("stderr.txt")
+
+
+@pytest.mark.rigSession("x11")
+@pytest.mark.parametrize("session", ["x11", "wayland"])
+def test_curtainLeftBehindIsLookedForOnlyInAnXSession(start: Start, session: str):
+	# An unreadable record, which liftStale removes and logs without connecting anywhere.
+	record = Path(_rigLockPath()).with_name(f"display{RIG_DISPLAY}.curtain")
+	record.write_text("not a record", encoding="utf-8")
+	try:
+		with contextlib.ExitStack() as stack:
+			env = stack.enter_context(_waylandSocket()) if session == "wayland" else {}
+			nvda = start("curtain", "exit", welcome=False, env=env)
+			nvda.waitForSpeech(SENTENCE, STARTUP_BOUND)
+			assert nvda.waitForExit(SHUTDOWN_BOUND) == 0, nvda.describe()
+		nvda.assertClean(logNames=("nvda.log",))
+		lifted = "Removed an unreadable Screen Curtain record" in nvda.text("nvda.log")
+		assert (lifted, record.exists()) == ((True, False) if session == "x11" else (False, True))
+	finally:
+		record.unlink(missing_ok=True)
 
 
 def test_launcherOptionIsRefused(start: Start):
@@ -820,6 +899,41 @@ def test_oneLockNamePerWaylandDisplay(monkeypatch, tmp_path: Path):
 	assert singleInstance.displayName() == "wayland-1"
 	monkeypatch.setenv("WAYLAND_DISPLAY", "/elsewhere/wayland-1")
 	assert singleInstance.displayName() == "_elsewhere_wayland-1"
+
+
+@pytest.mark.parametrize(
+	("kind", "display", "wayland", "names"),
+	[
+		("x11", ":0", None, [":0"]),
+		# The owner's session with a stray socket named: the one lock it has always had.
+		("x11", ":0", "wayland-1", [":0"]),
+		("wayland", ":1", "wayland-1", ["wayland-1", ":1"]),
+		("wayland", None, "wayland-1", ["wayland-1"]),
+		("wayland", ":1", None, [":1"]),
+		("none", None, None, ["none"]),
+	],
+)
+def test_lockNamesPerSession(
+	monkeypatch, tmp_path: Path, kind: str, display: str | None, wayland: str | None, names: list[str]
+):
+	monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+	for variable, value in (("DISPLAY", display), ("WAYLAND_DISPLAY", wayland)):
+		if value is None:
+			monkeypatch.delenv(variable, raising=False)
+		else:
+			monkeypatch.setenv(variable, value)
+	assert singleInstance.displayNames(kind) == names
+
+
+@pytest.mark.parametrize("display", [":0", ":0.1", "unix:0", "localhost:10.0", ":10"])
+def test_lockOfAnXSessionIsTodays(monkeypatch, tmp_path: Path, display: str):
+	monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+	monkeypatch.setenv("DISPLAY", display)
+	monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+	[name] = singleInstance.displayNames("x11")
+	assert name == singleInstance.displayName()
+	for appName in (singleInstance.APP_NAME, singleInstance.FORMER_APP_NAME):
+		assert singleInstance.lockFilePath(appName, name) == singleInstance.lockFilePath(appName)
 
 
 def test_lockDirectoryMustBePrivate(monkeypatch, tmp_path: Path):
