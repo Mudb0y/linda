@@ -50,9 +50,12 @@ KEPT_LIMIT = 200_000
 #: must differ before NVDA says its layout is not the desktop's.
 LAYOUT_SPAN = 8
 LAYOUT_MISMATCHES = 5
+#: Seconds a key passed on waits for its character at most. NVDA or the application, when busy, may
+#: get to the insert well after TYPING_WINDOW, and it is still that key's.
+LAYOUT_HOLD = 3.0
 #: Keys passed on and not yet paired with what they inserted, at most: more than a person types within
-#: TYPING_WINDOW.
-LAYOUT_PENDING_LIMIT = 32
+#: LAYOUT_HOLD.
+LAYOUT_PENDING_LIMIT = 64
 
 #: The last text removed from an object, as (its node, offset, text, time.monotonic()).
 _lastRemoved: tuple[object, int, str, float] | None = None
@@ -474,14 +477,14 @@ class LayoutCheck:
 		now = time.monotonic()
 		with self._lock:
 			pending = self._pending
-			while pending and now - pending[0].time > TYPING_WINDOW:
+			while pending and now - pending[0].time > LAYOUT_HOLD:
 				pending.popleft()
 			if not pending:
 				return
 			if not comparable:
 				pending.popleft()
 				return
-			differed = self._pair(pending, text)
+			differed = self._pair(pending, text, now)
 		if differed is None:
 			return
 		self._recent.append(differed)
@@ -492,7 +495,7 @@ class LayoutCheck:
 		else:
 			self.matches += 1
 
-	def _pair(self, pending: deque[_PassedKey], text: str) -> bool | None:
+	def _pair(self, pending: deque[_PassedKey], text: str, now: float) -> bool | None:
 		"""Whether text differs from what its key types, taking that key and any before it from pending;
 		None when it is not known which key that was."""
 		for index, key in enumerate(pending):
@@ -510,6 +513,10 @@ class LayoutCheck:
 					pending.popleft()
 				self._composing = False
 				return None
+		if now - pending[0].time > TYPING_WINDOW:
+			# The oldest key's character may yet come, late, and this may be that of a key given up on.
+			pending.popleft()
+			return None
 		pending.popleft()
 		return True
 

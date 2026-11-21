@@ -232,6 +232,47 @@ result["said"] = said
 	assert value["said"] == []
 
 
+def test_lateInsertsArePairedWithTheirOwnKeys(tmp_path: Path):
+	"""With the same layout on both sides, inserts NVDA gets to well after their keys went down, as when
+	it or the application is busy, still match: each insert handled 0.6 s after its key while keys go
+	down 0.15 s apart, and a stall of about a second while twelve keys a second are typed."""
+	value = runCheck(
+		tmp_path,
+		r"""
+text = "the quick brown"
+start = time.monotonic() - 0.6 - 0.15 * len(text)
+events = []
+for index, character in enumerate(text):
+	events.append((start + index * 0.15, "key", character))
+	events.append((start + index * 0.15 + 0.6, "insert", character))
+events.sort(key=lambda event: (event[0], event[1] == "insert"))
+real = time.monotonic
+for at, kind, character in events:
+	if kind == "key":
+		key(character, at=at)
+	else:
+		time.monotonic = lambda at=at: at
+		try:
+			insert(character)
+		finally:
+			time.monotonic = real
+result["steady"] = counts()
+for character in "the ":
+	key(character)
+	insert(character)
+word = "dermatoglyph"
+base = time.monotonic() - 0.08 * len(word)
+for index, character in enumerate(word):
+	key(character, at=base + index * 0.08)
+for character in word:
+	insert(character)
+result["stall"] = counts()
+result["said"] = said
+""",
+	)
+	assert value == {"steady": [15, 0], "stall": [31, 0], "said": []}
+
+
 def test_aDeadKeysCharacterIsNotAMismatch(tmp_path: Path):
 	"""A dead key types nothing, and the letter after it inserts the accented one; the compose key and
 	the two keys after it insert one character. Neither is a mismatch, and the keys after are compared
