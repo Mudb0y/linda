@@ -832,6 +832,14 @@ class KernelKeySource:
 
 	def _inject(self, keycode: int, vk: int, isUp: bool) -> None:
 		held = self._typedDown.get(keycode)
+		if held is not None and held[1] == keydClient.TYPE_DECIDE:
+			# Typed by the other computer and held there, as when NVDA sends on the Tab it typed: the helper
+			# has a key typed down once, so that one is let go of first, as on Windows the key the hook
+			# blocked is up already, and its own release later goes nowhere.
+			self._typeKey(keycode, held[0], False, True)
+			if isUp:
+				return
+			held = None
 		if isUp:
 			if held is None or held[1] != keydClient.TYPE_INJECT:
 				return

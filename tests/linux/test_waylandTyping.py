@@ -218,6 +218,43 @@ def test_typedKeysComeToNVDAAsInjectedAndThenTheApplication(tmp_path: Path):
 	assert value["lines"] == []
 
 
+SENT_ON_CHILD = r"""
+source = startRoute()
+# Every key NVDA's, as with input help on, so that the typed Tab is kept, as browse mode keeps it.
+source.holdKeyboard(True)
+source.typeKey(VK_TAB, False, False)
+time.sleep(0.2)
+kept = sink.passed()
+# NVDA sends the Tab on while the controlling computer still holds it.
+source.inject(VK_TAB, 0x0F, False, False)
+source.inject(VK_TAB, 0x0F, False, True)
+time.sleep(0.2)
+sent = sink.passed()
+source.typeKey(VK_TAB, False, True)
+time.sleep(0.3)
+result = {
+	"kept": kept,
+	"sent": sent,
+	"after": sink.passed(),
+	"events": [[e["vk"], e["up"], e["injected"]] for e in delivered],
+	"outcomes": outcomes(),
+}
+source.stop()
+"""
+
+
+@forcedSession
+def test_aTypedKeyStillHeldIsLetGoOfBeforeNVDASendsItOn(tmp_path: Path):
+	"""The helper has a key typed down once: one the other computer still holds, kept, is let go of
+	before NVDA sends it on, and the other computer's own release of it later types nothing."""
+	value = runTypingChild(tmp_path, f"VK_TAB = {VK_TAB}\n" + SENT_ON_CHILD)
+	assert value["kept"] == []
+	assert value["sent"] == [[TAB, True], [TAB, False]]
+	assert value["after"] == value["sent"]
+	assert value["events"] == [[VK_TAB, False, True], [VK_TAB, True, True]]
+	assert value["outcomes"] == [TYPED_KEPT, TYPED_KEPT, TYPED_OUT, TYPED_OUT]
+
+
 NUMPAD_CHILD = r"""
 source = startRoute()
 
