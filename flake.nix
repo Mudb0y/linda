@@ -32,7 +32,7 @@
       # wxPython is 4.3 where this NVDA release pins 4.2: under 4.2 on GTK a
       # list control reaches AT-SPI as an empty panel, so its items cannot be
       # read at all.
-      python = pythonInterpreter.withPackages (ps: with ps; [
+      pythonPackages = ps: with ps; [
         bleak
         # The BRLTTY driver's client; BRLTTY itself is the system's.
         brlapi
@@ -74,7 +74,12 @@
         url-normalize
         wxpython_4_3
         xkbcommon
-      ]);
+      ];
+      python = pythonInterpreter.withPackages pythonPackages;
+      # The rig's Wayland clients, the key injector on sway and the keymap
+      # dump, speak the protocol through pywayland. Only the shell has it, so
+      # that the package Linda runs from stays what it was.
+      shellPython = pythonInterpreter.withPackages (ps: pythonPackages ps ++ [ ps.pywayland ]);
 
       louisTables = pkgs.callPackage ./nix/louis-tables.nix { };
       cargoVendorDir = pkgs.rustPlatform.importCargoLock { lockFile = ./engine/Cargo.lock; };
@@ -206,7 +211,7 @@
 
       devShells.${system}.default = pkgs.mkShell (runtimeEnv // {
         nativeBuildInputs = with pkgs; [
-          python
+          shellPython
           cargo
           rustc
           clippy
@@ -247,8 +252,10 @@
           mate-session-manager
           libnotify
           featherpad
-          # Another program's side of the clipboard, for the clipboard tests.
+          # Another program's side of the clipboard, for the clipboard tests,
+          # on X and on Wayland.
           xclip
+          wl-clipboard
           # tests/linux/rig builds its sandbox with this, and gives it the
           # internet on request through pasta, in a namespace it makes and
           # enters with util-linux and whose routes it sets with ip.
@@ -343,13 +350,18 @@
         # own wrapper; Linda's code under test is given it here.
         LINDA_MATE_DESKTOP_SCHEMAS = pkgs.glib.getSchemaPath pkgs.mate-desktop;
 
-        # The compositor of the rig's Wayland mode, LINDA_RIG_SESSION=wayland, off PATH so that
+        # The compositors of the rig's Wayland mode, LINDA_RIG_COMPOSITOR, off PATH so that
         # the X mode's sandbox stays as it was: Mutter headless on a virtual monitor, with its
         # own schemas, and Mesa's software renderer, which libglvnd finds on a NixOS host only
-        # under /run, empty in the rig.
+        # under /run, empty in the rig; and sway, unwrapped because the wrapper only adds the
+        # session's own variables, whose programs the rig puts on PATH in that mode alone.
         LINDA_MUTTER = "${pkgs.mutter}/bin/mutter";
         LINDA_MUTTER_SCHEMAS = "${pkgs.mutter}/share/gsettings-schemas/${pkgs.mutter.name}";
         LINDA_MESA = "${pkgs.mesa}";
+        LINDA_SWAY_BIN = "${pkgs.sway-unwrapped}/bin";
+        # The protocol the sway injector types through, from the wlroots sway is built on;
+        # pywayland's own bindings do not have it.
+        LINDA_VIRTUAL_KEYBOARD_PROTOCOL = "${pkgs.wlroots_0_20.src}/protocol/virtual-keyboard-unstable-v1.xml";
 
         # The terminal fixture's shell. The bash on PATH is stdenv's, built
         # without readline, so arrows and Control with them would type escape

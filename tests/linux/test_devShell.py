@@ -209,6 +209,19 @@ def _mesa(value: str) -> None:
 	_holds(_directory(value), "share/glvnd/egl_vendor.d/50_mesa.json")
 
 
+def _swayBin(value: str) -> None:
+	_program(_directory(value), "sway")
+	_program(_directory(value), "swaymsg")
+	# Unwrapped: the wrapper is a script that sets the variables of a desktop session.
+	_elfFile(str(Path(value) / "sway"))
+
+
+def _virtualKeyboardProtocol(value: str) -> None:
+	path = Path(value)
+	assert path.is_file() and path.name == "virtual-keyboard-unstable-v1.xml", value
+	assert '<interface name="zwp_virtual_keyboard_manager_v1"' in path.read_text(encoding="utf-8"), value
+
+
 def _storePath(path: Path) -> Path:
 	"""The store path a file is in."""
 	return Path(STORE) / path.relative_to(STORE).parts[0]
@@ -284,6 +297,8 @@ SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
 	"LINDA_MUTTER": _mutter,
 	"LINDA_MUTTER_SCHEMAS": _mutterSchemas,
 	"LINDA_MESA": _mesa,
+	"LINDA_SWAY_BIN": _swayBin,
+	"LINDA_VIRTUAL_KEYBOARD_PROTOCOL": _virtualKeyboardProtocol,
 	"LINDA_RIG_PATH": _searchPath,
 	"LINDA_RIG_XDG_DATA_DIRS": _searchPath,
 }
@@ -311,6 +326,21 @@ def test_liblouisVersionIsTheLibraryNvdaLoads(tmp_path: Path):
 	done = harness.runChild(tmp_path, "import louis\nresult = louis.version()", prepare="none")
 	done.assertClean()
 	assert done.value == os.environ["LINDA_LIBLOUIS_VERSION"]
+
+
+def test_virtualKeyboardProtocolLoadsInTheShellsPython():
+	"""pywayland, which only the shell's Python has, makes bindings of the protocol the sway injector
+	types through, whose keyboard is made for the core protocol's own seat."""
+	import waylandKeyboard
+	from pywayland.protocol.wayland import WlSeat
+
+	protocol = waylandKeyboard.loadProtocol(
+		os.environ["LINDA_VIRTUAL_KEYBOARD_PROTOCOL"], "virtual_keyboard_unstable_v1"
+	)
+	keyboard = protocol.ZwpVirtualKeyboardV1
+	assert [request.name for request in keyboard.requests] == ["keymap", "key", "modifiers", "destroy"]
+	(create,) = protocol.ZwpVirtualKeyboardManagerV1.requests
+	assert create.arguments[0].interface is WlSeat
 
 
 @pytest.mark.parametrize("searchPath", ["PATH", "LINDA_RIG_PATH"])
