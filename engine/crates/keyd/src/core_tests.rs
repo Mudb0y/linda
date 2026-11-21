@@ -104,19 +104,28 @@ impl T {
     }
 
     fn hello(&mut self, conn: ConnId) {
+        self.hello_asking(conn, 0);
+    }
+
+    fn hello_asking(&mut self, conn: ConnId, features: u32) {
         self.from(
             conn,
             FromClient::Hello {
                 version: PROTOCOL_VERSION,
-                features: 0,
+                features,
             },
         );
     }
 
     /// Connects, says HELLO, and is admitted to the session in front.
     fn admit(&mut self, conn: ConnId) {
+        self.admit_asking(conn, 0);
+    }
+
+    /// As admit, asking for features; answers those WELCOME granted.
+    fn admit_asking(&mut self, conn: ConnId, features: u32) -> u32 {
         self.connect(conn, PEER);
-        self.hello(conn);
+        self.hello_asking(conn, features);
         assert!(
             self.out.contains(&Output::Admit(conn, PEER)),
             "{:?}",
@@ -126,8 +135,13 @@ impl T {
         self.take();
         let welcome =
             |o: &Output| matches!(o, Output::Send(c, ToClient::Welcome { .. }) if *c == conn);
-        assert!(self.out.iter().any(welcome), "{:?}", self.out);
+        let granted = self.out.iter().find_map(|o| match o {
+            Output::Send(c, ToClient::Welcome { features, .. }) if *c == conn => Some(*features),
+            _ => None,
+        });
+        assert!(granted.is_some(), "{:?}", self.out);
         self.out.retain(|o| !welcome(o));
+        granted.unwrap_or_default()
     }
 
     /// What the client was sent since last asked, but the echoes of its heartbeats.
@@ -1319,12 +1333,39 @@ fn unknown_features_are_not_granted() {
         CLIENT,
         FromClient::Hello {
             version: 1,
-            features: FEATURE_TYPING | 0x8000,
+            features: FEATURE_TYPING | FEATURE_LATE_PASS | FEATURE_VIRTUAL_SEEN | 0x8000,
         },
     );
     t.core.admitted(CLIENT, Ok(SESSION.into()), t.now);
     t.take();
-    assert!(matches!(t.sent()[0], ToClient::Welcome { features: 0, .. }));
+    assert!(matches!(
+        t.sent()[0],
+        ToClient::Welcome {
+            features: FEATURE_TYPING,
+            ..
+        }
+    ));
+}
+
+/// What Linda's X route asks for, as it has since FEATURE_WAIT came, is granted alone, and such a
+/// client is never sent a typed key's answer.
+#[test]
+fn a_client_asking_for_wait_alone_is_granted_nothing_more() {
+    let mut t = T::new();
+    t.w.plug("keyboard");
+    assert_eq!(t.admit_asking(CLIENT, FEATURE_WAIT), FEATURE_WAIT);
+    t.send(FromClient::Start);
+    t.pass(VIRTUAL_SETTLE);
+    t.send(FromClient::Type {
+        tag: 1,
+        code: KEY_A,
+        press: true,
+        mode: TypeMode::Inject,
+    });
+    let sent = t.sent();
+    assert_eq!(goodbye_reason(&sent), Some(Goodbye::Malformed), "{sent:?}");
+    assert!(!sent.iter().any(|m| matches!(m, ToClient::Typed { .. })));
+    t.assert_let_go();
 }
 
 // The emergency chord.
@@ -3884,19 +3925,24 @@ fn fault_the_chords_last_key_is_not_told_up_without_being_told_down() {
     );
 }
 
-// Typing, with FEATURE_TYPING. No real client is granted it yet, so these grant it by hand to the
-// client T::capturing admitted.
+// Typing, with FEATURE_TYPING.
 
 const KEY_B: u16 = 48;
 
 impl T {
-    fn grant_typing(&mut self) {
-        self.core.client.as_mut().expect("a client").features |= FEATURE_TYPING;
+    /// As capturing, with FEATURE_TYPING asked for and granted.
+    fn typing() -> (T, u32) {
+        T::typing_asking(FEATURE_TYPING)
     }
 
-    fn typing() -> (T, u32) {
-        let (mut t, k) = T::capturing();
-        t.grant_typing();
+    fn typing_asking(features: u32) -> (T, u32) {
+        let mut t = T::new();
+        let k = t.w.plug("AT Translated Set 2 keyboard");
+        assert_eq!(t.admit_asking(CLIENT, features), features);
+        t.send(FromClient::Start);
+        t.pass(VIRTUAL_SETTLE);
+        assert!(t.w.grabbed(k), "{:?}", t.sent());
+        t.out.clear();
         (t, k)
     }
 
@@ -4002,8 +4048,7 @@ fn type_from_a_client_not_granted_typing_drops_it_and_lets_go() {
 fn typing_is_refused_unless_the_helper_captures_for_the_client_in_front() {
     let mut t = T::new();
     let k = t.w.plug("keyboard");
-    t.admit(CLIENT);
-    t.grant_typing();
+    t.admit_asking(CLIENT, FEATURE_TYPING);
     t.type_key(1, KEY_A, true);
     t.send(FromClient::Start);
     t.type_key(2, KEY_A, true);
@@ -4071,8 +4116,7 @@ fn typing_needs_no_keyboard_held() {
             let k = t.w.plug("keyboard");
             t.w.set_busy(k, true);
         }
-        t.admit(CLIENT);
-        t.grant_typing();
+        t.admit_asking(CLIENT, FEATURE_TYPING);
         t.send(FromClient::Start);
         t.pass(VIRTUAL_SETTLE);
         assert!(!t.w.any_grabbed());
@@ -4531,23 +4575,347 @@ fn injected_keys_do_not_end_a_run_of_unanswered_presses() {
     t.assert_let_go();
 }
 
+// Typing with TYPE_DECIDE: the key comes back as KEY, to be decided as a key read from a keyboard.
+
+impl T {
+    fn decide_key(&mut self, tag: u32, code: u16, press: bool) {
+        self.send(FromClient::Type {
+            tag,
+            code,
+            press,
+            mode: TypeMode::Decide,
+        });
+    }
+
+    /// The sequence number of the typed key just told, with everything else sent since dropped.
+    fn typed_seq(&mut self) -> u64 {
+        let keys = self.keys();
+        let key = keys.last().expect("a key was sent");
+        assert_eq!(key.device, TYPED_DEVICE, "{keys:?}");
+        key.seq
+    }
+}
+
+fn typed_key(seq: u64, code: u16, press: bool) -> ToClient {
+    ToClient::Key(Key {
+        seq,
+        device: TYPED_DEVICE,
+        code,
+        value: if press { KEY_PRESS } else { KEY_RELEASE },
+        flags: if press {
+            KEY_ASK | KEY_TYPED
+        } else {
+            KEY_TYPED
+        },
+    })
+}
+
+fn answered(tag: u32, seq: u64, outcome: u8) -> ToClient {
+    ToClient::Typed { tag, seq, outcome }
+}
+
 #[test]
-fn a_typed_key_to_be_decided_is_refused_until_the_helper_decides_typed_keys() {
+fn a_key_typed_to_be_decided_comes_back_as_a_key_and_goes_out_once_passed() {
     let (mut t, _k) = T::typing();
-    t.send(FromClient::Type {
-        tag: 1,
-        code: KEY_A,
-        press: true,
-        mode: TypeMode::Decide,
-    });
+    t.decide_key(1, KEY_A, true);
+    let sent = t.sent();
+    let [ToClient::Key(Key { seq: a, .. })] = sent[..] else {
+        panic!("{sent:?}")
+    };
+    assert_eq!(sent, vec![typed_key(a, KEY_A, true)]);
+    assert!(t.w.emitted().is_empty(), "went out before its verdict");
+    t.verdict(a, false);
+    assert_eq!(t.sent(), vec![answered(1, a, TYPED_OUT)]);
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1)]);
+    t.decide_key(2, KEY_A, false);
     assert_eq!(
         t.sent(),
-        vec![ToClient::Typed {
-            tag: 1,
-            seq: 0,
-            outcome: TYPED_REFUSED_KEY
-        }]
+        vec![
+            typed_key(a + 1, KEY_A, false),
+            answered(2, a + 1, TYPED_OUT)
+        ]
     );
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1), (KEY_A, 0)]);
     assert!(!t.closed(CLIENT));
+}
+
+#[test]
+fn a_key_typed_to_be_decided_and_kept_never_goes_out() {
+    let (mut t, _k) = T::typing();
+    t.decide_key(1, KEY_A, true);
+    let a = t.typed_seq();
+    t.verdict(a, true);
+    assert_eq!(t.sent(), vec![answered(1, a, TYPED_KEPT)]);
+    t.decide_key(2, KEY_A, false);
+    assert_eq!(
+        t.sent(),
+        vec![
+            typed_key(a + 1, KEY_A, false),
+            answered(2, a + 1, TYPED_KEPT)
+        ]
+    );
+    assert!(t.w.emitted().is_empty(), "{:?}", t.w.emitted());
+    // Released, it may be typed down again.
+    t.decide_key(3, KEY_A, true);
+    let again = t.typed_seq();
+    t.verdict(again, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1)]);
+}
+
+#[test]
+fn a_key_typed_to_be_decided_waits_in_line_with_the_keys_read_around_it() {
+    let (mut t, k) = T::typing();
+    t.press(k, KEY_T);
+    t.decide_key(1, KEY_A, true);
+    t.press(k, KEY_B);
+    let told: Vec<(u32, u64)> = t.keys().iter().map(|k| (k.device, k.seq)).collect();
+    let [(_, user), (TYPED_DEVICE, a), (_, b)] = told[..] else {
+        panic!("{told:?}")
+    };
+    t.verdict(b, false);
+    t.verdict(a, false);
+    assert!(
+        t.w.emitted().is_empty(),
+        "went out before the press read before it"
+    );
+    assert!(t.sent().is_empty());
+    t.verdict(user, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_T, 1), (KEY_A, 1), (KEY_B, 1)]);
+    assert_eq!(t.sent(), vec![answered(1, a, TYPED_OUT)]);
+    // Its release, typed while a press waits, goes ahead of that press as any release does, and a
+    // modifier typed after that press waits behind it.
+    t.press(k, KEY_LEFTSHIFT);
+    let shift = t.last_seq();
+    t.decide_key(2, KEY_A, false);
+    assert_eq!(
+        t.sent(),
+        vec![
+            typed_key(shift + 1, KEY_A, false),
+            answered(2, shift + 1, TYPED_OUT)
+        ]
+    );
+    t.decide_key(3, KEY_LEFTALT, true);
+    let alt = t.typed_seq();
+    t.verdict(alt, false);
+    assert!(t.sent().is_empty());
+    t.verdict(shift, false);
+    assert_eq!(
+        t.w.emitted()[3..],
+        [(KEY_A, 0), (KEY_LEFTSHIFT, 1), (KEY_LEFTALT, 1)],
+        "{:?}",
+        t.w.emitted()
+    );
+    assert_eq!(t.sent(), vec![answered(3, alt, TYPED_OUT)]);
+}
+
+#[test]
+fn a_key_typed_to_be_decided_left_unanswered_is_passed_on_at_its_bound() {
+    let (mut t, _k) = T::typing();
+    t.decide_key(1, KEY_A, true);
+    let a = t.typed_seq();
+    t.pass(VERDICT_TIMEOUT - ms(1));
     assert!(t.w.emitted().is_empty());
+    t.pass(ms(1));
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1)]);
+    assert_eq!(
+        t.sent(),
+        vec![ToClient::Expired { seq: a }, answered(1, a, TYPED_OUT)]
+    );
+    // A verdict that comes after changes nothing.
+    t.verdict(a, true);
+    assert!(t.sent().is_empty());
+    t.decide_key(2, KEY_A, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1), (KEY_A, 0)]);
+}
+
+#[test]
+fn a_client_that_answers_none_of_the_keys_it_types_is_dropped_as_one_that_answers_nothing() {
+    let (mut t, k) = T::typing();
+    let mut elapsed = Duration::ZERO;
+    while !t.closed(CLIENT) {
+        t.decide_key(1, KEY_B, true);
+        t.pass(ms(50));
+        t.decide_key(2, KEY_B, false);
+        t.pass(ms(50));
+        elapsed += ms(100);
+        assert!(elapsed < Duration::from_secs(3), "never dropped");
+    }
+    assert!(elapsed >= UNANSWERED_SPAN, "dropped after {elapsed:?}");
+    assert!(
+        elapsed <= UNANSWERED_SPAN + ms(200),
+        "dropped after {elapsed:?}"
+    );
+    assert_eq!(goodbye_reason(&t.sent()), Some(Goodbye::Unanswered));
+    assert!(!t.w.is_open(k));
+    t.assert_let_go();
+}
+
+#[test]
+fn wait_holds_a_key_typed_to_be_decided() {
+    let (mut t, _k) = T::typing_asking(FEATURE_TYPING | FEATURE_WAIT);
+    t.decide_key(1, KEY_A, true);
+    let a = t.typed_seq();
+    t.wait(a);
+    t.pass(VERDICT_WAIT_TIMEOUT - ms(10));
+    assert!(t.w.emitted().is_empty());
+    assert!(t.sent().is_empty());
+    t.verdict(a, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1)]);
+    assert_eq!(t.sent(), vec![answered(1, a, TYPED_OUT)]);
+}
+
+#[test]
+fn the_watchdog_sees_a_key_typed_to_be_decided_waiting() {
+    let (mut t, _k) = T::typing();
+    let typed = t.now;
+    t.decide_key(1, KEY_A, true);
+    assert_eq!(t.core.oldest_undecided(), Some(typed));
+    assert_eq!(t.core.next_wake(), Some(typed + VERDICT_TIMEOUT));
+}
+
+#[test]
+fn keys_typed_to_be_decided_waiting_as_the_helper_lets_go_are_lost_and_never_go_out() {
+    for way in ["stop", "chord", "console"] {
+        let (mut t, k) = T::typing();
+        t.decide_key(1, KEY_LEFTSHIFT, true);
+        let shift = t.typed_seq();
+        t.verdict(shift, false);
+        assert_eq!(t.w.emitted(), vec![(KEY_LEFTSHIFT, 1)], "{way}");
+        t.press(k, KEY_T);
+        t.decide_key(2, KEY_A, true);
+        let a = t.typed_seq();
+        t.verdict(a, false);
+        t.decide_key(3, KEY_A, false);
+        let release = t.typed_seq();
+        let reason = match way {
+            "stop" => {
+                t.send(FromClient::Stop);
+                Released::Stopped
+            }
+            "chord" => {
+                for c in CHORD.map(|keys| keys[0]) {
+                    t.press(k, c);
+                }
+                Released::Emergency
+            }
+            _ => {
+                t.console(3);
+                Released::Background
+            }
+        };
+        let sent = t.sent();
+        let at = sent.iter().position(|m| *m == released(reason));
+        let lost = [answered(2, a, TYPED_LOST), answered(3, release, TYPED_LOST)]
+            .map(|m| sent.iter().position(|s| *s == m));
+        assert!(at.is_some(), "{way}: {sent:?}");
+        assert!(
+            lost.iter().all(|i| i.is_some() && *i < at),
+            "{way}: {sent:?}"
+        );
+        t.verdict(a, false);
+        assert!(
+            t.w.emitted().iter().all(|e| e.0 != KEY_A),
+            "{way}: {:?}",
+            t.w.emitted()
+        );
+        t.assert_let_go();
+    }
+}
+
+#[test]
+fn a_key_typed_to_be_decided_is_refused_as_it_goes_out_by_the_sysrq_rules() {
+    let (mut t, k) = T::typing();
+    t.press(k, KEY_LEFTALT);
+    let alt = t.last_seq();
+    t.decide_key(1, KEY_SYSRQ, true);
+    let sysrq = t.typed_seq();
+    t.verdict(sysrq, false);
+    t.decide_key(2, KEY_SYSRQ, false);
+    let release = t.typed_seq();
+    assert!(t.sent().is_empty());
+    t.verdict(alt, false);
+    assert_eq!(
+        t.sent(),
+        vec![
+            answered(1, sysrq, TYPED_REFUSED_KEY),
+            answered(2, release, TYPED_NOT_DOWN)
+        ]
+    );
+    assert_eq!(t.w.emitted(), vec![(KEY_LEFTALT, 1)]);
+    no_sysrq_with_alt(&t.w.emitted());
+}
+
+#[test]
+fn a_key_typed_to_be_decided_that_is_refused_at_once_is_sent_as_no_key() {
+    let mut t = T::new();
+    let k = t.w.plug("keyboard");
+    t.admit_asking(CLIENT, FEATURE_TYPING);
+    t.decide_key(1, KEY_A, true);
+    assert_eq!(t.sent(), vec![answered(1, 0, TYPED_REFUSED_STATE)]);
+    t.send(FromClient::Start);
+    t.pass(VIRTUAL_SETTLE);
+    t.sent();
+    t.decide_key(2, KEY_POWER, true);
+    t.decide_key(3, KEY_A, false);
+    t.decide_key(4, KEY_A, true);
+    t.decide_key(5, KEY_A, true);
+    let sent = t.sent();
+    assert_eq!(
+        sent[..2],
+        [
+            answered(2, 0, TYPED_REFUSED_KEY),
+            answered(3, 0, TYPED_NOT_DOWN)
+        ],
+        "{sent:?}"
+    );
+    // The client's KEYs are numbered from 1, refused keys spending no number.
+    assert_eq!(
+        sent[2..],
+        [typed_key(1, KEY_A, true), answered(5, 0, TYPED_REFUSED_KEY)],
+        "{sent:?}"
+    );
+    t.press(k, KEY_T);
+    assert_eq!(t.last_seq(), 2);
+}
+
+#[test]
+fn keys_typed_to_be_decided_count_neither_toward_the_emergency_chord_nor_against_it() {
+    let (mut t, k) = T::typing();
+    for (tag, c) in [(1, KEY_BACKSPACE), (2, KEY_ESC), (3, KEY_ENTER)] {
+        t.decide_key(tag, c, true);
+        let seq = t.typed_seq();
+        t.verdict(seq, false);
+    }
+    assert_eq!(t.w.emitted().len(), 3);
+    t.press(k, KEY_BACKSPACE);
+    t.pass_last();
+    t.press(k, KEY_ESC);
+    t.pass_last();
+    assert!(
+        !t.sent().contains(&released(Released::Emergency)),
+        "typed keys made the chord"
+    );
+    t.press(k, KEY_ENTER);
+    assert!(t.sent().contains(&released(Released::Emergency)));
+    t.assert_let_go();
+}
+
+/// The kernel never has the Alt's release, so its SysRq handler stays active for the virtual
+/// keyboard; a key typed to be decided and passed behind it is not put out under it.
+#[test]
+fn no_key_typed_to_be_decided_goes_out_after_the_virtual_keyboard_failed_to_take_an_alt_release() {
+    let (mut t, k) = T::typing();
+    t.press(k, KEY_LEFTALT);
+    t.pass_last();
+    t.press(k, KEY_SYSRQ);
+    let sysrq = t.last_seq();
+    t.release(k, KEY_SYSRQ);
+    t.release(k, KEY_LEFTALT);
+    t.decide_key(1, KEY_B, true);
+    let b = t.typed_seq();
+    t.verdict(b, false);
+    t.w.fail_emit_once(KEY_LEFTALT, 0);
+    t.verdict(sysrq, false);
+    assert!(t.sent().contains(&answered(1, b, TYPED_LOST)));
+    assert!(t.w.emitted().iter().all(|e| e.0 != KEY_B));
 }

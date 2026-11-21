@@ -28,7 +28,8 @@
 //! - A keyboard that vanishes has a release put in line for every key it held down.
 //! - A virtual keyboard that fails is destroyed, and the kernel releases what it held.
 //! - A key the client types goes out only while the helper captures for it in front, and letting go
-//!   drops every typed key still in line instead of putting it out.
+//!   drops every typed key still in line instead of putting it out. One it types to be decided waits
+//!   for its verdict, and its bound, as a press read from a keyboard does.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::os::fd::BorrowedFd;
@@ -946,14 +947,12 @@ impl<D: Devices> Core<D> {
         }
     }
 
-    /// TYPE: refused at once, with the reason, or put in line already passed, as a key of
-    /// TYPED_DEVICE, to be answered as it goes out.
+    /// TYPE: refused at once, with the reason, or put in line as a key of TYPED_DEVICE, to be
+    /// answered as it goes out or is kept: with INJECT already passed, with DECIDE sent to the client
+    /// as KEY to be decided as a key read from a keyboard is.
     fn type_key(&mut self, tag: u32, code: u16, press: bool, mode: TypeMode, now: Instant) {
         let refused = if !self.may_type() {
             Some(TYPED_REFUSED_STATE)
-        } else if mode == TypeMode::Decide {
-            // A key to be decided goes out only once decided, which is not built yet.
-            Some(TYPED_REFUSED_KEY)
         } else if !press {
             (!self.typed_down.contains(code)).then_some(TYPED_NOT_DOWN)
         } else if !typeable(code) || self.typed_down.contains(code) || self.sysrq_refuses(code) {
@@ -984,13 +983,34 @@ impl<D: Devices> Core<D> {
         } else {
             self.typed_down.remove(code);
         }
+        let decide = mode == TypeMode::Decide;
+        // Numbered as the keys read from keyboards are, and told before anything is answered for it.
+        let seq = if decide {
+            let seq = self.next_seq;
+            self.next_seq += 1;
+            let flags = if press {
+                KEY_ASK | KEY_TYPED
+            } else {
+                KEY_TYPED
+            };
+            self.send_client(ToClient::Key(Key {
+                seq,
+                device: TYPED_DEVICE,
+                code,
+                value: if press { KEY_PRESS } else { KEY_RELEASE },
+                flags,
+            }));
+            seq
+        } else {
+            0
+        };
         self.line.push_back(Entry {
-            seq: 0,
+            seq,
             device: TYPED_DEVICE,
             code,
             press,
             arrival: now,
-            verdict: press.then_some(false),
+            verdict: if decide { None } else { press.then_some(false) },
             waited: false,
             made_up: false,
             tag: Some(tag),
@@ -1026,8 +1046,10 @@ impl<D: Devices> Core<D> {
     }
 
     /// Puts out a typed key whose turn has come, with the rules checked again, since the keys
-    /// ahead of it may have changed what is down, and says what became of it.
-    fn put_typed(&mut self, e: Entry) -> u8 {
+    /// ahead of it may have changed what is down, and says what became of it. A press the client
+    /// kept is recorded as not passed, which its release then answers TYPED_KEPT; a press that did
+    /// not go out is not recorded at all, which its release answers TYPED_NOT_DOWN.
+    fn put_typed(&mut self, e: Entry, keep: bool) -> u8 {
         let key = (e.device, e.code);
         if !e.press {
             return match self.passed.remove(&key) {
@@ -1038,13 +1060,17 @@ impl<D: Devices> Core<D> {
                         TYPED_LOST
                     }
                 }
-                _ => TYPED_NOT_DOWN,
+                Some(false) => TYPED_KEPT,
+                None => TYPED_NOT_DOWN,
             };
+        }
+        if keep {
+            self.passed.insert(key, false);
+            return TYPED_KEPT;
         }
         // A write the virtual keyboard failed may have been an Alt's release, which the kernel's
         // SysRq handler then never saw: no typed press is safe until the helper has let go.
         if self.virtual_broken {
-            self.passed.insert(key, false);
             return TYPED_LOST;
         }
         let refused = if !self.may_type() {
@@ -1055,14 +1081,16 @@ impl<D: Devices> Core<D> {
             None
         };
         if let Some(outcome) = refused {
-            self.passed.insert(key, false);
             return outcome;
         }
         let before = self.pressed[usize::from(e.code)];
         self.press_virtual(e.code);
-        let out = self.pressed[usize::from(e.code)] > before;
-        self.passed.insert(key, out);
-        if out { TYPED_OUT } else { TYPED_LOST }
+        if self.pressed[usize::from(e.code)] > before {
+            self.passed.insert(key, true);
+            TYPED_OUT
+        } else {
+            TYPED_LOST
+        }
     }
 
     /// Drops every typed key still in line, each answered TYPED_LOST: a key typed for one moment
@@ -1714,11 +1742,14 @@ impl<D: Devices> Core<D> {
     fn advance(&mut self, now: Instant) {
         let mut give_up = false;
         while let Some(&e) = self.line.front() {
-            // Already passed, so no answer of the client's, and nothing of the run of unanswered
-            // presses: injecting keys must not keep a client that answers nothing.
-            if let Some(tag) = e.tag {
+            // A release, or an injected press: already passed, so no answer of the client's, and
+            // nothing of the run of unanswered presses, since injecting keys must not keep a client
+            // that answers nothing. A press to be decided is decided below as any press is.
+            if let Some(tag) = e.tag
+                && !(e.press && e.seq != 0)
+            {
                 self.line.pop_front();
-                let outcome = self.put_typed(e);
+                let outcome = self.put_typed(e, false);
                 self.send_client(ToClient::Typed {
                     tag,
                     seq: e.seq,
@@ -1750,6 +1781,15 @@ impl<D: Devices> Core<D> {
                     None => break,
                 };
                 self.line.pop_front();
+                if let Some(tag) = e.tag {
+                    let outcome = self.put_typed(e, keep);
+                    self.send_client(ToClient::Typed {
+                        tag,
+                        seq: e.seq,
+                        outcome,
+                    });
+                    continue;
+                }
                 // A made-up Insert is the screen reader's to know of: to a program it is a key,
                 // which would come typed late, under whatever modifiers the answer found with it.
                 let out = !keep && !(e.made_up && READER_MODIFIERS.contains(&e.code));
@@ -1854,17 +1894,20 @@ impl<D: Devices> Core<D> {
             return true;
         }
         *held -= 1;
-        let last = *held == 0;
-        if last && ALTS.contains(&code) && !self.alt_on_virtual() {
-            self.sysrq_active = false;
+        if *held > 0 {
+            return true;
         }
-        if last
-            && let Virt::Ready(v) = &mut self.virt
+        if let Virt::Ready(v) = &mut self.virt
             && let Err(e) = v.emit(code, 0)
         {
             log!("the virtual keyboard did not take a key: {e}");
             self.virtual_broken = true;
             return false;
+        }
+        // Only once the kernel has the Alt's release is its handler idle; until the let-go that a
+        // failed write brings, the flag says what the kernel has.
+        if ALTS.contains(&code) && !self.alt_on_virtual() {
+            self.sysrq_active = false;
         }
         true
     }

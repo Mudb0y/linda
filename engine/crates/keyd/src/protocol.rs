@@ -144,7 +144,7 @@
 //! other type is malformed, and the helper ends the connection over it. A client should still
 //! ignore a helper message of a type it does not know.
 //!
-//! Version 1 defines one feature, [`FEATURE_WAIT`]. With it granted, the client may answer a press
+//! Version 1's first feature is [`FEATURE_WAIT`]. With it granted, the client may answer a press
 //! still waiting for its verdict with VERDICT [`VERDICT_WAIT`], which holds it for longer: the
 //! press's bound becomes [`VERDICT_WAIT_TIMEOUT`] from its reading instead of [`VERDICT_TIMEOUT`],
 //! for when the client cannot yet tell whether it wants the key, as when its reader has not yet
@@ -169,12 +169,13 @@
 //!
 //! # Typing, the late pass and the virtual keyboard seen
 //!
-//! Three more features of version 1 are specified here, and this helper grants none of them yet:
-//! [`FEATURE_TYPING`], [`FEATURE_LATE_PASS`] and [`FEATURE_VIRTUAL_SEEN`] are not in
+//! Three more features of version 1 are specified here. This helper grants [`FEATURE_TYPING`], and
+//! not yet [`FEATURE_LATE_PASS`] or [`FEATURE_VIRTUAL_SEEN`]: those two are not in
 //! [`FEATURES_KNOWN`], so a client may ask for them and WELCOME leaves them out. Until WELCOME
 //! grants a feature its messages are malformed, as for any other: the helper ends the connection of
-//! a client that sends TYPE or LATE_PASS, and sends no TYPED or VIRTUAL. A client written from this
-//! text asks for what it wants, and sends a feature's messages only once WELCOME has granted it.
+//! a client that sends LATE_PASS, or TYPE without FEATURE_TYPING granted, and sends no VIRTUAL, nor
+//! TYPED to a client not granted typing. A client written from this text asks for what it wants,
+//! and sends a feature's messages only once WELCOME has granted it.
 //!
 //! ## Typing, with FEATURE_TYPING
 //!
@@ -185,7 +186,9 @@
 //!   read from a keyboard when the TYPE was, and comes back as KEY flagged [`KEY_TYPED`], a press
 //!   flagged [`KEY_ASK`] too, to be decided as any key is: a press the client keeps does not go out,
 //!   and one it passes does, its repeats and release following it. So a chord of the client's own,
-//!   typed from another computer, is the client's command.
+//!   typed from another computer, is the client's command. The KEY is numbered as every KEY is and
+//!   comes before the TYPED that answers its TYPE; a press left unanswered is passed on at its bound
+//!   and EXPIRED says so, as for any press. A TYPE refused at once is sent as no KEY.
 //! - [`TYPE_INJECT`]: the key goes in line already passed, and no KEY comes back for it.
 //!
 //! Either way it waits its turn by the rules of point 5, as a key of TYPED_DEVICE: a typed press goes
@@ -452,8 +455,7 @@ pub const OUTBOX_LIMIT: usize = 512;
 /// The largest message either side sends, text included.
 pub const MAX_MESSAGE: usize = 256;
 
-/// TYPE and TYPED: the client types keys through the virtual keyboard. Specified, and not yet granted
-/// by this helper.
+/// TYPE and TYPED: the client types keys through the virtual keyboard.
 pub const FEATURE_TYPING: u32 = 1;
 /// VERDICT [`VERDICT_WAIT`]: the client may hold a press for its answer up to
 /// [`VERDICT_WAIT_TIMEOUT`] instead of [`VERDICT_TIMEOUT`].
@@ -465,7 +467,7 @@ pub const FEATURE_LATE_PASS: u32 = 4;
 /// granted by this helper.
 pub const FEATURE_VIRTUAL_SEEN: u32 = 8;
 /// The features this helper grants.
-pub const FEATURES_KNOWN: u32 = FEATURE_WAIT;
+pub const FEATURES_KNOWN: u32 = FEATURE_WAIT | FEATURE_TYPING;
 /// The device number of keys the client types with [`TYPE_DECIDE`]. Real keyboards are numbered as
 /// the kernel numbers input devices, which never comes near this.
 pub const TYPED_DEVICE: u32 = u32::MAX;
@@ -1315,7 +1317,7 @@ mod tests {
     }
 
     #[test]
-    fn the_planned_features_are_specified_and_not_granted() {
+    fn every_feature_is_specified_and_wait_and_typing_are_granted() {
         let features = [
             FEATURE_TYPING,
             FEATURE_WAIT,
@@ -1324,7 +1326,7 @@ mod tests {
         ];
         assert!(features.iter().all(|f| f.count_ones() == 1));
         assert_eq!(features.iter().fold(0, |all, f| all | f), 0b1111);
-        assert_eq!(FEATURES_KNOWN, FEATURE_WAIT);
+        assert_eq!(FEATURES_KNOWN, FEATURE_WAIT | FEATURE_TYPING);
         let client = [HELLO, START, STOP, VERDICT, HEARTBEAT, TYPE, LATE_PASS];
         let helper = [
             WELCOME,
@@ -1353,10 +1355,11 @@ mod tests {
         }
     }
 
-    /// A helper built from this tree, asked for every feature, grants FEATURE_WAIT alone, and ends
-    /// the connection of a client that then types or late-passes a key.
+    /// A helper built from this tree, asked for every feature, grants FEATURE_WAIT and
+    /// FEATURE_TYPING, answers a TYPE, and ends the connection of a client that then late-passes a
+    /// key.
     #[test]
-    fn a_client_that_sends_a_planned_message_is_dropped() {
+    fn a_client_asking_for_every_feature_may_type_and_not_late_pass() {
         use crate::core::{Core, Front, Output, Peer};
         use std::time::Instant;
 
@@ -1365,7 +1368,7 @@ mod tests {
             uid: 1000,
             gid: 100,
         };
-        for m in planned_client_messages() {
+        for (m, dropped) in planned_client_messages().into_iter().zip([false, true]) {
             let world = crate::mock::World::new();
             let mut core = Core::new(world.devices());
             let now = Instant::now();
@@ -1393,9 +1396,19 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(granted, vec![FEATURE_WAIT]);
+            assert_eq!(granted, vec![FEATURE_WAIT | FEATURE_TYPING]);
             core.received(1, &m, now);
             let out = core.take_output();
+            if !dropped {
+                // Not capturing yet.
+                let refused = ToClient::Typed {
+                    tag: 7,
+                    seq: 0,
+                    outcome: TYPED_REFUSED_STATE,
+                };
+                assert_eq!(out, vec![Output::Send(1, refused)]);
+                continue;
+            }
             assert!(
                 out.iter().any(|o| matches!(
                     o,
