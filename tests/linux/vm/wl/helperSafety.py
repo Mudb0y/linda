@@ -41,6 +41,7 @@ if __name__ != "__main__":
 		VIRTUAL_KEYBOARD,
 		WINDOW_TITLE,
 		Mark,
+		keyEvents,
 	)
 
 if TYPE_CHECKING:
@@ -448,20 +449,25 @@ def hotplug(ground: "Ground", client: "KeydClient", figures: dict) -> None:
 	with ground.subtest("the USB keyboard unplugged with Shift held has Shift released"):
 		mark = ground.mark()
 		ground.qemuKey("shift", True)
-		ground.waitForKeys("evdev", [("KEY_LEFTSHIFT", 1)], mark, device=VIRTUAL_KEYBOARD)
-		unplugged = ground.now()
+		pressed = ground.waitForKeys("evdev", [("KEY_LEFTSHIFT", 1)], mark, device=VIRTUAL_KEYBOARD)
+		ground.settle(0.5)
+		assert keyEvents(ground.keys("evdev", mark, device=VIRTUAL_KEYBOARD)) == [("KEY_LEFTSHIFT", 1)]
+		unplugging = ground.now()
 		ground.unplugUsbKeyboard()
 		release = ground.waitForKeys(
 			"evdev", [("KEY_LEFTSHIFT", 1), ("KEY_LEFTSHIFT", 0)], mark, device=VIRTUAL_KEYBOARD
 		)
-		figures["hotplugShiftReleasedAfter"] = round(release[1]["t"] - unplugged, 3)
-		ground.machine.log(
-			f"Shift released on the virtual keyboard {figures['hotplugShiftReleasedAfter']} s after the unplug"
-		)
 		ground.waitForKeys("app", [("KEY_LEFTSHIFT", 1), ("KEY_LEFTSHIFT", 0)], mark)
 		gone = client.waitForDevice(USB_KEYBOARD, "GONE", mark)
 		releases = [r for r in client.keys(mark) if r["device"] == gone["device"] and r["value"] == 0]
-		assert [r["key"] for r in releases] == ["KEY_LEFTSHIFT"], releases
+		figures["hotplug"] = {
+			"shiftHeld": round(release[1]["t"] - pressed[0]["t"], 3),
+			"releasedAfterUnplugAsked": round(release[1]["t"] - unplugging, 3),
+			"goneAfterUnplugAsked": round(gone["t"] - unplugging, 3),
+		}
+		ground.machine.log(f"the USB keyboard unplugged with Shift held: {figures['hotplug']}")
+		# The release is the helper's own, made as the keyboard went.
+		assert [(r["key"], r["synthetic"]) for r in releases] == [("KEY_LEFTSHIFT", True)], releases
 		ground.qemuKey("shift", False)
 		mark = ground.mark()
 		late.tap("KEY_Q")
@@ -473,9 +479,7 @@ def hotplug(ground: "Ground", client: "KeydClient", figures: dict) -> None:
 
 
 def emergency(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", figures: dict) -> None:
-	mark = ground.mark()
-	client.capture(UHID, VIRTIO_KEYBOARD, since=mark)
-
+	"""With the client capturing, as hotplug leaves it."""
 	with ground.subtest("the chord on a held keyboard lets go while the client is hung"):
 		ground.session({"op": "signal", "name": "keyd-main", "signal": "SIGSTOP"})
 		mark = ground.mark()
@@ -623,10 +627,9 @@ def console(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 
 
 def watchdogThread(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", figures: dict) -> None:
+	"""With the client capturing, as console leaves it."""
 	ground.shell("systemctl reset-failed linda-keyd")
 	pid = ground.waitForHelper()
-	mark = ground.mark()
-	client.capture(UHID, since=mark)
 
 	with ground.subtest("the watchdog thread lets go of a keyboard whose loop has stopped"):
 		mark = ground.mark()
@@ -677,6 +680,7 @@ def watchdogThread(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClie
 
 
 def stopped(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", figures: dict) -> None:
+	"""With the client capturing, as watchdogThread leaves it."""
 	ground.shell("systemctl reset-failed linda-keyd")
 	pid = ground.waitForHelper()
 	restarts = ground.helperRestarts()
