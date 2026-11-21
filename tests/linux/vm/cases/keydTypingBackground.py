@@ -24,7 +24,6 @@ WAIT_BOUND = 0.6
 CONSOLE = 2
 CONSOLE_TEXT = "/tmp/ground/console.txt"
 READY = "/tmp/ground/typist-ready"
-SWITCHED = "/tmp/ground/switched"
 #: What the guest half types: a Shift held down, then T to be decided, then A; and once let go of,
 #: B, and C to be decided.
 TYPED_KEYS = ("KEY_LEFTSHIFT", "KEY_T", "KEY_A", "KEY_B", "KEY_C")
@@ -47,8 +46,8 @@ def run(ground: "Ground") -> None:
 		"what waited to be typed as the session leaves the front is lost, and no more is typed"
 	):
 		client.call("close")
-		ground.shell(f"rm -f {READY} {SWITCHED}")
-		switch = f"until [ -e {READY} ]; do sleep 0.005; done; ground-record now > {SWITCHED}; chvt {CONSOLE}"
+		ground.shell(f"rm -f {READY}")
+		switch = f"until [ -e {READY} ]; do sleep 0.005; done; chvt {CONSOLE}"
 		ground.shell(
 			"systemd-run --collect --unit=ground-switch --setenv=PATH=/run/current-system/sw/bin "
 			f"sh -c {shlex.quote(switch)}"
@@ -57,15 +56,14 @@ def run(ground: "Ground") -> None:
 		done = ground.run(["ground-typist", "lost", UHID, READY], timeout=60)
 		assert done.returncode == 0, done
 		seen = json.loads(done.stdout)
-		switched = float(ground.shell(f"cat {SWITCHED}").split()[0])
 		released = seen["released"]
 		typed = seen["typed"]
 		ground.machine.log(
-			f"from the KEY of the typed T: the switch {switched - seen['head']['t']:+.3f} s, RELEASED "
-			f"{released['t'] - seen['head']['t']:+.3f} s; answers {json.dumps(typed)}"
+			f"from the KEY of the typed T: RELEASED {released['t'] - seen['head']['t']:+.3f} s; "
+			f"answers {json.dumps(typed)}"
 		)
-		# What the test claims rests on the switch coming while T still held the line.
-		assert switched - seen["head"]["t"] < WAIT_BOUND - 0.1, (switched, seen["head"])
+		# What the test claims rests on the helper letting go while T still held the line.
+		assert released["t"] - seen["head"]["t"] < WAIT_BOUND - 0.1, (released, seen["head"])
 		assert released["reason"] == "BACKGROUND", released
 		assert [typed[tag]["outcome"] for tag in ("2", "3", "4")] == ["LOST"] * 3, typed
 		assert typed["2"]["seq"] == seen["head"]["seq"], typed
