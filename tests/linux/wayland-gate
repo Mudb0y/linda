@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Runs tests/linux/test_wayland*.py in the rig four times: under headless
+# Mutter and under headless sway, each once with no X display at all and once
+# with the compositor's own Xwayland. From the dev shell, outside the rig:
+#   nix develop ROOT -c ROOT/tests/linux/wayland-gate SCRATCH [PYTEST_ARGUMENT...]
+# SCRATCH is a directory outside the checkout that is bound into each rig and
+# holds pytest's temporary directories, one fresh one per run. Further
+# arguments go to pytest, before the test files.
+# The exit status is 0 when every run passed, and 1 otherwise.
+set -euo pipefail
+
+fail() {
+	echo "wayland-gate: $*" >&2
+	exit 2
+}
+
+[ $# -ge 1 ] || fail "usage: wayland-gate SCRATCH [PYTEST_ARGUMENT...]"
+[ -d "$1" ] || fail "no such directory: $1"
+scratch=$(realpath -e -- "$1")
+shift
+here=$(dirname "$(realpath -e -- "$0")")
+files=("$here"/test_wayland*.py)
+[ -e "${files[0]}" ] || fail "no test_wayland*.py beside the gate"
+
+run=$(date +%s)-$$
+echo "wayland-gate: ${#files[@]} files, under Mutter and sway, with and without Xwayland"
+failed=()
+for compositor in mutter sway; do
+	for xwayland in 0 1; do
+		name=$compositor
+		[ "$xwayland" = 1 ] && name=$compositor-xwayland
+		status=0
+		# Only these choose the session: one the caller had set must not carry in.
+		env -u LINDA_RIG_SESSION -u LINDA_RIG_WM LINDA_RIG_COMPOSITOR="$compositor" LINDA_RIG_XWAYLAND="$xwayland" \
+			"$here/rig" --bind "$scratch" python3 -m pytest -q -p no:cacheprovider \
+			--basetemp="$scratch/wayland-gate-$run-$name" "$@" "${files[@]}" || status=$?
+		if [ "$status" = 0 ]; then
+			echo "wayland-gate: $name passed"
+		else
+			echo "wayland-gate: $name failed with status $status" >&2
+			failed+=("$name")
+		fi
+	done
+done
+if [ ${#failed[@]} -gt 0 ]; then
+	echo "wayland-gate: failed under ${failed[*]}" >&2
+	exit 1
+fi
+echo "wayland-gate: all four passed"
