@@ -2,9 +2,9 @@
 documents found on the accessibility desktop, and what the keys page logged.
 
 Inside the rig only. In the rig's Wayland sessions Firefox runs as a Wayland client, with no X display
-even where the compositor has an Xwayland. Firefox runs in a process group of its own, led by the process this starts;
-the desktop session's close stops that process, and waits for or kills the rest of the group
-through it, so that no content process outlives the test.
+even where the compositor has an Xwayland. Firefox runs in a process group of its own, led by the
+process this starts; the desktop session's close stops that process, and waits for or kills the rest
+of the group through it, so that no content process outlives the test.
 """
 
 import contextlib
