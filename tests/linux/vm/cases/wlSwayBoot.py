@@ -5,7 +5,8 @@ on through its virtual keyboard, which sway gives the Polish layout too.
 
 All of it runs twice in one boot: first in the session as the guest starts it, with Xwayland, which
 an X client of the test's own then starts; then in the session started again with Xwayland disabled,
-where nothing has DISPLAY.
+with a user manager of its own as at a fresh login, where neither the runner nor the user manager
+has DISPLAY.
 
 Along the way it writes down experiment E7 (logind's facts about the session, and what a program
 started from sway's exec knows of it) and E20 (how long the guest takes to start and how much memory
@@ -41,8 +42,11 @@ SESSION_VARIABLES = (
 	"DISPLAY",
 	"SWAYSOCK",
 )
-#: Seconds the old session may take to end once lightdm is stopped.
+#: Seconds the old session, and then alice's user manager, may take to end once lightdm is stopped.
 SESSION_END_TIMEOUT = 60
+#: alice's user ID in guestSway.nix.
+UID = 1000
+USER_MANAGER = f"user@{UID}.service"
 
 
 def memory(ground: "Ground", when: str) -> None:
@@ -95,6 +99,30 @@ def sessionFacts(ground: "Ground", variant: str) -> tuple[str, dict]:
 	# What sway's exec starts is the session's own, as a program a user's sway configuration starts.
 	assert cgroup.endswith(f"/{session['Scope']}"), (cgroup, session)
 	return front, variables
+
+
+def userManagerEnvironment(ground: "Ground") -> dict[str, str]:
+	"""What every user unit and D-Bus-activated service starts with: the portals, PipeWire, and a
+	KeydClient or Linda started as a user unit."""
+	answer = ground.run(["systemctl", "--user", "show-environment"])
+	assert answer.returncode == 0, answer
+	return dict(line.split("=", 1) for line in answer.stdout.splitlines() if "=" in line)
+
+
+def userManagerAgrees(ground: "Ground", variant: str, variables: dict) -> None:
+	# NixOS's sway config.d hands the session's variables to the user manager, and skips one that is
+	# unset, leaving whatever an earlier session left there.
+	environment = ground.waitFor(
+		lambda: (
+			(e := userManagerEnvironment(ground)).get("WAYLAND_DISPLAY") == variables["WAYLAND_DISPLAY"] and e
+		),
+		"sway to hand its variables to the user manager",
+	)
+	ground.machine.log(
+		f"E7 {variant}: the user manager has DISPLAY {environment.get('DISPLAY')}"
+		f" and WAYLAND_DISPLAY {environment.get('WAYLAND_DISPLAY')}"
+	)
+	assert environment.get("DISPLAY") == variables["DISPLAY"], (environment.get("DISPLAY"), variables)
 
 
 def typedTo(ground: "Ground", keyboard: "FakeKeyboard", title: str, through: str) -> None:
@@ -159,6 +187,7 @@ def variant(ground: "Ground", keyboard: "FakeKeyboard", xwayland: bool) -> None:
 	with ground.subtest(f"{name}: logind's facts about the session, and the runner's environment"):
 		front, variables = sessionFacts(ground, name)
 		assert (variables["DISPLAY"] is not None) == xwayland, variables
+		userManagerAgrees(ground, name, variables)
 
 	ground.openWindow(GTK3)
 	ground.openWindow(GTK4, name="window4", gtk4=True)
@@ -227,9 +256,15 @@ def variant(ground: "Ground", keyboard: "FakeKeyboard", xwayland: bool) -> None:
 		client.stop()
 
 
+def userManager(ground: "Ground") -> str:
+	return ground.shell(f"systemctl show {USER_MANAGER} -P InvocationID").strip()
+
+
 def startAgain(ground: "Ground", xwayland: bool) -> None:
-	"""Write the variant sway reads as it starts, end the session and have lightdm sign alice in again."""
+	"""Write the variant sway reads as it starts, end the session and alice's user manager, and have
+	lightdm sign alice in again, as at a login of her own with that line in her configuration."""
 	front = frontSession(ground)
+	manager = userManager(ground)
 	line = "xwayland enable" if xwayland else "xwayland disable"
 	ground.shell(f"echo {shlex.quote(line)} > {shlex.quote(ground.guest['variant'])}")
 	ground.shell("systemctl stop display-manager.service")
@@ -240,6 +275,21 @@ def startAgain(ground: "Ground", xwayland: bool) -> None:
 		f"session {front} to end",
 		SESSION_END_TIMEOUT,
 	)
+	# logind keeps the user manager for a while after the last session, and with it the old
+	# session's variables and everything it started: PipeWire and the portals among them.
+	stopping = time.monotonic()
+	ground.shell(f"systemctl stop {USER_MANAGER}")
+	ground.waitFor(
+		lambda: (
+			ground.machine.execute(f"systemctl is-active --quiet {USER_MANAGER}")[0] != 0
+			and ground.machine.execute(f"test -e /run/user/{UID}")[0] != 0
+		),
+		"alice's user manager and runtime directory to go",
+		SESSION_END_TIMEOUT,
+	)
+	ground.machine.log(
+		f"E20 alice's user manager was gone {time.monotonic() - stopping:.1f} s after it was stopped"
+	)
 	# So that the waits below see the new session's and sway uses the fixed name again.
 	stale = [ground.guest["socket"], ground.guest["swaysock"], f"{GROUND}/session.sock"]
 	ground.shell("rm -f " + " ".join(shlex.quote(path) for path in stale))
@@ -247,6 +297,7 @@ def startAgain(ground: "Ground", xwayland: bool) -> None:
 	ground.shell("systemctl start display-manager.service")
 	ground._bootWayland(started)
 	assert frontSession(ground) != front, front
+	assert userManager(ground) not in ("", manager), manager
 
 
 def run(ground: "Ground") -> None:
