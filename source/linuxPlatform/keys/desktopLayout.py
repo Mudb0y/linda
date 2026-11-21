@@ -378,8 +378,11 @@ class GnomeLayoutFeed(_ThreadedFeed):
 		sources = [tuple(s) for s in values["sources"]]
 		recent = [tuple(s) for s in values["mru-sources"]]
 		repeat, locksGuess = self._keyboard()
-		# The shell's choice: the source switched to last, while it is still one of the sources.
-		active = recent[0] if recent and recent[0] in sources else sources[0] if sources else None
+		# The shell's choice as keyboard.js _updateMruSources makes it at start and whenever IBus comes or
+		# goes: the most recent entry still among the sources, but only when more than one entry is.
+		# Its own activation then is not interactive, so mru-sources may keep removed entries in front.
+		known = [s for s in recent if s in sources]
+		active = known[0] if len(known) > 1 else sources[0] if sources else None
 		if active is None:
 			if self._fallback is None:
 				self._fallback = systemSnapshot()

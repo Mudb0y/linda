@@ -244,6 +244,11 @@ for name, values in {
 	"single": {"sources": [("xkb", "pl")]},
 	"recent": {"sources": [("xkb", "pl"), ("xkb", "us")], "mru": [("xkb", "us"), ("xkb", "pl")]},
 	"recentGone": {"sources": [("xkb", "pl"), ("xkb", "us")], "mru": [("xkb", "de")]},
+	"recentGoneOfMany": {
+		"sources": [("xkb", "pl"), ("xkb", "us")],
+		"mru": [("xkb", "de"), ("xkb", "us"), ("xkb", "pl")],
+	},
+	"recentGoneOneLeft": {"sources": [("xkb", "pl"), ("xkb", "us")], "mru": [("xkb", "de"), ("xkb", "us")]},
 	"variant": {"sources": [("xkb", "de+nodeadkeys")], "model": "pc104"},
 	"capsNone": {"sources": [("xkb", "pl")], "options": ["caps:none"]},
 	"empty": {},
@@ -262,6 +267,10 @@ result["threads"] = feedThreads()
 		"single": snap(pl, repeat=GNOME_REPEAT, locks=0),
 		"recent": snap(("evdev", GNOME_MODEL, "us", "", ""), repeat=GNOME_REPEAT, locks=0),
 		"recentGone": snap(pl, repeat=GNOME_REPEAT, locks=0),
+		# The shell passes over mru entries that are no longer sources, and goes by the list only while
+		# more than one entry is left (keyboard.js, _updateMruSources).
+		"recentGoneOfMany": snap(("evdev", GNOME_MODEL, "us", "", ""), repeat=GNOME_REPEAT, locks=0),
+		"recentGoneOneLeft": snap(pl, repeat=GNOME_REPEAT, locks=0),
 		"variant": snap(("evdev", "pc104", "de", "nodeadkeys", ""), repeat=GNOME_REPEAT, locks=0),
 		"capsNone": snap(("evdev", GNOME_MODEL, "pl", "", "caps:none"), repeat=GNOME_REPEAT, locks=0),
 		# No source: localed's layout, which the rig has no system bus for, then US English.
