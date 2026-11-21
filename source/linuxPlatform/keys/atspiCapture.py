@@ -197,9 +197,10 @@ class AtspiCaptureFeed:
 		since = None if self.settled(now) else self._mayMoveAt
 		deadline = now + LOOK_ROUND_TRIP if since is None else since + FOCUS_MOVE_GRACE
 		self._looks.append(_Look(number, deadline, done, since))
-		if self._wakeWrite is not None:
+		wake = self._wakeWrite
+		if wake is not None:
 			try:
-				os.write(self._wakeWrite, b"\0")
+				os.write(wake, b"\0")
 			except (BlockingIOError, OSError):
 				pass
 		return deadline
@@ -619,6 +620,7 @@ class AtspiCaptureFeed:
 		self._context = GLib.MainContext.new()
 		self._loop = GLib.MainLoop.new(self._context, False)
 		self._wakeRead, self._wakeWrite = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+		self._ready.clear()
 		self._thread = threading.Thread(target=self._run, name="lindaAtspiCapture", daemon=True)
 		self._thread.start()
 		if not self._ready.wait(START_TIMEOUT):
@@ -638,10 +640,12 @@ class AtspiCaptureFeed:
 			log.debugWarning("AT-SPI capture feed: its thread did not end in time")
 			return
 		self._thread = None
-		for fd in (self._wakeRead, self._wakeWrite):
+		# Taken away before they are closed, so that a look asked meanwhile writes to no other file.
+		fds = (self._wakeRead, self._wakeWrite)
+		self._wakeRead = self._wakeWrite = None
+		for fd in fds:
 			if fd is not None:
 				os.close(fd)
-		self._wakeRead = self._wakeWrite = None
 
 	def _run(self) -> None:
 		self._context.push_thread_default()
