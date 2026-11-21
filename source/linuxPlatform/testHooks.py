@@ -1,5 +1,5 @@
-"""Lets a launcher or test add drivers and plugins that exist only for testing, and give NVDA a
-stand-in for linda-keyd.
+"""Lets a launcher or test add drivers and plugins that exist only for testing, give NVDA a
+stand-in for linda-keyd, and make the focus's news come late to the keys of a Wayland session.
 
 NVDA finds synth drivers and global plugins by searching the __path__ of the synthDrivers and
 globalPlugins packages. Add-ons and the scratchpad directory are the upstream ways in, but
@@ -23,6 +23,10 @@ from types import ModuleType
 ENVIRONMENT_VARIABLE = "LINDA_TEST_HOOKS_DIR"
 #: Names the socket of a test's stand-in for linda-keyd, honoured as ENVIRONMENT_VARIABLE is.
 KEYD_SOCKET_VARIABLE = "LINDA_TEST_KEYD_SOCKET"
+#: Names the milliseconds the capture feed holds back window events, honoured as ENVIRONMENT_VARIABLE
+#: is, and taken up to MAX_CAPTURE_DELAY.
+CAPTURE_DELAY_VARIABLE = "LINDA_TEST_CAPTURE_DELAY_MS"
+MAX_CAPTURE_DELAY = 10000
 
 #: The packages whose search paths get the subdirectory of the same name.
 packageNames = ("synthDrivers", "globalPlugins")
@@ -82,6 +86,28 @@ def keydSocketPath() -> str | None:
 	if globalVars.appArgs.secure or not _isRunningFromCheckout():
 		return None
 	return path
+
+
+def captureDelay() -> int:
+	"""Milliseconds the capture feed of a Wayland session holds back each window event, named by
+	CAPTURE_DELAY_VARIABLE, so that a test can make the focus's news come late; 0 outside a test, or
+	when the value is not a whole number of milliseconds from 0 to MAX_CAPTURE_DELAY.
+
+	Only where test drivers would be added, so that an installed copy never slows its own keys for
+	whatever the environment says.
+	"""
+	value = os.environ.get(CAPTURE_DELAY_VARIABLE)
+	if not value or not os.environ.get(ENVIRONMENT_VARIABLE):
+		return 0
+	import globalVars
+
+	if globalVars.appArgs.secure or not _isRunningFromCheckout():
+		return 0
+	try:
+		milliseconds = int(value)
+	except ValueError:
+		return 0
+	return milliseconds if 0 <= milliseconds <= MAX_CAPTURE_DELAY else 0
 
 
 def install() -> list[str]:
