@@ -234,29 +234,42 @@ def test_theRigsXSessionKeepsThePointerAndTheHighlight(tmp_path: Path):
 
 @pytest.mark.rigSession("x11")
 def test_anXSessionWithAStrayWaylandSocketStaysX(tmp_path: Path):
-	socketPath = tmp_path / "wayland-stray"
+	runtimeDir = tmp_path / "run"
+	runtimeDir.mkdir(mode=0o700)
 	done = harness.runChild(
 		tmp_path,
-		f"""
+		"""
+		import os
 		import socket
 
+		# A socket's path may be no longer than 107 bytes, and pytest's folders can be longer; the
+		# child's own folder is put back, since NVDA finds its files from there.
+		here = os.getcwd()
+		os.chdir(os.environ["XDG_RUNTIME_DIR"])
 		stray = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-		stray.bind({str(socketPath)!r})
+		stray.bind("wayland-stray")
+		os.chdir(here)
 		import platformFeatures
 
 		from linuxPlatform import displayServer, pointer
 
-		result = [displayServer.reason(), platformFeatures.isSupported(platformFeatures.Feature.POINTER), pointer.isAvailable()]
+		result = [
+			displayServer.waylandSocket() == os.path.join(os.environ["XDG_RUNTIME_DIR"], "wayland-stray"),
+			displayServer.reason(),
+			platformFeatures.isSupported(platformFeatures.Feature.POINTER),
+			pointer.isAvailable(),
+		]
 		""",
 		env={
 			**UNSET,
 			"XDG_SESSION_TYPE": "x11",
 			"XDG_CURRENT_DESKTOP": "MATE",
-			"WAYLAND_DISPLAY": str(socketPath),
+			"XDG_RUNTIME_DIR": str(runtimeDir),
+			"WAYLAND_DISPLAY": "wayland-stray",
 		},
 	)
 	done.assertClean()
-	assert done.value == ["x11 by rule 2: XDG_SESSION_TYPE is x11 and DISPLAY is set", True, True]
+	assert done.value == [True, "x11 by rule 2: XDG_SESSION_TYPE is x11 and DISPLAY is set", True, True]
 
 
 @pytest.mark.rigSession("x11")
