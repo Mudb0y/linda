@@ -167,11 +167,110 @@
 //! message. A helper without the feature grants it not, and the client answers within
 //! VERDICT_TIMEOUT as it would anyway.
 //!
-//! The next planned is [`FEATURE_TYPING`], for Remote Access and
-//! NVDA's own sent keys: a client message TYPE with a code, a value and a flag, which the helper
-//! puts in line as a key of the pseudo-device [`TYPED_DEVICE`] and sends back as KEY with the flag
-//! [`KEY_TYPED`], to be decided as any key is, or with its flag set, puts straight on the virtual
-//! keyboard without asking, as NVDA's inject. Its held keys are released with every other key's.
+//! # Typing, the late pass and the virtual keyboard seen
+//!
+//! Three more features of version 1 are specified here, and this helper grants none of them yet:
+//! [`FEATURE_TYPING`], [`FEATURE_LATE_PASS`] and [`FEATURE_VIRTUAL_SEEN`] are not in
+//! [`FEATURES_KNOWN`], so a client may ask for them and WELCOME leaves them out. Until WELCOME
+//! grants a feature its messages are malformed, as for any other: the helper ends the connection of
+//! a client that sends TYPE or LATE_PASS, and sends no TYPED or VIRTUAL. A client written from this
+//! text asks for what it wants, and sends a feature's messages only once WELCOME has granted it.
+//!
+//! ## Typing, with FEATURE_TYPING
+//!
+//! For keys the client sends rather than reads: Remote Access, and the screen reader's own sent
+//! keys, in a session where it has no other way to type. TYPE: a tag of the client's choosing, the
+//! evdev key code, the value, 1 to press or 0 to release, and the mode:
+//! - [`TYPE_DECIDE`]: the key goes in line as a key of the pseudo-device [`TYPED_DEVICE`], as though
+//!   read from a keyboard when the TYPE was, and comes back as KEY flagged [`KEY_TYPED`], a press
+//!   flagged [`KEY_ASK`] too, to be decided as any key is: a press the client keeps does not go out,
+//!   and one it passes does, its repeats and release following it. So a chord of the client's own,
+//!   typed from another computer, is the client's command.
+//! - [`TYPE_INJECT`]: the key goes in line already passed, and no KEY comes back for it.
+//!
+//! Either way it waits its turn by the rules of point 5, as a key of TYPED_DEVICE: a typed press goes
+//! out only once every press read before it has been decided, a typed release of a key that is not a
+//! modifier may go ahead of presses still waiting, and the release of a modifier keeps its place. A
+//! key typed down and the same key held down on a keyboard are one key to the virtual keyboard, which
+//! has it up only once both are let go of, as the X server has a key typed through XTEST that is
+//! already held.
+//!
+//! Each TYPE is answered by one TYPED: its tag, the sequence number of the KEY it was sent as (0 when
+//! none was), and the outcome:
+//! - [`TYPED_OUT`]: it went on the virtual keyboard;
+//! - [`TYPED_KEPT`]: it was sent as KEY and the client kept it, or, for a release, kept its press;
+//! - [`TYPED_REFUSED_STATE`]: the helper is not capturing for a client whose session is in front;
+//! - [`TYPED_REFUSED_KEY`]: the helper does not type that code, or not at that moment, by the rules
+//!   below;
+//! - [`TYPED_REFUSED_FULL`]: too many typed keys are waiting, or have come too fast;
+//! - [`TYPED_NOT_DOWN`]: a release of a key the client has not typed down;
+//! - [`TYPED_LOST`]: the helper let go before the key went out, and it never will.
+//!
+//! A refused key goes nowhere and takes no place in line. TYPED comes as soon as the key's fate is
+//! known: at once for a refusal, as the key goes out or is kept, and for a lost one as the helper
+//! lets go, before the RELEASED that follows.
+//!
+//! What the helper types, and when:
+//! - Only while it captures for a client whose session is in front, with its virtual keyboard taken
+//!   up. This is checked again as each typed key goes out, not only as its TYPE comes, so that a key
+//!   typed for one session never lands in another's, a login screen's or a console. After STOP,
+//!   after the emergency chord, while the virtual keyboard settles and in the background the answer
+//!   is TYPED_REFUSED_STATE. How many keyboards are held does not matter, so typing works where the
+//!   only keyboard is one the helper leaves alone.
+//! - Only the codes that source/linuxPlatform/keys/keyMap.py names in its FIXED, NUMPAD and LAYOUT
+//!   tables, without KEY_SLEEP (142). Never KEY_POWER (116), KEY_SUSPEND (205), KEY_POWER2 (0x164)
+//!   or KEY_RESTART (0x198): logind takes the virtual keyboard's power keys as the machine's.
+//! - Never a press of SysRq (99) while an Alt is down on the virtual keyboard, nor of an Alt while
+//!   SysRq is down there, so that no typed key reaches the kernel's SysRq handler.
+//! - At most [`TYPED_WAITING_LIMIT`] typed keys in line at once, and no more than
+//!   [`TYPED_PER_SECOND`] a second over time, in bursts of up to [`TYPED_BURST`].
+//! - Whenever the helper lets go, for whatever reason, typed keys not yet out are dropped and
+//!   answered TYPED_LOST, never put out, unlike the user's own keys still waiting: a key sent for
+//!   one moment must not land in the next. Keys typed down are released with every other key the
+//!   virtual keyboard has down.
+//! - Typed keys never count toward the emergency chord, nor against it.
+//! - An unanswered TYPE_DECIDE press counts toward UNANSWERED_SPAN as any press does, and WAIT, with
+//!   FEATURE_WAIT, holds it as it holds any press.
+//!
+//! A value other than 0 or 1, a mode other than these two, or a code the virtual keyboard cannot
+//! send ([`is_virtual_key`](crate::keys::is_virtual_key)) is malformed and ends the connection. A
+//! key the rules above refuse is answered with TYPED and the connection is kept, since dropping the
+//! client would let go of the keyboards.
+//!
+//! ## The late pass, with FEATURE_LATE_PASS
+//!
+//! For a modifier the client kept, such as Alt held with the screen reader's own modifier key, that
+//! a key it then passes needs: Alt+Tab, when Alt went down under the screen reader's key. LATE_PASS
+//! names a kept press and then a press waiting for its verdict. The kept key goes on the virtual
+//! keyboard immediately before the waiting press, in that press's place in line and whatever
+//! becomes of it, and its release, once read, is passed as though its press had been. The client
+//! sends it just before the VERDICT that passes the waiting press.
+//! - The first must be a press the client kept, of one of the
+//!   [`MODIFIERS`](crate::keys::MODIFIERS) but Caps Lock, whose key is still down and which no
+//!   earlier LATE_PASS named; the second must be waiting for its verdict. Anything else is
+//!   malformed.
+//! - If the helper lets go before the waiting press's turn, the kept key never goes out.
+//!
+//! TYPE_INJECT would not do: an injected key joins the end of the line, after the press it has to
+//! come before. LATE_PASS also puts out no key but one the user is holding.
+//!
+//! ## The virtual keyboard seen, with FEATURE_VIRTUAL_SEEN
+//!
+//! Whether the desktop took up the virtual keyboard, where nothing else tells: a compositor that
+//! opens a new keyboard writes the seat's lock lights to it. The kernel passes a light on to a device
+//! only when it changes, so for a client granted the feature, a virtual keyboard made after its
+//! START starts with every light the opposite of the real keyboards', for the compositor's write to
+//! change them; the helper ignores the echo of its own write, and puts the real lights on the
+//! virtual keyboard at [`VIRTUAL_SETTLE`]. VIRTUAL then says, once for each client, before any
+//! keyboard is grabbed for it:
+//! - [`VIRTUAL_SEEN`]: the compositor wrote the lights before VIRTUAL_SETTLE;
+//! - [`VIRTUAL_UNSEEN`]: nothing came by then;
+//! - [`VIRTUAL_OLD`]: the virtual keyboard was made before this client's START, so nothing can be
+//!   seen.
+//!
+//! SEEN proves the keyboard is read. UNSEEN proves nothing on a desktop that never writes the
+//! lights, and means something only on one that was seen to before. The feature is built only for
+//! desktops where that write is shown to come, and may never be granted.
 //!
 //! # Time bounds
 //!
@@ -324,16 +423,35 @@ pub const OUTBOX_LIMIT: usize = 512;
 /// The largest message either side sends, text included.
 pub const MAX_MESSAGE: usize = 256;
 
-/// Not defined in version 1; reserved for typing keys through the helper.
+/// TYPE and TYPED: the client types keys through the virtual keyboard. Specified, and not yet granted
+/// by this helper.
 pub const FEATURE_TYPING: u32 = 1;
 /// VERDICT [`VERDICT_WAIT`]: the client may hold a press for its answer up to
 /// [`VERDICT_WAIT_TIMEOUT`] instead of [`VERDICT_TIMEOUT`].
 pub const FEATURE_WAIT: u32 = 2;
+/// LATE_PASS: a kept modifier goes on the virtual keyboard ahead of a press the client passes.
+/// Specified, and not yet granted by this helper.
+pub const FEATURE_LATE_PASS: u32 = 4;
+/// VIRTUAL: whether the desktop wrote the lights of a new virtual keyboard. Specified, and not yet
+/// granted by this helper.
+pub const FEATURE_VIRTUAL_SEEN: u32 = 8;
 /// The features this helper grants.
 pub const FEATURES_KNOWN: u32 = FEATURE_WAIT;
-/// The device number of keys the client types, once typing exists. Real keyboards are numbered as
+/// The device number of keys the client types with [`TYPE_DECIDE`]. Real keyboards are numbered as
 /// the kernel numbers input devices, which never comes near this.
 pub const TYPED_DEVICE: u32 = u32::MAX;
+/// The most typed keys in line at once, with [`FEATURE_TYPING`]; beyond it TYPE is answered
+/// [`TYPED_REFUSED_FULL`]. Someone typing from another computer has a few keys on the way at a time,
+/// and the line has no other bound, so this keeps a client gone wrong from filling the helper's
+/// memory with keys that would all go out.
+pub const TYPED_WAITING_LIMIT: usize = 64;
+/// How many typed keys a second the helper takes over time, presses and releases each counted, and
+/// how many it takes at once after a pause: a bucket of [`TYPED_BURST`] filled at this rate, a TYPE
+/// that finds it empty answered [`TYPED_REFUSED_FULL`]. Far beyond anyone typing, even a short
+/// string sent at once, yet a client gone wrong cannot type pages a second into whatever has the
+/// focus.
+pub const TYPED_PER_SECOND: u32 = 100;
+pub const TYPED_BURST: u32 = 200;
 
 /// The press wants a verdict.
 pub const KEY_ASK: u8 = 0x01;
@@ -341,7 +459,7 @@ pub const KEY_ASK: u8 = 0x01;
 /// keyboard that vanished, or whose events the kernel dropped, or, with [`KEY_ASK`], the press of
 /// a modifier found down after the kernel dropped events.
 pub const KEY_SYNTHETIC: u8 = 0x02;
-/// Reserved for keys the client typed, once typing exists.
+/// A key the client typed with TYPE [`TYPE_DECIDE`], with [`FEATURE_TYPING`].
 pub const KEY_TYPED: u8 = 0x04;
 
 pub const KEY_RELEASE: u8 = 0;
@@ -367,6 +485,16 @@ pub const VERDICT: u8 = 0x04;
 pub const VERDICT_WAIT: u8 = 2;
 /// `<BI`: type, a counter of the client's choosing, echoed back.
 pub const HEARTBEAT: u8 = 0x05;
+/// `<BIHBB`, with [`FEATURE_TYPING`]: type, a tag of the client's choosing, the evdev key code, 1 to
+/// press or 0 to release, and the mode, [`TYPE_DECIDE`] or [`TYPE_INJECT`].
+pub const TYPE: u8 = 0x06;
+/// TYPE's mode in which the key comes back as KEY, flagged [`KEY_TYPED`], to be decided.
+pub const TYPE_DECIDE: u8 = 0;
+/// TYPE's mode in which the key goes in line already passed.
+pub const TYPE_INJECT: u8 = 1;
+/// `<BQQ`, with [`FEATURE_LATE_PASS`]: type, the sequence number of a kept press whose key is still
+/// down, then that of the press waiting for its verdict which it goes out just before.
+pub const LATE_PASS: u8 = 0x07;
 
 // The helper's messages.
 /// `<BHIHHHH`: type, version, features granted, then in milliseconds VERDICT_TIMEOUT,
@@ -395,6 +523,23 @@ pub const DEVICE: u8 = 0x86;
 pub const LOCKS: u8 = 0x87;
 /// `<BI`: type, the counter of the client's HEARTBEAT.
 pub const HEARTBEAT_ECHO: u8 = 0x88;
+/// `<BIQB`, with [`FEATURE_TYPING`]: type, the tag of the TYPE it answers, the sequence number of
+/// the KEY that TYPE was sent as or 0, and the outcome, one of the TYPED_ values.
+pub const TYPED: u8 = 0x89;
+/// TYPED's outcomes, as the module's text gives them.
+pub const TYPED_OUT: u8 = 1;
+pub const TYPED_KEPT: u8 = 2;
+pub const TYPED_REFUSED_STATE: u8 = 3;
+pub const TYPED_REFUSED_KEY: u8 = 4;
+pub const TYPED_REFUSED_FULL: u8 = 5;
+pub const TYPED_NOT_DOWN: u8 = 6;
+pub const TYPED_LOST: u8 = 7;
+/// `<BB`, with [`FEATURE_VIRTUAL_SEEN`]: type, and [`VIRTUAL_SEEN`], [`VIRTUAL_UNSEEN`] or
+/// [`VIRTUAL_OLD`].
+pub const VIRTUAL: u8 = 0x8A;
+pub const VIRTUAL_SEEN: u8 = 1;
+pub const VIRTUAL_UNSEEN: u8 = 2;
+pub const VIRTUAL_OLD: u8 = 3;
 
 /// Why the helper let go of every keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1040,6 +1185,117 @@ mod tests {
                 .contains("UTF-8")
         );
         assert!(ToClient::decode(&[RELEASED, 99]).is_err());
+    }
+
+    /// TYPE and LATE_PASS of their documented sizes, 9 and 17 bytes.
+    fn planned_client_messages() -> [Vec<u8>; 2] {
+        let mut typed = vec![TYPE];
+        typed.extend_from_slice(&7u32.to_le_bytes());
+        typed.extend_from_slice(&30u16.to_le_bytes());
+        typed.extend_from_slice(&[1, TYPE_INJECT]);
+        let mut late = vec![LATE_PASS];
+        late.extend_from_slice(&1u64.to_le_bytes());
+        late.extend_from_slice(&2u64.to_le_bytes());
+        [typed, late]
+    }
+
+    #[test]
+    fn the_planned_features_are_specified_and_not_granted() {
+        let features = [
+            FEATURE_TYPING,
+            FEATURE_WAIT,
+            FEATURE_LATE_PASS,
+            FEATURE_VIRTUAL_SEEN,
+        ];
+        assert!(features.iter().all(|f| f.count_ones() == 1));
+        assert_eq!(features.iter().fold(0, |all, f| all | f), 0b1111);
+        assert_eq!(FEATURES_KNOWN, FEATURE_WAIT);
+        let client = [HELLO, START, STOP, VERDICT, HEARTBEAT, TYPE, LATE_PASS];
+        let helper = [
+            WELCOME,
+            GOODBYE,
+            KEY,
+            EXPIRED,
+            RELEASED,
+            DEVICE,
+            LOCKS,
+            HEARTBEAT_ECHO,
+            TYPED,
+            VIRTUAL,
+        ];
+        assert!(client.iter().all(|t| *t < 0x80) && helper.iter().all(|t| *t >= 0x80));
+        let mut all: Vec<u8> = client.iter().chain(&helper).copied().collect();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), client.len() + helper.len());
+        let [typed, late] = planned_client_messages();
+        assert_eq!((typed.len(), late.len()), (9, 17));
+        for (m, why) in [
+            (typed, "unknown message type 0x06"),
+            (late, "unknown message type 0x07"),
+        ] {
+            assert!(FromClient::decode(&m).unwrap_err().0.contains(why));
+        }
+    }
+
+    /// A helper built from this tree, asked for every feature, grants FEATURE_WAIT alone, and ends
+    /// the connection of a client that then types or late-passes a key.
+    #[test]
+    fn a_client_that_sends_a_planned_message_is_dropped() {
+        use crate::core::{Core, Front, Output, Peer};
+        use std::time::Instant;
+
+        let peer = Peer {
+            pid: 4242,
+            uid: 1000,
+            gid: 100,
+        };
+        for m in planned_client_messages() {
+            let world = crate::mock::World::new();
+            let mut core = Core::new(world.devices());
+            let now = Instant::now();
+            core.front_changed(
+                Front::Session {
+                    id: "2".into(),
+                    uid: 1000,
+                    vt: 7,
+                },
+                now,
+            );
+            core.connected(1, peer, now);
+            let hello = FromClient::Hello {
+                version: PROTOCOL_VERSION,
+                features: FEATURE_TYPING | FEATURE_WAIT | FEATURE_LATE_PASS | FEATURE_VIRTUAL_SEEN,
+            };
+            core.received(1, &hello.encode(), now);
+            assert!(core.take_output().contains(&Output::Admit(1, peer)));
+            core.admitted(1, Ok("2".into()), now);
+            let granted: Vec<u32> = core
+                .take_output()
+                .into_iter()
+                .filter_map(|o| match o {
+                    Output::Send(1, ToClient::Welcome { features, .. }) => Some(features),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(granted, vec![FEATURE_WAIT]);
+            core.received(1, &m, now);
+            let out = core.take_output();
+            assert!(
+                out.iter().any(|o| matches!(
+                    o,
+                    Output::Send(
+                        1,
+                        ToClient::Goodbye {
+                            reason: Goodbye::Malformed,
+                            ..
+                        }
+                    )
+                )),
+                "{out:?}"
+            );
+            assert!(out.contains(&Output::Close(1)), "{out:?}");
+        }
     }
 
     #[test]
