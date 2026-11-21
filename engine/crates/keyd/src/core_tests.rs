@@ -1991,6 +1991,59 @@ fn waking_starts_the_clients_silence_afresh() {
     assert_eq!(goodbye_reason(&t.sent()), Some(Goodbye::Silent));
 }
 
+/// systemd-sleep freezes the client's slice, and the kernel freezes the helper only later, as much
+/// as sixteen seconds later on a busy machine: the helper, running on, does not drop the frozen
+/// client for its silence, nor refuse a caller frozen before its HELLO, and after the wake each
+/// has its usual time again.
+#[test]
+fn a_client_frozen_before_the_helper_going_to_sleep_is_not_dropped_for_its_silence() {
+    let (mut t, k) = T::capturing();
+    t.press(k, KEY_A);
+    t.keys();
+    t.connect(OTHER, PEER);
+    t.core.sleeping(true, t.now);
+    t.take();
+    assert_eq!(t.sent(), vec![released(Released::Background)]);
+    // Let go of, the press waiting went out, and no run of unanswered presses is counted.
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1), (KEY_A, 0)]);
+    t.quiet(Duration::from_secs(16));
+    assert!(
+        t.sent().is_empty(),
+        "the client was told something while frozen"
+    );
+    assert!(!t.closed(CLIENT) && !t.closed(OTHER));
+    // The kernel freezes the helper too, and five seconds later everything wakes, A long let go of.
+    t.w.release(k, KEY_A);
+    t.now += Duration::from_secs(5);
+    assert!(t.core.thawed(t.now));
+    t.core.sleeping(false, t.now);
+    t.take();
+    t.quiet(HEARTBEAT_TIMEOUT - ms(1));
+    assert!(!t.closed(CLIENT) && !t.closed(OTHER));
+    assert!(t.w.grabbed(k));
+    // Silent the usual time after the wake, it is dropped, as is the caller that never said HELLO.
+    t.quiet(ms(1));
+    assert_eq!(goodbye_reason(&t.sent()), Some(Goodbye::Silent));
+    assert!(t.closed(OTHER));
+}
+
+/// A sleep logind announces and then calls off: the helper holds nothing meanwhile, and once
+/// logind says the machine is awake a client still silent is dropped after the usual time.
+#[test]
+fn a_sleep_called_off_leaves_a_silent_client_its_usual_time_from_then() {
+    let (mut t, _k) = T::capturing();
+    t.core.sleeping(true, t.now);
+    t.take();
+    t.quiet(Duration::from_secs(30));
+    assert!(!t.closed(CLIENT));
+    t.core.sleeping(false, t.now);
+    t.take();
+    t.quiet(HEARTBEAT_TIMEOUT - ms(1));
+    assert!(!t.closed(CLIENT));
+    t.quiet(ms(1));
+    assert_eq!(goodbye_reason(&t.sent()), Some(Goodbye::Silent));
+}
+
 #[test]
 fn a_forgiven_freeze_gives_the_client_and_a_waiting_press_their_bounds_afresh() {
     let (mut t, k) = T::capturing();

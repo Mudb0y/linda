@@ -531,8 +531,10 @@ impl<D: Devices> Core<D> {
     /// logind says the machine is about to sleep, or has woken. Before sleep the helper lets go
     /// of every keyboard, as when the session leaves the front: nothing needs holding while the
     /// machine goes down, and a helper that holds nothing cannot leave a keyboard dead however long
-    /// it is frozen. On waking the client is not held to the time it was frozen, and the helper
-    /// captures again, all keys up first, if the client's session is still in front.
+    /// it is frozen. Until it wakes, the client's silence and a caller's missing HELLO are not
+    /// counted, since systemd-sleep freezes them before the kernel freezes the helper. On waking
+    /// the client and the callers are heard afresh, and the helper captures again, all keys up
+    /// first, if the client's session is still in front.
     pub fn sleeping(&mut self, asleep: bool, now: Instant) {
         if asleep == self.asleep {
             return;
@@ -550,6 +552,9 @@ impl<D: Devices> Core<D> {
             self.woke = Some(now);
             if let Some(c) = self.client.as_mut() {
                 c.last_heard = now;
+            }
+            for c in self.callers.values_mut() {
+                c.since = c.since.max(now);
             }
         }
         self.settle(now);
@@ -726,7 +731,13 @@ impl<D: Devices> Core<D> {
     }
 
     pub fn tick(&mut self, now: Instant) {
+        // Going to sleep, systemd-sleep freezes user.slice, the client's, and only then does the
+        // kernel freeze every task, which on a busy machine took sixteen seconds; the helper,
+        // outside it, runs on meanwhile and must not take the frozen client for a hung one. Holding
+        // nothing while asleep, it loses nothing by waiting, and logind ends the stretch within
+        // SESSION_RECHECK of the sleep's end or its failure.
         if let Some(c) = &self.client
+            && !self.asleep
             && now >= c.last_heard + HEARTBEAT_TIMEOUT
         {
             let why = format!("no message for {} ms", HEARTBEAT_TIMEOUT.as_millis());
@@ -736,7 +747,7 @@ impl<D: Devices> Core<D> {
             .callers
             .iter()
             .filter_map(|(conn, c)| match c.admitting {
-                None if now >= c.since + HELLO_TIMEOUT => Some((
+                None if !self.asleep && now >= c.since + HELLO_TIMEOUT => Some((
                     *conn,
                     Goodbye::Silent,
                     format!("no HELLO within {} ms", HELLO_TIMEOUT.as_millis()),
