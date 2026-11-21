@@ -287,6 +287,7 @@ class AtSpiBuffer(VirtualBuffer):
 		try:
 			rendered = vbufEngine.render(busName, path, docHandle, progressive=True)
 			renderedAt = time.perf_counter()
+			vbufEngine.logTransport(log, busName, rendered.info)
 			try:
 				handle = vbufLib.create()
 				vbufLib.build(handle, rendered.stream)

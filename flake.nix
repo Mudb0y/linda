@@ -253,6 +253,10 @@
           # internet on request through pasta, in a namespace it makes and
           # enters with util-linux and whose routes it sets with ip.
           bubblewrap
+          # Flatpak's proxy of the accessibility bus, which
+          # tests/linux/test_sandboxedBrowser.py puts between a browser and
+          # the bus as Flatpak does.
+          xdg-dbus-proxy
           passt
           iproute2
           util-linux

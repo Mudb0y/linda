@@ -163,6 +163,7 @@ def _run(nextBatch) -> None:
 			return
 		if batch is None:
 			continue
+		vbufEngine.logTransport(log, batch.busName, batch.info)
 		try:
 			_apply(batch)
 		except Exception:

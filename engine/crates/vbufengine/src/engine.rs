@@ -1,7 +1,7 @@
-//! The engine's own thread: one connection to the accessibility bus for signals, one peer-to-peer
-//! connection to each application for calls, the documents rendered and watched, and the updates
-//! their changes make. Everything here runs on that one thread, so nothing is shared but the queues
-//! in lib.rs.
+//! The engine's own thread: one connection to the accessibility bus for signals, one connection to
+//! each application for calls, peer to peer where the application's own server can be reached and
+//! over the bus where it cannot, the documents rendered and watched, and the updates their changes
+//! make. Everything here runs on that one thread, so nothing is shared but the queues in lib.rs.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use futures_util::FutureExt;
 use futures_util::future::LocalBoxFuture;
 use futures_util::stream::{FuturesUnordered, SelectAll, StreamExt};
-use mirror::client::Client;
-use mirror::consts::{IFACE_ACCESSIBLE, IFACE_PROPERTIES};
+use mirror::client::{Client, Transport};
+use mirror::consts::{IFACE_ACCESSIBLE, IFACE_PROPERTIES, ROOT_PATH};
 use mirror::decode;
 use mirror::discovery::{self, Timeouts};
 use mirror::{app, time};
@@ -76,7 +76,8 @@ fn bus_timeouts() -> Timeouts {
     }
 }
 
-/// Calls over an application's own connection, each of which has a second.
+/// Calls over an application's own connection, each of which has a second; and those of a walk over
+/// the bus, which then gives up on a call as soon.
 fn p2p_timeouts() -> Timeouts {
     Timeouts {
         method: Duration::from_secs(1),
@@ -85,9 +86,45 @@ fn p2p_timeouts() -> Timeouts {
 }
 
 struct App {
-    client: Rc<Client>,
+    /// Peer to peer until that connection is lost, then over the bus for as long as the application
+    /// keeps its name.
+    client: RefCell<Rc<Client>>,
+    name: String,
     primed: Cell<bool>,
     actions_primed: Cell<bool>,
+    /// Which way the engine reaches the application and why, for the info of the next reply or
+    /// batch, so that it is told once each time it is decided.
+    note: RefCell<Option<Map<String, Value>>>,
+}
+
+impl App {
+    fn client(&self) -> Rc<Client> {
+        self.client.borrow().clone()
+    }
+
+    fn take_note(&self, info: &mut Map<String, Value>) {
+        if let Some(note) = self.note.borrow_mut().take() {
+            info.extend(note);
+        }
+    }
+}
+
+/// What the log says of how the engine reaches an application: transport, transportWhy, appName,
+/// and peerToPeerFailed when its own server was offered and could not be used.
+fn transport_note(
+    client: &Client,
+    name: &str,
+    why: String,
+    p2p_failed: bool,
+) -> Map<String, Value> {
+    let mut note = Map::new();
+    note.insert("transport".into(), json!(client.transport));
+    note.insert("transportWhy".into(), why.into());
+    note.insert("appName".into(), name.into());
+    if p2p_failed {
+        note.insert("peerToPeerFailed".into(), true.into());
+    }
+    note
 }
 
 #[derive(Default)]
@@ -118,6 +155,7 @@ struct Doc {
 struct State {
     shared: Arc<Shared>,
     bus: RefCell<Option<Connection>>,
+    bus_address: RefCell<Option<String>>,
     registered: Cell<bool>,
     apps: RefCell<HashMap<String, Rc<App>>>,
     docs: RefCell<HashMap<(String, String), Rc<Doc>>>,
@@ -145,7 +183,42 @@ impl State {
             .await
             .map_err(|e| e.to_string())?;
         *self.bus.borrow_mut() = Some(conn.clone());
+        *self.bus_address.borrow_mut() = Some(address.address);
         Ok(conn)
+    }
+
+    /// A connection of its own to the accessibility bus for one application's calls, where its own
+    /// server cannot be used: each call then has the second it would have had peer to peer, and the
+    /// walk's bulk does not queue with the signals of every document. The signal connection, whose
+    /// calls have ten seconds, when that connection cannot be made.
+    async fn bus_client(&self, bus_name: &str) -> Result<Client, String> {
+        let shared = self.bus().await?;
+        let address = self.bus_address.borrow().clone();
+        let own = match address {
+            Some(a) => discovery::connect_bus(&a, p2p_timeouts()).await.ok(),
+            None => None,
+        };
+        Ok(Client::bus(own.unwrap_or(shared), bus_name))
+    }
+
+    /// Moves an application whose peer-to-peer connection was lost to the bus, for as long as it
+    /// keeps its name, and returns the client to use; that of another task when one moved it first.
+    async fn fall_back(
+        &self,
+        app: &App,
+        lost: &Rc<Client>,
+        why: String,
+    ) -> Result<Rc<Client>, String> {
+        if !Rc::ptr_eq(&app.client(), lost) {
+            return Ok(app.client());
+        }
+        let client = Rc::new(self.bus_client(&lost.app_bus).await?);
+        if !Rc::ptr_eq(&app.client(), lost) {
+            return Ok(app.client());
+        }
+        *app.note.borrow_mut() = Some(transport_note(&client, &app.name, why, true));
+        *app.client.borrow_mut() = client.clone();
+        Ok(client)
     }
 
     async fn app(
@@ -172,27 +245,47 @@ impl State {
             }
             self.registered.set(true);
         }
-        let owner = app::owner(&conn, bus_name)
+        let on_bus = Client::bus(conn.clone(), bus_name);
+        let address = private_address(&on_bus, doc, info).await?;
+        let name = app::property_string(&on_bus, ROOT_PATH, IFACE_ACCESSIBLE, "Name")
             .await
-            .map_err(|e| e.to_string())?;
-        let address = private_address(&Client::bus(conn.clone(), bus_name), doc, info).await?;
-        let client = if address.is_empty() {
-            Client::bus(conn.clone(), bus_name)
+            .unwrap_or_default();
+        // A program in a container, Flatpak's or Steam's, offers a socket in a runtime directory of
+        // its own, which is not there outside it, and its name on the bus belongs to the proxy
+        // between it and the bus, not to the process holding that socket. Everything it offers on
+        // the bus still works, only slower.
+        let (client, why, p2p_failed) = if address.is_empty() {
+            (on_bus, "it offers no peer-to-peer server".to_owned(), false)
         } else {
-            let p2p = discovery::connect_p2p(&address, owner, p2p_timeouts())
-                .await
-                .map_err(|e| e.to_string())?;
-            Client::p2p(p2p, bus_name)
+            let p2p = match app::owner(&conn, bus_name).await {
+                Ok(owner) => discovery::connect_p2p(&address, owner, p2p_timeouts()).await,
+                Err(e) => Err(e),
+            };
+            match p2p {
+                Ok(p2p) => (
+                    Client::p2p(p2p, bus_name),
+                    format!("its own server at {address} answered"),
+                    false,
+                ),
+                Err(e) => (
+                    self.bus_client(bus_name).await?,
+                    format!("its peer-to-peer server at {address} could not be used: {e}"),
+                    true,
+                ),
+            }
         };
         info.insert("connectSeconds".into(), t.elapsed().as_secs_f64().into());
         if let Some(a) = self.apps.borrow().get(bus_name) {
             return Ok(a.clone());
         }
         self.new_streams.borrow_mut().extend(streams);
+        let note = transport_note(&client, &name, why, p2p_failed);
         let a = Rc::new(App {
-            client: Rc::new(client),
+            client: RefCell::new(Rc::new(client)),
+            name,
             primed: Cell::new(false),
             actions_primed: Cell::new(false),
+            note: RefCell::new(Some(note)),
         });
         self.apps
             .borrow_mut()
@@ -369,7 +462,7 @@ impl State {
             let Some(a) = st.apps.borrow().get(&bus).cloned() else {
                 return;
             };
-            let Some(frame) = parent_of(&a.client, &path).await else {
+            let Some(frame) = parent_of(&a.client(), &path).await else {
                 return;
             };
             for d in st.docs_of(&bus) {
@@ -656,47 +749,67 @@ async fn render_task(
     {
         old.p.borrow_mut().unwatched = true;
     }
-    let client = app.client.clone();
-    if !app.primed.get() {
-        let t = Instant::now();
-        info.insert("primeCalls".into(), prime(&client, &root).await.into());
-        info.insert("primeSeconds".into(), t.elapsed().as_secs_f64().into());
-        app.primed.set(true);
-    }
-    let url = doc_url(&client, &root).await;
-    *d.url.borrow_mut() = url.clone();
-    info.insert("docURL".into(), url.into());
-    *d.frame.borrow_mut() = parent_of(&client, &root).await;
-
-    let calls_before = client.counters().calls;
-    let t_walk = Instant::now();
-    let mut walk = Walk::new(client.clone(), None, MAX_OBJECTS, MAX_WALK_TIME);
-    // LINDA_VBUF_WALK=objects asks every object for every field, for bisecting.
-    if std::env::var("LINDA_VBUF_WALK").as_deref() != Ok("objects") {
-        walk = walk.by_subtrees();
-    }
-    walk.start(&root, Vec::new());
     let mut first_sent = false;
-    while walk.step().await {
-        if progressive
-            && !first_sent
-            && (walk.complete >= FIRST_PART_OBJECTS
-                || (t_walk.elapsed() >= FIRST_PART_TIME
-                    && walk.objs.get(&root).is_some_and(Obj::complete)))
-        {
-            let (out, nodes, _) = render_whole(&walk.objs, &root, handle, true);
-            let mut part = info.clone();
-            part.insert("complete".into(), false.into());
-            part.insert("busy".into(), busy(&walk.objs, &root).into());
-            part.insert("objects".into(), nodes.into());
-            part.insert("seconds".into(), t0.elapsed().as_secs_f64().into());
-            let _ = reply.send(RenderReply {
-                stream: Some(out),
-                info: Value::Object(part).to_string(),
-            });
-            first_sent = true;
+    let (client, mut walk, calls_before, t_walk) = loop {
+        let client = app.client();
+        if !app.primed.get() {
+            let t = Instant::now();
+            info.insert("primeCalls".into(), prime(&client, &root).await.into());
+            info.insert("primeSeconds".into(), t.elapsed().as_secs_f64().into());
+            app.primed.set(true);
         }
-    }
+        let url = doc_url(&client, &root).await;
+        *d.url.borrow_mut() = url.clone();
+        info.insert("docURL".into(), url.into());
+        *d.frame.borrow_mut() = parent_of(&client, &root).await;
+
+        let calls_before = client.counters().calls;
+        let t_walk = Instant::now();
+        let mut walk = Walk::new(client.clone(), None, MAX_OBJECTS, MAX_WALK_TIME);
+        // LINDA_VBUF_WALK=objects asks every object for every field, for bisecting.
+        if std::env::var("LINDA_VBUF_WALK").as_deref() != Ok("objects") {
+            walk = walk.by_subtrees();
+        }
+        walk.start(&root, Vec::new());
+        while walk.step().await {
+            if progressive
+                && !first_sent
+                && client.lost().is_none()
+                && (walk.complete >= FIRST_PART_OBJECTS
+                    || (t_walk.elapsed() >= FIRST_PART_TIME
+                        && walk.objs.get(&root).is_some_and(Obj::complete)))
+            {
+                let (out, nodes, _) = render_whole(&walk.objs, &root, handle, true);
+                let mut part = info.clone();
+                app.take_note(&mut part);
+                part.insert("complete".into(), false.into());
+                part.insert("busy".into(), busy(&walk.objs, &root).into());
+                part.insert("objects".into(), nodes.into());
+                part.insert("seconds".into(), t0.elapsed().as_secs_f64().into());
+                let _ = reply.send(RenderReply {
+                    stream: Some(out),
+                    info: Value::Object(part).to_string(),
+                });
+                first_sent = true;
+            }
+        }
+        // What the walk found after its connection went is holes, not the document: it is walked
+        // again over the bus, and a top already sent is replaced whole when that walk is done.
+        if client.transport == Transport::PeerToPeer
+            && let Some(lost) = client.lost()
+            && st
+                .fall_back(
+                    &app,
+                    &client,
+                    format!("its peer-to-peer connection was lost during a render: {lost}"),
+                )
+                .await
+                .is_ok()
+        {
+            continue;
+        }
+        break (client, walk, calls_before, t_walk);
+    };
     if !d.p.borrow().unwatched
         && !app.actions_primed.get()
         && let Some(link) = walk.first_link.clone()
@@ -746,9 +859,11 @@ async fn render_task(
                 format!("{handle},{};", crate::render::id_of(&root).unwrap_or(0)).encode_utf16(),
             );
             stream.extend(out);
+            app.take_note(&mut info);
             st.emit(&bus, &root, &["complete"], Some(stream), info);
         }
     } else {
+        app.take_note(&mut info);
         let _ = reply.send(RenderReply {
             stream: Some(out),
             info: Value::Object(info).to_string(),
@@ -842,7 +957,7 @@ fn merge(
 }
 
 async fn update_task(st: Rc<State>, d: Rc<Doc>) {
-    let (invalid, url_check, why) = {
+    let (invalid, url_check, signals) = {
         let mut p = d.p.borrow_mut();
         p.since = None;
         p.updating = true;
@@ -867,12 +982,29 @@ async fn update_task(st: Rc<State>, d: Rc<Doc>) {
             dirty: if d.reuse { dirty } else { HashSet::new() },
             reuse: d.reuse,
         };
-        let mut walk = Walk::new(app.client.clone(), Some(outer), MAX_OBJECTS, MAX_WALK_TIME);
+        let client = app.client();
+        let mut walk = Walk::new(client.clone(), Some(outer), MAX_OBJECTS, MAX_WALK_TIME);
         for t in &targets {
             walk.start(t, Vec::new());
         }
         while walk.step().await {}
         if d.p.borrow().unwatched || !st.is_current(&d) {
+            end_update(&st, &d);
+            return;
+        }
+        // Merged, what the walk found after its connection went would take the changed parts out of
+        // the buffer; the same changes are walked again over the bus.
+        if client.transport == Transport::PeerToPeer
+            && let Some(lost) = client.lost()
+        {
+            let why = format!("its peer-to-peer connection was lost during an update: {lost}");
+            if st.fall_back(&app, &client, why).await.is_ok() {
+                let mut p = d.p.borrow_mut();
+                p.invalid.extend(invalid);
+                p.url_check |= url_check;
+                p.why.extend(signals);
+                p.since.get_or_insert_with(Instant::now);
+            }
             end_update(&st, &d);
             return;
         }
@@ -928,7 +1060,7 @@ async fn update_task(st: Rc<State>, d: Rc<Doc>) {
         info.insert("reused".into(), reused.len().into());
     }
     if url_check || stream.is_some() {
-        let url = doc_url(&app.client, &d.root).await;
+        let url = doc_url(&app.client(), &d.root).await;
         if d.p.borrow().unwatched {
             end_update(&st, &d);
             return;
@@ -939,8 +1071,9 @@ async fn update_task(st: Rc<State>, d: Rc<Doc>) {
         }
     }
     info.insert("seconds".into(), t0.elapsed().as_secs_f64().into());
-    info.insert("signals".into(), json!(why));
+    info.insert("signals".into(), json!(signals));
     if (stream.is_some() || !events.is_empty()) && st.is_current(&d) {
+        app.take_note(&mut info);
         st.emit(&d.bus, &d.root, &events, stream, info);
     }
     end_update(&st, &d);
@@ -971,6 +1104,7 @@ pub async fn run(inbox: Arc<Inbox>, shared: Arc<Shared>) {
     let st = Rc::new(State {
         shared,
         bus: RefCell::new(None),
+        bus_address: RefCell::new(None),
         registered: Cell::new(false),
         apps: RefCell::new(HashMap::new()),
         docs: RefCell::new(HashMap::new()),
@@ -1059,6 +1193,9 @@ pub async fn run(inbox: Arc<Inbox>, shared: Arc<Shared>) {
         }
     }
 }
+
+#[cfg(test)]
+mod transport_tests;
 
 #[cfg(test)]
 mod tests {

@@ -599,3 +599,81 @@ fn the_applications_own_server_is_connected_to() {
     });
     assert_eq!(role, 95);
 }
+
+#[test]
+fn a_connection_the_application_closes_is_known_to_be_lost_at_once() {
+    rig();
+    let (first, second, waited, lost) = zbus::block_on(async {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let server = zbus::connection::Builder::unix_stream(theirs)
+            .server(zbus::Guid::generate())
+            .p2p()
+            .build();
+        let client = zbus::connection::Builder::unix_stream(ours)
+            .p2p()
+            .method_timeout(Duration::from_secs(10))
+            .build();
+        let (server, client) = futures_util::future::join(server, client).await;
+        let server = server.unwrap();
+        let client = Client::p2p(client.unwrap(), APP);
+        // Answers the first call and closes its end, as an application whose server went away.
+        let serving = async move {
+            let mut calls = MessageStream::from(&server);
+            while let Some(Ok(call)) = calls.next().await {
+                if call.message_type() == Type::MethodCall {
+                    let _ = server.send(&reply(&call, &95u32).unwrap()).await;
+                    break;
+                }
+            }
+            drop(calls);
+            let _ = server.close().await;
+        };
+        let testing = async {
+            let first = client
+                .call(ROOT_PATH, "org.a11y.atspi.Accessible", "GetRole", &())
+                .await;
+            assert!(client.lost().is_none());
+            let t = Instant::now();
+            let second = client
+                .call(ROOT_PATH, "org.a11y.atspi.Accessible", "GetRole", &())
+                .await;
+            (first, second, t.elapsed())
+        };
+        let ((first, second, waited), ()) = futures_util::future::join(testing, serving).await;
+        (first, second, waited, client.lost())
+    });
+    assert!(first.is_ok(), "{first:?}");
+    let second = second.expect_err("a call on a closed connection");
+    assert!(
+        mirror::client::is_connection_lost(&second),
+        "{second:?} does not say the connection is gone"
+    );
+    assert!(lost.is_some());
+    assert!(
+        waited < Duration::from_secs(2),
+        "the call waited {waited:?}, as if for its timeout"
+    );
+}
+
+#[test]
+fn a_call_unanswered_or_refused_does_not_lose_the_connection() {
+    rig();
+    let answer: Answer = Box::new(|call| match member(call).as_str() {
+        "GetRole" => error(call, "org.freedesktop.DBus.Error.UnknownObject"),
+        _ => None,
+    });
+    against(Duration::from_millis(200), answer, async |c| {
+        let refused = c
+            .call(ROOT_PATH, "org.a11y.atspi.Accessible", "GetRole", &())
+            .await;
+        assert!(refused.is_err());
+        let unanswered = c
+            .call(ROOT_PATH, "org.a11y.atspi.Accessible", "GetState", &())
+            .await;
+        assert!(
+            matches!(&unanswered, Err(e) if mirror::client::is_timeout(e)),
+            "{unanswered:?}"
+        );
+        assert_eq!(c.lost(), None);
+    });
+}

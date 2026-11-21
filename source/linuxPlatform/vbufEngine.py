@@ -168,6 +168,28 @@ def render(
 	return Rendered(Stream(pointer.value, length.value), details)
 
 
+def logTransport(log, busName: str, info: dict) -> None:
+	"""Say in log how the engine reaches the application, when info, of a render or a batch, says the
+	engine has just decided it: once for each application, and again if it moves to the bus. Reading
+	over the bus because the program's own server could not be used is a warning, since browse mode
+	is slower there and a bug report should show it at the default level."""
+	transport = info.get("transport")
+	if not transport:
+		return
+	way = (
+		"over its own peer-to-peer connection"
+		if transport == "peer-to-peer"
+		else "over the accessibility bus"
+	)
+	if info.get("peerToPeerFailed"):
+		way += ", which is slower,"
+	text = f"Browse mode reads {info.get('appName') or 'an application'} ({busName}) {way} because {info.get('transportWhy')}"
+	if info.get("peerToPeerFailed"):
+		log.warning(text)
+	else:
+		log.info(text)
+
+
 def next(timeoutMs: int) -> Batch | None:
 	"""The next batch of changes to any watched document, or None when none came within timeoutMs or
 	the engine has shut down. Never call it on the main thread."""

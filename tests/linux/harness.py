@@ -117,6 +117,14 @@ ALLOWED_STANDARD_ERROR = (
 		r"\n?\([^()\n:]+:\d+\): Gtk-WARNING \*\*: [\d:.]+: Negative content (?:width|height) -?\d+ "
 		r"\(allocation \d+, extents \d+x\d+\) while allocating gadget \(node entry, owner GtkEntry\)\n",
 	),
+	# libatspi, which NVDA's objects are read through, warns when a program in a container, Steam's or
+	# Flatpak's, offers a server of its own in a runtime directory that is not there outside, and then
+	# reads that program over the bus, as the engine does (atspi-misc.c in at-spi2-core).
+	re.compile(
+		r"\n?\([^()\n:]+:\d+\): atspi-WARNING \*\*: [\d:.]+: AT-SPI: Unable to open bus connection for "
+		r"application with pid \d+: Failed to connect to socket [^\n]*/at-spi2-\w+/socket: No such file or "
+		r"directory\n",
+	),
 )
 
 #: Libraries that can reach a sound server or a sound card, by the start of their file name with any

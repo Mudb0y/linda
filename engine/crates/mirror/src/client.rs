@@ -1,6 +1,6 @@
 //! One connection to one application, with the counters a benchmark needs.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use serde::Serialize;
 use zbus::{Connection, DynamicType, Message};
@@ -56,6 +56,8 @@ pub struct Client {
     pub app_bus: String,
     pub transport: Transport,
     counters: Cell<Counters>,
+    /// The first failure that showed the connection itself is gone.
+    lost: RefCell<Option<String>>,
 }
 
 impl Client {
@@ -66,6 +68,7 @@ impl Client {
             app_bus: app_bus.to_owned(),
             transport: Transport::Bus,
             counters: Cell::default(),
+            lost: RefCell::default(),
         }
     }
 
@@ -76,11 +79,19 @@ impl Client {
             app_bus: app_bus.to_owned(),
             transport: Transport::PeerToPeer,
             counters: Cell::default(),
+            lost: RefCell::default(),
         }
     }
 
     pub fn counters(&self) -> Counters {
         self.counters.get()
+    }
+
+    /// Why the connection is gone, once a call has shown that it is: nothing sent on it can be
+    /// answered any more. A call that timed out or was answered with an error says nothing of the
+    /// kind.
+    pub fn lost(&self) -> Option<String> {
+        self.lost.borrow().clone()
     }
 
     /// A failure of a call this client made, with where it happened.
@@ -154,6 +165,9 @@ impl Client {
                 if is_timeout(e) {
                     c.timeouts += 1;
                 }
+                if is_connection_lost(e) && self.lost.borrow().is_none() {
+                    *self.lost.borrow_mut() = Some(e.to_string());
+                }
             }
         }
         self.counters.set(c);
@@ -163,6 +177,12 @@ impl Client {
 
 pub fn is_timeout(e: &zbus::Error) -> bool {
     matches!(e, zbus::Error::InputOutput(io) if io.kind() == std::io::ErrorKind::TimedOut)
+}
+
+/// Whether a call failed because its connection is closed or broken, as when the other end went
+/// away, rather than going unanswered or being answered with an error.
+pub fn is_connection_lost(e: &zbus::Error) -> bool {
+    matches!(e, zbus::Error::InputOutput(io) if io.kind() != std::io::ErrorKind::TimedOut)
 }
 
 const UNKNOWN_METHOD: &str = "org.freedesktop.DBus.Error.UnknownMethod";
