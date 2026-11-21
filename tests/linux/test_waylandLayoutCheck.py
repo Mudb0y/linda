@@ -274,6 +274,38 @@ result["said"] = said
 	assert value == {"steady": [15, 0], "stall": [31, 0], "said": []}
 
 
+def test_anInsertReportedTwiceIsComparedOnce(tmp_path: Path):
+	"""A rich editor's paragraph inside the focus and the focus itself both report each insert, which
+	typedChars hears both of: only the focus's is compared, so the second report is not paired with the
+	next key."""
+	value = runCheck(
+		tmp_path,
+		r"""
+import eventHandler
+
+compared = []
+compare = check.compare
+check.compare = lambda focus, text: (compared.append(text), compare(focus, text))
+typedChars._layoutCheck = check
+editor = types.SimpleNamespace(
+	node="editor", atspiStates={"editable", "focused"}, role=Role.EDITABLETEXT, isProtected=False, toolkit="gtk"
+)
+paragraph = types.SimpleNamespace(node="paragraph")
+eventHandler.lastQueuedFocusObject = editor
+typedChars._isInsideFocus = lambda node, focus: node == "paragraph"
+key("x", vk=0x58)
+key("y", vk=0x59)
+inputHook._lastKeyDown = types.SimpleNamespace(time=time.monotonic(), typing=True, text="y", vkCode=0x59)
+for character in "xy":
+	typedChars.handleTextChange(paragraph, "insert", 0, 1, character)
+	typedChars.handleTextChange(editor, "insert", 0, 1, character)
+result["compared"] = compared
+result["counts"] = counts()
+""",
+	)
+	assert value == {"compared": ["x", "y"], "counts": [2, 0]}
+
+
 def test_keysAreForgottenWhenTheirTimeIsUp(tmp_path: Path):
 	"""What was typed is held only while a key may still be paired: keys older than the hold are
 	forgotten when a terminal's insert compares nothing, and when the next key goes down."""
