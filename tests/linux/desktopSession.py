@@ -1,10 +1,16 @@
 """A desktop in the rig for tests that read applications: a window manager, applications started and
 waited for, keys typed on the rig's display, and NVDA with what it speaks.
 
-Inside the rig only. Keys go through xdotool to the rig's own X display, and every process this
-starts is one of its own children, which close stops by its process ID.
+Inside the rig only. On the rig's X display keys go through xdotool and windows are activated with
+wmctrl. In the rig's Wayland sessions the compositor is the window manager, keys go through the rig's
+virtual keyboard (waylandKeyboard.py) in the pl layout, and windows are activated as each compositor
+allows: by swaymsg under sway, and under plain Mutter, which has no way to name a window to it, by its
+own window switching keys. A session given a stand-in for linda-keyd presses and types on the stand-in
+instead, in either kind of session, as a person types on a keyboard the helper holds. Every process
+this starts is one of its own children, which close stops by its process ID.
 """
 
+import json
 import os
 import re
 import shutil
@@ -13,10 +19,15 @@ import subprocess
 import sys
 import time
 from collections.abc import Sequence
+from functools import cache
 from pathlib import Path
-from typing import Self
+from typing import TYPE_CHECKING, Self
 
 import harness
+import waylandKeyboard
+
+if TYPE_CHECKING:
+	from keydStandIn import StandIn
 
 #: The applications tests read, each a program fixture names.
 APPS = harness.HERE / "fixtures" / "apps"
@@ -30,11 +41,33 @@ NVDA_EXIT_TIMEOUT = 10.0
 APP_EXIT_TIMEOUT = 3.0
 #: Seconds any one AT-SPI call waits for an application that does not answer.
 ATSPI_TIMEOUT_MS = 1000
+#: Seconds Mutter has to move the keyboard after its window switching key, which takes it a few
+#: hundredths of one.
+SWITCH_TIMEOUT = 2.0
+#: Seconds each key is held on the rig's Wayland keyboard or a stand-in, and between characters typed,
+#: as typeText's xdotool types on the X display.
+KEY_HOLD = 0.03
+TYPE_DELAY = 0.04
+#: Mutter's key for its switch-applications-backward binding, which activates the window used longest
+#: ago at once; with no shell there is no switcher to choose in, and pressed once for each window it
+#: brings every window to the front in turn.
+MUTTER_SWITCH_BACK = "shift+alt+Tab"
+#: evdev codes of the modifiers that pick a key's levels in the pl layout: none, Shift, AltGr, and both.
+_SHIFT, _ALTGR = 42, 100
+_LEVEL_MODIFIERS = ((), (_SHIFT,), (_ALTGR,), (_SHIFT, _ALTGR))
+
+
+def compositor() -> str | None:
+	"""mutter or sway when the rig gave a Wayland session, None on its X display."""
+	session = harness.rigSession()
+	return None if session == "x11" else session
 
 
 def windowManagerIsRunning() -> bool:
 	"""Whether a window manager has named itself on the root window, set up its desktops, and is still
-	there."""
+	there. Under a compositor, which is the window manager and runs for the rig's whole life, always."""
+	if compositor() is not None:
+		return True
 	shown = subprocess.run(
 		["xprop", "-root", "_NET_SUPPORTING_WM_CHECK", "_NET_NUMBER_OF_DESKTOPS"],
 		capture_output=True,
@@ -49,7 +82,10 @@ def windowManagerIsRunning() -> bool:
 
 
 def capsLockIsOn() -> bool:
-	"""Whether the rig's display has Caps Lock on."""
+	"""Whether the rig's display has Caps Lock on; under a compositor, whether the rig's virtual
+	keyboard has it on, by the XKB state it keeps beside the compositor's."""
+	if compositor() is not None:
+		return waylandKeyboard.lights()["caps"]
 	from Xlib import display
 
 	connection = display.Display()
@@ -128,13 +164,110 @@ def activate(title: str, timeout: float = 10) -> None:
 	"""
 	deadline = time.monotonic() + timeout
 	while True:
-		# -F matches the whole title: without it "Fixture window" would also pick "Qt fixture window".
-		subprocess.run(["wmctrl", "-F", "-a", title], check=False, capture_output=True)
+		askToActivate(title)
 		active = activeTopLevelNames()
 		if active == [title]:
 			return
 		assert time.monotonic() < deadline, f"{title!r} did not become active within {timeout} s: {active}"
 		time.sleep(0.2)
+
+
+def askToActivate(title: str) -> None:
+	"""Ask the window manager once to give the keyboard to the top-level window named title, and return
+	without waiting to see it done, except under Mutter."""
+	match compositor():
+		case None:
+			# -F matches the whole title: without it "Fixture window" would also pick "Qt fixture window".
+			subprocess.run(["wmctrl", "-F", "-a", title], check=False, capture_output=True)
+		case "sway":
+			_swayFocus(title)
+		case "mutter":
+			_mutterSwitch(title)
+
+
+def _swayWindows(node: dict):
+	"""Every window in a node of swaymsg's tree; a window is a node with a process."""
+	if node.get("pid"):
+		yield node
+	for child in node.get("nodes", []) + node.get("floating_nodes", []):
+		yield from _swayWindows(child)
+
+
+def _swayFocus(title: str) -> None:
+	# By the container's number rather than a title criterion, which sway takes as a regular expression.
+	tree = json.loads(
+		subprocess.run(["swaymsg", "-t", "get_tree"], capture_output=True, text=True, check=True).stdout
+	)
+	for window in _swayWindows(tree):
+		if window.get("name") == title:
+			subprocess.run(["swaymsg", f"[con_id={window['id']}] focus"], check=False, capture_output=True)
+			return
+
+
+def _mutterSwitch(title: str) -> None:
+	"""One step of Mutter's backward window switching, unless title has the keyboard already, and the
+	wait for the keyboard to move: pressed again before AT-SPI says it has, the key may take it on
+	past the very window it had just brought forward."""
+	before = activeTopLevelNames()
+	if before == [title]:
+		return
+	waylandKeyboard.press(MUTTER_SWITCH_BACK, gap=0)
+	deadline = time.monotonic() + SWITCH_TIMEOUT
+	while activeTopLevelNames() == before and time.monotonic() < deadline:
+		time.sleep(0.05)
+
+
+@cache
+def _layoutKeys() -> tuple[dict[str, tuple[int, ...]], dict[int, tuple[int, ...]]]:
+	"""What the pl layout types and which key symbols it gives, each with the evdev codes that make it,
+	modifiers first, the fewest modifiers that do; with Caps Lock off, as DesktopSession leaves it."""
+	from xkbcommon import xkb
+
+	keymap = xkb.Context().keymap_new_from_names(layout=waylandKeyboard.LAYOUT)
+	characters: dict[str, tuple[int, ...]] = {}
+	keysyms: dict[int, tuple[int, ...]] = {}
+	for modifiers in _LEVEL_MODIFIERS:
+		for keycode in range(keymap.min_keycode(), keymap.max_keycode() + 1):
+			if keycode - 8 in modifiers:
+				continue
+			state = keymap.state_new()
+			for modifier in modifiers:
+				state.update_key(modifier + 8, xkb.KeyDirection.XKB_KEY_DOWN)
+			codes = (*modifiers, keycode - 8)
+			if (keysym := state.key_get_one_sym(keycode)) != 0:
+				keysyms.setdefault(keysym, codes)
+			if len(character := state.key_get_string(keycode)) == 1:
+				characters.setdefault(character, codes)
+	# xdotool types a new line with Return, which gives a carriage return, not with the Linefeed key.
+	characters["\n"] = characters["\r"]
+	return characters, keysyms
+
+
+def chordCodes(chord: str) -> list[int]:
+	"""The evdev codes of a chord in xdotool's key names, as "alt+Tab" or "shift+question", in the order
+	they go down: a name the rig's keyboard has no code for is found in the pl layout by its key symbol,
+	with what selects its level, as xdotool finds one."""
+	codes: list[int] = []
+	for name in chord.split("+"):
+		try:
+			found: tuple[int, ...] = (waylandKeyboard.code(name),)
+		except ValueError:
+			from xkbcommon import xkb
+
+			try:
+				found = _layoutKeys()[1][xkb.keysym_from_name(name)]
+			except (KeyError, xkb.XKBInvalidKeysym):
+				raise ValueError(f"no key in the {waylandKeyboard.LAYOUT} layout for {name!r}") from None
+		codes.extend(code for code in found if code not in codes)
+	return codes
+
+
+def characterCodes(character: str) -> tuple[int, ...]:
+	"""The evdev codes that type character in the pl layout, modifiers first."""
+	try:
+		return _layoutKeys()[0][character]
+	except KeyError:
+		raise ValueError(f"the {waylandKeyboard.LAYOUT} layout cannot type {character!r}") from None
 
 
 def _matches(expected: str, spoken: str) -> bool:
@@ -155,15 +288,21 @@ class DesktopSession:
 	Every process it starts is stopped by close, NVDA first, by the process IDs it started.
 	"""
 
-	def __init__(self, directory: Path, *, windowManager: bool = True) -> None:
+	def __init__(
+		self, directory: Path, *, windowManager: bool = True, standIn: "StandIn | None" = None
+	) -> None:
 		"""
 		:param directory: Where NVDA's runs and the applications' standard error go.
 		:param windowManager: Whether to have marco running, which the rig starts when
-			LINDA_RIG_WM=marco is in its caller's environment, and this does otherwise.
+			LINDA_RIG_WM=marco is in its caller's environment, and this does otherwise. Under a
+			compositor there is no other window manager to have.
+		:param standIn: The stand-in for linda-keyd that press and typeText press keys on, which a
+			test may also set later as standIn; without one, keys go to the rig's display.
 		"""
 		harness.requireRig()
 		self.directory = directory
 		directory.mkdir(parents=True, exist_ok=True)
+		self.standIn = standIn
 		self._apps: list[subprocess.Popen] = []
 		self._launches: list[harness.Launch] = []
 		self._windowManager: subprocess.Popen | None = None
@@ -172,7 +311,10 @@ class DesktopSession:
 		# The rig's display outlives a test, and a test that failed with Caps Lock on would leave
 		# every later one typing capitals.
 		if capsLockIsOn():
-			subprocess.run(["xdotool", "key", "Caps_Lock"], check=True)
+			if compositor() is None:
+				subprocess.run(["xdotool", "key", "Caps_Lock"], check=True)
+			else:
+				waylandKeyboard.press("Caps_Lock", gap=0)
 
 	def __enter__(self) -> Self:
 		return self
@@ -222,6 +364,10 @@ class DesktopSession:
 		if qtPlugins and "QT_PLUGIN_PATH" not in env:
 			# Without its platform plugin a PyQt6 program aborts before it opens a window.
 			env["QT_PLUGIN_PATH"] = qtPlugins
+		if compositor() is not None:
+			# The Qt fixture asks for xcb unless told otherwise, and a Wayland run must not pass
+			# through Xwayland quietly, or fail for want of it.
+			env.setdefault("QT_QPA_PLATFORM", "wayland")
 		stderrPath = self.directory / f"app{len(self._apps)}.stderr.txt"
 		started = time.monotonic()
 		with open(stderrPath, "w") as stderr:
@@ -277,17 +423,47 @@ class DesktopSession:
 		return launch
 
 	def press(self, *chords: str, gap: float = 0.15) -> None:
-		"""Press each chord in turn on the rig's display, with gap seconds after each.
+		"""Press each chord in turn on the rig's display, or on the stand-in when the session has one,
+		with gap seconds after each.
 
-		Chords use xdotool's key names: "Tab", "Insert+t", "KP_Up", "alt+Tab".
+		Chords use xdotool's key names: "Tab", "Insert+t", "KP_Up", "alt+Tab". On the stand-in they are
+		its own press's names.
 		"""
 		for chord in chords:
-			subprocess.run(["xdotool", "key", chord], check=True)
+			if self.standIn is not None:
+				self.standIn.press(chord)
+			elif compositor() is not None:
+				self._pressCodes(chordCodes(chord))
+			else:
+				subprocess.run(["xdotool", "key", chord], check=True)
 			time.sleep(gap)
 
 	def typeText(self, text: str) -> None:
-		"""Type text on the rig's display, one key at a time, as a person would."""
-		subprocess.run(["xdotool", "type", "--delay", "40", text], check=True)
+		"""Type text on the rig's display, or on the stand-in when the session has one, one key at a
+		time, as a person would. On the stand-in or a compositor's keyboard, each character is typed on
+		the keys the pl layout has it on; the test owns the stand-in, and stops it itself."""
+		if self.standIn is None and compositor() is None:
+			subprocess.run(["xdotool", "type", "--delay", "40", text], check=True)
+			return
+		for character in text:
+			self._pressCodes(characterCodes(character))
+			time.sleep(TYPE_DELAY)
+
+	def _pressCodes(self, codes: Sequence[int]) -> None:
+		"""Each of codes down in order, then up in the reverse, on the stand-in or the rig's keyboard."""
+		standIn = self.standIn
+		for code in codes:
+			if standIn is not None:
+				standIn.down(code)
+			else:
+				waylandKeyboard.key(code, True)
+			time.sleep(KEY_HOLD)
+		for code in reversed(codes):
+			if standIn is not None:
+				standIn.up(code)
+			else:
+				waylandKeyboard.key(code, False)
+			time.sleep(KEY_HOLD)
 
 	def mark(self) -> int:
 		"""How many speak records NVDA has made so far, to give spokenSince or expect."""
