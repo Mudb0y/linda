@@ -1,4 +1,5 @@
-"""GNOME's lock screen with Linda: gnome-shell draws it and owns org.gnome.ScreenSaver, and neither the
+"""GNOME's lock screen with Linda: a D-Bus-activated proxy owns org.gnome.ScreenSaver and forwards
+org.gnome.Shell.ScreenShield, which gnome-shell owns as it draws the lock screen, and neither the
 shell nor Linda, both started by the user's systemd manager, is in the logind session, so Linda's lock
 monitor has to learn from logind that the shell's lock is its own session's. Then it says the session
 is locked, reads the shell's password field, speaks none of the password typed into it through
