@@ -75,6 +75,8 @@ def quitClean(desktop: DesktopSession, nvda: harness.Launch) -> None:
 	nvda.assertClean(logNames=("nvda.log",))
 	log = nvda.text("nvda.log")
 	assert "Keys are read from the X display" not in log, log[-6000:]
+	# Its failing to connect is only a warning, which assertClean lets through.
+	assert log.count("AT-SPI capture feed: following the foreground on its own connection") == 1, log[-6000:]
 
 
 def test_startsCleanWithNoHelper(desktop: DesktopSession, socketDir: Path) -> None:
