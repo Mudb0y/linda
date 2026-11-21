@@ -95,6 +95,15 @@ RETRY_DELAY_SECONDS = 0.02
 #: How long after the foreground deactivated, with no window activated since, to look for an active
 #: window again.
 RESCAN_DELAYS_SECONDS = (0.25, 1.0)
+#: Seconds after a top-level shows at which its states are read, in a Wayland session, for an activation
+#: nothing announced: GTK 4 now and then sends no window event, active state or focus for a window it
+#: maps, whose states say active once it has the keyboard (experiment E3). The keyboard came 20 ms after
+#: the map in one set-up and 2.3 to 4.1 s after it in another.
+SHOWN_PROBE_SECONDS = (0.1, 0.5, 1.0, 2.0, 3.0, 4.5, 6.0)
+#: Of those reads, the ones after which an accessible that could not be read at all is given up on.
+UNREAD_SHOWN_PROBES = 2
+#: The state changes that say a top-level was mapped; GTK 4 sends both, with detail1 0.
+_SHOWN_STATES = frozenset({"showing", "visible"})
 #: Roles whose "selected" state stands for focus in GTK, whose menu items and tabs announce focus with
 #: no focused state.
 SELECTED_AS_FOCUS_ROLES = frozenset({"menu", "menu item", "check menu item", "radio menu item", "page tab"})
@@ -135,6 +144,18 @@ _rescans: list[float] = []
 _roles: dict[tuple[str, str], str] = {}
 #: The name each accessible was last given by an event, by key.
 _names: dict[tuple[str, str], str] = {}
+#: Whether shown top-levels are read for an activation nothing announced. Only in a Wayland session: in
+#: an X session no toolkit has been seen to miss one, and what is said there stays as it is.
+_probesShown = False
+#: Accessibles whose showing or visible state changed, with when, not yet looked at.
+_shown: collections.deque = collections.deque(maxlen=MAX_QUEUED)
+#: Top-levels shown with no window event for them since, by key: the node, when it showed, and how many
+#: of SHOWN_PROBE_SECONDS have been read.
+_shownProbes: dict[tuple[str, str], tuple[Node, float, int]] = {}
+#: When the latest window:activate was handled.
+_activatedAt = 0.0
+#: When a pump is already asked for at, for the next read of a shown top-level.
+_probePumpAt: float | None = None
 
 
 def knownRole(node: Node) -> str | None:
@@ -555,6 +576,12 @@ def _onEvent(eventType: str, source: Node | None, detail1: int, detail2: int, an
 	now = time.monotonic()
 	if eventType.startswith("object:state-changed:"):
 		state = eventType[len("object:state-changed:") :]
+		if _probesShown and state in _SHOWN_STATES:
+			with _queueLock:
+				_shown.append((source, now))
+			if state == "visible":
+				# Not queued below, so nothing else asks for the pump that looks at it.
+				core.requestPump()
 		# libatspi sends defunct itself whenever it frees its own proxy for a live object. Active is
 		# kept for _asWindowEvent.
 		if state not in STATE_CHANGE_STATES and state not in ("focused", "showing", "active"):
@@ -634,10 +661,13 @@ def _sayThereIsNoBus() -> None:
 
 
 def initialize() -> None:
-	global _listening, _exiting
+	global _listening, _exiting, _probesShown
 	_exiting = False
 	import core
 
+	from linuxPlatform import displayServer
+
+	_probesShown = displayServer.isWayland()
 	if not client().hasBus:
 		core.postNvdaStartup.register(_sayThereIsNoBus)
 		return
@@ -647,7 +677,7 @@ def initialize() -> None:
 
 
 def terminate() -> None:
-	global _listening, _desktopNode, _settleStartedAt
+	global _listening, _desktopNode, _settleStartedAt, _probePumpAt
 	import core
 
 	core.postNvdaStartup.unregister(_onPostNvdaStartup)
@@ -657,6 +687,9 @@ def terminate() -> None:
 	_listening = False
 	with _queueLock:
 		_queue.clear()
+		_shown.clear()
+	_shownProbes.clear()
+	_probePumpAt = None
 	liveObjects.clear()
 	_activeDescendants.clear()
 	_firstSeen.clear()
@@ -1236,6 +1269,91 @@ def _isSettling(now: float) -> bool:
 	return False
 
 
+def _isTopLevel(node: Node) -> bool | None:
+	"""Whether node is a top-level window; None while it cannot be read."""
+	topLevel = _topLevels.get(node.key)
+	if topLevel is None:
+		try:
+			parent = client().parent(node)
+		except NodeGone:
+			return None
+		topLevel = parent is not None and parent.path == ROOT_PATH
+		_noteTopLevel(node.key, topLevel)
+	return topLevel
+
+
+def _hasFocusIn(window: Node) -> bool:
+	"""Whether the focus NVDA has is window or lies within it."""
+	import eventHandler
+
+	focus = getattr(eventHandler.lastQueuedFocusObject, "node", None)
+	if focus is None or focus.busName != window.busName:
+		return False
+	try:
+		return focus == window or _topLevelOf(focus) == window
+	except NodeGone:
+		return False
+
+
+def _probeShown(events: list, now: float) -> list:
+	"""The window:activate events that stand for activations nothing announced: of each top-level that
+	showed and has had no window event since, read at SHOWN_PROBE_SECONDS after it showed, whether it
+	says it is active.
+
+	Another window announced active after it showed, and still the foreground, is believed over it.
+	"""
+	global _activatedAt, _probePumpAt
+	import core
+
+	with _queueLock:
+		shown = list(_shown)
+		_shown.clear()
+	for node, at in shown:
+		if _isTopLevel(node) is not False:
+			_shownProbes[node.key] = (node, at, 0)
+	for event in events:
+		if event[0] in WINDOW_ACTIVATION_EVENTS:
+			_shownProbes.pop(event[1].key, None)
+			if event[0] == "window:activate":
+				_activatedAt = now
+	found = []
+	for key, (node, shownAt, done) in list(_shownProbes.items()):
+		if now < shownAt + SHOWN_PROBE_SECONDS[done]:
+			continue
+		done += 1
+		topLevel = _isTopLevel(node)
+		# Readable within the first reads if it is a window that is there at all; a flood of objects
+		# shown as they go is not read for seconds.
+		if topLevel is False or (topLevel is None and done >= UNREAD_SHOWN_PROBES):
+			del _shownProbes[key]
+			continue
+		try:
+			active = topLevel is True and "active" in client().states(node)
+		except NodeGone:
+			# GTK 4 names a window it maps before it can be read, and a busy program may answer later.
+			active = False
+		if active and ((_foreground == node and _foregroundActive) or _hasFocusIn(node)):
+			del _shownProbes[key]
+		elif active and not (_foregroundActive and _activatedAt > shownAt):
+			del _shownProbes[key]
+			log.debug(f"AT-SPI focus: {node} says it is active with no window event since it showed")
+			_setForeground(node)
+			_rescans.clear()
+			found.append(("window:activate", node, 0, 0, None))
+		elif done >= len(SHOWN_PROBE_SECONDS):
+			del _shownProbes[key]
+		else:
+			_shownProbes[key] = (node, shownAt, done)
+	if _probePumpAt is not None and now >= _probePumpAt:
+		_probePumpAt = None
+	if _shownProbes:
+		due = min(shownAt + SHOWN_PROBE_SECONDS[done] for _node, shownAt, done in _shownProbes.values())
+		if _probePumpAt is None or due < _probePumpAt:
+			_probePumpAt = due
+			core.callLater(max(1, round((due - now) * 1000)), core.requestPump)
+	return found
+
+
 def pumpAll() -> None:
 	import core
 	import eventHandler
@@ -1282,6 +1400,7 @@ def pumpAll() -> None:
 				_noteTopLevel(event[4].key, False)
 	released = _releasedDescendantChanges(now)
 	events = [converted for event in events if (converted := _asWindowEvent(event)) is not None]
+	found = _probeShown(events, now) if _probesShown else []
 	resumed = []
 	for busName, (event, since) in list(_focusWhileHung.items()):
 		if now - since > HUNG_FOCUS_SECONDS:
@@ -1292,12 +1411,14 @@ def pumpAll() -> None:
 			resumed.append((event, since))
 	if _retries or _rescans or _focusWhileHung:
 		core.requestPump()
-	if not events and not due and not resumed and not released:
+	if not events and not due and not resumed and not released and not found:
 		if _heldDescendantChanges:
 			core.requestPump()
 		return
 	for event in due:
 		_processFocus(event, mayRetry=False)
+	for event in found:
+		_processFocus(event)
 	for event in released:
 		_processFocus(event)
 	for event, since in resumed:
