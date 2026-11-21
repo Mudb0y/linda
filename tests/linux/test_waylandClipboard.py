@@ -513,6 +513,50 @@ def test_anOwnerThatNeverAnswersCostsLindaAMoment(session: ClipboardSession) -> 
 	linda.launch.assertClean(logNames=("nvda.log",))
 
 
+#: A clipboard manager as Plasma's is: it takes each new text over at once, serving it itself, so that the
+#: clipboard outlives the program that copied. It copies only what it has not copied itself, or it would
+#: take its own copies over for ever.
+CLIPBOARD_MANAGER = """\
+text=$(cat; echo .)
+text=${text%.}
+last=$(cat "$1"; echo .)
+last=${last%.}
+[ -z "$text" ] || [ "$text" = "$last" ] && exit 0
+printf %s "$text" >"$1"
+printf %s "$text" | wl-copy
+"""
+
+
+@pytest.mark.rigSession("sway")
+def test_aClipboardManagerTakingEachCopyOverLeavesItCopied(session: ClipboardSession, tmp_path: Path) -> None:
+	linda = session.linda
+	script = tmp_path / "manager.sh"
+	script.write_text(CLIPBOARD_MANAGER, encoding="utf-8")
+	last = tmp_path / "last"
+	last.touch()
+	manager = subprocess.Popen(
+		["wl-paste", "--watch", "sh", str(script), str(last)],
+		stdout=subprocess.DEVNULL,
+		stderr=(tmp_path / "manager.stderr.txt").open("w"),
+	)
+	try:
+		for count in range(1, 5):
+			text = f"Copy number {count}"
+			copied, spoken = linda.copy(text)
+			assert copied["copied"] and spoken == [COPIED.format(text)], (copied, spoken)
+			deadline = time.monotonic() + WL_BOUND
+			while last.read_text(encoding="utf-8") != text:
+				assert time.monotonic() < deadline, "the clipboard manager never took the copy over"
+				time.sleep(0.05)
+			assert session.other.paste() == text
+	finally:
+		manager.terminate()
+		manager.wait()
+	linda.stop()
+	linda.launch.assertClean(logNames=("nvda.log",))
+	assert "The compositor ended NVDA's connection" not in linda.launch.text("nvda.log")
+
+
 @pytest.mark.rigSession("sway")
 def test_withoutDataControlLindaUsesAWindowAndSaysWhenItCannot(session: ClipboardSession) -> None:
 	linda, other = session.linda, session.other
