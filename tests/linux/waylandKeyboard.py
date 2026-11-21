@@ -177,7 +177,8 @@ def press(*chords: str, gap: float = 0.15, hold: float = 0.03) -> None:
 
 
 def lights() -> dict[str, bool]:
-	"""Which of caps, num and scroll are lit in the server's own XKB state."""
+	"""Which of caps, num and scroll are lit in the server's own XKB state, which follows key() alone: a
+	lock pressed through keysym() reaches the compositor but not this."""
 	values = _send("lights").split()
 	return {name: value == "1" for name, value in zip(LIGHTS, values, strict=True)}
 
