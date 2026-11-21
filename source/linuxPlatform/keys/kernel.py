@@ -1831,7 +1831,10 @@ class KernelKeySource:
 			if press.looked is not None:
 				press.looked.set()
 			if self._environment is not None and not dropUndecided and press.follows is None:
-				# The helper passes on what it has not had a verdict on as it lets go.
+				# The helper passes on what it has not had a verdict on as it lets go, kept here or not: so
+				# passed, that its release is told of too.
+				with press.lock:
+					press.passed = True
 				self._tell(self._environment.notePassed, press.keycode, False)
 				if self._presses.get(press.keycode) is not press:
 					self._passedUp(press, now)

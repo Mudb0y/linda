@@ -635,6 +635,38 @@ def test_anEnvironmentThatCannotSayLeavesNVDAItsKeys(tmp_path: Path):
 	}, done.logErrors
 
 
+#: h held on an open look and decided by NVDA as kept, its verdict not yet sent, as the helper lets go
+#: of the keyboard, which passes it on; then h released.
+RELEASE_ALL_CHILD = r"""
+from keydStandIn import RELEASED, RELEASED_BACKGROUND
+
+environment = FakeEnvironment(lookAfter=None, until=5.0, state=AWAY)
+source = startSource(environment)
+keyboard.down("h")
+time.sleep(0.05)
+pending = list(source._pending)
+pending[0].decide(False)
+keyboard._sendClient(struct.pack("<BB", RELEASED, RELEASED_BACKGROUND))
+time.sleep(0.8)
+keyboard.up("h")
+time.sleep(0.2)
+result = {
+	"pending": len(pending),
+	"verdicts": len(keyboard.verdicts),
+	"passed": [call[2:] for call in environment.calls if call[1] == "passed"],
+}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_aKeyTheHelperPassesOnAsItLetsGoIsToldOfDownAndUp(tmp_path: Path):
+	value = runEnvironmentChild(tmp_path, RELEASE_ALL_CHILD).value
+	# Its keep was never sent, so the helper passed it on: 43 is h as X numbers keys.
+	assert value["pending"] == 1 and value["verdicts"] == 0, value
+	assert value["passed"] == [[43, False], [43, True]], value
+
+
 REPEAT_CHILD = r"""
 environment = FakeEnvironment(layout=Layout(repeat=(True, 0.2, 0.05)))
 source = startSource(environment)
