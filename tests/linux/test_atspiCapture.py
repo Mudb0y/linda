@@ -435,6 +435,38 @@ def test_readsThatCannotMoveTheForegroundHoldNoLook(tmp_path: Path) -> None:
 	)
 
 
+def test_oneWindowIsAskedAboutOnce(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		feed = anchoredOnFirst(t)
+		# GTK 4 says a frame is showing and visible as it maps.
+		new = (":1.20", "/org/a11y/atspi/accessible/5")
+		feed._onStateChanged(new, "showing", 0, t + 1)
+		feed._onStateChanged(new, "visible", 0, t + 1)
+		assert feed.asked("parent") == [new], feed.requests
+		feed.answer("parent", new, ROOT_PATH)
+		assert len(feed.timers) == 1, feed.timers
+		# A window that shows and says it is active before its parent is known is asked about once, and
+		# the look waits for the answer.
+		other = (":1.20", "/org/a11y/atspi/accessible/6")
+		feed._onStateChanged(other, "showing", 1, t + 2)
+		feed._onStateChanged(other, "active", 1, t + 2)
+		assert feed.asked("parent") == [other], feed.requests
+		feed.requestLook(1, t + 2 + QUIET, feed.done)
+		feed._takeLooks(t + 2 + QUIET)
+		feed.clock = t + 2 + QUIET + 0.005
+		feed.answer("roundTrip", None, True)
+		assert feed.ended == [], feed.ended
+		feed.answer("parent", other, ROOT_PATH)
+		assert feed.foreground[:2] == other and not feed.captureState.focused, feed.foreground
+		feed._serviceLooks(t + 2 + 2 * QUIET + 0.005)
+		assert feed.ended == [(1, True)], feed.ended
+		assert feed._reading == 0
+		""",
+	)
+
+
 def test_newWindowThatSaysNothing(tmp_path: Path) -> None:
 	runLogic(
 		tmp_path,

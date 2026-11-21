@@ -142,6 +142,9 @@ class AtspiCaptureFeed:
 		self._heardFrom: set[Key] = set()
 		#: New top-level windows being asked about.
 		self._asking: set[Key] = set()
+		#: Objects whose parent is being asked, each with what is to be done once it is known to be a
+		#: top-level window and whether that holds the looks.
+		self._askingParent: dict[Key, list[tuple[Callable[[], None], bool]]] = {}
 		self._windowNumbers: dict[Key, int] = {}
 		self._nextWindowNumber = 1
 		self._lastWindowEventAt = float("-inf")
@@ -467,22 +470,30 @@ class AtspiCaptureFeed:
 
 	def _findTopLevel(self, key: Key, then: Callable[[], None], holdsLooks: bool) -> None:
 		"""Find out whether key is a top-level window, the child of its application's root, and call then
-		if it is; while holdsLooks, no look ends known before the answer."""
-		if len(self._asking) >= MAX_ASKING:
-			return
-		self._asking.add(key)
-		self._reading += holdsLooks
-
-		def answered(parent: str | None) -> None:
-			self._reading -= holdsLooks
-			self._asking.discard(key)
-			if parent is None:
+		if it is; while holdsLooks, no look ends known before the answer. GTK 4 says a window is showing
+		and visible at once, which is asked about once."""
+		waiting = self._askingParent.get(key)
+		first = waiting is None
+		if first:
+			if len(self._askingParent) >= MAX_ASKING:
 				return
-			self._noteTopLevel(key, parent == ROOT_PATH)
-			if parent == ROOT_PATH:
-				then()
+			waiting = self._askingParent[key] = []
+		if holdsLooks and not any(holds for _then, holds in waiting):
+			self._reading += 1
+		waiting.append((then, holdsLooks))
+		if first:
+			self._request("parent", key, lambda parent: self._parentKnown(key, parent))
 
-		self._request("parent", key, answered)
+	def _parentKnown(self, key: Key, parent: str | None) -> None:
+		waiting = self._askingParent.pop(key, [])
+		if any(holds for _then, holds in waiting):
+			self._reading -= 1
+		if parent is None:
+			return
+		self._noteTopLevel(key, parent == ROOT_PATH)
+		if parent == ROOT_PATH:
+			for then, _holds in waiting:
+				then()
 
 	def _watchNewWindow(self, key: Key, shown: float) -> None:
 		"""Ask a top-level window that has just shown whether it is active, a few times, while neither it
