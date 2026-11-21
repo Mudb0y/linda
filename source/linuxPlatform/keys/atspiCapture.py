@@ -49,8 +49,11 @@ LOOK_ROUND_TRIP = 0.05
 WINDOW_QUIET = 0.03
 #: Seconds after a top-level window shows at which it is asked whether it is active, while it has sent
 #: no window event of its own and no other window has: GTK 4 sends none for some new windows, measured
-#: becoming active 20 ms and 4 s after they showed.
-NEW_WINDOW_READS = (0.1, 1.0, 3.0)
+#: becoming active 20 ms and 4.1 s after they showed. The same as the focus handler's
+#: SHOWN_PROBE_SECONDS, so that NVDA's focus and the keys' place are found by the same reads. It is
+#: not imported from there, which would bring the handler's libatspi client in with a feed that keeps
+#: to a connection of its own; test_atspiCapture.py holds the two equal.
+NEW_WINDOW_READS = (0.1, 0.5, 1.0, 2.0, 3.0, 4.5, 6.0)
 #: Milliseconds any call on the bus may take; the feed's looks never wait for one beyond their own end.
 CALL_TIMEOUT_MS = 1000
 #: Seconds start waits for the connection, and stop for the thread.

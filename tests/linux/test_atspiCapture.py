@@ -8,6 +8,7 @@ windows become active with no other listener running. Run under the rig:
 	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_atspiCapture.py
 """
 
+import ast
 import json
 import os
 import textwrap
@@ -526,6 +527,61 @@ def test_newWindowThatSaysNothing(tmp_path: Path) -> None:
 		assert feed.foreground[:2] == OTHER
 		""",
 	)
+
+
+def test_windowActiveFourSecondsAfterItShowedIsFound(tmp_path: Path) -> None:
+	assert runLogic(
+		tmp_path,
+		"""\
+		new = (":1.40", "/org/linda/Probe/a11y/1")
+		never = (":1.50", "/org/linda/Probe/a11y/1")
+
+
+		def readUntil(window, activeAfter):
+			\"\"\"Fire each read the feed asks for, at its time, until it has no more; the window says it is
+			active from activeAfter seconds after it showed.\"\"\"
+			shown = feed.clock = t + 1
+			feed._onStateChanged(window, "showing", 1, shown)
+			feed.answer("parent", window, ROOT_PATH)
+			reads = []
+			while feed.timers:
+				((seconds, _call),) = feed.timers
+				feed.clock += seconds
+				reads.append(round(feed.clock - shown, 3))
+				feed.fire()
+				active = feed.clock - shown >= activeAfter
+				feed.answer("state", window, states(STATE_SHOWING, STATE_VISIBLE, *([STATE_ACTIVE] if active else [])))
+			return reads
+
+
+		feed = feedWithProcesses()
+		feed._onWindowEvent(OTHER, True, t)
+		# E3 measured GTK 4 giving a new window the keyboard 4.1 s after it mapped, saying nothing.
+		found = readUntil(new, 4.1)
+		assert feed.foreground[:2] == new, feed.foreground
+		feed = feedWithProcesses()
+		feed._onWindowEvent(OTHER, True, t)
+		givenUp = readUntil(never, 60)
+		assert feed.foreground[:2] == OTHER and not feed._asking, (feed.foreground, feed._asking)
+		result = [found, givenUp]
+		""",
+	) == [[0.1, 0.5, 1.0, 2.0, 3.0, 4.5], [0.1, 0.5, 1.0, 2.0, 3.0, 4.5, 6.0]]
+
+
+def test_newWindowReadsAreTheFocusHandlers() -> None:
+	"""The feed's reads of a window that has shown are the focus handler's, read from both files' source,
+	as neither module imports the other."""
+
+	def constant(path: Path, name: str) -> object:
+		for node in ast.parse(path.read_text(encoding="utf-8")).body:
+			if isinstance(node, ast.Assign) and [target.id for target in node.targets] == [name]:
+				return ast.literal_eval(node.value)
+		raise AssertionError(f"no {name} in {path}")
+
+	platform = harness.SOURCE / "linuxPlatform"
+	reads = constant(platform / "keys" / "atspiCapture.py", "NEW_WINDOW_READS")
+	assert reads == constant(platform / "atspi" / "handler.py", "SHOWN_PROBE_SECONDS")
+	assert max(reads) > 4.1, reads
 
 
 def test_activeStateCountsOnlyForTopLevels(tmp_path: Path) -> None:
