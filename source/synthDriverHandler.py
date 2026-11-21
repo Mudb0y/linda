@@ -493,7 +493,14 @@ def getSynth() -> SynthDriver | None:
 
 
 def getSynthInstance(name: str, asDefault: bool = False):
-	newSynth = _getSynthDriver(name)()
+	synthClass = _getSynthDriver(name)
+	newSynth = synthClass.__new__(synthClass)
+	try:
+		newSynth.__init__()
+	except BaseException:
+		# As for a braille display: a synth that failed to start must not have its settings saved.
+		newSynth._unregisterConfigSaveAction()
+		raise
 	if asDefault and newSynth.name == "oneCore":
 		# Will raise an exception if oneCore does not support the system language
 		newSynth._getDefaultVoice(pickAny=False)

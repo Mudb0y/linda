@@ -104,7 +104,14 @@ def callWithin[T](timeout: float, call: Callable[[], T], abandoned: Callable[[T]
 			outcome["waited"] = False
 			raise TimeoutError(f"BRLTTY did not answer within {timeout} s")
 	if "error" in outcome:
-		raise outcome["error"]
+		error = outcome.pop("error")
+		try:
+			raise error
+		finally:
+			# The error's traceback holds this frame. Were the frame to hold the error, the cycle would
+			# keep all the traceback holds, a driver that failed to start among it, until the collector
+			# ran, and until then the driver's settings would be saved with the configuration.
+			del error
 	return outcome["result"]
 
 

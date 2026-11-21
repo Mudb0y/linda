@@ -22,6 +22,19 @@ from typing import (  # noqa: UP035
 from collections.abc import Callable, Generator, Iterable
 
 
+def _describe(obj: object) -> str:
+	"""The repr of obj, or a description that cannot fail. A handler's failure is logged with it, and the
+	handler of an object that failed half way through its making, a braille display driver for one, may
+	fail again in its repr, ending the notification there instead of moving on to the next handler."""
+	try:
+		return repr(obj)
+	except Exception:  # noqa: BLE001
+		owner = getattr(obj, "__self__", None)
+		if owner is not None:
+			return f"<bound method {getattr(obj, '__name__', '?')} of {type(owner).__qualname__} at {id(owner):#x}>"
+		return f"<{type(obj).__qualname__} at {id(obj):#x}>"
+
+
 class Action(HandlerRegistrar[Callable[..., None]]):
 	"""Allows interested parties to register to be notified when some action occurs.
 	For example, this might be used to notify that the configuration profile has been switched.
@@ -53,7 +66,7 @@ class Action(HandlerRegistrar[Callable[..., None]]):
 			try:
 				callWithSupportedKwargs(handler, **kwargs)
 			except:  # noqa: E722
-				log.exception("Error running handler %r for %r" % (handler, self))  # noqa: UP031
+				log.exception("Error running handler %s for %s" % (_describe(handler), _describe(self)))  # noqa: UP031
 
 	def notifyOnce(self, **kwargs):
 		"""Notify all registered handlers that the action has occurred.
@@ -65,7 +78,9 @@ class Action(HandlerRegistrar[Callable[..., None]]):
 				callWithSupportedKwargs(handler, **kwargs)
 				self.unregister(handler)
 			except Exception as e:
-				log.exception(f"Error running handler {handler} for {self}. Exception {e}")  # noqa: TRY401
+				log.exception(
+					f"Error running handler {_describe(handler)} for {_describe(self)}. Exception {e}"  # noqa: TRY401
+				)
 
 
 FilterValueT = TypeVar("FilterValueT")
@@ -113,7 +128,7 @@ class Filter(
 			try:
 				value = callWithSupportedKwargs(handler, value, **kwargs)
 			except:  # noqa: E722
-				log.exception("Error running handler %r for %r" % (handler, self))  # noqa: UP031
+				log.exception("Error running handler %s for %s" % (_describe(handler), _describe(self)))  # noqa: UP031
 		return value
 
 
@@ -161,7 +176,7 @@ class Decider(HandlerRegistrar[Callable[..., bool]]):
 			try:
 				decision = callWithSupportedKwargs(handler, **kwargs)
 			except:  # noqa: E722
-				log.exception("Error running handler %r for %r" % (handler, self))  # noqa: UP031
+				log.exception("Error running handler %s for %s" % (_describe(handler), _describe(self)))  # noqa: UP031
 				continue
 			if not decision:
 				return False
@@ -217,7 +232,7 @@ class AccumulatingDecider(HandlerRegistrar[Callable[..., bool]]):
 			try:
 				decisions.add(callWithSupportedKwargs(handler, **kwargs))
 			except Exception:
-				log.exception("Error running handler %r for %r" % (handler, self))  # noqa: UP031
+				log.exception("Error running handler %s for %s" % (_describe(handler), _describe(self)))  # noqa: UP031
 				continue
 		if (not self.defaultDecision) in decisions:
 			return not self.defaultDecision
@@ -267,9 +282,11 @@ class Chain(HandlerRegistrar[Callable[..., Iterable[ChainValueTypeT]]], Generic[
 			try:
 				iterable = callWithSupportedKwargs(handler, **kwargs)
 				if not isinstance(iterable, Iterable):
-					log.exception(f"The handler {handler!r} on {self!r} didn't return an iterable")
+					log.exception(
+						f"The handler {_describe(handler)} on {_describe(self)} didn't return an iterable"
+					)
 					continue
 				for value in iterable:  # noqa: UP028
 					yield value
 			except Exception:
-				log.exception(f"Error yielding value from handler {handler!r} for {self!r}")
+				log.exception(f"Error yielding value from handler {_describe(handler)} for {_describe(self)}")

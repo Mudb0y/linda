@@ -511,7 +511,13 @@ class BrailleHandler(baseObject.AutoPropertyObject):
 			newDisplay = oldDisplay
 		else:
 			newDisplay = newDisplayClass.__new__(newDisplayClass)
-		extensionPoints.callWithSupportedKwargs(newDisplay.__init__, **kwargs)
+		try:
+			extensionPoints.callWithSupportedKwargs(newDisplay.__init__, **kwargs)
+		except BaseException:
+			# Whatever keeps a driver that failed to start alive, a traceback among it, would otherwise
+			# have its settings saved with the configuration, from a section initSettings never made.
+			newDisplay._unregisterConfigSaveAction()
+			raise
 		if not sameDisplayReInit:  # noqa: SIM102
 			if oldDisplay:
 				log.debug(f"Switching braille display from {oldDisplay.name!r} to {newDisplay.name!r}")

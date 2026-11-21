@@ -15,6 +15,7 @@ import os
 import select
 import shutil
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -397,6 +398,38 @@ def test_automaticWithoutBrlttyIsQuietAndTakesItUpOnceItRuns(
 	waitUntilShown(nvda, display)
 	toggleInputHelp(desktop, display, on=True)
 	toggleInputHelp(desktop, display, on=False)
+	assertExitedCleanly(desktop, nvda)
+
+
+def leaveStaleSocket() -> None:
+	"""The socket a BRLTTY that was killed leaves behind: there, with nothing listening on it."""
+	with socket.socket(socket.AF_UNIX) as server:
+		server.bind(str(SOCKET))
+	SOCKET.chmod(0o777)
+
+
+def waitForTries(nvda: harness.Launch, times: int) -> None:
+	"""Wait until Automatic has tried BRLTTY's driver times times: once every RETRY_INTERVAL and a
+	look of the watcher."""
+	made = "registering pre_configSave action: <class 'brailleDisplayDrivers.brltty.BrailleDisplayDriver'>"
+	deadline = time.monotonic() + times * RETRY_BOUND
+	while nvda.text("nvda.log").count(made) < times:
+		assert nvda.process.poll() is None and time.monotonic() < deadline, nvda.describe()
+		time.sleep(0.1)
+
+
+def test_automaticWithBrlttyGoneSavesTheConfiguration(
+	desktop: DesktopSession, socketDirectory: Path, tmp_path: Path
+):
+	leaveStaleSocket()
+	nvda = startNVDA(desktop, tmp_path)
+	waitForTries(nvda, 4)
+	mark = desktop.mark()
+	desktop.press("Insert+control+c")
+	desktop.expect("Configuration saved", since=mark)
+	log = nvda.text("nvda.log")
+	assert "Loaded braille display driver 'brltty'" not in log
+	assert "Error running handler" not in log, log
 	assertExitedCleanly(desktop, nvda)
 
 

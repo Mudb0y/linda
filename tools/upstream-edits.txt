@@ -359,6 +359,10 @@ source/braille/brailleHandler.py
   Linux runtime: the display acknowledgement timer is a
   linuxPlatform.ioThread.WaitableTimer, since Linux has no waitable timer
   handles; terminate closes it instead of cancelling and closing a handle
+  every platform: a display driver whose __init__ raises is unregistered
+  from pre_configSave, as whatever kept it alive, a cycle through its
+  traceback among it, would have its settings saved from a section never
+  made, and the error logged at every save
 source/braille/display/driver.py
   Linux runtime: an acknowledgement from the display cancels the Linux
   timer object rather than calling CancelWaitableTimer
@@ -372,7 +376,8 @@ source/brailleDisplayDrivers/brltty.py
   exit; the display's size and driver name are asked once. The key
   check timer is started on the main thread, and a lost connection
   gives way to Automatic or no braille once, with a warning rather than
-  an error on every key check
+  an error on every key check. A driver that has not connected has no
+  link and a display of 0 cells, so that its repr cannot fail
 source/brailleViewer/__init__.py
   every platform: createBrailleViewerTool unregisters its display
   dimensions filter and reports the viewer as not created when the
@@ -455,6 +460,10 @@ source/documentNavigation/paragraphHelper.py
   Linux runtime: after moving the caret, both paragraph moves
   import the UI Automation text class only on Windows; Linux has no UI
   Automation and uses an empty tuple, which no isinstance test matches
+source/extensionPoints/__init__.py
+  every platform: a handler that fails is logged with a description that
+  cannot fail, as the repr of a half-made driver could, which ended the
+  notification there and made config.conf.save fail
 source/fileUtils.py
   Linux runtime: FaultTolerantFile puts the synced temporary file in place with
   os.replace and then syncs the directory, where Windows calls MoveFileEx,
@@ -748,6 +757,8 @@ source/synthDriverHandler.py
   fallback and is never saved as the configured synth.
   test_transcriptSynth.py checks that the skipped set is exactly the set
   that fails to import
+  every platform: a synth whose __init__ raises is unregistered from
+  pre_configSave, as a braille display driver is
 source/synthDrivers/_espeak.py
   Linux runtime: the library, the data directory passed to
   espeak_Initialize and the variants directory come from

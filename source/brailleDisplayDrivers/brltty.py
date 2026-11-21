@@ -45,6 +45,9 @@ class BrailleDisplayDriver(braille.display.driver.BrailleDisplayDriver):
 	if sys.platform != "win32":
 		# A BrlAPI server comes and goes with BRLTTY, which on Linux is the only way to a display.
 		supportsAutomaticDetection = True
+		# Until it has connected, and when it could not, a driver has no link, and is still described in
+		# the log as a display of no cells.
+		_link: "brlapiClient.Link | None" = None
 
 		@classmethod
 		def registerAutomaticDetection(cls, driverRegistrar):
@@ -164,12 +167,12 @@ class BrailleDisplayDriver(braille.display.driver.BrailleDisplayDriver):
 
 	def _get_numCols(self) -> int:
 		if sys.platform != "win32":
-			return self._link.displaySize[0]
+			return self._link.displaySize[0] if self._link else 0
 		return self._con.displaySize[0]
 
 	def _get_numRows(self) -> int:
 		if sys.platform != "win32":
-			return self._link.displaySize[1]
+			return self._link.displaySize[1] if self._link else 0
 		return self._con.displaySize[1]
 
 	def display(self, cells: list[int]):
