@@ -151,6 +151,8 @@ def code(name: str) -> int:
 def _send(line: str) -> str:
 	"""What the server answered after its ok, which is all it answers when the request worked."""
 	with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+		# A stalled compositor fails the test that pressed, instead of hanging it and every one after.
+		s.settimeout(10)
 		s.connect(socketPath())
 		s.sendall(line.encode() + b"\n")
 		answer = s.makefile().readline().strip()

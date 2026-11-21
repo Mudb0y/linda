@@ -70,6 +70,7 @@ def test_waylandSessions(tmp_path: Path, compositor: str) -> None:
 		env=env,
 		capture_output=True,
 		text=True,
+		timeout=300,
 		check=False,
 	)
 	assert ran.returncode == 0, ran.stdout[-6000:] + ran.stderr[-3000:]
