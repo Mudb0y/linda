@@ -174,6 +174,10 @@ def test_browserWindowAppearsOnTheAccessibilityDesktop(desktop: DesktopSession, 
 			assert b"MOZ_ENABLE_WAYLAND=1" in environment
 			assert not any(entry.startswith(b"DISPLAY=") for entry in environment)
 	else:
+		# Chromium joins the accessibility bus only if the status was on when it started, and the rig's
+		# own setting may have been switched off by an earlier test in the run.
+		if chromiumSession.accessibilityStatus() is not True:
+			chromiumSession._status("Set", "string:IsEnabled", "variant:boolean:true")
 		assert chromiumSession.accessibilityStatus() is True
 		if browser == "chromium":
 			process = chromiumSession.startChromium(desktop, "basic.html")
