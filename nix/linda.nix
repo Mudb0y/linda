@@ -274,6 +274,22 @@ stdenv.mkDerivation {
           exit 1
         fi
       done
+      # Without dconf's module GSettings falls back to keeping settings in memory, and a Wayland
+      # session's keyboard layout is then not read from GNOME's settings.
+      gioModules=$(grep -oE '"GIO_EXTRA_MODULES=[^"]*"' python.log | head -n 1)
+      gioModules=''${gioModules#\"GIO_EXTRA_MODULES=}
+      gioModules=''${gioModules%\"}
+      dconfModule=
+      IFS=: read -ra gioModuleDirs <<<"$gioModules"
+      for dir in "''${gioModuleDirs[@]}"; do
+        if [ -f "$dir/libdconfsettings.so" ]; then
+          dconfModule=$dir/libdconfsettings.so
+        fi
+      done
+      if [ -z "$dconfModule" ]; then
+        echo "error: $program gives Python no libdconfsettings.so on GIO_EXTRA_MODULES"
+        exit 1
+      fi
     done
     runHook postInstallCheck
   '';
