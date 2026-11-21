@@ -215,10 +215,30 @@ def headingByH(ground: "Ground", keyboard: "FakeKeyboard", heading: str) -> None
 	assert pageKeys(ground)[before:] == [], pageKeys(ground)[before:]
 
 
-def run(ground: "Ground", *, promptIsRead: bool, raisePrompt: list[str]) -> dict:
+def loggedSpeech(ground: "Ground") -> list[str]:
+	"""What NVDA's speech logged, at IO level, as it was asked to speak: unlike the transcript, also
+	what was cancelled before it reached the synth."""
+	return [record.split("\n", 1)[-1] for _t, record in ground.lindaLogRecords("Speaking [")]
+
+
+def waitForField(ground: "Ground", since: "Mark") -> None:
+	try:
+		ground.waitFor(
+			lambda: spokenSince(ground, since, "protected"), "Linda to read the password field", LOCK_TIMEOUT
+		)
+	except AssertionError as e:
+		raise AssertionError(
+			f"{e}; it spoke {ground.speech(since)}; its speech logged {loggedSpeech(ground)[-8:]}"
+		) from None
+
+
+def run(
+	ground: "Ground", *, promptIsRead: bool, raisePrompt: list[str], promptFault: str | None = None
+) -> dict:
 	"""The whole case on one desktop. promptIsRead says whether the shell probe found the desktop's
 	lock screen on the accessibility bus; raisePrompt is the keys that bring up its password field
-	once the lock screen shows, typed through the helper. Answers the figures for the log."""
+	once the lock screen shows, typed through the helper; promptFault names a fault, where there is
+	one today, that keeps Linda from reading the field all the same. Answers the figures for the log."""
 	figures: dict = {}
 	ground.shell(f"echo {USER}:{MARKER} | chpasswd")
 	ground.openWindow()
@@ -261,11 +281,11 @@ def run(ground: "Ground", *, promptIsRead: bool, raisePrompt: list[str]) -> dict
 		if raisePrompt:
 			keyboard.tap(*raisePrompt)
 		if promptIsRead:
-			ground.waitFor(
-				lambda: spokenSince(ground, lockMark, "protected"),
-				"Linda to read the password field",
-				LOCK_TIMEOUT,
-			)
+			if promptFault is None:
+				waitForField(ground, lockMark)
+			else:
+				with ground.expectedFailure(promptFault):
+					waitForField(ground, lockMark)
 		else:
 			ground.settle(5)
 			assert [text for _t, text in ground.speech(lockMark)] == [LOCKED], ground.speech(lockMark)
@@ -275,9 +295,17 @@ def run(ground: "Ground", *, promptIsRead: bool, raisePrompt: list[str]) -> dict
 
 	with ground.subtest("typing the password through the helper speaks none of its characters"):
 		mark = ground.mark()
+		logged = len(loggedSpeech(ground))
 		typePassword(ground, keyboard)
 		ground.settle(2)
 		figures["while typing"] = passwordUnspoken(ground, mark)
+		figures["logged while typing"] = loggedSpeech(ground)[logged:]
+		ground.machine.log(
+			f"Linda's speech logged while the password was typed: {figures['logged while typing']}"
+		)
+		quoted = {f"'{c}'" for c in MARKER}
+		leaked = [s for s in figures["logged while typing"] if any(q in s.lower() for q in quoted)]
+		assert not leaked, leaked
 		ground.machine.log(f"Linda said while the password was typed: {figures['while typing']}")
 		if not promptIsRead:
 			assert figures["while typing"] == [], figures["while typing"]
