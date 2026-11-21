@@ -6,7 +6,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::num::NonZeroUsize;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -86,7 +87,13 @@ pub fn admit(
     peer: &Peer,
     start_time: &dyn Fn(u32) -> Option<u64>,
 ) -> Result<String, Refusal> {
-    admit_reading(login, peer, start_time, &proc_file, &ADMISSIONS_LOGGED)
+    admit_reading(
+        login,
+        peer,
+        start_time,
+        &bounded(proc_file, &CMDLINE_BLOCKED),
+        &ADMISSIONS_LOGGED,
+    )
 }
 
 fn admit_reading(
@@ -255,6 +262,50 @@ impl Allowance {
 /// A file of /proc/PID.
 fn proc_file(pid: u32, name: &str) -> io::Result<Vec<u8>> {
     std::fs::read(format!("/proc/{pid}/{name}"))
+}
+
+/// How long admission waits for /proc/PID/cmdline before it logs the program as unknown.
+const CMDLINE_BOUND: Duration = Duration::from_millis(100);
+
+/// Whether a read of /proc/PID/cmdline that admission stopped waiting for has still not returned.
+static CMDLINE_BLOCKED: AtomicBool = AtomicBool::new(false);
+
+/// Reads files of /proc/PID through `read`, cmdline on a thread of its own that is waited for no
+/// longer than CMDLINE_BOUND. Reading cmdline takes the process's memory map lock, which the
+/// process can keep from the helper for as long as it likes, and every caller after it would wait
+/// to be admitted; stat, comm and cgroup take no lock of the process's memory. While a read given
+/// up on is still blocked, cmdline is not read at all, so that blocked threads cannot pile up.
+fn bounded<F>(read: F, blocked: &'static AtomicBool) -> impl Fn(u32, &str) -> io::Result<Vec<u8>>
+where
+    F: Fn(u32, &str) -> io::Result<Vec<u8>> + Send + Sync + 'static,
+{
+    let read = Arc::new(read);
+    move |pid, name| {
+        if name != "cmdline" {
+            return read(pid, name);
+        }
+        if blocked.swap(true, Ordering::AcqRel) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "an earlier read of a command line has not returned",
+            ));
+        }
+        let (tx, rx) = mpsc::sync_channel(1);
+        let read = Arc::clone(&read);
+        let reader = thread::Builder::new()
+            .name("cmdline".into())
+            .spawn(move || {
+                let r = read(pid, "cmdline");
+                blocked.store(false, Ordering::Release);
+                let _ = tx.send(r);
+            });
+        if let Err(e) = reader {
+            blocked.store(false, Ordering::Release);
+            return Err(e);
+        }
+        rx.recv_timeout(CMDLINE_BOUND)
+            .unwrap_or_else(|_| Err(io::Error::from(io::ErrorKind::TimedOut)))
+    }
 }
 
 /// The last part of each path in /proc/PID/cgroup: one line, "0::PATH", on the unified hierarchy,
@@ -1052,6 +1103,66 @@ mod tests {
         let later = t + REFUSAL_LOG_SPAN;
         assert_eq!(a.take(later), Some(2));
         assert_eq!(a.take(later), Some(0));
+    }
+
+    #[test]
+    fn a_command_line_that_cannot_be_read_holds_admission_up_no_longer_than_the_bound() {
+        static BLOCKED: AtomicBool = AtomicBool::new(false);
+        const HELD: Duration = Duration::from_secs(5);
+        let (release, held) = mpsc::channel::<()>();
+        let held = Mutex::new(held);
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&reads);
+        // As a process does that holds its own memory map lock, until it is let go of.
+        let blocking = move |pid, name: &str| {
+            if name == "cmdline" {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let _ = held.lock().unwrap().recv_timeout(HELD);
+            }
+            proc_of(IN_SESSION)(pid, name)
+        };
+        let read = bounded(blocking, &BLOCKED);
+        let admit = || {
+            let mut f = Fake::usual();
+            let asked = Instant::now();
+            let r = admit_reading(
+                &mut f,
+                &PEER,
+                &started,
+                &read,
+                &Mutex::new(Allowance::new()),
+            );
+            (r, asked.elapsed())
+        };
+        for _ in 0..2 {
+            let (r, took) = admit();
+            assert_eq!(r, Ok("2".into()));
+            assert!(took < CMDLINE_BOUND * 5, "took {took:?}");
+        }
+        // The second admission did not start another read behind the first.
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        release.send(()).unwrap();
+        let since = Instant::now();
+        while BLOCKED.load(Ordering::Acquire) {
+            assert!(since.elapsed() < HELD, "the blocked read never returned");
+            thread::sleep(Duration::from_millis(10));
+        }
+        drop(release);
+        let (r, _) = admit();
+        assert_eq!(r, Ok("2".into()));
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_command_line_is_read_whole_within_the_bound() {
+        static BLOCKED: AtomicBool = AtomicBool::new(false);
+        let read = bounded(proc_of(IN_SESSION), &BLOCKED);
+        assert_eq!(
+            read(PEER.pid, "cmdline").unwrap(),
+            b"/run/current-system/sw/bin/python3\0-m\0linda\0"
+        );
+        assert_eq!(read(PEER.pid, "comm").unwrap(), b"linda\n");
+        assert!(!BLOCKED.load(Ordering::Acquire));
     }
 
     #[test]
