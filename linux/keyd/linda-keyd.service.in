@@ -1,7 +1,7 @@
 # linda-keyd takes the keyboards in the kernel for Linda while Linda, in the session in front, asks
 # it to. A keyboard it holds cannot be used by anything else, so this unit is about ending it when it
 # stops making progress as much as about confining it: the kernel lets go of whatever a dead process
-# held, and Linda goes back to taking keys through X.
+# held, and the keyboards work again without Linda until the helper is back.
 [Unit]
 Description=Linda's key capture helper
 # It follows logind and asks polkit on the system bus; it waits for the bus by itself when the bus is
@@ -11,7 +11,7 @@ After=dbus.service
 # /dev/uinput would stand in uinput's way; the node is there once the module is loaded at boot, or
 # as kmod's static node before.
 ConditionPathExists=/dev/uinput
-# A helper that keeps being ended is left failed, and Linda takes keys through X: a fault that came
+# A helper that keeps being ended is left failed, and Linda has none of its keys: a fault that came
 # back at every capture would otherwise leave the keyboard dead for a second or more every few
 # seconds for as long as it lasted. Three starts within two minutes trip it, which a fault at every
 # capture does within about ten seconds, at a cost of up to three such dead moments, and a crash now

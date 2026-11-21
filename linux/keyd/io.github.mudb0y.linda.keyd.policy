@@ -7,7 +7,7 @@
   <vendor_url>https://github.com/Mudb0y/linda</vendor_url>
 
   <!-- Asked by linda-keyd of each process that would be its client, never with a password: a
-       process it is not allowed keeps taking keys through X. -->
+       process it is not allowed is turned away, and gets no keys from the helper. -->
   <action id="io.github.mudb0y.linda.keyd.capture">
     <description>Take the keyboards for the screen reader</description>
     <message>A screen reader wants to read every key before the programs do</message>

@@ -20,6 +20,17 @@ in
       type = lib.types.package;
       description = "Linda's libraries package, built with the key capture service (keyd_service), whose unit and polkit action are installed.";
     };
+    allowedGroup = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "linda";
+      description = ''
+        The group whose members alone may have their keys taken by linda-keyd. Any program of a
+        member's session in front can still be admitted, as with the default, which lets in a
+        program of any local user's session in front. Membership is read at each admission, so a
+        user added to the group needs no new sign-in. The group is not made here.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -28,6 +39,15 @@ in
     # The polkit action, which polkit reads from the system profile's share/polkit-1.
     environment.systemPackages = [ cfg.package ];
     security.polkit.enable = true;
+    # Only a refusal: a member is left to the action's own defaults, which allow the session in front
+    # alone.
+    security.polkit.extraConfig = lib.mkIf (cfg.allowedGroup != null) ''
+      polkit.addRule(function(action, subject) {
+        if (action.id == "io.github.mudb0y.linda.keyd.capture" && !subject.isInGroup(${builtins.toJSON cfg.allowedGroup})) {
+          return polkit.Result.NO;
+        }
+      });
+    '';
     boot.kernelModules = [ "uinput" ];
     users.users.linda-keyd = {
       isSystemUser = true;
