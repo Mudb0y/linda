@@ -251,9 +251,12 @@ def main() -> NoReturn:
 		# From then on this copy acts on SIGTERM at once, so a copy replacing it need wait no longer.
 		for lock in instanceLocks:
 			core.postNvdaStartup.register(lock.markReady)
-		# Once there is a keyboard to take back, from the main loop that answers.
-		controlSocket.prepare(ownLockPaths)
-		core.postNvdaStartup.register(controlSocket.start)
+		# Once there is a keyboard to take back, from the main loop that answers. Only in a Wayland session:
+		# in an X one NVDA reads keys from the X display after the emergency chord, so its own command
+		# takes the keyboard back.
+		if sessionKind == "wayland":
+			controlSocket.prepare(ownLockPaths)
+			core.postNvdaStartup.register(controlSocket.start)
 		# Once NVDA can speak, so that a session manager waiting for it goes on as soon as it is up.
 		core.postNvdaStartup.register(sessionClient.start)
 		core.main()
