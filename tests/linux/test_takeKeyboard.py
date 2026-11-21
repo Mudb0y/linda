@@ -158,7 +158,9 @@ def test_copyWhoseMainLoopIsStoppedDoesNotAnswer(launches, tmp_path: Path, wayla
 	finally:
 		os.kill(nvda.process.pid, signal.SIGCONT)
 	for status, stdout, stderr, seconds in outcomes:
-		assert (status, stdout, stderr) == (1, controlSocket._SAID[controlSocket.NO_ANSWER] + "\n", ""), outcomes
+		assert (status, stdout, stderr) == (1, controlSocket._SAID[controlSocket.NO_ANSWER] + "\n", ""), (
+			outcomes
+		)
 		assert seconds < GIVE_UP_BOUND, f"gave up after {seconds:.2f} s"
 	print(f"gave up after {', '.join(f'{seconds:.2f}' for *_rest, seconds in outcomes)} s")
 	# The requests it took while stopped are acted on once it runs again, to nobody, and it goes on.
