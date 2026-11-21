@@ -924,6 +924,55 @@ def nvdaLogErrorRecords(text: str) -> list[str]:
 	return _nvdaLogErrorRecord.findall(text)
 
 
+#: How long a typed marker must be, so that finding its letters strung together in a log is no accident.
+MARKER_LENGTH = 8
+
+
+def _letters(text: str) -> str:
+	return "".join(character for character in text.casefold() if character.isalnum())
+
+
+def textsHoldingMarker(marker: str, texts: dict[str, str]) -> list[str]:
+	"""The names of the texts, such as log files by name, that hold marker, a string a test typed.
+
+	Held in any case, and also with anything at all between its letters, as a log that wrote each key
+	on a line of its own would hold it.
+	"""
+	if len(_letters(marker)) < MARKER_LENGTH or _letters(marker) != marker.casefold():
+		raise ValueError(f"a marker is {MARKER_LENGTH} or more letters and digits and nothing else")
+	wanted = marker.casefold()
+	return [name for name, text in texts.items() if wanted in text.casefold() or wanted in _letters(text)]
+
+
+def assertMarkerAbsent(marker: str, texts: dict[str, str]) -> None:
+	"""Fails, naming only the texts, when any of them holds marker: what was typed is never logged."""
+	holding = textsHoldingMarker(marker, texts)
+	assert not holding, f"what the test typed is written in {', '.join(holding)}"
+
+
+#: The sessions a test names in pytest.mark.rigSession: the rig's X display, either of its Wayland
+#: compositors, or one of them by name.
+RIG_SESSIONS = ("x11", "wayland", "mutter", "sway")
+
+
+def rigSession() -> str:
+	"""x11, mutter or sway: the session this rig gave its command. The rig sets LINDA_RIG_COMPOSITOR in
+	every Wayland session, and refuses it for an X one."""
+	return os.environ.get("LINDA_RIG_COMPOSITOR") or "x11"
+
+
+def rigHasXwayland() -> bool:
+	return rigSession() != "x11" and os.environ.get("LINDA_RIG_XWAYLAND") == "1"
+
+
+def rigSessionIsOneOf(names: Collection[str]) -> bool:
+	unknown = set(names) - set(RIG_SESSIONS)
+	if unknown or not names:
+		raise ValueError(f"rigSession takes some of {', '.join(RIG_SESSIONS)}, not {sorted(unknown)}")
+	session = rigSession()
+	return session in names or ("wayland" in names and session != "x11")
+
+
 class Launch:
 	"""One run of the launcher, as a process of its own, and what it recorded and spoke."""
 

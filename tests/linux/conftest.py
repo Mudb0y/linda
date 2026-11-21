@@ -1,6 +1,7 @@
 """Stops a test run that was started outside tests/linux/rig, before any test is collected, fails a
-test that skips unless its skip is expected, and gives every test the launches fixture and, from
-pipewireFixture, the pipewire fixture."""
+test that skips unless its skip is expected, leaves out a test marked for another of the rig's sessions
+than this run's, and gives every test the launches fixture and, from pipewireFixture, the pipewire
+fixture."""
 
 from collections.abc import Iterator
 from pathlib import Path
@@ -19,6 +20,30 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 			"Use: nix develop . -c tests/linux/rig python -m pytest tests/linux",
 			returncode=pytest.ExitCode.USAGE_ERROR,
 		)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+	config.addinivalue_line(
+		"markers",
+		"rigSession(*sessions): the test runs only in these of the rig's sessions, x11, wayland, mutter "
+		"and sway, and is deselected in any other. A test that forces Linda's session type while the rig "
+		"gives it the X display is marked x11.",
+	)
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+	# Deselected rather than skipped: a skip fails here, and a test for another session has not stopped
+	# running, it runs in that session.
+	kept, left = [], []
+	for item in items:
+		marks = list(item.iter_markers("rigSession"))
+		if all(harness.rigSessionIsOneOf(mark.args) for mark in marks):
+			kept.append(item)
+		else:
+			left.append(item)
+	if left:
+		config.hook.pytest_deselected(items=left)
+		items[:] = kept
 
 
 #: The tests that may skip in the rig, by file and function, each with why its skip is honest. Any
