@@ -1852,6 +1852,75 @@ fn not_knowing_which_session_is_in_front_lets_go() {
     assert!(t.w.grabbed(k));
 }
 
+// A session on no console: logind gives VTNr 0 when it finds no consoles on seat0, which the
+// kernel may still have.
+
+/// Admitted and asked to capture, with logind naming the client's session on no console.
+fn on_no_console(consoles: &[u32]) -> (T, u32) {
+    let mut t = T::new();
+    for c in consoles {
+        t.console(*c);
+    }
+    t.logind(on_console(SESSION, 1000, 0));
+    let k = t.w.plug("AT Translated Set 2 keyboard");
+    t.admit(CLIENT);
+    t.send(FromClient::Start);
+    t.pass(VIRTUAL_SETTLE);
+    (t, k)
+}
+
+#[test]
+fn a_session_on_no_console_captures_though_the_kernel_has_consoles() {
+    let (mut t, k) = on_no_console(&[1]);
+    assert!(t.w.grabbed(k), "{:?}", t.sent());
+    let (mut t, k) = on_no_console(&[]);
+    assert!(t.w.grabbed(k), "{:?}", t.sent());
+    t.console(1);
+    assert!(
+        t.w.grabbed(k),
+        "let go when the kernel first named its console"
+    );
+}
+
+#[test]
+fn a_session_on_no_console_lets_go_when_the_kernel_leaves_its_console_and_takes_back_on_return() {
+    let (mut t, k) = on_no_console(&[1]);
+    t.out.clear();
+    t.console(3);
+    assert_eq!(t.sent(), vec![released(Released::Background)]);
+    t.assert_let_go();
+    // logind, which has no consoles, goes on naming the same session.
+    for _ in 0..3 {
+        t.pass(SESSION_RECHECK);
+        t.logind(on_console(SESSION, 1000, 0));
+    }
+    assert!(
+        !t.w.is_open(k),
+        "grabbed again with a text console in front"
+    );
+    t.console(1);
+    assert!(t.w.grabbed(k));
+}
+
+#[test]
+fn a_session_on_no_console_is_on_the_console_in_front_when_logind_first_names_it() {
+    let (mut t, k) = on_no_console(&[1]);
+    t.logind(on_console("c2", 1000, 0));
+    t.assert_let_go();
+    t.console(4);
+    t.logind(on_console(SESSION, 1000, 0));
+    assert!(t.w.grabbed(k));
+    t.console(1);
+    t.assert_let_go();
+    // A session logind places on a console is judged by that console, as ever.
+    t.logind(on_console(SESSION, 1000, 1));
+    assert!(t.w.grabbed(k));
+    t.logind(on_console(SESSION, 1000, 0));
+    assert!(t.w.grabbed(k), "{:?}", t.sent());
+    t.console(4);
+    t.assert_let_go();
+}
+
 // Sleep.
 
 #[test]
