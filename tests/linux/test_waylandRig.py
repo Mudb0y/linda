@@ -76,6 +76,82 @@ def test_waylandSessions(tmp_path: Path, compositor: str) -> None:
 	assert ran.returncode == 0, ran.stdout[-6000:] + ran.stderr[-3000:]
 
 
+#: Run in the inner rig: what Mutter started with, against what the test itself has.
+_MUTTER_SETTINGS_PROBE = r"""
+import json, os
+from pathlib import Path
+for entry in Path("/proc").iterdir():
+	try:
+		if (entry / "comm").read_text().strip() == ".mutter-wrapped":
+			mutter = dict(item.split("=", 1) for item in (entry / "environ").read_text().split("\0") if "=" in item)
+	except OSError:
+		pass
+config = Path(mutter["XDG_CONFIG_HOME"]) / "glib-2.0" / "settings" / "keyfile"
+print(json.dumps({
+	"backend": mutter.get("GSETTINGS_BACKEND"),
+	"keyfile": config.read_text(),
+	"inRuntime": mutter["XDG_CONFIG_HOME"].startswith(os.environ["XDG_RUNTIME_DIR"]),
+	"ownBackend": os.environ.get("GSETTINGS_BACKEND"),
+}))
+"""
+
+
+def _innerRig(tmp_path: Path, command: list[str], **variables: str) -> subprocess.CompletedProcess:
+	env = {
+		name: value
+		for name, value in os.environ.items()
+		if not name.startswith(("LINDA_RIG_SESSION", "LINDA_RIG_WM", "LINDA_RIG_MUTTER_SETTINGS"))
+	}
+	env.update(variables)
+	return subprocess.run(
+		[str(harness.HERE / "rig"), "--bind", str(tmp_path), *command],
+		env=env,
+		capture_output=True,
+		text=True,
+		timeout=120,
+		check=False,
+	)
+
+
+@pytest.mark.rigSession("x11")
+def test_mutterStartsWithTheSettingsAsked(tmp_path: Path) -> None:
+	settings = tmp_path / "mutter.keyfile"
+	settings.write_text("[org/gnome/desktop/wm/preferences]\nfocus-new-windows='strict'\n")
+	ran = _innerRig(
+		tmp_path,
+		[sys.executable, "-c", _MUTTER_SETTINGS_PROBE],
+		LINDA_RIG_COMPOSITOR="mutter",
+		LINDA_RIG_MUTTER_SETTINGS=str(settings),
+	)
+	assert ran.returncode == 0, ran.stderr[-3000:]
+	seen = json.loads(ran.stdout.strip().splitlines()[-1])
+	# Mutter alone has them, from a copy of its own in the run; everything else keeps the memory backend.
+	assert seen == {
+		"backend": "keyfile",
+		"keyfile": settings.read_text(),
+		"inRuntime": True,
+		"ownBackend": "memory",
+	}
+
+
+@pytest.mark.rigSession("x11")
+@pytest.mark.parametrize(
+	("variables", "said"),
+	[
+		({"LINDA_RIG_COMPOSITOR": "sway"}, "is for a Mutter session"),
+		({}, "is for a Mutter session"),
+		({"LINDA_RIG_COMPOSITOR": "mutter", "absent": "1"}, "names no file the sandbox can read"),
+	],
+	ids=["sway", "x11", "absent"],
+)
+def test_mutterSettingsAreRefusedWhereTheyCannotApply(tmp_path: Path, variables: dict, said: str) -> None:
+	settings = tmp_path / "mutter.keyfile"
+	if not variables.pop("absent", None):
+		settings.write_text("[org/gnome/desktop/wm/preferences]\nfocus-new-windows='strict'\n")
+	ran = _innerRig(tmp_path, ["true"], LINDA_RIG_MUTTER_SETTINGS=str(settings), **variables)
+	assert ran.returncode == 125 and said in ran.stderr, (ran.returncode, ran.stderr[-2000:])
+
+
 def test_markerCheckFindsWhatWasTyped() -> None:
 	texts = {"nvda.log": "DEBUG - typed\nk\nq\nz\nm\nx\nj\nw\nv\n", "keyd": "nothing here"}
 	assert harness.textsHoldingMarker("KQZMXJWV", texts) == ["nvda.log"]
@@ -108,6 +184,24 @@ def test_markerCheckFindsAKeyPerLine(line: str) -> None:
 	assert harness.textsHoldingMarker(marker, {"nvda.log": log, "keyd": "key 30 a\nkey 48 b\n"}) == [
 		"nvda.log"
 	]
+
+
+@pytest.mark.parametrize("failing", ["first", "last"])
+def test_aKeyThatFailsInPressLetsGoOfTheKeysHeld(monkeypatch: pytest.MonkeyPatch, failing: str) -> None:
+	sent: list[tuple[int, bool]] = []
+	failsOn = {"first": 42, "last": 30}[failing]
+
+	def key(keyCode: int, pressed: bool) -> None:
+		if keyCode == failsOn and pressed:
+			raise RuntimeError("the injector answered an error")
+		sent.append((keyCode, pressed))
+
+	monkeypatch.setattr(waylandKeyboard, "key", key)
+	with pytest.raises(RuntimeError):
+		waylandKeyboard.press("Tab", "shift+alt_r+a", "Escape", gap=0, hold=0)
+	# Tab done, the chord's keys before the failing one let go of in reverse, and Escape never pressed.
+	held = {"first": [], "last": [(42, True), (100, True), (100, False), (42, False)]}[failing]
+	assert sent == [(15, True), (15, False), *held]
 
 
 def _pump(seconds: float) -> None:

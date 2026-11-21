@@ -11,6 +11,7 @@ X rig only the X test runs:
 nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_waylandDialogs.py
 """
 
+import os
 import subprocess
 import sys
 import time
@@ -18,8 +19,10 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import desktopSession
+import harness
 import pytest
-from test_waylandMenu import ACTIVATION_BOUND, GTK, MENU_TITLE, Linda, Lines, WaylandSession
+import test_waylandMenu
+from test_waylandMenu import ACTIVATION_BOUND, GTK, KEY_PROBE, MENU_TITLE, Linda, Lines, WaylandSession
 
 SETTINGS = "Linda Settings"
 QUESTION = "Probe question"
@@ -28,6 +31,9 @@ QUESTION = "Probe question"
 NOT_REACHED = "Linda's window opened but did not get the keyboard. Press Alt plus Tab to reach it."
 #: Seconds after which the line about an unreached window has had every chance to be said again.
 REPEAT_WINDOW = 3.0
+#: GNOME's setting under which a new window is given the keyboard only if it belongs to the window that
+#: has it, as Mutter's window_state_on_map reads it, in the keyfile LINDA_RIG_MUTTER_SETTINGS names.
+STRICT_FOCUS = "[org/gnome/desktop/wm/preferences]\nfocus-new-windows='strict'\n"
 
 
 @pytest.fixture
@@ -142,12 +148,10 @@ def test_modalMessageDialogIsBroughtBackWithItsLoopRunning(session: WaylandSessi
 	assert NOT_REACHED not in linda.spoken()
 
 
-@pytest.mark.rigSession("sway")
-def test_windowTheCompositorDoesNotFocusSaysHowToReachIt(session: WaylandSession) -> None:
-	"""sway's no_focus for Linda's windows stands for GNOME's focus-new-windows set to strict."""
+def notFocusedIsSaidOnce(session: WaylandSession) -> None:
+	"""Linda's menu, which the compositor does not give the keyboard, has Linda say once how to reach it,
+	and stays open for the person to."""
 	linda = session.linda
-	session.probeHasFocus()
-	subprocess.run(["swaymsg", f"no_focus [pid={session.lindaID}]"], check=True, capture_output=True)
 	given = linda.command("menu")
 	popup = linda.waitFor("popupMenu", since=given)
 	deadline = time.monotonic() + 5
@@ -167,6 +171,78 @@ def test_windowTheCompositorDoesNotFocusSaysHowToReachIt(session: WaylandSession
 	assert linda.state()["menuOpen"]
 	linda.command("closeMenu", MENU_TITLE)
 	linda.waitFor("popupReturned", since=popup["t"])
+
+
+@pytest.mark.rigSession("sway")
+def test_windowTheCompositorDoesNotFocusSaysHowToReachIt(session: WaylandSession) -> None:
+	"""sway's no_focus for Linda's windows stands for GNOME's focus-new-windows set to strict, which
+	test_windowStrictMutterDoesNotFocusSaysHowToReachIt sets itself."""
+	session.probeHasFocus()
+	subprocess.run(["swaymsg", f"no_focus [pid={session.lindaID}]"], check=True, capture_output=True)
+	notFocusedIsSaidOnce(session)
+
+
+class _ActivatedKeyProbe(Lines):
+	"""The GTK 4 key probe given the keyboard by the compositor's own switch, as a person would under
+	strict focus, where no new window is given it."""
+
+	def __init__(self, directory: Path, name: str = "probe") -> None:
+		super().__init__([sys.executable, str(KEY_PROBE)], directory / f"{name}.stderr.txt")
+		desktopSession.activate("Key probe", timeout=15)
+		self.waitFor(lambda line: line == "active", 15)
+
+
+def _mutterIsStrict() -> bool:
+	settings = os.environ.get("LINDA_RIG_MUTTER_SETTINGS")
+	return bool(settings) and Path(settings).read_text(encoding="utf-8") == STRICT_FOCUS
+
+
+@pytest.mark.rigSession("mutter")
+def test_windowStrictMutterDoesNotFocusSaysHowToReachIt(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+	"""Under Mutter with focus-new-windows strict, as GNOME users may set it. The gate's Mutter has the
+	rig's empty settings, so this runs itself again in a Mutter of its own that starts with strict focus,
+	with Xwayland or without as the gate's has it."""
+	if not _mutterIsStrict():
+		settings = tmp_path / "strict.keyfile"
+		settings.write_text(STRICT_FOCUS, encoding="utf-8")
+		env = {
+			name: value
+			for name, value in os.environ.items()
+			if not name.startswith(("LINDA_RIG_SESSION", "LINDA_RIG_WM"))
+		}
+		env.update(LINDA_RIG_COMPOSITOR="mutter", LINDA_RIG_MUTTER_SETTINGS=str(settings))
+		ran = subprocess.run(
+			[
+				str(harness.HERE / "rig"),
+				"--bind",
+				str(tmp_path),
+				sys.executable,
+				"-m",
+				"pytest",
+				"-q",
+				"-p",
+				"no:cacheprovider",
+				f"--basetemp={tmp_path / 'pt'}",
+				f"{__file__}::{request.node.name}",
+			],
+			env=env,
+			capture_output=True,
+			text=True,
+			timeout=300,
+			check=False,
+		)
+		assert ran.returncode == 0, ran.stdout[-6000:] + ran.stderr[-3000:]
+		assert "1 passed" in ran.stdout, ran.stdout[-2000:]
+		return
+	monkeypatch.setattr(test_waylandMenu, "KeyProbe", _ActivatedKeyProbe)
+	session = WaylandSession(tmp_path / "session")
+	try:
+		session.probeHasFocus()
+		notFocusedIsSaidOnce(session)
+	finally:
+		session.close()
 
 
 @pytest.mark.rigSession("x11")

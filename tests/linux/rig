@@ -30,6 +30,10 @@
 # LINDA_RIG_SESSION=wayland alone means Mutter, and LINDA_RIG_XWAYLAND=1 lets
 # the compositor start Xwayland beside it, whose display alone is then
 # DISPLAY. Nothing about the X mode changes when the variables are unset.
+# LINDA_RIG_MUTTER_SETTINGS names a GVariant keyfile, as GLib's keyfile
+# settings backend reads one, that Mutter alone starts with, in place of the
+# empty memory backend everything else in the sandbox has; the file must be
+# visible in the sandbox, and Mutter is given a copy of it.
 #
 # The exit status is the command's, or 125 when the rig itself failed.
 set -euo pipefail
@@ -86,6 +90,12 @@ if [ "${1:-}" = --inside ]; then
 		export LINDA_RIG_COMPOSITOR=$compositor LINDA_RIG_SESSION=wayland
 	else
 		[ -z "$xwayland" ] || fail "LINDA_RIG_XWAYLAND is for a Wayland session"
+	fi
+	mutterSettings=${LINDA_RIG_MUTTER_SETTINGS:-}
+	if [ -n "$mutterSettings" ]; then
+		[ "$compositor" = mutter ] || fail "LINDA_RIG_MUTTER_SETTINGS is for a Mutter session"
+		[ -f "$mutterSettings" ] && [ -r "$mutterSettings" ] ||
+			fail "LINDA_RIG_MUTTER_SETTINGS names no file the sandbox can read: $mutterSettings"
 	fi
 	if [ "$session" = x11 ]; then
 		# -noreset, because the server otherwise resets when its first client
@@ -154,7 +164,15 @@ if [ "${1:-}" = --inside ]; then
 			# quietly through it.
 			x11=(--no-x11)
 			[ -n "$xwayland" ] && x11=()
-			env XDG_DATA_DIRS="$LINDA_MUTTER_SCHEMAS:$XDG_DATA_DIRS" \
+			settings=()
+			if [ -n "$mutterSettings" ]; then
+				# A copy, so that what Mutter writes back stays in the run.
+				config=$XDG_RUNTIME_DIR/mutter-config
+				mkdir -p "$config/glib-2.0/settings"
+				cp -- "$mutterSettings" "$config/glib-2.0/settings/keyfile"
+				settings=(GSETTINGS_BACKEND=keyfile XDG_CONFIG_HOME="$config")
+			fi
+			env "${settings[@]}" XDG_DATA_DIRS="$LINDA_MUTTER_SCHEMAS:$XDG_DATA_DIRS" \
 				__EGL_VENDOR_LIBRARY_FILENAMES="$LINDA_MESA/share/glvnd/egl_vendor.d/50_mesa.json" \
 				LIBGL_DRIVERS_PATH="$LINDA_MESA/lib/dri" GBM_BACKENDS_PATH="$LINDA_MESA/lib/gbm" \
 				"$LINDA_MUTTER" --headless --wayland "${x11[@]}" --wayland-display=wayland-rig \
