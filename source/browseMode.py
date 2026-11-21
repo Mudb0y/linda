@@ -78,6 +78,13 @@ def reportPassThrough(treeInterceptor, onlyIfChanged=True):
 
 reportPassThrough.last = False
 
+if sys.platform != "win32":
+
+	def _sayCannotClick() -> None:
+		# Translators: Said on Linux when activating an element in browse mode needs a click, which NVDA
+		# cannot make in this session, as in a Wayland session, where it has no pointer.
+		ui.message(_("NVDA cannot click here"))
+
 
 def mergeQuickNavItemIterators(iterators, direction="next"):
 	"""
@@ -691,6 +698,13 @@ class BrowseModeTreeInterceptor(treeInterceptorHandler.TreeInterceptor):
 		@param obj: The object to activate.
 		@type obj: L{NVDAObjects.NVDAObject}
 		"""
+		if sys.platform != "win32":
+			from linuxPlatform import pointer
+
+			canClick = pointer.isAvailable()
+			# A walk that reaches the root has had every action fail, and under a compositor no element has
+			# a location to climb out at, so without the pointer that is where it ends.
+			tried = obj and obj != self.rootNVDAObject
 		while obj and obj != self.rootNVDAObject:
 			try:
 				obj.doAction()
@@ -706,20 +720,18 @@ class BrowseModeTreeInterceptor(treeInterceptorHandler.TreeInterceptor):
 			if not location.width or not location.height:
 				obj = obj.parent
 				continue
-			if sys.platform != "win32":
-				from linuxPlatform import pointer
-
-				if not pointer.isAvailable():
-					# Translators: Said on Linux when activating an element in browse mode needs a click,
-					# which NVDA cannot make in this session, as in a Wayland session.
-					ui.message(_("NVDA cannot click here"))
-					break
+			if sys.platform != "win32" and not canClick:
+				_sayCannotClick()
+				break
 			log.debugWarning("Clicking with mouse")
 			oldX, oldY = winUser.getCursorPos()
 			winUser.setCursorPos(*location.center)
 			mouseHandler.doPrimaryClick()
 			winUser.setCursorPos(oldX, oldY)
 			break
+		else:
+			if sys.platform != "win32" and tried and not canClick:
+				_sayCannotClick()
 
 	def _activatePosition(self, obj=None):
 		if not obj:

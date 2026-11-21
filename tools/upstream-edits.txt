@@ -398,7 +398,9 @@ source/browseMode.py
   Linux runtime: activating an element whose action fails says NVDA
   cannot click here, in place of clicking at it, when linuxPlatform.pointer
   is not available, as in a Wayland session, where asking for the pointer
-  would raise
+  would raise; and says it too when the walk up from such an element ends
+  at the root with every action failed, as under a compositor, where no
+  element has a location to click at
 source/buildVersion.py
   Linux runtime: name is Linda, the name NVDA has on Linux, so that the
   main window, the notification area icon and versionInfo say it
