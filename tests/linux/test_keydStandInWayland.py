@@ -614,6 +614,42 @@ def test_latePassPutsTheKeptModifierJustBeforeThePress(
 	assert not client.closed.is_set() and not any(m[0] == RELEASED for m in client.messages)
 
 
+def test_twoLatePassesPutBothKeptModifiersBeforeThePress(socketPath: str, served: Served):
+	sink = NullSink()
+	ctrl = code("Control_L")
+	keyboard, client = served(
+		socketPath,
+		sink,
+		decide=lambda evdev, _f: (
+			VERDICT_KEEP if evdev in (INSERT, ctrl, ALT) else None if evdev == TAB else VERDICT_PASS
+		),
+	)
+	keyboard.down("Insert")
+	keyboard.down("Control_L")
+	keyboard.down("alt")
+	client.waitFor(lambda: len(keyboard.verdicts) == 3)
+	keyboard.down("Tab")
+	client.waitFor(lambda: len(client.told()) == 4)
+	tab = client.pressSeq(TAB)
+	client.latePass(client.pressSeq(ctrl), tab)
+	client.latePass(client.pressSeq(ALT), tab)
+	client.verdict(tab, VERDICT_PASS)
+	keyboard.waitFor(lambda: len(sink.passed()) >= 3)
+	for name in ("Tab", "alt", "Control_L", "Insert"):
+		keyboard.up(name)
+	keyboard.waitFor(lambda: len(sink.passed()) == 6)
+	# In the order their LATE_PASSes came, each just before the press.
+	assert sink.passed() == [
+		(ctrl, True),
+		(ALT, True),
+		(TAB, True),
+		(TAB, False),
+		(ALT, False),
+		(ctrl, False),
+	]
+	assert sink.kept == [(INSERT, True), (ctrl, True), (ALT, True), (INSERT, False)]
+
+
 def test_latePassWhenTheWaitingPressIsKept(socketPath: str, served: Served):
 	sink = NullSink()
 	keyboard, client = served(socketPath, sink, decide=keepReaderKeys)

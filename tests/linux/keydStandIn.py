@@ -30,7 +30,7 @@ import struct
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, Self
 
@@ -408,8 +408,9 @@ class _Entry:
 	tag: int | None = None
 	#: Typed with TYPE_INJECT: in line already passed, never asked about and never unanswered.
 	injected: bool = False
-	#: (device, code) of a kept press that LATE_PASS puts out just before this one.
-	lateKept: tuple[int, int] | None = None
+	#: (device, code) of each kept press that LATE_PASS puts out just before this one, in the order the
+	#: LATE_PASSes came.
+	lateKept: list[tuple[int, int]] = field(default_factory=list)
 
 
 class StandIn:
@@ -787,14 +788,14 @@ class StandIn:
 		"""A decided press leaves the line: kept, or put on the virtual keyboard."""
 		held = (head.device, head.code)
 		typed = head.tag is not None
-		late = head.lateKept
-		if late is not None and late in self._kept:
-			# Whatever becomes of the press, the kept key goes out in its place, and from now its release
-			# is passed as though its press had been.
-			self._kept.discard(late)
-			self._passedOut.add(late)
-			self._note("late pass out", head.seq)
-			self._virtual(late[1], True)
+		for late in head.lateKept:
+			if late in self._kept:
+				# Whatever becomes of the press, the kept key goes out in its place, and from now its release
+				# is passed as though its press had been.
+				self._kept.discard(late)
+				self._passedOut.add(late)
+				self._note("late pass out", head.seq)
+				self._virtual(late[1], True)
 		if head.verdict:
 			self._kept.add(held)
 			self._passedOut.discard(held)
@@ -865,7 +866,7 @@ class StandIn:
 			self._sendTyped(entry, TYPED_LOST)
 		for entry in self._line:
 			# The kept key of a LATE_PASS goes out only at its press's turn, which letting go is not.
-			entry.lateKept = None
+			entry.lateKept.clear()
 		if dropUndecided:
 			self._line.clear()
 		else:
@@ -1190,6 +1191,6 @@ class StandIn:
 		applies = kept in self._keptSeqs and downAtWaiting and entry is not None
 		if applies:
 			device, evdev, _value, _flags = self._told[kept]
-			entry.lateKept = (device, evdev)
+			entry.lateKept.append((device, evdev))
 		self.latePasses.append((kept, waiting, applies))
 		self._note("late pass", kept, waiting, applies)
