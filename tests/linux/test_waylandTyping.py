@@ -401,6 +401,45 @@ def test_aTypedPressRefusedAsItGoesOutIsStillReleased(tmp_path: Path):
 	]
 
 
+INJECT_REFUSED_OUT_CHILD = r"""
+source = startRoute()
+k = source._kernel
+alt = k._keycodeToType(VK_LMENU, False)
+sysrq = k._keycodeToType(VK_SNAPSHOT, False)
+# NVDA sends SysRq on while a typed Alt waits ahead of it: taken, then refused as the Alt goes out first.
+k._post(lambda: (k._typeKey(alt, VK_LMENU, False, False), k._inject(sysrq, VK_SNAPSHOT, False)))
+time.sleep(0.3)
+source.inject(VK_SNAPSHOT, 0x37, False, True)
+time.sleep(0.2)
+source.typeKey(VK_LMENU, False, True)
+time.sleep(0.2)
+before = len(sink.passed())
+source.inject(VK_SNAPSHOT, 0x37, False, False)
+source.inject(VK_SNAPSHOT, 0x37, False, True)
+time.sleep(0.3)
+result = {"typed": keyboard.typed, "again": sink.passed()[before:]}
+source.stop()
+"""
+
+
+@forcedSession
+def test_anInjectedPressRefusedIsStillReleased(tmp_path: Path):
+	"""An injected press may be refused as it goes out, when the helper has it typed down already, and
+	no TYPED says which refusal it was: its release is sent all the same, so the key can be sent again."""
+	value = runTypingChild(
+		tmp_path, f"VK_LMENU, VK_SNAPSHOT = {VK_LMENU}, {VK_SNAPSHOT}\n" + INJECT_REFUSED_OUT_CHILD
+	)
+	assert [outcome for _tag, _seq, outcome in value["typed"]] == [
+		TYPED_OUT,
+		TYPED_REFUSED_KEY,
+		TYPED_NOT_DOWN,
+		TYPED_OUT,
+		TYPED_OUT,
+		TYPED_OUT,
+	]
+	assert value["again"] == [[SYSRQ, True], [SYSRQ, False]]
+
+
 WITHOUT_CHILD = r"""
 announced = []
 inputHook._announce = announced.append

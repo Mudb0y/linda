@@ -515,6 +515,8 @@ class KernelKeySource:
 		#: Key code: the KEY's number of each key typed to be decided whose press was refused as it went
 		#: out, until its release is answered.
 		self._refusedOut: dict[int, int] = {}
+		#: The key codes of presses injected and refused whose release NVDA has not yet sent.
+		self._injectedRefused: set[int] = set()
 		#: Whether Num Lock was on before a numpad key was typed under the other state, until it is put
 		#: back as the last such key is released.
 		self._numLockBefore: bool | None = None
@@ -845,6 +847,11 @@ class KernelKeySource:
 			held = None
 		if isUp:
 			if held is None or held[1] != keydClient.TYPE_INJECT:
+				if keycode in self._injectedRefused:
+					# Its press may have been refused only as it went out, which leaves it typed down to the
+					# helper until this release; refused as it came, this costs a NOT_DOWN.
+					self._injectedRefused.discard(keycode)
+					self._type(keycode, False, keydClient.TYPE_INJECT)
 				return
 			self._typedNow(keycode, vk, keydClient.TYPE_INJECT, None)
 		elif held is not None:
@@ -857,6 +864,7 @@ class KernelKeySource:
 		if tag is None:
 			return
 		if not isUp:
+			self._injectedRefused.discard(keycode)
 			self._typedNow(keycode, vk, keydClient.TYPE_INJECT, tag)
 		self._injected(keycode, isUp, mods, light)
 
@@ -927,6 +935,8 @@ class KernelKeySource:
 				self._typeKey(keycode, vk, False, True)
 			else:
 				self._inject(keycode, vk, True)
+		for keycode in sorted(self._injectedRefused):
+			self._inject(keycode, 0, True)
 		self._putNumLockBack()
 
 	def _onTyped(self, message: keydClient.Typed, now: float) -> None:
@@ -950,6 +960,9 @@ class KernelKeySource:
 		elif held is not None and held[2] == message.tag:
 			vk, mode, _tag = held
 			self._typedNow(sent.keycode, vk, mode, None)
+			if mode == keydClient.TYPE_INJECT and message.outcome != keydClient.TYPED_LOST:
+				# No KEY numbers an injected key, so whether it was refused as it went out is not told.
+				self._injectedRefused.add(sent.keycode)
 		if sent.light:
 			self._locks ^= sent.light
 
@@ -967,6 +980,7 @@ class KernelKeySource:
 		self._typing.clear()
 		self._typedDown = {}
 		self._refusedOut.clear()
+		self._injectedRefused.clear()
 		self._numLockBefore = None
 
 	def _post(self, command: Callable[[], None]) -> None:
