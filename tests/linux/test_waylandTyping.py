@@ -440,6 +440,60 @@ def test_anInjectedPressRefusedIsStillReleased(tmp_path: Path):
 	assert value["again"] == [[SYSRQ, True], [SYSRQ, False]]
 
 
+INJECT_NOTED_CHILD = r"""
+noted, locks = [], []
+source = startRoute()
+k = source._kernel
+source._environment.onPassed = lambda keycode, isUp: noted.append([keycode - 8, isUp])
+source._environment.onPassedLock = lambda light, now: locks.append(light)
+source.inject(VK_TAB, 0x0F, False, False)
+source.inject(VK_TAB, 0x0F, False, True)
+time.sleep(0.3)
+tab = noted[:]
+noted.clear()
+keyboard.down("alt")
+time.sleep(0.2)
+source.inject(VK_SNAPSHOT, 0x37, False, False)
+source.inject(VK_SNAPSHOT, 0x37, False, True)
+time.sleep(0.2)
+sysrq = [n for n in noted if n[0] == SYSRQ]
+# SysRq with Alt down makes the kernel's SysRq handler active, which refuses every typed press.
+keyboard.down(SYSRQ)
+time.sleep(0.2)
+source.inject(VK_NUMLOCK, 0x45, False, False)
+source.inject(VK_NUMLOCK, 0x45, False, True)
+time.sleep(0.2)
+keyboard.up(SYSRQ)
+keyboard.up("alt")
+time.sleep(0.2)
+result = {
+	"tab": tab,
+	"refused": sysrq + [n for n in noted if n[0] == NUM_LOCK],
+	"locks": locks,
+	"numLock": bool(source.keyState(VK_NUMLOCK) & 1),
+	"outcomes": outcomes(),
+}
+source.stop()
+"""
+
+
+@forcedSession
+def test_anInjectedKeyIsToldOfOnlyOnceItWentOut(tmp_path: Path):
+	"""The environment hears of a key NVDA sends on as of a key passed, but only once the helper says it
+	went out: one refused never reached the desktop, and a lock refused changed no light."""
+	value = runTypingChild(
+		tmp_path,
+		f"VK_TAB, VK_SNAPSHOT, VK_NUMLOCK = {VK_TAB}, {VK_SNAPSHOT}, {VK_NUMLOCK}\n"
+		f"SYSRQ, NUM_LOCK = {SYSRQ}, {NUM_LOCK}\n" + INJECT_NOTED_CHILD,
+	)
+	assert value["tab"] == [[TAB, False], [TAB, True]]
+	assert value["outcomes"][:2] == [TYPED_OUT, TYPED_OUT]
+	assert TYPED_OUT not in value["outcomes"][2:]
+	assert value["refused"] == []
+	assert value["locks"] == []
+	assert not value["numLock"]
+
+
 WITHOUT_CHILD = r"""
 announced = []
 inputHook._announce = announced.append

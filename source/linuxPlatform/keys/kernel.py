@@ -161,6 +161,8 @@ class _Typed:
 	mode: int
 	#: The lock lights it was taken to change, which a refusal puts back.
 	light: int = 0
+	#: For a key injected, the modifiers down as it was sent, which the environment hears of once it is out.
+	mods: int = 0
 
 
 class _XkbGetState(rq.ReplyRequest):
@@ -815,7 +817,7 @@ class KernelKeySource:
 			return None
 		return keycode
 
-	def _type(self, keycode: int, down: bool, mode: int, light: int = 0) -> int | None:
+	def _type(self, keycode: int, down: bool, mode: int, light: int = 0, mods: int = 0) -> int | None:
 		"""Send TYPE; its tag, or None when it could not be sent."""
 		if not self.canType:
 			return None
@@ -823,7 +825,7 @@ class KernelKeySource:
 		tag = self._typeTag
 		if not self._send(keydClient.typeKey(tag, keycode - 8, down, mode)):
 			return None
-		self._typing[tag] = _Typed(keycode, down, mode, light)
+		self._typing[tag] = _Typed(keycode, down, mode, light, mods)
 		return tag
 
 	def _typedNow(self, keycode: int, vk: int, mode: int, tag: int | None) -> None:
@@ -860,26 +862,28 @@ class KernelKeySource:
 		tables = self._tables
 		mods = self._depressed(tables) if tables is not None else 0
 		light = self._lockKeys.get(keycode, 0) if not isUp else 0
-		tag = self._type(keycode, not isUp, keydClient.TYPE_INJECT, light)
+		tag = self._type(keycode, not isUp, keydClient.TYPE_INJECT, light, mods)
 		if tag is None:
 			return
 		if not isUp:
 			self._injectedRefused.discard(keycode)
 			self._typedNow(keycode, vk, keydClient.TYPE_INJECT, tag)
-		self._injected(keycode, isUp, mods, light)
-
-	def _injected(self, keycode: int, isUp: bool, mods: int, light: int) -> None:
-		"""Follow a key injected as _passedOn follows a key passed: no KEY comes back to tell of it."""
-		now = time.monotonic()
 		if light:
-			# Locked or unlocked as it reaches the desktop; the next key typed is read in the new state.
+			# Locked or unlocked as it reaches the desktop; the next key typed is read in the new state, and
+			# a refusal puts it back.
 			self._locks ^= light
-			self._tell(self._environment.notePassedLock, light, now)
+
+	def _injected(self, sent: _Typed, now: float) -> None:
+		"""Follow a key injected that went out as _passedOn follows a key passed: no KEY tells of it, and
+		one refused never reached the desktop, so only its TYPED does."""
+		keycode, isUp = sent.keycode, not sent.down
+		if sent.light:
+			self._tell(self._environment.notePassedLock, sent.light, now)
 		self._tell(self._environment.notePassed, keycode, isUp)
 		tables = self._tables
 		own = tables.keyMods.get(keycode, 0) if tables is not None else 0
 		if (isUp and own & FOCUS_MOVING_MODS) or (
-			not isUp and mods & FOCUS_MOVING_MODS and not own & FOCUS_MOVING_MODS
+			not isUp and sent.mods & FOCUS_MOVING_MODS and not own & FOCUS_MOVING_MODS
 		):
 			self._tell(self._environment.noteFocusMayMove, now)
 
@@ -945,6 +949,8 @@ class KernelKeySource:
 			return
 		if not sent.down and sent.mode == keydClient.TYPE_DECIDE:
 			self._releaseRefusedOut(sent.keycode, now)
+		if message.outcome == keydClient.TYPED_OUT and sent.mode == keydClient.TYPE_INJECT:
+			self._injected(sent, now)
 		if message.outcome not in TYPED_UNDONE:
 			return
 		# By tag only, as which key it was is what was typed.
