@@ -518,6 +518,61 @@ def test_whatANoteRaisesIsLoggedWithoutTheKey(tmp_path: Path):
 		assert "38" not in re.sub(r'File "[^"]*", line \d+', "", record["message"]), record
 
 
+#: An environment that cannot say where a document's keys go nor whether it can look.
+RAISING_CAPTURE_CHILD = r"""
+class Raising(FakeEnvironment):
+	@property
+	def captureState(self):
+		raise RuntimeError("the feed is not ready")
+
+	def captureNow(self, now):
+		raise RuntimeError("the feed is not ready")
+
+	@property
+	def canLook(self):
+		raise RuntimeError("the feed is not ready")
+
+	@canLook.setter
+	def canLook(self, value):
+		pass
+
+
+environment = Raising()
+source = startSource(environment)
+keyboard.press("Insert+t")
+time.sleep(0.3)
+keyboard.press("h")
+time.sleep(0.3)
+result = {
+	"downs": [[e["vk"], e["captured"], e["nvda"], e["reached"]] for e in delivered if not e["up"]],
+	"verdicts": [keep for _seq, keep, _latency in keyboard.verdicts],
+	"expired": expired(),
+	"emitted": keyboard.emitted(),
+}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_anEnvironmentThatCannotSayLeavesNVDAItsKeys(tmp_path: Path):
+	done = runEnvironmentChild(tmp_path, RAISING_CAPTURE_CHILD)
+	value = done.value
+	# Insert and T are NVDA's and kept; h is the program's, passed on with no look.
+	assert value["downs"] == [
+		[0x2D, True, True, False],
+		[ord("T"), True, True, False],
+		[ord("H"), False, False, True],
+	]
+	assert value["verdicts"] == [True, True, False]
+	# Only h reached the program, Insert and T being kept: 35 is h as the kernel numbers keys.
+	assert value["expired"] == [] and value["emitted"] == [[35, True], [35, False]]
+	headings = {record.split("\n")[0] for record in done.logErrors}
+	assert headings == {
+		"ERROR: Asking the kernel key source's environment where a document's keys go: RuntimeError",
+		"ERROR: Asking the kernel key source's environment whether it can look at the focus: RuntimeError",
+	}, done.logErrors
+
+
 REPEAT_CHILD = r"""
 environment = FakeEnvironment(layout=Layout(repeat=(True, 0.2, 0.05)))
 source = startSource(environment)

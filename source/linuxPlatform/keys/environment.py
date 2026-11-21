@@ -5,10 +5,13 @@ of the keys it passes on.
 Both are structural protocols. Whatever follows the layout or the focus matches them by shape and
 imports nothing from here, so that this file is the one statement of what the kernel source asks.
 
-The kernel source calls every method below except attach and detach from the thread that answers
-keys, which must answer the helper in time however busy NVDA's other threads keep the interpreter. So
-each of them only reads state replaced whole, or appends and writes to a pipe, and never calls into a
-C library or waits: whatever follows the layout or the focus does its work on threads of its own.
+The kernel source calls the methods below from the thread that answers keys, which must answer the
+helper in time however busy NVDA's other threads keep the interpreter. The exceptions: attach is
+called from the thread that starts the source; detach from the thread that stops it, or from the thread
+that answers keys as it loses the helper; and captureNow from the thread that puts keys in NVDA's terms
+as well. So each method but attach only reads state replaced whole, or appends and writes to a pipe,
+and never calls into a C library or waits: whatever follows the layout or the focus does its work on
+threads of its own. What one raises is logged and taken as no capture, no look or nothing heard.
 
 The notes are handed key codes, which are the user's typing: none may go into a log, nor into an
 exception, as a KeyError of one would. The kernel source logs what a method raises by its type and

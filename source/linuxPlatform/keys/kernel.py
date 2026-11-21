@@ -933,7 +933,7 @@ class KernelKeySource:
 		differ, the watch being the sooner to read the X server's word: what the X source makes of the
 		focus coming back to the window, once it reads it, is made of it here as the X source makes it."""
 		if self._environment is not None:
-			return self._environment.captureNow(now)
+			return self._environmentCapture(now)
 		state = self._captureState()
 		window, focused = self._focusSeen
 		if not state.window or window != state.window:
@@ -964,8 +964,28 @@ class KernelKeySource:
 
 	def _captureState(self) -> x11.CaptureState:
 		if self._environment is not None:
-			return self._environment.captureState
+			return self._environmentCapture(None)
 		return self._x.captureState if self._x is not None else x11.NO_CAPTURE
+
+	def _environmentCapture(self, now: float | None) -> x11.CaptureState:
+		"""The environment's capture state, for a key that came at now or, with None, as it stands; none
+		when it raises, so that the key is still answered and NVDA's keys still NVDA's."""
+		try:
+			if now is None:
+				return self._environment.captureState
+			return self._environment.captureNow(now)
+		except Exception:  # noqa: BLE001
+			_logEnvironmentError("Asking the kernel key source's environment where a document's keys go")
+			return x11.NO_CAPTURE
+
+	def _environmentCanLook(self) -> bool:
+		try:
+			return bool(self._environment.canLook)
+		except Exception:  # noqa: BLE001
+			_logEnvironmentError(
+				"Asking the kernel key source's environment whether it can look at the focus"
+			)
+			return False
 
 	@staticmethod
 	def _grabsTake(state: x11.CaptureState) -> bool:
@@ -1615,7 +1635,7 @@ class KernelKeySource:
 				and not held
 				and kind == own
 				and own in (PASS_KIND, CAPTURE_KIND)
-				and self._environment.canLook
+				and self._environmentCanLook()
 				and self._turnsOnFocus(keycode, effective, capture)
 			)
 		if looks:
