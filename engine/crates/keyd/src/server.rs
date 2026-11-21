@@ -19,6 +19,7 @@ use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketAddrUnix, SocketFla
 
 use crate::core::{ConnId, Core, Front, Output, Peer, Refusal, Source};
 use crate::device::Devices;
+use crate::peer::Process;
 use crate::protocol::{
     ACCEPTS_PER_TURN, Goodbye, LOOP_TICK, MAX_MESSAGE, OUTBOX_LIMIT, WATCHDOG_FROZEN,
 };
@@ -77,27 +78,38 @@ impl Notices {
     }
 }
 
-/// A caller for the admission thread to ask about, and whether it has gone since it was put in
-/// line.
-pub type Question = (ConnId, Peer, Arc<AtomicBool>);
+/// A caller for the admission thread to ask about, the process that connected as the helper holds
+/// it, and whether the caller has gone since it was put in line.
+pub type Question = (ConnId, Peer, Arc<Process>, Arc<AtomicBool>);
+
+/// As [`spawn_process_admitter`], for a `decide` that goes by the peer's numbers alone.
+pub fn spawn_admitter<F>(notices: Arc<Notices>, mut decide: F) -> io::Result<mpsc::Sender<Question>>
+where
+    F: FnMut(&Peer) -> Result<String, Refusal> + Send + 'static,
+{
+    spawn_process_admitter(notices, move |peer, _| decide(peer))
+}
 
 /// Starts the thread that asks logind and polkit about each caller with `decide`, one at a time,
 /// and posts each answer. A caller that has gone is not asked about, so that callers which hang
 /// up cannot keep the rightful one waiting behind their questions; its answer comes all the same,
 /// since a question counts against MAX_CALLERS until it does.
-pub fn spawn_admitter<F>(notices: Arc<Notices>, mut decide: F) -> io::Result<mpsc::Sender<Question>>
+pub fn spawn_process_admitter<F>(
+    notices: Arc<Notices>,
+    mut decide: F,
+) -> io::Result<mpsc::Sender<Question>>
 where
-    F: FnMut(&Peer) -> Result<String, Refusal> + Send + 'static,
+    F: FnMut(&Peer, &Process) -> Result<String, Refusal> + Send + 'static,
 {
     let (tx, rx) = mpsc::channel::<Question>();
     thread::Builder::new()
         .name("admission".into())
         .spawn(move || {
-            for (conn, peer, gone) in rx {
+            for (conn, peer, process, gone) in rx {
                 let answer = if gone.load(Relaxed) {
                     Err((Goodbye::NotInFront, "the caller has gone".into()))
                 } else {
-                    decide(&peer)
+                    decide(&peer, &process)
                 };
                 notices.post(Notice::Admitted(conn, answer));
             }
@@ -147,6 +159,8 @@ pub fn bind(path: &Path) -> io::Result<OwnedFd> {
 struct Conn {
     fd: OwnedFd,
     backlog: VecDeque<Vec<u8>>,
+    /// The process that connected, beside the peer's numbers the core has.
+    process: Arc<Process>,
     /// Raised when the connection goes, for the admission thread to skip its question.
     gone: Arc<AtomicBool>,
 }
@@ -370,6 +384,9 @@ impl<D: Devices> Server<D> {
                 uid: cred.uid.as_raw(),
                 gid: cred.gid.as_raw(),
             };
+            // Taken now, while the process that connected is most likely still there to be held:
+            // an older kernel gives none for one already reaped.
+            let process = Arc::new(Process::of(fd.as_fd()));
             let id = self.next_conn;
             self.next_conn += 1;
             self.conns.insert(
@@ -377,6 +394,7 @@ impl<D: Devices> Server<D> {
                 Conn {
                     fd,
                     backlog: VecDeque::new(),
+                    process,
                     gone: Arc::new(AtomicBool::new(false)),
                 },
             );
@@ -467,7 +485,8 @@ impl<D: Devices> Server<D> {
                             self.core.admitted(id, Err((Goodbye::NotInFront, why)), now);
                             continue;
                         };
-                        if self.admit.send((id, peer, c.gone.clone())).is_err() {
+                        let question = (id, peer, c.process.clone(), c.gone.clone());
+                        if self.admit.send(question).is_err() {
                             let why = "the admission thread has gone".to_owned();
                             self.core.admitted(id, Err((Goodbye::NoAnswer, why)), now);
                         }

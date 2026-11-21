@@ -62,8 +62,8 @@ fn run() -> io::Result<()> {
     let n = notices.clone();
     session::watch_sleep(move |asleep, inhibitor| n.post(Notice::Sleep { asleep, inhibitor }))?;
     let mut bus = SystemBus::new();
-    let admit = server::spawn_admitter(notices.clone(), move |peer| {
-        session::admit(&mut bus, peer, &session::start_time)
+    let admit = server::spawn_process_admitter(notices.clone(), move |peer, process| {
+        session::admit_process(&mut bus, peer, process, &session::start_time)
     })?;
     watchdog::spawn(
         progress.clone(),

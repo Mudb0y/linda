@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::num::NonZeroUsize;
+use std::os::fd::BorrowedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -18,6 +19,7 @@ use zbus::message::Type;
 use zbus::{Connection, MatchRule, MessageStream, OwnedObjectPath, OwnedVariant, Variant};
 
 use crate::core::{Front, Peer, Refusal};
+use crate::peer::Process;
 use crate::protocol::{
     DBUS_CALL_TIMEOUT, DBUS_RETRY, Goodbye, POLKIT_ACTION, REFUSAL_LOG_SPAN, REFUSALS_LOGGED,
     SESSION_RECHECK,
@@ -62,6 +64,15 @@ pub trait Login {
     fn front(&mut self) -> Result<Front, String>;
     /// Whether polkit allows the process the action, without asking anyone.
     fn authorized(&mut self, peer: &Peer, start_time: u64) -> Result<bool, String>;
+    /// The same, for the process the pidfd given refers to when there is one.
+    fn authorized_process(
+        &mut self,
+        peer: &Peer,
+        start_time: u64,
+        _pidfd: Option<BorrowedFd>,
+    ) -> Result<bool, String> {
+        self.authorized(peer, start_time)
+    }
 }
 
 /// Decides whether a peer may be the client: it must be a process of the session in front on
@@ -75,8 +86,8 @@ pub trait Login {
 /// before and after the questions, so a process that ends while it is being asked about is turned
 /// away; but a process that ended between connect and the first reading, whose ID another process
 /// took meanwhile, is judged in its place. That cannot cross users: the session must be of the
-/// user ID from connect, and polkit is asked about that user ID. Judging the very process that
-/// connected needs a pidfd taken at connect (SO_PEERPIDFD, Linux 6.5).
+/// user ID from connect, and polkit is asked about that user ID. [`admit_process`] closes the gap
+/// with the pidfd taken at accept.
 ///
 /// A process in a Flatpak or snap scope is turned away whatever logind and polkit would say: such a
 /// program was given the socket only by a hole in its sandbox, and would use the helper to read the
@@ -87,15 +98,32 @@ pub fn admit(
     peer: &Peer,
     start_time: &dyn Fn(u32) -> Option<u64>,
 ) -> Result<String, Refusal> {
-    admit_reading(
+    admit_process(login, peer, &Process::Unheld, start_time)
+}
+
+/// As [`admit`], judging the very process that connected when the helper holds a pidfd for it. A
+/// process that has not ended keeps its ID, so a caller whose pidfd says it is still there once
+/// logind has answered, and again once everything about it has been read, was the process every
+/// question by its ID was about; one that has ended is turned away, whoever has its ID now. polkit
+/// is given the pidfd too, and from release 124 judges by it. Without a pidfd, the start time
+/// alone vouches for the process, as [`admit`] says.
+pub fn admit_process(
+    login: &mut dyn Login,
+    peer: &Peer,
+    process: &Process,
+    start_time: &dyn Fn(u32) -> Option<u64>,
+) -> Result<String, Refusal> {
+    admit_judging(
         login,
         peer,
+        process,
         start_time,
         &bounded(proc_file, &CMDLINE_BLOCKED),
         &ADMISSIONS_LOGGED,
     )
 }
 
+#[cfg(test)]
 fn admit_reading(
     login: &mut dyn Login,
     peer: &Peer,
@@ -103,8 +131,28 @@ fn admit_reading(
     read: &dyn Fn(u32, &str) -> io::Result<Vec<u8>>,
     allowance: &Mutex<Allowance>,
 ) -> Result<String, Refusal> {
+    admit_judging(login, peer, &Process::Unheld, start_time, read, allowance)
+}
+
+fn admit_judging(
+    login: &mut dyn Login,
+    peer: &Peer,
+    process: &Process,
+    start_time: &dyn Fn(u32) -> Option<u64>,
+    read: &dyn Fn(u32, &str) -> io::Result<Vec<u8>>,
+    allowance: &Mutex<Allowance>,
+) -> Result<String, Refusal> {
     let not_in_front = |why: String| (Goodbye::NotInFront, why);
     let no_answer = |why: String| (Goodbye::NoAnswer, why);
+    let ended_meanwhile = || {
+        not_in_front(format!(
+            "process {} ended while it was being admitted",
+            peer.pid
+        ))
+    };
+    if process.ended() {
+        return Err(not_in_front(format!("process {} has ended", peer.pid)));
+    }
     let Some(started) = start_time(peer.pid) else {
         return Err(not_in_front(format!("process {} has ended", peer.pid)));
     };
@@ -162,7 +210,13 @@ fn admit_reading(
     if !s.active || !matches!(&front, Front::Session { id, .. } if *id == s.id) {
         return Err(not_in_front(format!("session {} is not in front", s.id)));
     }
-    if !login.authorized(peer, started).map_err(no_answer)? {
+    if process.ended() {
+        return Err(ended_meanwhile());
+    }
+    if !login
+        .authorized_process(peer, started, process.pidfd())
+        .map_err(no_answer)?
+    {
         return Err((
             Goodbye::NotAuthorized,
             format!("polkit does not allow {POLKIT_ACTION}"),
@@ -180,11 +234,8 @@ fn admit_reading(
         program: read(peer.pid, "cmdline").ok().and_then(|b| first_word(&b)),
         unit: unit_of(&cgroup).map(str::to_owned),
     };
-    if start_time(peer.pid) != Some(started) {
-        return Err(not_in_front(format!(
-            "process {} ended while it was being admitted",
-            peer.pid
-        )));
+    if start_time(peer.pid) != Some(started) || process.ended() {
+        return Err(ended_meanwhile());
     }
     let unlogged = allowance
         .lock()
@@ -493,13 +544,27 @@ impl Login for SystemBus {
     }
 
     fn authorized(&mut self, peer: &Peer, start_time: u64) -> Result<bool, String> {
+        self.authorized_process(peer, start_time, None)
+    }
+
+    /// The pidfd goes beside the ID and start time, which a polkit older than 124 goes by, since it
+    /// ignores a key it does not know; a later one judges by the pidfd alone.
+    fn authorized_process(
+        &mut self,
+        peer: &Peer,
+        start_time: u64,
+        pidfd: Option<BorrowedFd>,
+    ) -> Result<bool, String> {
         let peer = *peer;
         self.run("asking polkit", |c| async move {
-            let subject: HashMap<&str, Variant<'_>> = HashMap::from([
+            let mut subject: HashMap<&str, Variant<'_>> = HashMap::from([
                 ("pid", Variant::from(peer.pid)),
                 ("start-time", Variant::from(start_time)),
                 ("uid", Variant::from(peer.uid as i32)),
             ]);
+            if let Some(fd) = pidfd {
+                subject.insert("pidfd", Variant::from(zbus::Fd::from(fd)));
+            }
             let details: HashMap<&str, &str> = HashMap::new();
             // No flags: polkit answers from the action's defaults and rules, and never asks the
             // user for a password on the helper's behalf.
@@ -1173,6 +1238,163 @@ mod tests {
         assert_eq!(parse_console(b"tty12"), Some(12));
         assert_eq!(parse_console(b"ttyS0\n"), None);
         assert_eq!(parse_console(b""), None);
+    }
+
+    /// A child that waits to be killed, and a pidfd for it.
+    fn waiting_child() -> (libc::pid_t, Process) {
+        // SAFETY: the child makes only calls that are safe after fork in a process with threads.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork: {}", io::Error::last_os_error());
+        if pid == 0 {
+            loop {
+                // SAFETY: waits for a signal, which kills it.
+                unsafe { libc::pause() };
+            }
+        }
+        (pid, Process::Held(crate::peer::tests::pidfd_of(pid)))
+    }
+
+    fn kill_and_reap(pid: libc::pid_t) {
+        let mut status = 0;
+        // SAFETY: a child of this test, which nothing else waits for.
+        unsafe {
+            assert_eq!(libc::kill(pid, libc::SIGKILL), 0);
+            assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
+        }
+    }
+
+    /// logind and polkit as Fake has them, the caller ending as logind is asked about it when
+    /// `ending` names it, and the pidfd polkit was given kept.
+    struct Watched {
+        fake: Fake,
+        ending: Option<libc::pid_t>,
+        polkit_had: Option<Option<i64>>,
+    }
+
+    impl Login for Watched {
+        fn session_of_pid(&mut self, pid: u32) -> Result<Option<String>, String> {
+            if let Some(child) = self.ending.take() {
+                kill_and_reap(child);
+            }
+            self.fake.session_of_pid(pid)
+        }
+        fn display_of_user(&mut self, uid: u32) -> Result<Option<String>, String> {
+            self.fake.display_of_user(uid)
+        }
+        fn session(&mut self, path: &str) -> Result<SessionInfo, String> {
+            self.fake.session(path)
+        }
+        fn front(&mut self) -> Result<Front, String> {
+            self.fake.front()
+        }
+        fn authorized(&mut self, _: &Peer, _: u64) -> Result<bool, String> {
+            panic!("polkit is asked with the process")
+        }
+        fn authorized_process(
+            &mut self,
+            peer: &Peer,
+            start: u64,
+            pidfd: Option<BorrowedFd>,
+        ) -> Result<bool, String> {
+            self.polkit_had = Some(pidfd.map(crate::peer::tests::pid_in));
+            self.fake.authorized(peer, start)
+        }
+    }
+
+    fn watched() -> Watched {
+        Watched {
+            fake: Fake::usual(),
+            ending: None,
+            polkit_had: None,
+        }
+    }
+
+    fn judge(w: &mut Watched, process: &Process) -> Result<String, Refusal> {
+        admit_judging(
+            w,
+            &PEER,
+            process,
+            &started,
+            &proc_of(IN_SESSION),
+            &Mutex::new(Allowance::new()),
+        )
+    }
+
+    #[test]
+    fn a_caller_that_ends_while_logind_is_asked_is_turned_away_whoever_takes_its_number() {
+        let (child, process) = waiting_child();
+        let mut w = watched();
+        w.ending = Some(child);
+        // Its number, read in /proc, still shows a process of the session started when it was:
+        // another has taken it, as far as the start time can tell.
+        let e = judge(&mut w, &process).unwrap_err();
+        assert_eq!(e.0, Goodbye::NotInFront, "{}", e.1);
+        assert!(e.1.contains("ended while"), "{}", e.1);
+        assert_eq!(
+            w.polkit_had, None,
+            "polkit was asked about the process that took its place"
+        );
+        // And without the pidfd, the same is admitted: the gap the pidfd closes.
+        let (child, _) = waiting_child();
+        let mut w = watched();
+        w.ending = Some(child);
+        assert_eq!(judge(&mut w, &Process::Unheld), Ok("2".into()));
+    }
+
+    #[test]
+    fn a_caller_that_ended_before_admission_began_is_turned_away_before_anyone_is_asked() {
+        let (child, process) = waiting_child();
+        kill_and_reap(child);
+        for process in [process, Process::Ended] {
+            let mut w = watched();
+            w.fake.by_pid = Err("logind must not be asked".into());
+            let e = judge(&mut w, &process).unwrap_err();
+            assert_eq!(e, (Goodbye::NotInFront, "process 300 has ended".into()));
+            assert_eq!(w.polkit_had, None);
+        }
+    }
+
+    #[test]
+    fn a_living_caller_is_admitted_and_polkit_is_given_its_pidfd() {
+        let (child, process) = waiting_child();
+        let mut w = watched();
+        assert_eq!(judge(&mut w, &process), Ok("2".into()));
+        assert_eq!(w.polkit_had, Some(Some(i64::from(child))));
+        kill_and_reap(child);
+    }
+
+    #[test]
+    fn without_a_pidfd_the_start_time_alone_judges() {
+        let mut w = watched();
+        assert_eq!(judge(&mut w, &Process::Unheld), Ok("2".into()));
+        assert_eq!(w.polkit_had, Some(None));
+        let calls = std::cell::Cell::new(0);
+        let replaced = |_| {
+            calls.set(calls.get() + 1);
+            Some(if calls.get() == 1 { 77 } else { 78 })
+        };
+        let mut w = watched();
+        let e = admit_judging(
+            &mut w,
+            &PEER,
+            &Process::Unheld,
+            &replaced,
+            &proc_of(IN_SESSION),
+            &Mutex::new(Allowance::new()),
+        )
+        .unwrap_err();
+        assert!(e.1.contains("ended while"), "{}", e.1);
+        let mut w = watched();
+        let e = admit_judging(
+            &mut w,
+            &PEER,
+            &Process::Unheld,
+            &|_| None,
+            &proc_of(IN_SESSION),
+            &Mutex::new(Allowance::new()),
+        )
+        .unwrap_err();
+        assert_eq!(e, (Goodbye::NotInFront, "process 300 has ended".into()));
     }
 
     #[test]

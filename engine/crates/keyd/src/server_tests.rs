@@ -40,7 +40,14 @@ impl Helper {
     }
 
     fn start_full(
-        decide: impl FnMut(&Peer) -> Result<String, Refusal> + Send + 'static,
+        mut decide: impl FnMut(&Peer) -> Result<String, Refusal> + Send + 'static,
+        notifier: Option<Notifier>,
+    ) -> Helper {
+        Helper::start_judging(move |peer, _| decide(peer), notifier)
+    }
+
+    fn start_judging(
+        decide: impl FnMut(&Peer, &Process) -> Result<String, Refusal> + Send + 'static,
         notifier: Option<Notifier>,
     ) -> Helper {
         let dir = std::env::temp_dir().join(format!(
@@ -54,7 +61,7 @@ impl Helper {
         let w = World::new();
         let listener = bind(&socket).unwrap();
         let notices = Notices::new().unwrap();
-        let admit = spawn_admitter(notices.clone(), decide).unwrap();
+        let admit = spawn_process_admitter(notices.clone(), decide).unwrap();
         let core = Core::new(w.devices());
         let progress = Progress::new();
         let ended = Arc::new(AtomicBool::new(false));
@@ -421,6 +428,97 @@ fn a_caller_that_has_gone_is_not_asked_about() {
         thread::sleep(Duration::from_millis(50));
     }
     assert_eq!(asked.load(Relaxed), 2);
+}
+
+/// What the admission thread was given of each caller: its number from the socket's credentials,
+/// the number of the process its pidfd refers to (-1 for one that has ended, None with no pidfd),
+/// and whether that process had ended.
+type Judged = Arc<Mutex<Vec<(u32, Option<i64>, bool)>>>;
+
+fn judging_helper() -> (Helper, Judged) {
+    let judged = Judged::default();
+    let j = judged.clone();
+    let h = Helper::start_judging(
+        move |peer, process| {
+            let ended = process.ended();
+            let pid = process.pidfd().map(crate::peer::tests::pid_in);
+            j.lock().unwrap().push((peer.pid, pid, ended));
+            if ended {
+                Err((Goodbye::NotInFront, "ended".into()))
+            } else {
+                Ok(SESSION.into())
+            }
+        },
+        None,
+    );
+    (h, judged)
+}
+
+#[test]
+fn the_process_held_from_accept_is_the_one_that_connected() {
+    let (h, judged) = judging_helper();
+    let c = h.client();
+    assert!(matches!(c.hello(), ToClient::Welcome { .. }));
+    let ours = std::process::id();
+    assert_eq!(
+        *judged.lock().unwrap(),
+        [(ours, Some(i64::from(ours)), false)]
+    );
+}
+
+#[test]
+fn a_caller_that_ended_before_it_said_hello_is_judged_as_ended() {
+    let (h, judged) = judging_helper();
+    let fd = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::SEQPACKET,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    let address = SocketAddrUnix::new(&h.socket).unwrap();
+    // The child connects the socket this test keeps, so the helper's caller is a process that has
+    // ended, and been reaped, by the time HELLO comes from here.
+    // SAFETY: the child makes only calls that are safe after fork in a process with threads.
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0);
+    if child == 0 {
+        let connected = rustix::net::connect(&fd, &address).is_ok();
+        // SAFETY: ends the child at once.
+        unsafe { libc::_exit(if connected { 0 } else { 1 }) };
+    }
+    let mut status = 0;
+    // SAFETY: waits for this test's own child.
+    assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+    assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
+    let hello = FromClient::Hello {
+        version: PROTOCOL_VERSION,
+        features: 0,
+    };
+    rustix::net::send(&fd, &hello.encode(), SendFlags::NOSIGNAL).unwrap();
+    let mut fds = [PollFd::new(&fd, PollFlags::IN)];
+    let wait = Timespec {
+        tv_sec: MARGIN.as_secs() as _,
+        tv_nsec: MARGIN.subsec_nanos() as _,
+    };
+    rustix::event::poll(&mut fds, Some(&wait)).unwrap();
+    let mut buf = [0u8; MAX_MESSAGE];
+    let (_, n) = rustix::net::recv(&fd, &mut buf, RecvFlags::DONTWAIT).unwrap();
+    assert!(matches!(
+        ToClient::decode(&buf[..n]),
+        Ok(ToClient::Goodbye {
+            reason: Goodbye::NotInFront,
+            ..
+        })
+    ));
+    let judged = judged.lock().unwrap();
+    assert_eq!(judged.len(), 1, "{judged:?}");
+    let (pid, held, ended) = judged[0];
+    assert_eq!(pid, child as u32);
+    assert!(ended);
+    // A pidfd taken while the child was there, or as a kernel from 6.16 gives one for a process
+    // already reaped, refers to no process now.
+    assert!(matches!(held, None | Some(-1)), "{held:?}");
 }
 
 // Found in the security review of admission. It fails on purpose and says in its message what goes

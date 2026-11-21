@@ -179,6 +179,7 @@ pub mod core;
 pub mod device;
 pub mod evdev;
 pub mod keys;
+pub mod peer;
 pub mod protocol;
 pub mod server;
 pub mod session;
