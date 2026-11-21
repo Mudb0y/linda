@@ -235,8 +235,9 @@ def ask(paths: list[str], timeout: float = ANSWER_TIMEOUT) -> str:
 			caller.settimeout(remaining)
 			try:
 				caller.connect(path)
-			# A queue full of connections nobody accepts, as a stopped copy's fills.
-			except TimeoutError:
+			# A queue full of connections nobody accepts, as a stopped copy's fills. Linux refuses that at
+			# once with EAGAIN rather than waiting, as the timeout makes the socket non-blocking.
+			except BlockingIOError:
 				return NO_ANSWER
 			# No socket, or one a copy that ended left behind, or a path too long to be one.
 			except OSError:

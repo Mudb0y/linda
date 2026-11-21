@@ -149,14 +149,19 @@ def test_runningCopyIsAskedAndAnswers(launches, tmp_path: Path, wayland: dict[st
 def test_copyWhoseMainLoopIsStoppedDoesNotAnswer(launches, tmp_path: Path, wayland: dict[str, str]):
 	nvda = _startCopy(launches, tmp_path, "stopped", wayland)
 	os.kill(nvda.process.pid, signal.SIGSTOP)
+	# More tries than the socket's queue holds, so the last ones find it full. Given only the Wayland
+	# socket, so that no other socket with room in its queue hides that.
+	outcomes = []
 	try:
-		status, stdout, stderr, seconds = _takeKeyboard(env=wayland)
+		for _try in range(controlSocket._BACKLOG + 2):
+			outcomes.append(_takeKeyboard(env={**wayland, "DISPLAY": None}))
 	finally:
 		os.kill(nvda.process.pid, signal.SIGCONT)
-	assert (status, stdout, stderr) == (1, controlSocket._SAID[controlSocket.NO_ANSWER] + "\n", ""), seconds
-	assert seconds < GIVE_UP_BOUND, f"gave up after {seconds:.2f} s"
-	print(f"gave up after {seconds:.2f} s")
-	# The request it took while stopped is acted on once it runs again, to nobody, and it goes on.
+	for status, stdout, stderr, seconds in outcomes:
+		assert (status, stdout, stderr) == (1, controlSocket._SAID[controlSocket.NO_ANSWER] + "\n", ""), outcomes
+		assert seconds < GIVE_UP_BOUND, f"gave up after {seconds:.2f} s"
+	print(f"gave up after {', '.join(f'{seconds:.2f}' for *_rest, seconds in outcomes)} s")
+	# The requests it took while stopped are acted on once it runs again, to nobody, and it goes on.
 	nvda.waitForLog("through the control socket, to take the keyboard back", SHUTDOWN_BOUND)
 	assert nvda.process.poll() is None
 	_quit(nvda)
