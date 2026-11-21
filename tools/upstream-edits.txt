@@ -734,6 +734,9 @@ source/platformFeatures.py
   every platform: added. What the platform supports, feature by feature,
   which the menus, the settings panels and the commands ask before they
   offer a feature, so that what cannot work on Linux is not shown there.
+  In a Linux session that says Wayland the pointer, mouse tracking, the
+  Screen Curtain and Visual Highlight are not supported either, and their
+  commands say so; a caller may keep such commands bound to their keys.
   On Windows every feature is supported, so every question asked of it is
   answered yes and Windows shows what it showed
 source/screenCurtain/_screenCurtain.py
