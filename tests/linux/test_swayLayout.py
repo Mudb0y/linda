@@ -161,6 +161,8 @@ class FakeSway:
 	def __init__(self, inputs):
 		self.inputs = inputs
 		self.listings = 0
+		#: The kinds of message each connection sent, in order.
+		self.orders = []
 		self.subscribers = []
 		self.lock = threading.Lock()
 		self.directory = tempfile.mkdtemp(prefix="sway", dir="/tmp")
@@ -188,6 +190,9 @@ class FakeSway:
 		return data
 
 	def _serve(self, client):
+		order = []
+		with self.lock:
+			self.orders.append(order)
 		try:
 			while True:
 				header = self._exactly(client, HEADER.size)
@@ -196,6 +201,7 @@ class FakeSway:
 				_magic, size, kind = HEADER.unpack(header)
 				if size:
 					self._exactly(client, size)
+				order.append(kind)
 				if kind == 2:
 					with self.lock:
 						self.subscribers.append(client)
@@ -220,6 +226,16 @@ class FakeSway:
 			except OSError:
 				# A feed that has stopped.
 				self.subscribers.remove(client)
+
+	def emitTogether(self, change, entries):
+		# Events that reach the feed's socket before it reads the first of them.
+		data = b""
+		for entry in entries:
+			event = json.dumps({"change": change, "input": entry}).encode()
+			data += HEADER.pack(b"i3-ipc", len(event), EVENT_INPUT) + event
+		with self.lock:
+			for client in self.subscribers:
+				client.sendall(data)
 
 	def hangUp(self):
 		for client in list(self.subscribers):
@@ -600,6 +616,9 @@ listings = sway.listings
 sway.emit("xkb_layout", keyboard(AT, ["Polish", "English (US)"], 1))
 sway.emit("libinput_config", virtual)
 time.sleep(0.3)
+afterConfig = sway.listings
+sway.emitTogether("added", [keyboard(AT, ["Polish", "English (US)"])] * 3)
+time.sleep(0.3)
 feed.stop()
 sway.emit("xkb_layout", keyboard(LINDA, ["Polish", "English (US)"], 0))
 time.sleep(0.3)
@@ -607,7 +626,8 @@ result = {{
 	"first": first,
 	"changes": [[t, name, plain(s)] for t, name, s in changes],
 	"asked": asked,
-	"listings": [listings, sway.listings],
+	"listings": [listings, afterConfig, sway.listings],
+	"order": sway.orders[0][:2],
 	"threads": feedThreads(),
 }}
 """,
@@ -619,8 +639,11 @@ result = {{
 	delays = [c[0] - t for c, t in zip(value["changes"], value["asked"])]
 	print("seconds from each change to onChange:", " ".join(f"{d:.4f}" for d in delays))
 	assert max(delays) < CHANGE_BOUND, delays
-	# A group's event is applied as it came; only the libinput_config event asked for a listing.
-	assert value["listings"] == [1, 2]
+	# A group's event is applied as it came; only the libinput_config event asked for a listing, and
+	# three events that came while one listing was asked for are answered by that one.
+	assert value["listings"] == [1, 2, 3]
+	# Subscribed before the first listing, so that no change between the two is missed.
+	assert value["order"] == [2, 100]
 	assert value["threads"] == []
 
 
