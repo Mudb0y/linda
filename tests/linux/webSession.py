@@ -1,7 +1,8 @@
 """Web pages for browse-mode tests: the pages, Firefox started on one with a fresh profile, its
 documents found on the accessibility desktop, and what the keys page logged.
 
-Inside the rig only. Firefox runs in a process group of its own, led by the process this starts;
+Inside the rig only. In the rig's Wayland sessions Firefox runs as a Wayland client, with no X display
+even where the compositor has an Xwayland. Firefox runs in a process group of its own, led by the process this starts;
 the desktop session's close stops that process, and waits for or kills the rest of the group
 through it, so that no content process outlives the test.
 """
@@ -305,13 +306,19 @@ def startFirefox(
 	(profile / "user.js").write_text(userPrefs)
 	logPath = profile.with_name(f"{profile.name}.log")
 	command = ["firefox", "--no-remote", "--new-instance", "--profile", str(profile), pageURL(page)]
+	env = dict(os.environ, MOZ_CRASHREPORTER_DISABLE="1")
+	if desktopSession.compositor() is not None:
+		# Firefox picks X whenever it has a display, and the compositor's Xwayland may be one.
+		env["MOZ_ENABLE_WAYLAND"] = "1"
+		env.pop("DISPLAY", None)
+		env.pop("XAUTHORITY", None)
 	with open(logPath, "w") as log:
 		process = FirefoxProcess(
 			command,
 			stdin=subprocess.DEVNULL,
 			stdout=log,
 			stderr=subprocess.STDOUT,
-			env=dict(os.environ, MOZ_CRASHREPORTER_DISABLE="1"),
+			env=env,
 		)
 	process.profile = profile
 	# The session's close stops what it started, last first, by process ID.
@@ -352,7 +359,7 @@ def _activateRenamed(process: FirefoxProcess) -> str:
 		if len(active) == 1 and active[0] in names:
 			return active[0]
 		for name in names:
-			subprocess.run(["wmctrl", "-F", "-a", name], check=False, capture_output=True)
+			desktopSession.askToActivate(name)
 		assert time.monotonic() < deadline, (
 			f"Firefox's window did not become active within {ACTIVATE_TIMEOUT} s: {names}, active {active}"
 		)

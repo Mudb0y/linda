@@ -3,7 +3,8 @@ profile, and their documents found on the accessibility desktop; and the accessi
 session bus that decides whether they join that desktop at all.
 
 Inside the rig only. A program runs in a process group of its own, led by the process this starts;
-the desktop session's close stops it, and waits for or kills the rest of the group through it.
+the desktop session's close stops it, and waits for or kills the rest of the group through it. In the
+rig's Wayland sessions both run as Wayland clients.
 
 Chromium, and Electron with it, read org.a11y.Status IsEnabled once, at their start, and join the
 accessibility bus only when it is on; so do the variables GNOME_ACCESSIBILITY and QT_ACCESSIBILITY,
@@ -51,6 +52,9 @@ CHROMIUM_SWITCHES = (
 	"--lang=en-US",
 )
 ELECTRON_SWITCHES = ("--disable-gpu",)
+#: What makes Chromium and Electron Wayland clients under a compositor, where they would otherwise take
+#: the compositor's Xwayland, or fail without one.
+WAYLAND_SWITCHES = ("--ozone-platform=wayland",)
 #: Seconds the launcher has to follow a client that comes or goes.
 STATUS_TIMEOUT = 3.0
 #: Seconds a Chromium started while the status is off is given to show its window after its zygote.
@@ -113,6 +117,10 @@ def clearAccessibilityStatus() -> None:
 	assert accessibilityStatus() is False, "the accessibility status could not be switched off"
 
 
+def _platformSwitches() -> tuple[str, ...]:
+	return WAYLAND_SWITCHES if desktopSession.compositor() is not None else ()
+
+
 def _start(
 	desktop: DesktopSession,
 	command: list[str],
@@ -160,7 +168,13 @@ def startChromium(desktop: DesktopSession, page: str) -> webSession.FirefoxProce
 	title = webSession._pageTitle(page)
 	process = _start(
 		desktop,
-		["chromium", f"--user-data-dir={profile}", *CHROMIUM_SWITCHES, webSession.pageURL(page)],
+		[
+			"chromium",
+			f"--user-data-dir={profile}",
+			*CHROMIUM_SWITCHES,
+			*_platformSwitches(),
+			webSession.pageURL(page),
+		],
 		window=f"{title}{CHROMIUM_TITLE_SUFFIX}",
 		logName=f"{profile.name}.log",
 	)
@@ -176,7 +190,13 @@ def startUnseenChromium(desktop: DesktopSession, page: str) -> webSession.Firefo
 	logPath = desktop.directory / f"{profile.name}.log"
 	with open(logPath, "w") as log:
 		process = webSession.FirefoxProcess(
-			["chromium", f"--user-data-dir={profile}", *CHROMIUM_SWITCHES, webSession.pageURL(page)],
+			[
+				"chromium",
+				f"--user-data-dir={profile}",
+				*CHROMIUM_SWITCHES,
+				*_platformSwitches(),
+				webSession.pageURL(page),
+			],
 			stdin=subprocess.DEVNULL,
 			stdout=log,
 			stderr=subprocess.STDOUT,
@@ -226,7 +246,14 @@ def startElectron(
 	profile = Path(tempfile.mkdtemp(prefix="electron", dir=desktop.directory))
 	process = _start(
 		desktop,
-		["electron", *ELECTRON_SWITCHES, f"--user-data-dir={profile}", str(directory), *arguments],
+		[
+			"electron",
+			*ELECTRON_SWITCHES,
+			*_platformSwitches(),
+			f"--user-data-dir={profile}",
+			str(directory),
+			*arguments,
+		],
 		window=window,
 		logName=f"{profile.name}.log",
 	)
