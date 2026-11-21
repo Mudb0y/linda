@@ -782,6 +782,11 @@ source/synthDrivers/espeak.py
   next change of voice fails with KeyError, as availableVoices is keyed by
   the last component. No Windows identifier holds a slash, so Windows does
   as before. A fix to offer NVDA
+source/synthDrivers/speechDispatcher.py
+  Linux runtime: added. A synthesizer speaking through the user's own
+  Speech Dispatcher daemon, so that every output module and voice the
+  distribution has can be chosen; its check fails on Windows, which has no
+  Speech Dispatcher, so it is never listed there
 source/systemUtils.py
   every platform: winreg comes from linuxPlatform.windowsOnly, which on
   Windows is the real module.

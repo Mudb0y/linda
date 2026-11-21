@@ -189,6 +189,13 @@ def _brltty(value: str) -> None:
 	assert path.name == "brltty" and os.access(path, os.X_OK), value
 
 
+def _speechd(value: str) -> None:
+	path = _elfFile(value)
+	assert path.name == "speech-dispatcher" and os.access(path, os.X_OK), value
+	# The configuration the test daemon is started with, the package's own and not the host's.
+	assert (path.parent.parent / "etc/speech-dispatcher/speechd.conf").is_file(), value
+
+
 def _storePath(path: Path) -> Path:
 	"""The store path a file is in."""
 	return Path(STORE) / path.relative_to(STORE).parts[0]
@@ -260,6 +267,7 @@ SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
 	"LINDA_MATE_DESKTOP_SCHEMAS": _mateDesktopSchemas,
 	"LINDA_BASH": _bash,
 	"LINDA_BRLTTY": _brltty,
+	"LINDA_SPEECHD": _speechd,
 	"LINDA_RIG_PATH": _searchPath,
 	"LINDA_RIG_XDG_DATA_DIRS": _searchPath,
 }

@@ -286,6 +286,9 @@
         # The daemon tests/linux/test_brltty.py drives a stand-in display with, from the build
         # the brlapi module comes from.
         LINDA_BRLTTY = "${pythonInterpreter.pkgs.brlapi.brltty}/bin/brltty";
+        # The private daemon tests/linux/test_speechDispatcher.py starts with this package's own
+        # configuration. Named rather than put on PATH, where the driver looks for the user's.
+        LINDA_SPEECHD = "${pkgs.speechd}/bin/speech-dispatcher";
 
         # setup.sh would put $out/lib first in every RUNPATH the linker
         # writes, and in a shell $out is outputs/out under the working
