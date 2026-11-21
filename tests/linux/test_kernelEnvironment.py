@@ -320,6 +320,25 @@ def test_aLookAnsweredUnknownPassesTheKeyAndCountsIt(tmp_path: Path):
 	assert counted == ["DEBUG: Where the focus is was not found out for a key, 1 so far; passed on"], counted
 
 
+WAIT_AT_ARRIVAL_CHILD = r"""
+environment = FakeEnvironment(lookAfter=0.2, state=AWAY)
+source = startSource(environment)
+keyboard.press("h")
+time.sleep(0.6)
+result = {"waits": [latency for _seq, latency in keyboard.waits]}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_aKeyWaitingOnALookAsksTheHelperToHoldItAtOnce(tmp_path: Path):
+	# With a bound of 0.3 s the share an NVDA key waits is 0.12 s, so a WAIT sent then is told apart
+	# from one sent as the press came: a WAIT late on the source's clock may reach the helper too late.
+	value = runEnvironmentChild(tmp_path, WAIT_AT_ARRIVAL_CHILD, standIn={"verdictTimeout": 0.3}).value
+	[latency] = value["waits"]
+	assert latency < 0.06, value
+
+
 #: A look whose environment says it may take five seconds: the press is answered by this source by
 #: DOCUMENT_WAIT from its coming, within the helper's bound for a press it was asked to hold.
 LONG_LOOK_CHILD = r"""
