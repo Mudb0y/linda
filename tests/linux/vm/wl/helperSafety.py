@@ -10,7 +10,10 @@ Wayland guest has no recorder that sees every key, as the X server's does in the
 helper passes is shown by the evdev recorder's records of the virtual keyboard, what reaches the
 compositor from a keyboard itself by the evdev recorder's records of that keyboard, which no reader
 has while the helper grabs it, and what reaches a program by the native GTK window's records. The
-lock lights are read from the kernel, by ground-poke.
+lock lights are read from the kernel, by ground-poke. A release the kernel makes itself as a device
+goes, the virtual keyboard's at a helper's end among them, carries the stamp of that device's last
+event, which was seen to be the press it releases, so such a release is timed by when the recorder
+read it.
 
 In the guest, as ground-helper-safety, which a case's module installs (cases/wlGnomeHelper.nix), it
 watches for the moment the compositor opens a keyboard:
@@ -479,7 +482,7 @@ def hotplug(ground: "Ground", client: "KeydClient", figures: dict) -> None:
 		gone = client.waitForDevice(USB_KEYBOARD, "GONE", mark)
 		releases = [r for r in client.keys(mark) if r["device"] == gone["device"] and r["value"] == 0]
 		figures["hotplug"] = {
-			"shiftHeld": round(release[1]["t"] - pressed[0]["t"], 3),
+			"shiftHeld": round(release[1]["received"] - pressed[0]["received"], 3),
 			"clientToldOfReleaseAfterUnplugAsked": round(releases[0]["t"] - unplugging, 3)
 			if releases
 			else None,
@@ -685,7 +688,7 @@ def watchdogThread(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClie
 		systemd = [t for t, line in ground.helperLog(mark) if "Watchdog timeout" in line]
 		figures["watchdogThread"] = {
 			"saidAfterStall": round(said[0] - stoppedAt, 3),
-			"shiftReleasedAfterStall": round(release[1]["t"] - stoppedAt, 3),
+			"shiftReleasedAfterStall": round(release[1]["received"] - stoppedAt, 3),
 			"endedAfterStall": round(ended[0] - stoppedAt, 3),
 			"systemdWatchdogAfterStall": round(systemd[0] - stoppedAt, 3) if systemd else None,
 		}
@@ -716,13 +719,14 @@ def stopped(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 		keyboard.run({"press": "KEY_LEFTSHIFT"})
 		ground.waitForKeys("evdev", [("KEY_LEFTSHIFT", 1)], mark, device=VIRTUAL_KEYBOARD)
 		steps = json.dumps([{"tap": "KEY_Q", "hold": 0.01}, {"sleep": STREAM_GAP - 0.01}] * STREAM_TAPS)
-		stoppedAt = float(
-			ground.shell(
-				f"ground-keyboard call {shlex.quote(UHID)} {shlex.quote(steps)} > /tmp/ground/stream.json & "
-				f"sleep 0.3; ground-record now; kill -STOP {pid}; wait"
-			).split()[0]
+		# Stopped first and typed on at once, from the same shell, so that every tap comes after the
+		# stop and the first one the keyboard gives a reader again says when the kernel let go.
+		output = ground.shell(
+			f"ground-record now; kill -STOP {pid}; "
+			f"ground-keyboard call {shlex.quote(UHID)} {shlex.quote(steps)}"
 		)
-		written = json.loads(ground.shell("cat /tmp/ground/stream.json"))["written"]
+		stoppedAt = float(output.split("\n", 1)[0])
+		written = json.loads(output.split("\n", 1)[1])["written"]
 		ground.waitForHelperLog("Watchdog timeout", mark)
 		ground.waitForHelperLog("with signal SIGKILL", mark)
 		ground.waitForHelperLog("status=9/KILL", mark)
@@ -738,7 +742,7 @@ def stopped(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 			ground.machine.log(f"{t - stoppedAt:+.3f} s: {line}")
 		typedAfterBack = [r for r in written if r["value"] == 1 and r["t"] >= back - STREAM_GAP]
 		figures["stopped"] = {
-			"shiftReleasedAfterStop": round(release[1]["t"] - stoppedAt, 3),
+			"shiftReleasedAfterStop": round(release[1]["received"] - stoppedAt, 3),
 			"keyboardBackAfterStop": round(back - stoppedAt, 3),
 			"firstKeyAtProgramAfterStop": round(app[0]["t"] - stoppedAt, 3),
 			"tapsTyped": len([r for r in written if r["value"] == 1]),
@@ -750,7 +754,7 @@ def stopped(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 		# late.
 		assert len(appKeyvals(app)) <= len(typedAfterBack), (figures["stopped"], app)
 		# The watchdog's two seconds count from the loop's last feed, before the stop.
-		assert release[1]["t"] - stoppedAt < WATCHDOG + SLACK, release
+		assert release[1]["received"] - stoppedAt < WATCHDOG + SLACK, release
 		assert back - stoppedAt < WATCHDOG + SLACK, back - stoppedAt
 
 	with ground.subtest("systemd starts it again, and it serves a client"):
