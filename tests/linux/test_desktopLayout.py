@@ -233,7 +233,12 @@ def assertOnlyNamesLogged(result) -> None:
 
 
 def noSystemBus() -> dict[str, str | None]:
-	return {"XKB_DEFAULT_LAYOUT": None, "XKB_DEFAULT_VARIANT": None, "XKB_DEFAULT_OPTIONS": None}
+	return {
+		"XKB_DEFAULT_LAYOUT": None,
+		"XKB_DEFAULT_VARIANT": None,
+		"XKB_DEFAULT_OPTIONS": None,
+		"SWAYSOCK": None,
+	}
 
 
 def test_gnomeSnapshots(tmp_path: Path):
@@ -663,10 +668,14 @@ def create(currentDesktop):
 def test_createChoosesOptionalModulesFirst(tmp_path: Path):
 	fakes = tmp_path / "fakes"
 	fakes.mkdir()
+	# Modules other packages have added since; the fakes must still win over them.
+	optional = ("waylandKeymap", "swayLayout", "gamescopeLayout")
+	inTree = {n for n in optional if (harness.SOURCE / "linuxPlatform" / "keys" / f"{n}.py").exists()}
 	result = runFeeds(
 		tmp_path,
 		rf"""
 import importlib
+import sys
 import linuxPlatform.keys
 
 def kind(desktop):
@@ -678,7 +687,9 @@ with open(fakes + "/swayLayout.py", "w") as f:
 	f.write({FAKE_FEED!r}.replace("SOURCE", repr("sway")))
 with open(fakes + "/gamescopeLayout.py", "w") as f:
 	f.write("import aModuleThatIsNotThere\n")
-linuxPlatform.keys.__path__.append(fakes)
+linuxPlatform.keys.__path__.insert(0, fakes)
+for name in {optional!r}:
+	sys.modules.pop("linuxPlatform.keys." + name, None)
 importlib.invalidate_caches()
 os.environ["XKB_DEFAULT_LAYOUT"] = "de"
 result["sway"] = started(desktopLayout.create("sway"))
@@ -686,6 +697,7 @@ result["gnome"] = kind("GNOME")
 result["broken"] = started(desktopLayout.create("broken"))
 with open(fakes + "/waylandKeymap.py", "w") as f:
 	f.write({FAKE_FEED!r}.replace("SOURCE", repr("keymap")))
+sys.modules.pop("linuxPlatform.keys.waylandKeymap", None)
 importlib.invalidate_caches()
 result["keymap"] = started(desktopLayout.create("sway"))
 """,
@@ -706,14 +718,14 @@ result["keymap"] = started(desktopLayout.create("sway"))
 	assert result.value["broken"] == snap(("evdev", "pc105", "de", "", ""), source="environment")
 	assert result.value["keymap"] == snap(pl, source="keymap")
 	records = moduleRecords(result)
-	for name in ("waylandKeymap", "swayLayout", "gamescopeLayout"):
+	for name in set(optional) - inTree:
 		assert f"Keyboard layout: no {name} module" in records
 	# A module that is there but fails its own imports is broken, not absent: both are absent only for
-	# the six desktops asked before the fakes were written.
+	# the six desktops asked before the fakes were written, and never when the tree has them.
 	absent = [
 		records.count(f"Keyboard layout: no {name} module") for name in ("swayLayout", "gamescopeLayout")
 	]
-	assert absent == [6, 6]
+	assert absent == [0 if name in inTree else 6 for name in ("swayLayout", "gamescopeLayout")]
 	assert "Keyboard layout: the gamescopeLayout module could not be loaded" in records
 	assert "Keyboard layout: taken from the swayLayout module" in records
 	assert "Keyboard layout: the swayLayout feed did not start" in records
