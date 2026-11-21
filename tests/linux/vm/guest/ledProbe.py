@@ -20,7 +20,9 @@ a keyboard open as it started first holds its node open, with its pid, comm and 
 comm REGEX finds is the desktop's reader: the compositor, or the X server. It prints one JSON object,
 every time on the guest's CLOCK_MONOTONIC and also in seconds from the moment the keyboard was made.
 The reference keyboard is QEMU's virtio keyboard, which the desktop lights as it lights every
-keyboard of the seat.
+keyboard of the seat. Its lights before and after, read with EVIOCGLED, are its state; the light
+events read from it during the probe, referenceLeds, can miss a change: on sway they came back empty
+while its Num Lock light went from on to off.
 
 experiment runs E6's four probes in a row and prints them as one JSON object: with every light off,
 first with no preset and then with the complement, and then with Num Lock on in the desktop, the same
@@ -45,11 +47,13 @@ A call the compositor refuses is answered with the D-Bus error's name and messag
 """
 
 import argparse
+import fcntl
 import json
 import os
 import re
 import select
 import socket
+import struct
 import sys
 import threading
 import time
@@ -71,6 +75,11 @@ NUM = 1 << ecodes.LED_NUML
 BUSTYPE = 0x06
 VENDOR = 0x4772
 PRODUCT = 0x4C50
+#: An evdev reader's events are stamped on the wall clock unless it asks for another; uinput's own
+#: are on the monotonic clock already.
+EVIOCSCLOCKID = 0x400445A0
+CLOCK_MONOTONIC = 1
+CLOCK_SLACK = 1.0
 #: Seconds between two looks for a reader that has opened the probe.
 WATCH_INTERVAL = 0.002
 #: Seconds the presser is given to be opened and settle, and the reference to show a lock pressed.
@@ -208,7 +217,9 @@ def probe(preset: str, reader: str | None, seconds: float) -> dict:
 		bits = int(preset)
 	candidates = readers()
 	# Read, not grabbed: the kernel hands every reader of a keyboard each change of its lights.
+	referenceOpened = time.monotonic()
 	reference = inputDevice(REFERENCE)
+	fcntl.ioctl(reference.fd, EVIOCSCLOCKID, struct.pack("i", CLOCK_MONOTONIC))
 	while reference.read_one() is not None:
 		pass
 	device = keyboard(PROBE)
@@ -247,6 +258,11 @@ def probe(preset: str, reader: str | None, seconds: float) -> dict:
 		if event.type == ecodes.EV_LED:
 			referenceLeds.append({"t": event.timestamp(), "code": event.code, "value": event.value})
 	reference.close()
+	ended = time.monotonic()
+	# A change whose report was begun just before the open is stamped a little before it.
+	stray = [e for e in referenceLeds if not referenceOpened - CLOCK_SLACK <= e["t"] <= ended]
+	if stray:
+		raise RuntimeError(f"the reference keyboard's light events are not on this probe's clock: {stray}")
 
 	def since(t: float | None) -> float | None:
 		return None if t is None else round(t - created, 4)
