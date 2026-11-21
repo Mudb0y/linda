@@ -43,6 +43,9 @@ FOCUS_TIMEOUT = 1.0
 ROUND_TRIP_TIMEOUT = 1.0
 #: Seconds another program has to take what NVDA copied, once it asks, before NVDA stops writing.
 SEND_TIMEOUT = 5.0
+#: How many times a copy is read back while the clipboard changes under the read, as it does when a
+#: clipboard manager takes the copy over as NVDA reads it.
+_READS_OF_A_COPY = 3
 
 #: The data control managers NVDA can use, the standard one first, with the prefix of their objects.
 DATA_CONTROL_MANAGERS = (
@@ -460,20 +463,18 @@ class _Wire:
 		self.send(_DISPLAY, 0, _uint(callback))
 		return self.waitFor(lambda: done, timeout)
 
-	def receive(self, offer: int, opcode: int, mimeType: str, timeout: float) -> bytes:
-		"""What the clipboard's owner writes for offer as mimeType.
-
-		:raises OSError: When the owner has not finished within timeout.
-		"""
+	def receive(self, offer: int, opcode: int, mimeType: str) -> int:
+		"""Ask the clipboard's owner to write offer as mimeType; the end of the pipe to read it from,
+		which the caller closes."""
 		readEnd, writeEnd = os.pipe2(os.O_CLOEXEC)
 		try:
-			try:
-				self.send(offer, opcode, _string(mimeType), fds=(writeEnd,))
-			finally:
-				os.close(writeEnd)
-			return _readAll(readEnd, timeout)
-		finally:
+			self.send(offer, opcode, _string(mimeType), fds=(writeEnd,))
+		except BaseException:
 			os.close(readEnd)
+			raise
+		finally:
+			os.close(writeEnd)
+		return readEnd
 
 	def _onDisplay(self, opcode: int, arguments: list) -> None:
 		if opcode == 0:
@@ -715,22 +716,41 @@ class _Selection:
 		if not wire.waitFor(lambda: self._selections > selectionsBefore, timeout):
 			log.debugWarning("The compositor did not take NVDA's copy: it never said what the clipboard is")
 			return False
-		if self._readSelection(timeout) != text:
-			log.debugWarning("The compositor did not take NVDA's copy: the clipboard holds something else")
-			return False
-		return True
+		for _attempt in range(_READS_OF_A_COPY):
+			got, readFrom = self._readSelectionAndCount(timeout)
+			if got == text:
+				return True
+			# A clipboard manager that took the copy over as it was read leaves the offer read empty, and
+			# what it put in its place is the copy; the compositor's word of that may still be on its way.
+			if not wire.roundTrip(timeout):
+				return False
+			with wire.condition:
+				if self._selections == readFrom:
+					break
+		log.debugWarning("The compositor did not take NVDA's copy: the clipboard holds something else")
+		return False
 
 	def _readSelection(self, timeout: float) -> str:
 		"""The text of the clipboard as the compositor last named it, or "" when it holds none."""
+		return self._readSelectionAndCount(timeout)[0]
+
+	def _readSelectionAndCount(self, timeout: float) -> tuple[str, int]:
+		"""_readSelection's text, and how many times the compositor had said what the clipboard is when
+		NVDA chose what to read."""
 		with self.wire.condition:
 			offer = self._selection
-			types = list(self._offers.get(offer, ())) if offer is not None else []
-		if offer is None:
-			return ""
-		for mimeType, isUtf8 in READ_TYPES:
-			if mimeType in types:
-				return _decode(self.wire.receive(offer, self._OFFER_RECEIVE, mimeType, timeout), isUtf8)
-		return ""
+			count = self._selections
+			types = self._offers.get(offer, ()) if offer is not None else ()
+			chosen = next(((t, isUtf8) for t, isUtf8 in READ_TYPES if t in types), None)
+			if chosen is None:
+				return "", count
+			# Asked with the condition held, since the connection's thread destroys an offer once the
+			# clipboard moves on, and a request to a destroyed object ends the connection.
+			readEnd = self.wire.receive(offer, self._OFFER_RECEIVE, chosen[0])
+		try:
+			return _decode(_readAll(readEnd, timeout), chosen[1]), count
+		finally:
+			os.close(readEnd)
 
 
 class _DataControlRoute(_Selection):
