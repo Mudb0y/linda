@@ -9,9 +9,12 @@ and GTK 4 little, for a reader that only listens.
 
 Toolkits do not always say that a window went. A process that ends, by a crash, Ctrl+Q or its last
 window closing, sends no deactivation, so the bus name of the foreground's application going away
-counts as one, as does the foreground window going defunct or no longer showing. GTK 4 at times sends
-nothing at all as a new window becomes active, so a top-level window that appears and is heard nothing
-more of is asked for its state a few times after it shows.
+counts as one, as does the foreground window going defunct or no longer showing, or saying it is
+destroyed, which is all Firefox says as its last window closes, most of a second before its process
+ends. GTK 4 at times sends nothing at all as a new window becomes active, so a top-level window that
+appears and is heard nothing more of is asked for its state a few times after it shows, as is each
+window of an application that joins the desktop: GTK 4 joins only as its first window shows, and then
+at times has said nothing of that window that anyone could hear.
 
 The window keys are captured on is an anchor, by the X source's rules, the foreground standing in for
 the X focus window: it is the foreground as NVDA last said browse or focus while there was no anchor or
@@ -73,7 +76,9 @@ BUS_PATH = "/org/freedesktop/DBus"
 #: The accessibility bus launcher, on the session bus.
 LAUNCHER = "org.a11y.Bus"
 LAUNCHER_PATH = "/org/a11y/bus"
-REGISTERED_EVENTS = ("window:activate", "window:deactivate", "object:state-changed")
+REGISTERED_EVENTS = ("window:activate", "window:deactivate", "window:destroy", "object:state-changed")
+#: The window events listened for.
+WINDOW_MEMBERS = ("Activate", "Deactivate", "Destroy")
 #: The state changes listened for, each with a match rule of its own.
 WATCHED_STATES = ("active", "showing", "visible", "defunct")
 #: AtspiStateType's numbers, bits of GetState's answer.
@@ -575,6 +580,19 @@ class AtspiCaptureFeed:
 		self._reading += 1
 		self._request("children", (REGISTRY, ROOT_PATH), applications)
 
+	def _applicationAdded(self, app: Key, now: float) -> None:
+		"""An application joined the desktop: each of its windows is asked about as one that has just
+		shown, as GTK 4's first window may already be active without having said so."""
+		if app[0] == REGISTRY or app[1] != ROOT_PATH:
+			return
+
+		def windows(children: list[Key] | None) -> None:
+			for window in children or ():
+				self._noteTopLevel(window, True)
+				self._watchNewWindow(window, now)
+
+		self._request("children", app, windows)
+
 	# Looks, on the feed's thread.
 
 	def _takeLooks(self, now: float | None = None) -> None:
@@ -733,11 +751,15 @@ class AtspiCaptureFeed:
 			return False
 		connection = self._connection
 		self._closedHandler = connection.connect("closed", self._onClosed)
-		for member in ("Activate", "Deactivate"):
+		for member in WINDOW_MEMBERS:
 			self._subscribe(connection, WINDOW_EVENTS, member, None, self._onWindowSignal)
 		for state in WATCHED_STATES:
 			self._subscribe(connection, OBJECT_EVENTS, "StateChanged", state, self._onStateSignal)
 		self._subscribe(connection, BUS, "NameOwnerChanged", None, self._onNameOwnerChanged, sender=BUS)
+		# The registry says so of every application that joins, whether anyone registered for it or not.
+		self._subscribe(
+			connection, OBJECT_EVENTS, "ChildrenChanged", "add", self._onChildrenSignal, path=ROOT_PATH
+		)
 		for event in REGISTERED_EVENTS:
 			try:
 				connection.call_sync(
@@ -760,12 +782,12 @@ class AtspiCaptureFeed:
 		log.debug("AT-SPI capture feed: following the foreground on its own connection")
 		return True
 
-	def _subscribe(self, connection, interface, member, arg0, handler, sender=None) -> None:
+	def _subscribe(self, connection, interface, member, arg0, handler, sender=None, path=None) -> None:
 		from gi.repository import Gio
 
 		self._subscriptions.append(
 			connection.signal_subscribe(
-				sender, interface, member, None, arg0, Gio.DBusSignalFlags.NONE, handler
+				sender, interface, member, path, arg0, Gio.DBusSignalFlags.NONE, handler
 			)
 		)
 
@@ -811,7 +833,10 @@ class AtspiCaptureFeed:
 
 	def _onWindowSignal(self, _connection, sender, path, _interface, member, _parameters) -> None:
 		def handle(now: float) -> None:
-			self._onWindowEvent((sender, path), member == "Activate", now)
+			if member == "Destroy":
+				self._windowGone((sender, path), now)
+			else:
+				self._onWindowEvent((sender, path), member == "Activate", now)
 			self._serviceLooks(now)
 
 		self._held(handle)
@@ -823,6 +848,17 @@ class AtspiCaptureFeed:
 		def handle(now: float) -> None:
 			self._onStateChanged((sender, path), state, value, now)
 			self._serviceLooks(now)
+
+		self._held(handle)
+
+	def _onChildrenSignal(self, _connection, _sender, _path, _interface, _member, parameters) -> None:
+		child = parameters.get_child_value(3).get_variant()
+		if child.get_type_string() != "(so)":
+			return
+		app = child.unpack()
+
+		def handle(now: float) -> None:
+			self._applicationAdded(app, now)
 
 		self._held(handle)
 
