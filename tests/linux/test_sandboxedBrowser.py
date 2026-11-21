@@ -16,6 +16,7 @@ LINDA_RIG_WM=marco nix develop . -c tests/linux/rig python3 -m pytest -q tests/l
 import os
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -29,6 +30,11 @@ import webSession
 from desktopSession import DesktopSession
 from test_browseUsable import (
 	EXIT_BOUND,
+	FREEZE_MARKS,
+	LARGE_FIRST_LINE_BOUND,
+	LARGE_LAST_LINE,
+	LARGE_NAME_BOUND,
+	LARGE_TITLE,
 	SETTLE,
 	STARTUP_BOUND,
 	STEP_BOUND,
@@ -36,7 +42,9 @@ from test_browseUsable import (
 	step,
 	stopReading,
 	typeEchoed,
+	waitForRecord,
 )
+from test_chromium import ADDRESS_BAR
 
 #: What the engine logs when a program's own server could not be used and it reads it over the bus.
 OVER_THE_BUS = "over the accessibility bus, which is slower, because its peer-to-peer server at"
@@ -62,6 +70,9 @@ FLATPAK_A11Y_FILTER = (
 )
 #: Seconds the proxy has to make its socket.
 PROXY_BOUND = 10.0
+#: Seconds after Return by which the whole large page is in the buffer: the engine walks all of
+#: Chromium's in about 23 s over the bus, where peer to peer takes about 15 (test_chromium.py waits 25).
+LARGE_COMPLETE_DELAY = 35.0
 
 
 @dataclass
@@ -261,6 +272,64 @@ class TestSteamLike:
 		time.sleep(SETTLE)
 		step(session, "Down", "out of form list…")
 		step(session, "Down", "bullet  Added Bob")
+
+	def test_largePageOverTheBus(self, session: Session):
+		"""The large page of the benchmark is read from its top within test_chromium.py's bounds over the
+		bus too, without NVDA freezing, and its end is there once the rest has come."""
+		page = session.directory / "large.html"
+		subprocess.run(
+			[sys.executable, str(harness.HERE / "bench" / "makePage.py"), "large", str(page)],
+			check=True,
+			capture_output=True,
+		)
+		mark = session.desktop.mark()
+		session.desktop.press("ctrl+l")
+		waitForRecord(
+			session,
+			lambda spoken: ADDRESS_BAR in spoken,
+			since=mark,
+			timeout=STEP_BOUND,
+			what="the address bar",
+		)
+		time.sleep(SETTLE)
+		session.desktop.typeText(page.as_uri())
+		time.sleep(SETTLE)
+		mark = session.desktop.mark()
+		session.desktop.press("Return", gap=0)
+		returned = time.monotonic()
+		name = waitForRecord(
+			session,
+			lambda spoken: spoken.startswith(LARGE_TITLE),
+			since=mark,
+			timeout=STEP_BOUND,
+			what="the page's name",
+		)
+		assert name["t"] - returned <= LARGE_NAME_BOUND, (
+			f"the page's name came {name['t'] - returned:.2f} s after Return"
+		)
+		firstLine = waitForRecord(
+			session,
+			lambda spoken: "Section 0" in spoken,
+			since=mark,
+			timeout=STEP_BOUND,
+			what="the page's first line",
+		)
+		assert firstLine["t"] - returned <= LARGE_FIRST_LINE_BOUND, (
+			f"the page's first line came {firstLine['t'] - returned:.2f} s after Return"
+		)
+		time.sleep(max(0.0, returned + LARGE_COMPLETE_DELAY - time.monotonic()))
+		session.desktop.press("Control_L")
+		mark = session.desktop.mark()
+		session.desktop.press("ctrl+End", "Up")
+		waitForRecord(
+			session,
+			lambda spoken: LARGE_LAST_LINE in spoken,
+			since=mark,
+			timeout=STEP_BOUND,
+			what="the page's last line",
+		)
+		log = session.nvda.text("nvda.log")
+		assert not [mark for mark in FREEZE_MARKS if mark in log], "the watchdog found NVDA frozen"
 
 	def test_exitIsClean(self, session: Session):
 		step(session, "Insert+q", "Exit Linda…")
