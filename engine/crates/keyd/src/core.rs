@@ -27,20 +27,26 @@
 //! - The emergency chord is looked for on each key as it is read, before the key goes anywhere.
 //! - A keyboard that vanishes has a release put in line for every key it held down.
 //! - A virtual keyboard that fails is destroyed, and the kernel releases what it held.
+//! - A key the client types goes out only while the helper captures for it in front, and letting go
+//!   drops every typed key still in line instead of putting it out.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::os::fd::BorrowedFd;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::device::{Devices, Found, GrabError, InputEvent, Keyboard, ReadError, VirtualKeyboard};
 use crate::keys::{
-    Assessment, CHORD, EV_KEY, EV_SYN, KEY_CAPSLOCK, KEY_CNT, KEY_KP0, KeySet, LED_NUML, MODIFIERS,
-    READER_MODIFIERS, SYN_DROPPED, is_virtual_key, modifies,
+    Assessment, CHORD, EV_KEY, EV_SYN, KEY_CAPSLOCK, KEY_CNT, KEY_KP0, KEY_LEFTALT, KEY_RIGHTALT,
+    KEY_SYSRQ, KeySet, LED_NUML, MODIFIERS, READER_MODIFIERS, SYN_DROPPED, is_virtual_key,
+    modifies, typeable,
 };
 use crate::protocol::*;
 
 /// A connection, numbered by the loop.
 pub type ConnId = u64;
+
+/// The keys the kernel's SysRq handler takes for Alt.
+const ALTS: [u16; 2] = [KEY_LEFTALT, KEY_RIGHTALT];
 
 /// Who is at the other end of a connection, as the kernel says on the socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +142,8 @@ struct Entry {
     waited: bool,
     /// A press the helper made up after a loss of events, of a key found down.
     made_up: bool,
+    /// A key the client typed, with the tag of its TYPE, of the device TYPED_DEVICE.
+    tag: Option<u32>,
 }
 
 impl Entry {
@@ -160,6 +168,44 @@ struct Client {
     last_heard: Instant,
     /// The features it was granted.
     features: u32,
+    typing: Bucket,
+}
+
+/// The bucket of TYPED_PER_SECOND and TYPED_BURST: how many typed keys it holds, and since when it
+/// has been filling.
+struct Bucket {
+    keys: u32,
+    since: Instant,
+}
+
+impl Bucket {
+    fn full(now: Instant) -> Bucket {
+        Bucket {
+            keys: TYPED_BURST,
+            since: now,
+        }
+    }
+
+    fn fill(&mut self, now: Instant) {
+        let each = Duration::from_secs(1) / TYPED_PER_SECOND;
+        let earned = now.saturating_duration_since(self.since).as_nanos() / each.as_nanos();
+        let keys = (u128::from(self.keys) + earned).min(u128::from(TYPED_BURST)) as u32;
+        // Time spent full earns nothing, and the part of a key not yet earned is kept.
+        if keys == TYPED_BURST {
+            self.since = now;
+        } else {
+            self.since += each * (keys - self.keys);
+        }
+        self.keys = keys;
+    }
+
+    /// Takes a key out, if one is there.
+    fn take(&mut self, now: Instant) -> bool {
+        self.fill(now);
+        let there = self.keys > 0;
+        self.keys = self.keys.saturating_sub(1);
+        there
+    }
 }
 
 struct Caller {
@@ -192,8 +238,14 @@ pub struct Core<D: Devices> {
     held_back: Vec<(u32, u16)>,
     /// How many keyboards hold each key down on the virtual keyboard: a key goes down there with
     /// the first and up with the last, so a Shift held on two keyboards stays down until both let
-    /// it go.
+    /// it go. The client's typed keys count as one keyboard more.
     pressed: Vec<u16>,
+    /// The keys the client has typed down and not yet typed up, whether or not they went out.
+    typed_down: KeySet,
+    /// The kernel's SysRq handler may be active for the virtual keyboard: a press of SysRq went out
+    /// there while an Alt was down there, and an Alt still is. The kernel takes every press on the
+    /// device for a SysRq command meanwhile.
+    sysrq_active: bool,
     leds: Option<u16>,
     /// The session that was in front when the lights were last set, whose they are.
     leds_by: Option<String>,
@@ -250,6 +302,8 @@ impl<D: Devices> Core<D> {
             passed: HashMap::new(),
             held_back: Vec::new(),
             pressed: vec![0; KEY_CNT],
+            typed_down: KeySet::new(),
+            sysrq_active: false,
             leds: None,
             leds_by: None,
             next_seq: 1,
@@ -488,6 +542,7 @@ impl<D: Devices> Core<D> {
                     wants: false,
                     last_heard: now,
                     features: features & FEATURES_KNOWN,
+                    typing: Bucket::full(now),
                 });
                 // Numbered afresh, so that the first key's number tells nothing of how many keys
                 // another client had. Nothing is in line: no client, no capture.
@@ -844,9 +899,16 @@ impl<D: Devices> Core<D> {
             FromClient::Heartbeat { counter } => {
                 self.send_client(ToClient::HeartbeatEcho { counter })
             }
-            FromClient::Type { .. } => {
-                self.drop_later(Goodbye::Malformed, "TYPE is not built".into())
+            // decode_granted reads it only from a client granted the feature.
+            FromClient::Type { .. } if c.features & FEATURE_TYPING == 0 => {
+                self.drop_later(Goodbye::Malformed, "TYPE without FEATURE_TYPING".into())
             }
+            FromClient::Type {
+                tag,
+                code,
+                press,
+                mode,
+            } => self.type_key(tag, code, press, mode, now),
         }
     }
 
@@ -882,6 +944,140 @@ impl<D: Devices> Core<D> {
         {
             e.waited = true;
         }
+    }
+
+    /// TYPE: refused at once, with the reason, or put in line already passed, as a key of
+    /// TYPED_DEVICE, to be answered as it goes out.
+    fn type_key(&mut self, tag: u32, code: u16, press: bool, mode: TypeMode, now: Instant) {
+        let refused = if !self.may_type() {
+            Some(TYPED_REFUSED_STATE)
+        } else if mode == TypeMode::Decide {
+            // A key to be decided goes out only once decided, which is not built yet.
+            Some(TYPED_REFUSED_KEY)
+        } else if !press {
+            (!self.typed_down.contains(code)).then_some(TYPED_NOT_DOWN)
+        } else if !typeable(code) || self.typed_down.contains(code) || self.sysrq_refuses(code) {
+            Some(TYPED_REFUSED_KEY)
+        } else if self.line.iter().filter(|e| e.tag.is_some()).count() >= TYPED_WAITING_LIMIT {
+            Some(TYPED_REFUSED_FULL)
+        } else {
+            None
+        };
+        // A release counts toward the rate, but is never refused by it: refused, it would leave
+        // its key down on the virtual keyboard, repeating.
+        let refused = match refused {
+            None if !self.client.as_mut().is_some_and(|c| c.typing.take(now)) && press => {
+                Some(TYPED_REFUSED_FULL)
+            }
+            r => r,
+        };
+        if let Some(outcome) = refused {
+            self.send_client(ToClient::Typed {
+                tag,
+                seq: 0,
+                outcome,
+            });
+            return;
+        }
+        if press {
+            self.typed_down.insert(code);
+        } else {
+            self.typed_down.remove(code);
+        }
+        self.line.push_back(Entry {
+            seq: 0,
+            device: TYPED_DEVICE,
+            code,
+            press,
+            arrival: now,
+            verdict: press.then_some(false),
+            waited: false,
+            made_up: false,
+            tag: Some(tag),
+        });
+        self.advance(now);
+    }
+
+    /// Whether the helper types now: it captures for the client, whose session is in front, with
+    /// its virtual keyboard taken up.
+    fn may_type(&self) -> bool {
+        self.capturing
+            && !self.asleep
+            && matches!(self.virt, Virt::Ready(_))
+            && self
+                .client
+                .as_ref()
+                .is_some_and(|c| c.wants && self.session_in_front() == Some(c.session.as_str()))
+    }
+
+    fn alt_on_virtual(&self) -> bool {
+        ALTS.iter().any(|a| self.pressed[usize::from(*a)] > 0)
+    }
+
+    /// Whether a typed press of this code would be taken by the kernel's SysRq handler for the
+    /// virtual keyboard, or could make it active: any press while it may be active, SysRq while
+    /// an Alt is down there, and an Alt while SysRq is. An Alt held back counts as down, since it
+    /// goes out just before the next press does.
+    fn sysrq_refuses(&self, code: u16) -> bool {
+        let alt = self.alt_on_virtual() || self.held_back.iter().any(|(_, c)| ALTS.contains(c));
+        self.sysrq_active
+            || (code == KEY_SYSRQ && alt)
+            || (ALTS.contains(&code) && self.pressed[usize::from(KEY_SYSRQ)] > 0)
+    }
+
+    /// Puts out a typed key whose turn has come, with the rules checked again, since the keys
+    /// ahead of it may have changed what is down, and says what became of it.
+    fn put_typed(&mut self, e: Entry) -> u8 {
+        let key = (e.device, e.code);
+        if !e.press {
+            return match self.passed.remove(&key) {
+                Some(true) => {
+                    if self.release_virtual(e.code) {
+                        TYPED_OUT
+                    } else {
+                        TYPED_LOST
+                    }
+                }
+                _ => TYPED_NOT_DOWN,
+            };
+        }
+        let refused = if !self.may_type() {
+            Some(TYPED_REFUSED_STATE)
+        } else if self.sysrq_refuses(e.code) {
+            Some(TYPED_REFUSED_KEY)
+        } else {
+            None
+        };
+        if let Some(outcome) = refused {
+            self.passed.insert(key, false);
+            return outcome;
+        }
+        let before = self.pressed[usize::from(e.code)];
+        self.press_virtual(e.code);
+        let out = self.pressed[usize::from(e.code)] > before;
+        self.passed.insert(key, out);
+        if out { TYPED_OUT } else { TYPED_LOST }
+    }
+
+    /// Drops every typed key still in line, each answered TYPED_LOST: a key typed for one moment
+    /// must not land in the next. Those typed down are released with the rest of what the virtual
+    /// keyboard holds.
+    fn lose_typed(&mut self) {
+        let mut lost = Vec::new();
+        self.line.retain(|e| {
+            if let Some(tag) = e.tag {
+                lost.push((tag, e.seq));
+            }
+            e.tag.is_none()
+        });
+        for (tag, seq) in lost {
+            self.send_client(ToClient::Typed {
+                tag,
+                seq,
+                outcome: TYPED_LOST,
+            });
+        }
+        self.typed_down = KeySet::new();
     }
 
     fn client_in_front(&self) -> bool {
@@ -1103,6 +1299,8 @@ impl<D: Devices> Core<D> {
         log!("the virtual keyboard failed; it is destroyed, and the kernel releases what it held");
         self.virt = Virt::Absent;
         self.pressed.fill(0);
+        // The kernel keeps the handler's state per device, and a new virtual keyboard starts idle.
+        self.sysrq_active = false;
         if self.capturing {
             self.let_go(Some(Released::VirtualKeyboard), false, now);
             if let Some(c) = self.client.as_mut() {
@@ -1494,6 +1692,7 @@ impl<D: Devices> Core<D> {
                 verdict: None,
                 waited: false,
                 made_up: value == KEY_PRESS && flags & KEY_SYNTHETIC != 0,
+                tag: None,
             });
         }
         self.send_client(ToClient::Key(Key {
@@ -1509,6 +1708,18 @@ impl<D: Devices> Core<D> {
     fn advance(&mut self, now: Instant) {
         let mut give_up = false;
         while let Some(&e) = self.line.front() {
+            // Already passed, so no answer of the client's, and nothing of the run of unanswered
+            // presses: injecting keys must not keep a client that answers nothing.
+            if let Some(tag) = e.tag {
+                self.line.pop_front();
+                let outcome = self.put_typed(e);
+                self.send_client(ToClient::Typed {
+                    tag,
+                    seq: e.seq,
+                    outcome,
+                });
+                continue;
+            }
             if e.press {
                 let keep = match e.verdict {
                     // A run of unanswered presses ends at a press answered in time, taken in the
@@ -1552,7 +1763,9 @@ impl<D: Devices> Core<D> {
                         Some(i) => {
                             self.held_back.remove(i);
                         }
-                        None => self.release_virtual(e.code),
+                        None => {
+                            self.release_virtual(e.code);
+                        }
                     }
                 }
             }
@@ -1587,7 +1800,14 @@ impl<D: Devices> Core<D> {
             {
                 self.line.remove(i);
                 self.passed.remove(&key);
-                self.release_virtual(e.code);
+                let out = self.release_virtual(e.code);
+                if let Some(tag) = e.tag {
+                    self.send_client(ToClient::Typed {
+                        tag,
+                        seq: e.seq,
+                        outcome: if out { TYPED_OUT } else { TYPED_LOST },
+                    });
+                }
                 continue;
             }
             i += 1;
@@ -1608,29 +1828,39 @@ impl<D: Devices> Core<D> {
             return;
         };
         let held = &mut self.pressed[usize::from(code)];
-        if *held == 0
-            && let Err(e) = v.emit(code, 1)
-        {
+        let first = *held == 0;
+        if first && let Err(e) = v.emit(code, 1) {
             log!("the virtual keyboard did not take a key: {e}");
             self.virtual_broken = true;
             return;
         }
         *held += 1;
+        if first && code == KEY_SYSRQ && self.alt_on_virtual() {
+            self.sysrq_active = true;
+        }
     }
 
-    fn release_virtual(&mut self, code: u16) {
+    /// Lets a key up on the virtual keyboard, or counts one keyboard fewer holding it down; false
+    /// when the virtual keyboard did not take the release.
+    fn release_virtual(&mut self, code: u16) -> bool {
         let held = &mut self.pressed[usize::from(code)];
         if *held == 0 {
-            return;
+            return true;
         }
         *held -= 1;
-        if *held == 0
+        let last = *held == 0;
+        if last && ALTS.contains(&code) && !self.alt_on_virtual() {
+            self.sysrq_active = false;
+        }
+        if last
             && let Virt::Ready(v) = &mut self.virt
             && let Err(e) = v.emit(code, 0)
         {
             log!("the virtual keyboard did not take a key: {e}");
             self.virtual_broken = true;
+            return false;
         }
+        true
     }
 
     /// Lets go of every keyboard. The line is settled as if no more verdicts were coming, every
@@ -1647,6 +1877,7 @@ impl<D: Devices> Core<D> {
     /// keyboard's events as its ungrab begins, so what comes after reaches the desktop from the
     /// keyboard itself, in order after the taps.
     fn let_go(&mut self, why: Option<Released>, drop_undecided: bool, now: Instant) {
+        self.lose_typed();
         if drop_undecided {
             self.line.clear();
         } else {
@@ -1667,6 +1898,7 @@ impl<D: Devices> Core<D> {
                 }
             }
         }
+        self.sysrq_active = false;
         self.passed.clear();
         // Never on the virtual keyboard, they need no release, and must not go out as taps.
         self.held_back.clear();

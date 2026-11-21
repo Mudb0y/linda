@@ -3883,3 +3883,652 @@ fn fault_the_chords_last_key_is_not_told_up_without_being_told_down() {
          rest of the batch, was told: {told:?}"
     );
 }
+
+// Typing, with FEATURE_TYPING. No real client is granted it yet, so these grant it by hand to the
+// client T::capturing admitted.
+
+const KEY_B: u16 = 48;
+
+impl T {
+    fn grant_typing(&mut self) {
+        self.core.client.as_mut().expect("a client").features |= FEATURE_TYPING;
+    }
+
+    fn typing() -> (T, u32) {
+        let (mut t, k) = T::capturing();
+        t.grant_typing();
+        (t, k)
+    }
+
+    fn type_key(&mut self, tag: u32, code: u16, press: bool) {
+        self.send(FromClient::Type {
+            tag,
+            code,
+            press,
+            mode: TypeMode::Inject,
+        });
+    }
+
+    /// The TYPED answers since last asked, as tag and outcome, with everything else dropped.
+    fn typed(&mut self) -> Vec<(u32, u8)> {
+        self.sent()
+            .into_iter()
+            .filter_map(|m| match m {
+                ToClient::Typed { tag, seq, outcome } => {
+                    assert_eq!(seq, 0, "an injected key is sent as no KEY");
+                    Some((tag, outcome))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Passes on the press of the key just read.
+    fn pass_last(&mut self) {
+        let seq = self.last_seq();
+        self.verdict(seq, false);
+    }
+}
+
+/// Neither a press of SysRq while an Alt was down on the virtual keyboard, nor a press of an Alt
+/// while SysRq was down there, in what it put out.
+fn no_sysrq_with_alt(emitted: &[(u16, i32)]) {
+    let mut down = KeySet::new();
+    for (code, value) in emitted {
+        if *value == 1 {
+            let alt = down.contains(KEY_LEFTALT) || down.contains(KEY_RIGHTALT);
+            assert!(!(*code == KEY_SYSRQ && alt), "SysRq under Alt: {emitted:?}");
+            let alt_key = *code == KEY_LEFTALT || *code == KEY_RIGHTALT;
+            assert!(
+                !(alt_key && down.contains(KEY_SYSRQ)),
+                "Alt over SysRq: {emitted:?}"
+            );
+            down.insert(*code);
+        } else if *value == 0 {
+            down.remove(*code);
+        }
+    }
+}
+
+#[test]
+fn a_typed_key_goes_out_in_line_behind_the_keys_read_before_it() {
+    let (mut t, k) = T::typing();
+    t.type_key(1, KEY_A, true);
+    assert_eq!(t.typed(), vec![(1, TYPED_OUT)]);
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1)]);
+    t.type_key(2, KEY_A, false);
+    assert_eq!(t.typed(), vec![(2, TYPED_OUT)]);
+    t.press(k, KEY_T);
+    let seq = t.last_seq();
+    t.type_key(3, KEY_C, true);
+    t.type_key(4, KEY_C, false);
+    assert_eq!(
+        t.typed(),
+        vec![],
+        "went out before the press read before it"
+    );
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1), (KEY_A, 0)]);
+    t.verdict(seq, false);
+    assert_eq!(t.typed(), vec![(3, TYPED_OUT), (4, TYPED_OUT)]);
+    assert_eq!(
+        t.w.emitted()[2..],
+        [(KEY_T, 1), (KEY_C, 1), (KEY_C, 0)],
+        "{:?}",
+        t.w.emitted()
+    );
+    // No KEY was sent for an injected key, and no number of the client's spent on one.
+    t.release(k, KEY_T);
+    assert_eq!(
+        t.keys().iter().map(|k| k.seq).collect::<Vec<_>>(),
+        vec![seq + 1]
+    );
+    assert!(t.w.virtual_down().is_empty());
+}
+
+#[test]
+fn type_from_a_client_not_granted_typing_drops_it_and_lets_go() {
+    let (mut t, k) = T::capturing();
+    t.press(k, KEY_LEFTSHIFT);
+    t.pass_last();
+    t.type_key(1, KEY_A, true);
+    let sent = t.sent();
+    assert_eq!(goodbye_reason(&sent), Some(Goodbye::Malformed), "{sent:?}");
+    assert!(t.closed(CLIENT));
+    t.assert_let_go();
+    assert_eq!(t.w.emitted(), vec![(KEY_LEFTSHIFT, 1), (KEY_LEFTSHIFT, 0)]);
+}
+
+#[test]
+fn typing_is_refused_unless_the_helper_captures_for_the_client_in_front() {
+    let mut t = T::new();
+    let k = t.w.plug("keyboard");
+    t.admit(CLIENT);
+    t.grant_typing();
+    t.type_key(1, KEY_A, true);
+    t.send(FromClient::Start);
+    t.type_key(2, KEY_A, true);
+    assert_eq!(
+        t.typed(),
+        vec![(1, TYPED_REFUSED_STATE), (2, TYPED_REFUSED_STATE)],
+        "before START and while the virtual keyboard settles"
+    );
+    t.pass(VIRTUAL_SETTLE);
+    assert!(t.w.grabbed(k));
+    t.type_key(3, KEY_A, true);
+    t.type_key(4, KEY_A, false);
+    assert_eq!(t.typed(), vec![(3, TYPED_OUT), (4, TYPED_OUT)]);
+    t.send(FromClient::Stop);
+    t.type_key(5, KEY_A, true);
+    assert_eq!(t.typed(), vec![(5, TYPED_REFUSED_STATE)], "after STOP");
+    t.send(FromClient::Start);
+    assert!(t.w.grabbed(k));
+    t.logind(front("c1", 1000));
+    t.type_key(6, KEY_A, true);
+    assert_eq!(
+        t.typed(),
+        vec![(6, TYPED_REFUSED_STATE)],
+        "in the background"
+    );
+    t.logind(front(SESSION, 1000));
+    assert!(t.w.grabbed(k));
+    t.console(3);
+    t.type_key(7, KEY_A, true);
+    assert_eq!(
+        t.typed(),
+        vec![(7, TYPED_REFUSED_STATE)],
+        "on another console before logind says so"
+    );
+    t.console(X_CONSOLE);
+    t.logind(front(SESSION, 1000));
+    t.core.sleeping(true, t.now);
+    t.take();
+    t.type_key(8, KEY_A, true);
+    assert_eq!(t.typed(), vec![(8, TYPED_REFUSED_STATE)], "asleep");
+    t.core.sleeping(false, t.now);
+    t.take();
+    assert!(t.w.grabbed(k));
+    for c in CHORD.map(|keys| keys[0]) {
+        t.press(k, c);
+    }
+    assert!(t.sent().contains(&released(Released::Emergency)));
+    t.type_key(9, KEY_A, true);
+    assert_eq!(
+        t.typed(),
+        vec![(9, TYPED_REFUSED_STATE)],
+        "after the emergency chord"
+    );
+    let a: Vec<_> = t.w.emitted().into_iter().filter(|e| e.0 == KEY_A).collect();
+    assert_eq!(a, vec![(KEY_A, 1), (KEY_A, 0)]);
+    assert!(!t.closed(CLIENT));
+}
+
+#[test]
+fn typing_needs_no_keyboard_held() {
+    // One keyboard another program holds, and none at all.
+    for plug in [true, false] {
+        let mut t = T::new();
+        if plug {
+            let k = t.w.plug("keyboard");
+            t.w.set_busy(k, true);
+        }
+        t.admit(CLIENT);
+        t.grant_typing();
+        t.send(FromClient::Start);
+        t.pass(VIRTUAL_SETTLE);
+        assert!(!t.w.any_grabbed());
+        t.type_key(1, KEY_A, true);
+        t.type_key(2, KEY_A, false);
+        assert_eq!(t.typed(), vec![(1, TYPED_OUT), (2, TYPED_OUT)]);
+        assert_eq!(t.w.emitted(), vec![(KEY_A, 1), (KEY_A, 0)]);
+    }
+}
+
+#[test]
+fn typed_keys_waiting_as_the_helper_lets_go_are_lost_and_never_go_out() {
+    for way in [
+        "stop", "console", "logind", "sleep", "chord", "virtual", "gone",
+    ] {
+        let (mut t, k) = T::typing();
+        t.type_key(1, KEY_LEFTSHIFT, true);
+        assert_eq!(t.typed(), vec![(1, TYPED_OUT)]);
+        t.press(k, KEY_T);
+        let seq = t.last_seq();
+        t.type_key(2, KEY_A, true);
+        t.type_key(3, KEY_LEFTSHIFT, false);
+        assert_eq!(t.typed(), vec![], "{way}");
+        let reason = match way {
+            "stop" => {
+                t.send(FromClient::Stop);
+                Some(Released::Stopped)
+            }
+            "console" => {
+                t.console(3);
+                Some(Released::Background)
+            }
+            "logind" => {
+                t.logind(front("c1", 1000));
+                Some(Released::Background)
+            }
+            "sleep" => {
+                t.core.sleeping(true, t.now);
+                t.take();
+                Some(Released::Background)
+            }
+            "chord" => {
+                for c in CHORD.map(|keys| keys[0]) {
+                    t.press(k, c);
+                }
+                Some(Released::Emergency)
+            }
+            "virtual" => {
+                t.w.fail_emit(true);
+                t.verdict(seq, false);
+                Some(Released::VirtualKeyboard)
+            }
+            _ => {
+                t.core.disconnected(CLIENT, t.now);
+                t.take();
+                None
+            }
+        };
+        let sent = t.sent();
+        let lost: Vec<usize> = sent
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                matches!(
+                    m,
+                    ToClient::Typed {
+                        outcome: TYPED_LOST,
+                        ..
+                    }
+                )
+            })
+            .map(|(i, _)| i)
+            .collect();
+        match reason {
+            Some(reason) => {
+                let at = sent.iter().position(|m| *m == released(reason));
+                assert!(at.is_some(), "{way}: {sent:?}");
+                assert_eq!(lost.len(), 2, "{way}: {sent:?}");
+                assert!(lost.iter().all(|i| Some(*i) < at), "{way}: {sent:?}");
+                assert!(
+                    sent.iter().all(
+                        |m| !matches!(m, ToClient::Typed { outcome, .. } if *outcome != TYPED_LOST)
+                    ),
+                    "{way}: {sent:?}"
+                );
+            }
+            None => assert!(sent.is_empty(), "{way}: {sent:?}"),
+        }
+        assert!(
+            t.w.emitted().iter().all(|e| e.0 != KEY_A),
+            "{way}: the typed key went out: {:?}",
+            t.w.emitted()
+        );
+        t.assert_let_go();
+    }
+}
+
+#[test]
+fn only_the_keys_linda_knows_are_typed_and_never_a_power_key() {
+    let (mut t, _k) = T::typing();
+    let refused = [
+        KEY_POWER,
+        KEY_SLEEP,
+        KEY_SUSPEND,
+        KEY_POWER2,
+        KEY_RESTART,
+        0x160,
+        KEY_MAX,
+    ];
+    for (tag, code) in refused.iter().enumerate() {
+        t.type_key(tag as u32, *code, true);
+    }
+    let want: Vec<(u32, u8)> = (0..refused.len() as u32)
+        .map(|tag| (tag, TYPED_REFUSED_KEY))
+        .collect();
+    assert_eq!(t.typed(), want);
+    t.type_key(100, KEY_POWER, false);
+    assert_eq!(t.typed(), vec![(100, TYPED_NOT_DOWN)]);
+    assert!(t.w.emitted().is_empty());
+    assert!(!t.closed(CLIENT));
+    for code in TYPEABLE {
+        t.type_key(u32::from(code), code, true);
+        t.type_key(u32::from(code), code, false);
+        assert_eq!(
+            t.typed(),
+            vec![(u32::from(code), TYPED_OUT), (u32::from(code), TYPED_OUT)],
+            "{code}"
+        );
+        // Within the rate.
+        t.pass(ms(20));
+    }
+    assert_eq!(t.w.emitted().len(), 2 * TYPEABLE.len());
+    // A code the virtual keyboard cannot send breaks the protocol.
+    t.type_key(200, 0x110, true);
+    assert_eq!(goodbye_reason(&t.sent()), Some(Goodbye::Malformed));
+    assert!(t.closed(CLIENT));
+    t.assert_let_go();
+}
+
+#[test]
+fn a_typed_key_goes_down_once_and_up_once() {
+    let (mut t, _k) = T::typing();
+    t.type_key(1, KEY_A, false);
+    t.type_key(2, KEY_A, true);
+    t.type_key(3, KEY_A, true);
+    t.type_key(4, KEY_A, false);
+    t.type_key(5, KEY_A, false);
+    assert_eq!(
+        t.typed(),
+        vec![
+            (1, TYPED_NOT_DOWN),
+            (2, TYPED_OUT),
+            (3, TYPED_REFUSED_KEY),
+            (4, TYPED_OUT),
+            (5, TYPED_NOT_DOWN)
+        ]
+    );
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1), (KEY_A, 0)]);
+}
+
+#[test]
+fn a_key_typed_down_and_held_on_a_keyboard_is_one_key() {
+    let (mut t, k) = T::typing();
+    t.press(k, KEY_A);
+    t.pass_last();
+    t.type_key(1, KEY_A, true);
+    assert_eq!(t.typed(), vec![(1, TYPED_OUT)]);
+    t.release(k, KEY_A);
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1)]);
+    t.type_key(2, KEY_A, false);
+    assert_eq!(t.typed(), vec![(2, TYPED_OUT)]);
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1), (KEY_A, 0)]);
+}
+
+#[test]
+fn a_typed_release_goes_ahead_of_waiting_presses_unless_it_is_a_modifiers() {
+    let (mut t, k) = T::typing();
+    t.type_key(1, KEY_A, true);
+    t.type_key(2, KEY_LEFTSHIFT, true);
+    assert_eq!(t.typed(), vec![(1, TYPED_OUT), (2, TYPED_OUT)]);
+    t.press(k, KEY_T);
+    let seq = t.last_seq();
+    t.type_key(3, KEY_A, false);
+    t.type_key(4, KEY_LEFTSHIFT, false);
+    assert_eq!(t.typed(), vec![(3, TYPED_OUT)]);
+    t.verdict(seq, false);
+    assert_eq!(t.typed(), vec![(4, TYPED_OUT)]);
+    assert_eq!(
+        t.w.emitted(),
+        vec![
+            (KEY_A, 1),
+            (KEY_LEFTSHIFT, 1),
+            (KEY_A, 0),
+            (KEY_T, 1),
+            (KEY_LEFTSHIFT, 0)
+        ]
+    );
+}
+
+#[test]
+fn typed_sysrq_is_refused_while_an_alt_is_down_and_a_typed_alt_while_sysrq_is() {
+    let (mut t, k) = T::typing();
+    for alt in [KEY_LEFTALT, KEY_RIGHTALT] {
+        t.press(k, alt);
+        t.pass_last();
+        t.type_key(1, KEY_SYSRQ, true);
+        assert_eq!(t.typed(), vec![(1, TYPED_REFUSED_KEY)], "{alt}");
+        t.release(k, alt);
+        t.type_key(2, KEY_SYSRQ, true);
+        t.type_key(3, KEY_SYSRQ, false);
+        assert_eq!(t.typed(), vec![(2, TYPED_OUT), (3, TYPED_OUT)], "{alt}");
+    }
+    // An Alt typed down counts as one held.
+    t.type_key(4, KEY_LEFTALT, true);
+    t.type_key(5, KEY_SYSRQ, true);
+    t.type_key(6, KEY_LEFTALT, false);
+    assert_eq!(
+        t.typed(),
+        vec![(4, TYPED_OUT), (5, TYPED_REFUSED_KEY), (6, TYPED_OUT)]
+    );
+    // SysRq held by the user.
+    t.press(k, KEY_SYSRQ);
+    t.pass_last();
+    t.type_key(7, KEY_LEFTALT, true);
+    t.type_key(8, KEY_RIGHTALT, true);
+    t.type_key(9, KEY_A, true);
+    t.type_key(10, KEY_A, false);
+    assert_eq!(
+        t.typed(),
+        vec![
+            (7, TYPED_REFUSED_KEY),
+            (8, TYPED_REFUSED_KEY),
+            (9, TYPED_OUT),
+            (10, TYPED_OUT)
+        ]
+    );
+    t.release(k, KEY_SYSRQ);
+    t.type_key(11, KEY_LEFTALT, true);
+    t.type_key(12, KEY_LEFTALT, false);
+    assert_eq!(t.typed(), vec![(11, TYPED_OUT), (12, TYPED_OUT)]);
+    no_sysrq_with_alt(&t.w.emitted());
+    assert!(t.w.virtual_down().is_empty());
+}
+
+#[test]
+fn no_typed_press_while_the_kernels_sysrq_handler_may_be_active() {
+    let (mut t, k) = T::typing();
+    t.type_key(1, KEY_A, true);
+    assert_eq!(t.typed(), vec![(1, TYPED_OUT)]);
+    // Alt+Print, a screenshot to the desktop and SysRq to the kernel, with both Alts down.
+    t.press(k, KEY_LEFTALT);
+    t.pass_last();
+    t.press(k, KEY_RIGHTALT);
+    t.pass_last();
+    t.press(k, KEY_SYSRQ);
+    t.pass_last();
+    t.release(k, KEY_SYSRQ);
+    t.type_key(2, KEY_B, true);
+    t.type_key(3, KEY_RIGHTALT, true);
+    // A release is no command.
+    t.type_key(4, KEY_A, false);
+    assert_eq!(
+        t.typed(),
+        vec![
+            (2, TYPED_REFUSED_KEY),
+            (3, TYPED_REFUSED_KEY),
+            (4, TYPED_OUT)
+        ]
+    );
+    t.release(k, KEY_LEFTALT);
+    t.type_key(5, KEY_B, true);
+    assert_eq!(
+        t.typed(),
+        vec![(5, TYPED_REFUSED_KEY)],
+        "AltGr is still down"
+    );
+    t.release(k, KEY_RIGHTALT);
+    t.type_key(6, KEY_B, true);
+    t.type_key(7, KEY_B, false);
+    assert_eq!(t.typed(), vec![(6, TYPED_OUT), (7, TYPED_OUT)]);
+    let b: Vec<_> = t.w.emitted().into_iter().filter(|e| e.0 == KEY_B).collect();
+    assert_eq!(b, vec![(KEY_B, 1), (KEY_B, 0)]);
+}
+
+#[test]
+fn the_sysrq_rules_are_checked_again_as_the_typed_press_goes_out() {
+    let (mut t, k) = T::typing();
+    // Nothing is down on the virtual keyboard as these come; Alt goes out ahead of them.
+    t.press(k, KEY_LEFTALT);
+    let alt = t.last_seq();
+    t.type_key(1, KEY_SYSRQ, true);
+    t.type_key(2, KEY_SYSRQ, false);
+    assert_eq!(t.typed(), vec![]);
+    t.verdict(alt, false);
+    assert_eq!(t.typed(), vec![(1, TYPED_REFUSED_KEY), (2, TYPED_NOT_DOWN)]);
+    assert_eq!(t.w.emitted(), vec![(KEY_LEFTALT, 1)]);
+    // The user's SysRq goes out under Alt ahead of a typed key, which the kernel would take as a
+    // command.
+    t.press(k, KEY_SYSRQ);
+    let sysrq = t.last_seq();
+    t.type_key(3, KEY_B, true);
+    t.type_key(4, KEY_B, false);
+    assert_eq!(t.typed(), vec![]);
+    t.verdict(sysrq, false);
+    assert_eq!(t.typed(), vec![(3, TYPED_REFUSED_KEY), (4, TYPED_NOT_DOWN)]);
+    assert!(t.w.emitted().iter().all(|e| e.0 != KEY_B));
+    // Refused, the press took no place: the key may be typed again once the handler is done.
+    t.release(k, KEY_SYSRQ);
+    t.release(k, KEY_LEFTALT);
+    t.type_key(5, KEY_B, true);
+    t.type_key(6, KEY_B, false);
+    assert_eq!(t.typed(), vec![(5, TYPED_OUT), (6, TYPED_OUT)]);
+}
+
+#[test]
+fn a_made_up_alt_held_back_counts_as_down_for_typed_sysrq() {
+    let (mut t, k) = T::typing();
+    t.made_up_and_passed(k, &[KEY_LEFTALT]);
+    t.type_key(1, KEY_SYSRQ, true);
+    assert_eq!(t.typed(), vec![(1, TYPED_REFUSED_KEY)]);
+    assert_eq!(t.w.emitted(), vec![]);
+}
+
+#[test]
+fn at_most_sixty_four_typed_keys_wait_in_line() {
+    let (mut t, k) = T::typing();
+    t.press(k, KEY_T);
+    let seq = t.last_seq();
+    let codes: Vec<u16> = TYPEABLE
+        .iter()
+        .copied()
+        .filter(|c| ![KEY_T, KEY_SYSRQ, KEY_LEFTALT, KEY_RIGHTALT].contains(c))
+        .take(TYPED_WAITING_LIMIT + 1)
+        .collect();
+    for (tag, code) in codes.iter().enumerate() {
+        t.type_key(tag as u32, *code, true);
+    }
+    assert_eq!(
+        t.typed(),
+        vec![(TYPED_WAITING_LIMIT as u32, TYPED_REFUSED_FULL)]
+    );
+    // The release of a key typed down is taken all the same.
+    t.type_key(100, codes[0], false);
+    assert_eq!(t.typed(), vec![]);
+    t.verdict(seq, false);
+    let typed = t.typed();
+    assert_eq!(typed.len(), TYPED_WAITING_LIMIT + 1, "{typed:?}");
+    assert!(typed.iter().all(|(_, o)| *o == TYPED_OUT), "{typed:?}");
+    assert_eq!(typed.last(), Some(&(100, TYPED_OUT)));
+    for code in &codes[1..TYPED_WAITING_LIMIT] {
+        t.type_key(1, *code, false);
+    }
+    assert_eq!(t.typed().len(), TYPED_WAITING_LIMIT - 1);
+    t.release(k, KEY_T);
+    assert!(t.w.virtual_down().is_empty());
+}
+
+#[test]
+fn typing_is_held_to_a_hundred_keys_a_second_in_bursts_of_two_hundred() {
+    let (mut t, _k) = T::typing();
+    let pairs = |t: &mut T, n: u32| {
+        for _ in 0..n {
+            t.type_key(1, KEY_A, true);
+            t.type_key(2, KEY_A, false);
+        }
+    };
+    pairs(&mut t, TYPED_BURST / 2);
+    let typed = t.typed();
+    assert_eq!(typed.len(), TYPED_BURST as usize);
+    assert!(typed.iter().all(|(_, o)| *o == TYPED_OUT), "{typed:?}");
+    t.type_key(3, KEY_A, true);
+    assert_eq!(t.typed(), vec![(3, TYPED_REFUSED_FULL)]);
+    let per_key = Duration::from_secs(1) / TYPED_PER_SECOND;
+    t.pass(per_key);
+    t.type_key(4, KEY_A, true);
+    t.type_key(5, KEY_B, true);
+    // A release of a key typed down is never refused for the rate, the bucket empty.
+    t.type_key(6, KEY_A, false);
+    assert_eq!(
+        t.typed(),
+        vec![(4, TYPED_OUT), (5, TYPED_REFUSED_FULL), (6, TYPED_OUT)]
+    );
+    t.pass(Duration::from_secs(1));
+    pairs(&mut t, TYPED_PER_SECOND / 2);
+    t.type_key(7, KEY_A, true);
+    let typed = t.typed();
+    assert_eq!(typed.len(), TYPED_PER_SECOND as usize + 1);
+    assert_eq!(typed.last(), Some(&(7, TYPED_REFUSED_FULL)));
+    // However long the pause, no more than a burst at once.
+    t.pass(Duration::from_secs(10));
+    pairs(&mut t, TYPED_BURST / 2);
+    t.type_key(8, KEY_A, true);
+    let typed = t.typed();
+    assert_eq!(typed.len(), TYPED_BURST as usize + 1);
+    assert_eq!(typed.last(), Some(&(8, TYPED_REFUSED_FULL)));
+    assert!(t.w.virtual_down().is_empty());
+}
+
+#[test]
+fn typed_keys_count_neither_toward_the_emergency_chord_nor_against_it() {
+    let (mut t, k) = T::typing();
+    for (tag, c) in [(1, KEY_BACKSPACE), (2, KEY_ESC), (3, KEY_ENTER)] {
+        t.type_key(tag, c, true);
+    }
+    assert_eq!(t.typed().len(), 3);
+    t.press(k, KEY_BACKSPACE);
+    t.pass_last();
+    t.press(k, KEY_ESC);
+    t.pass_last();
+    assert!(
+        !t.sent().contains(&released(Released::Emergency)),
+        "typed keys made the chord"
+    );
+    assert!(t.w.grabbed(k));
+    t.press(k, KEY_ENTER);
+    assert!(t.sent().contains(&released(Released::Emergency)));
+    t.assert_let_go();
+}
+
+#[test]
+fn injected_keys_do_not_end_a_run_of_unanswered_presses() {
+    let (mut t, k) = T::typing();
+    let mut elapsed = Duration::ZERO;
+    while !t.closed(CLIENT) {
+        t.press(k, KEY_T);
+        t.pass(ms(50));
+        t.type_key(1, KEY_A, true);
+        t.type_key(2, KEY_A, false);
+        t.pass(ms(100));
+        t.release(k, KEY_T);
+        t.pass(ms(150));
+        elapsed += ms(300);
+        assert!(elapsed < Duration::from_secs(3), "never dropped");
+    }
+    assert!(elapsed >= UNANSWERED_SPAN, "dropped after {elapsed:?}");
+    assert_eq!(goodbye_reason(&t.sent()), Some(Goodbye::Unanswered));
+    t.assert_let_go();
+}
+
+#[test]
+fn a_typed_key_to_be_decided_is_refused_until_the_helper_decides_typed_keys() {
+    let (mut t, _k) = T::typing();
+    t.send(FromClient::Type {
+        tag: 1,
+        code: KEY_A,
+        press: true,
+        mode: TypeMode::Decide,
+    });
+    assert_eq!(
+        t.sent(),
+        vec![ToClient::Typed {
+            tag: 1,
+            seq: 0,
+            outcome: TYPED_REFUSED_KEY
+        }]
+    );
+    assert!(!t.closed(CLIENT));
+    assert!(t.w.emitted().is_empty());
+}
