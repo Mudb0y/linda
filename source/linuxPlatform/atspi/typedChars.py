@@ -404,6 +404,8 @@ class _PassedKey(NamedTuple):
 	#: Whether it came after a key that typed nothing, as a dead key or the compose key does, and may be
 	#: part of a character that key began.
 	composing: bool
+	#: How many keys that type nothing had gone down before it.
+	textlessBefore: int
 
 
 class LayoutCheck:
@@ -431,6 +433,7 @@ class LayoutCheck:
 		self._lock = threading.Lock()
 		self._pending: deque[_PassedKey] = deque(maxlen=LAYOUT_PENDING_LIMIT)
 		self._composing = False
+		self._textless = 0
 		#: Of the last comparisons, whether each differed.
 		self._recent: deque[bool] = deque(maxlen=LAYOUT_SPAN)
 		self.matches = 0
@@ -449,11 +452,13 @@ class LayoutCheck:
 		if event.typing and event.text >= " ":
 			if event.reachedApplication:
 				with self._lock:
-					self._pending.append(_PassedKey(event.text, event.time, self._composing))
+					self._pending.append(_PassedKey(event.text, event.time, self._composing, self._textless))
 		elif event.vkCode not in self._modifiers:
 			# A dead key or the compose key, or one that moves or edits: what the next keys insert may be
 			# a character they make together.
-			self._composing = True
+			with self._lock:
+				self._composing = True
+				self._textless += 1
 		return True
 
 	def compare(self, focus, text: str | None) -> None:
@@ -503,15 +508,14 @@ class LayoutCheck:
 				# The keys before it inserted nothing here, or what they inserted came before them.
 				for _ in range(index + 1):
 					pending.popleft()
-				if key.composing:
-					self._composing = False
+				self._endComposing(key)
 				return False
 		for index, key in enumerate(pending):
 			if key.composing:
 				# Most likely the character a dead key or the compose key made with it.
 				for _ in range(index + 1):
 					pending.popleft()
-				self._composing = False
+				self._endComposing(key)
 				return None
 		if now - pending[0].time > TYPING_WINDOW:
 			# The oldest key's character may yet come, late, and this may be that of a key given up on.
@@ -519,6 +523,12 @@ class LayoutCheck:
 			return None
 		pending.popleft()
 		return True
+
+	def _endComposing(self, key: _PassedKey) -> None:
+		"""Mark the keys from now on as beginning no character, now that key's character has come, unless
+		a key that types nothing went down after key and may begin one."""
+		if key.composing and key.textlessBefore == self._textless:
+			self._composing = False
 
 	def _say(self) -> None:
 		import queueHandler

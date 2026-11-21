@@ -276,7 +276,8 @@ result["said"] = said
 def test_aDeadKeysCharacterIsNotAMismatch(tmp_path: Path):
 	"""A dead key types nothing, and the letter after it inserts the accented one; the compose key and
 	the two keys after it insert one character. Neither is a mismatch, and the keys after are compared
-	as ever."""
+	as ever. A dead key that goes down before NVDA gets to the insert of the letter before it still
+	marks the letter after it."""
 	value = runCheck(
 		tmp_path,
 		r"""
@@ -298,9 +299,22 @@ key("", vk=0xA0)
 key("T")
 insert("Y")
 result["after shift"] = counts()
+key("", vk=0x08)
+key("a")
+key("", vk=0xDE)
+insert("a")
+key("e")
+insert("é")
+result["dead before insert"] = counts()
 """,
 	)
-	assert value == {"dead": [0, 0], "after dead": [1, 0], "compose": [2, 0], "after shift": [2, 1]}
+	assert value == {
+		"dead": [0, 0],
+		"after dead": [1, 0],
+		"compose": [2, 0],
+		"after shift": [2, 1],
+		"dead before insert": [3, 1],
+	}
 
 
 def test_anX11SessionHasNoCheck(tmp_path: Path):
