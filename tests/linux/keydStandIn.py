@@ -331,7 +331,11 @@ class _CompositorSink:
 		self._server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 		# A stalled compositor fails the test, instead of hanging it and every one after.
 		self._server.settimeout(10)
-		self._server.connect(waylandKeyboard.socketPath())
+		try:
+			self._server.connect(waylandKeyboard.socketPath())
+		except OSError:
+			self._server.close()
+			raise
 		self._answers = self._server.makefile("r", encoding="utf-8")
 		#: (code, down, virtual) of each key put out, in order.
 		self.sent: list[tuple[int, bool, bool]] = []

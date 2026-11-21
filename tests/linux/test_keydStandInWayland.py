@@ -211,9 +211,15 @@ class Served:
 		options = {"heartbeatTimeout": 60, "verdictTimeout": 3.0, "unansweredSpan": 30.0, **options}
 		if features is not None:
 			options["features"] = features
-		keyboard = StandIn(path, sink=sink, **options).start()
+		try:
+			keyboard = StandIn(path, sink=sink, **options).start()
+		except BaseException:
+			sink.close()
+			raise
+		# Closed at the end even when the client never gets in.
+		self.pairs.append((keyboard, None))
 		client = Client(path, asked, decide, start=start)
-		self.pairs.append((keyboard, client))
+		self.pairs[-1] = (keyboard, client)
 		if start:
 			assert client.held.wait(5), "the stand-in never held the keyboard"
 		return keyboard, client
@@ -855,6 +861,18 @@ def given(probe, act: Callable[[], None]) -> tuple[list[str], str | None]:
 	lines = probe.drain()
 	texts = [line.removeprefix("text ") for line in lines if line.startswith("text ")]
 	return [line for line in lines if not line.startswith("text ")], (texts[-1] if texts else None)
+
+
+def test_aSinkThatCannotReachTheKeyServerLeavesNoSocket(tmp_path: Path, monkeypatch) -> None:
+	import waylandKeyboard
+
+	monkeypatch.setenv("LINDA_RIG_COMPOSITOR", "sway")
+	monkeypatch.setattr(waylandKeyboard, "socketPath", lambda: str(tmp_path / "absent"))
+	before = set(os.listdir("/proc/self/fd"))
+	# The failure is kept, and with it the half-made sink, so that only closing frees the socket.
+	with pytest.raises(OSError) as refused:
+		keydStandIn.SwaySink()
+	assert set(os.listdir("/proc/self/fd")) <= before, refused.value
 
 
 @compositors
