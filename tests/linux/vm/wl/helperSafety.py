@@ -68,6 +68,10 @@ CHORD_BACK = 1.0
 OPENED = "/tmp/ground/virtualOpened.jsonl"
 CONSOLE_TEXT = "/tmp/ground/console.txt"
 CONSOLE_LETTERS = "abcdefghijklmnopqrstuvwxyz"
+#: Seconds between the letters typed across a switch. Under GNOME on a loaded host the kernel put the
+#: console in front a second after chvt, where the X server lets it go at once, so the letters run
+#: some five seconds, to go on well past it.
+CONSOLE_GAP = 0.2
 #: Taps typed while the helper is stopped, one every STREAM_GAP seconds: past systemd's watchdog.
 STREAM_TAPS = 80
 STREAM_GAP = 0.05
@@ -582,7 +586,11 @@ def console(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 	with ground.subtest("a switch to a text console lets go as the kernel makes it"):
 		mark = ground.mark()
 		steps = json.dumps(
-			[s for c in CONSOLE_LETTERS for s in ({"tap": f"KEY_{c.upper()}", "hold": 0.01}, {"sleep": 0.05})]
+			[
+				s
+				for c in CONSOLE_LETTERS
+				for s in ({"tap": f"KEY_{c.upper()}", "hold": 0.01}, {"sleep": CONSOLE_GAP})
+			]
 		)
 		switched = float(
 			ground.shell(
