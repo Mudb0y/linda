@@ -166,15 +166,22 @@ def key(keyCode: int, pressed: bool) -> None:
 
 
 def press(*chords: str, gap: float = 0.15, hold: float = 0.03) -> None:
-	"""Press each chord in turn, as "Tab", "Insert+t" or "ctrl+alt+t", with gap seconds after each."""
+	"""Press each chord in turn, as "Tab", "Insert+t" or "ctrl+alt+t", with gap seconds after each.
+
+	A key that fails to go down still lets go of those before it: the rig's keyboard outlives the test,
+	and a Shift or Alt left held would change every key a later test presses."""
 	for chord in chords:
 		codes = [code(name) for name in chord.split("+")]
-		for c in codes:
-			key(c, True)
-			time.sleep(hold)
-		for c in reversed(codes):
-			key(c, False)
-			time.sleep(hold)
+		held: list[int] = []
+		try:
+			for c in codes:
+				key(c, True)
+				held.append(c)
+				time.sleep(hold)
+		finally:
+			while held:
+				key(held.pop(), False)
+				time.sleep(hold)
 		time.sleep(gap)
 
 
