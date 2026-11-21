@@ -133,6 +133,34 @@ MODIFIERS_KEPT_UNDER_NVDA = X.Mod1Mask | X.Mod4Mask
 #: release does once Alt+Tab's switcher or Super's overview has had them.
 FOCUS_MOVING_MODS = X.Mod1Mask | X.Mod4Mask
 _DEPRESSED = xkb.StateComponent.XKB_STATE_MODS_DEPRESSED
+#: The evdev codes TYPE may name, as protocol.rs's TYPEABLE has them: the keys keyMap knows, without
+#: KEY_SLEEP and the power keys. A code the virtual keyboard cannot send ends the connection, and with
+#: it the keyboard, so none other is ever sent.
+TYPEABLE = frozenset(keyMap.FIXED) | frozenset(keyMap.NUMPAD) | frozenset(keyMap.LAYOUT)
+TYPEABLE -= {142, 116, 205, 0x164, 0x198}
+#: The Num Lock key's evdev code, tapped around a numpad key typed under the other state of the lock.
+NUM_LOCK_KEY = 69
+#: TYPED's outcomes after which the key typed is not on the virtual keyboard.
+TYPED_UNDONE = frozenset(
+	(
+		keydClient.TYPED_REFUSED_STATE,
+		keydClient.TYPED_REFUSED_KEY,
+		keydClient.TYPED_REFUSED_FULL,
+		keydClient.TYPED_NOT_DOWN,
+		keydClient.TYPED_LOST,
+	)
+)
+
+
+@dataclass(frozen=True)
+class _Typed:
+	"""A TYPE sent and not yet answered."""
+
+	keycode: int
+	down: bool
+	mode: int
+	#: The lock lights it was taken to change, which a refusal puts back.
+	light: int = 0
 
 
 class _XkbGetState(rq.ReplyRequest):
@@ -316,6 +344,8 @@ class _Press:
 	lookUntil: float | None = None
 	lookEnded: float | None = None
 	lookKnown: bool = False
+	#: Whether NVDA typed it, with TYPE_DECIDE, as for Remote Access.
+	typed: bool = False
 	lock: threading.Lock = field(default_factory=threading.Lock)
 
 	def decide(self, passed: bool) -> bool:
@@ -342,6 +372,8 @@ class _Item:
 	altGr: bool = False
 	#: AltGr while it is not, which is nothing to NVDA but the level the next key comes in.
 	silent: bool = False
+	#: Typed by NVDA, which has it as injected, as Windows' hook has a key another program sends.
+	typed: bool = False
 
 
 class KernelKeySource:
@@ -473,6 +505,16 @@ class KernelKeySource:
 		self._locksHeard = False
 		#: With an environment, the GOODBYE_ reason the helper gave as it ended the connection, if it did.
 		self.lostReason: int | None = None
+		#: Typing, with an environment and FEATURE_TYPING, all on the thread that answers keys: the last
+		#: TYPE's tag, and each TYPE not yet answered by its tag.
+		self._typeTag = 0
+		self._typing: dict[int, _Typed] = {}
+		#: Key code: (its virtual-key code, the TYPE mode, the press's tag) of each key typed down and not
+		#: yet released, replaced whole, as keyState reads it from other threads.
+		self._typedDown: dict[int, tuple[int, int, int]] = {}
+		#: Whether Num Lock was on before a numpad key was typed under the other state, until it is put
+		#: back as the last such key is released.
+		self._numLockBefore: bool | None = None
 
 	def start(
 		self,
@@ -701,6 +743,13 @@ class KernelKeySource:
 			if press.passed and press.vk is not None and vkCode in (press.vk, x11.GENERIC_FOR.get(press.vk)):
 				state = 0x8000
 				break
+		if self._environment is not None and not state:
+			# A key injected comes back as no key to have a press of; it is down to the applications all
+			# the same. One typed to be decided is among the presses.
+			for vk, mode, _tag in tuple(self._typedDown.values()):
+				if mode == keydClient.TYPE_INJECT and vkCode in (vk, x11.GENERIC_FOR.get(vk)):
+					state = 0x8000
+					break
 		light = LOCK_LIGHTS.get(vkCode)
 		if light is not None and self._locks & light:
 			state |= 1
@@ -719,6 +768,177 @@ class KernelKeySource:
 	def keyName(self, scanCode: int, extended: bool) -> str:
 		with self._queryLock:
 			return self._query.keyName(scanCode, extended) if self._query else ""
+
+	# Typing, through the helper's virtual keyboard, where there is no X display to type through.
+
+	@property
+	def canType(self) -> bool:
+		"""Whether keys sent go out on the helper's virtual keyboard: only with an environment, as in an X
+		session they go through XTEST, and once the helper granted FEATURE_TYPING."""
+		return (
+			self._environment is not None
+			and bool(self._welcome.features & keydClient.FEATURE_TYPING)
+			and not self._lost
+		)
+
+	def inject(self, vkCode: int, scanCode: int, extended: bool, isUp: bool) -> None:
+		"""Send a key as passed already, with TYPE_INJECT: no KEY comes back for it, so NVDA does not have
+		its own key again."""
+		keycode = self._keycodeToType(vkCode, extended)
+		if keycode is not None:
+			vk = keyMap.GENERIC_MODIFIERS.get(vkCode, vkCode)
+			self._post(lambda: self._inject(keycode, vk, isUp))
+
+	def typeKey(self, vkCode: int, extended: bool, isUp: bool) -> None:
+		"""Type a key with TYPE_DECIDE: it comes back as a key to decide, which NVDA has as injected."""
+		keycode = self._keycodeToType(vkCode, extended)
+		if keycode is not None:
+			self._post(lambda: self._typeKey(keycode, vkCode, extended, isUp))
+
+	def releaseTypedKeys(self) -> None:
+		if self.canType:
+			self._post(self._releaseTyped)
+
+	def _keycodeToType(self, vkCode: int, extended: bool) -> int | None:
+		"""The key code that sends vkCode, or None when there is none to send or nothing to send it by."""
+		if not self.canType:
+			return None
+		with self._queryLock:
+			keycode = self._query.keycodeFor(vkCode, extended) if self._query is not None else None
+		if keycode is None or keycode - 8 not in TYPEABLE:
+			log.debugWarning("No key on this keyboard sends the virtual key asked for")
+			return None
+		return keycode
+
+	def _type(self, keycode: int, down: bool, mode: int, light: int = 0) -> int | None:
+		"""Send TYPE; its tag, or None when it could not be sent."""
+		if not self.canType:
+			return None
+		self._typeTag = self._typeTag % 0xFFFFFFFF + 1
+		tag = self._typeTag
+		if not self._send(keydClient.typeKey(tag, keycode - 8, down, mode)):
+			return None
+		self._typing[tag] = _Typed(keycode, down, mode, light)
+		return tag
+
+	def _typedNow(self, keycode: int, vk: int, mode: int, tag: int | None) -> None:
+		"""Record a key typed down, or with tag None, released."""
+		typedDown = dict(self._typedDown)
+		if tag is None:
+			typedDown.pop(keycode, None)
+		else:
+			typedDown[keycode] = (vk, mode, tag)
+		self._typedDown = typedDown
+
+	def _inject(self, keycode: int, vk: int, isUp: bool) -> None:
+		held = self._typedDown.get(keycode)
+		if isUp:
+			if held is None or held[1] != keydClient.TYPE_INJECT:
+				return
+			self._typedNow(keycode, vk, keydClient.TYPE_INJECT, None)
+		elif held is not None:
+			# The helper refuses a press of a key typed down; it is down already.
+			return
+		tables = self._tables
+		mods = self._depressed(tables) if tables is not None else 0
+		light = self._lockKeys.get(keycode, 0) if not isUp else 0
+		tag = self._type(keycode, not isUp, keydClient.TYPE_INJECT, light)
+		if tag is None:
+			return
+		if not isUp:
+			self._typedNow(keycode, vk, keydClient.TYPE_INJECT, tag)
+		self._injected(keycode, isUp, mods, light)
+
+	def _injected(self, keycode: int, isUp: bool, mods: int, light: int) -> None:
+		"""Follow a key injected as _passedOn follows a key passed: no KEY comes back to tell of it."""
+		now = time.monotonic()
+		if light:
+			# Locked or unlocked as it reaches the desktop; the next key typed is read in the new state.
+			self._locks ^= light
+			self._tell(self._environment.notePassedLock, light, now)
+		self._tell(self._environment.notePassed, keycode, isUp)
+		tables = self._tables
+		own = tables.keyMods.get(keycode, 0) if tables is not None else 0
+		if (isUp and own & FOCUS_MOVING_MODS) or (
+			not isUp and mods & FOCUS_MOVING_MODS and not own & FOCUS_MOVING_MODS
+		):
+			self._tell(self._environment.noteFocusMayMove, now)
+
+	def _typeKey(self, keycode: int, vk: int, extended: bool, isUp: bool) -> None:
+		held = self._typedDown.get(keycode)
+		if isUp:
+			if held is None or held[1] != keydClient.TYPE_DECIDE:
+				return
+			self._typedNow(keycode, vk, keydClient.TYPE_DECIDE, None)
+			self._type(keycode, False, keydClient.TYPE_DECIDE)
+			if self._numLockBefore is not None and not any(
+				code - 8 in keyMap.NUMPAD for code in self._typedDown
+			):
+				self._putNumLockBack()
+			return
+		if held is not None:
+			# Pressed again as the other computer repeats a key held: the helper refuses a press of a key
+			# typed down, and the desktop repeats it already.
+			return
+		numpad = keyMap.NUMPAD.get(keycode - 8)
+		if numpad is not None and not extended and vk in numpad[1:]:
+			# The key gives one virtual key with Num Lock on and another with it off, and the desktop picks
+			# by the lock; it is put back once no such key is typed down.
+			wanted = vk == numpad[1]
+			on = bool(self._locks & LOCK_NUM)
+			if on != wanted:
+				if self._numLockBefore is None:
+					self._numLockBefore = on
+				self._tapNumLock()
+		tag = self._type(keycode, True, keydClient.TYPE_DECIDE)
+		if tag is not None:
+			self._typedNow(keycode, vk, keydClient.TYPE_DECIDE, tag)
+
+	def _tapNumLock(self) -> None:
+		"""Press and release Num Lock, injected, so that NVDA does not announce the lock it never pressed."""
+		keycode = NUM_LOCK_KEY + 8
+		if self._lockKeys.get(keycode) != LOCK_NUM:
+			keycode = next((code for code, light in self._lockKeys.items() if light == LOCK_NUM), None)
+		if keycode is None or keycode in self._typedDown:
+			log.debugWarning("No Num Lock key to type a numpad key under the other state of the lock with")
+			return
+		self._inject(keycode, keyMap.VK["NUMLOCK"], False)
+		self._inject(keycode, keyMap.VK["NUMLOCK"], True)
+
+	def _putNumLockBack(self) -> None:
+		before, self._numLockBefore = self._numLockBefore, None
+		if before is not None and bool(self._locks & LOCK_NUM) != before:
+			self._tapNumLock()
+
+	def _releaseTyped(self) -> None:
+		for keycode, (vk, mode, _tag) in sorted(self._typedDown.items()):
+			if mode == keydClient.TYPE_DECIDE:
+				self._typeKey(keycode, vk, False, True)
+			else:
+				self._inject(keycode, vk, True)
+		self._putNumLockBack()
+
+	def _onTyped(self, message: keydClient.Typed) -> None:
+		sent = self._typing.pop(message.tag, None)
+		if sent is None or message.outcome not in TYPED_UNDONE:
+			return
+		# By tag only, as which key it was is what was typed.
+		outcome = keydClient.TYPED_NAMES.get(message.outcome, f"had outcome {message.outcome}")
+		log.debug(f"linda-keyd's typed key {message.tag} {outcome}")
+		if not sent.down:
+			return
+		held = self._typedDown.get(sent.keycode)
+		if held is not None and held[2] == message.tag:
+			vk, mode, _tag = held
+			self._typedNow(sent.keycode, vk, mode, None)
+		if sent.light:
+			self._locks ^= sent.light
+
+	def _forgetTyping(self) -> None:
+		"""The helper let go, which lets go of every key typed down and drops those not yet out."""
+		self._typing.clear()
+		self._typedDown = {}
+		self._numLockBefore = None
 
 	def _post(self, command: Callable[[], None]) -> None:
 		self._commands.append(command)
@@ -1183,6 +1403,8 @@ class KernelKeySource:
 				if self._environment is not None:
 					self.lostReason = message.reason
 				self._loseHelper(f"it said goodbye: {message.describe()}")
+			case keydClient.Typed() if self._environment is not None:
+				self._onTyped(message)
 			case _:
 				# A message of a later version or feature, which this client did not ask for.
 				pass
@@ -1552,6 +1774,11 @@ class KernelKeySource:
 		if self._x is not None:
 			for keycode in self._x.keysDownElsewhere:
 				mods |= tables.keyMods.get(keycode, 0)
+		if self._environment is not None:
+			# A modifier injected is down on the virtual keyboard, and no KEY told of it.
+			for keycode, (_vk, mode, _tag) in self._typedDown.items():
+				if mode == keydClient.TYPE_INJECT:
+					mods |= tables.keyMods.get(keycode, 0)
 		return mods
 
 	def _onKey(self, key: keydClient.Key, now: float) -> None:
@@ -1567,6 +1794,10 @@ class KernelKeySource:
 			holders = self._holders.setdefault(keycode, {})
 			if holders and keycode in self._presses:
 				holders[key.device] = self._follow(keycode, now, key.seq, key.device, decided)
+			elif self._environment is not None and key.flags & keydClient.KEY_TYPED:
+				holders[key.device] = self._press(
+					keycode, now, key.seq, decided=decided, device=key.device, typed=True
+				)
 			else:
 				holders[key.device] = self._press(keycode, now, key.seq, decided=decided, device=key.device)
 		elif key.value == KEY_RELEASE:
@@ -1592,6 +1823,7 @@ class KernelKeySource:
 		seq: int,
 		decided: bool = False,
 		device: int | None = None,
+		typed: bool = False,
 	) -> _Press:
 		tables = self._tables
 		held = self._held
@@ -1646,6 +1878,8 @@ class KernelKeySource:
 		if looks:
 			kind = own = CAPTURE_KIND
 		press = _Press(seq, keycode, now, kind, own, effective, under=under, device=device, asked=not decided)
+		if typed:
+			press.typed = True
 		if kind == CAPTURE_KIND and capture.documentUntil is not None and now < capture.documentUntil:
 			press.document = True
 		if looks:
@@ -1686,6 +1920,7 @@ class KernelKeySource:
 				now,
 				altGr=levelShift and held,
 				silent=levelShift and not held,
+				typed=typed,
 			)
 		)
 		if not decided and press.passed is not None:
@@ -1746,6 +1981,7 @@ class KernelKeySource:
 				now,
 				altGr=levelShift and held,
 				silent=levelShift and not held,
+				typed=press is not None and press.typed,
 			)
 		)
 
@@ -1813,6 +2049,7 @@ class KernelKeySource:
 				_lockedMods(self._locks),
 				now,
 				silent=keycode in tables.levelShift and not self._held,
+				typed=press is not None and press.typed,
 			)
 		)
 
@@ -1849,6 +2086,8 @@ class KernelKeySource:
 		self._released.clear()
 		self._nvdaHeld.clear()
 		self._repeating = self._nextRepeat = None
+		if self._environment is not None:
+			self._forgetTyping()
 
 	# The decider: each key in NVDA's terms, and NVDA's answer.
 
@@ -1891,7 +2130,7 @@ class KernelKeySource:
 			vkCode=vk,
 			scanCode=scan,
 			extended=extended,
-			injected=False,
+			injected=item.typed,
 			isUp=isUp,
 			repeat=item.value == KEY_REPEAT,
 			reachedApplication=True,
