@@ -41,7 +41,7 @@ everySession = pytest.mark.rigSession("x11", "wayland")
 
 #: What the route asks for, and the stand-in grants when told to.
 TYPING = FEATURE_WAIT | FEATURE_TYPING | FEATURE_LATE_PASS
-TYPED_OUT, TYPED_KEPT, TYPED_REFUSED_KEY, TYPED_NOT_DOWN = 1, 2, 4, 6
+TYPED_OUT, TYPED_KEPT, TYPED_REFUSED_KEY, TYPED_NOT_DOWN, TYPED_LOST = 1, 2, 4, 6, 7
 VK_TAB, VK_SHIFT, VK_INSERT, VK_SNAPSHOT = 0x09, 0x10, 0x2D, 0x2C
 VK_HOME, VK_NUMPAD5, VK_NUMLOCK, VK_LSHIFT = 0x24, 0x65, 0x90, 0xA0
 VK_LMENU = 0xA4
@@ -492,6 +492,48 @@ def test_anInjectedKeyIsToldOfOnlyOnceItWentOut(tmp_path: Path):
 	assert value["refused"] == []
 	assert value["locks"] == []
 	assert not value["numLock"]
+
+
+LOST_CHILD = r"""
+from keydStandIn import RELEASED_BACKGROUND
+
+noted = []
+source = startRoute()
+k = source._kernel
+source._environment.onPassed = lambda keycode, isUp: noted.append([keycode - 8, isUp])
+answer = threading.Event()
+
+
+def keep(event):
+	answer.wait(1.0)
+	return True
+
+
+source.typeKey(VK_INSERT, True, False)
+wait(lambda: len(k._pending) > 0, 2, "no typed press waited")
+keyboard.letGo(RELEASED_BACKGROUND)
+time.sleep(0.5)
+answer.set()
+time.sleep(0.3)
+result = {
+	"typed": keyboard.typed,
+	"noted": noted,
+	"passed": sink.passed(),
+	"events": [[e["vk"], e["up"], e["reached"]] for e in delivered],
+}
+source.stop()
+"""
+
+
+@forcedSession
+def test_aTypedPressLostAsTheHelperLetsGoIsNotPassed(tmp_path: Path):
+	"""The helper drops a typed press still waiting for NVDA as it lets go, where the user's own go out:
+	it is told of to no one as passed, and NVDA hears it never reached the application."""
+	value = runTypingChild(tmp_path, f"VK_INSERT = {VK_INSERT}\n" + LOST_CHILD)
+	assert value["typed"] == [[1, 1, TYPED_LOST]]
+	assert value["passed"] == []
+	assert value["noted"] == []
+	assert value["events"] == [[VK_INSERT, False, False], [VK_INSERT, True, False]]
 
 
 WITHOUT_CHILD = r"""

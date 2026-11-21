@@ -2111,12 +2111,14 @@ class KernelKeySource:
 		now = time.monotonic()
 		for press in list(self._pending):
 			self._pending.remove(press)
-			press.dropped = dropUndecided
-			press.decide(not dropUndecided)
+			# A typed key not yet out is dropped as the helper lets go, never put out: TYPED_LOST.
+			dropped = dropUndecided or press.typed
+			press.dropped = dropped
+			press.decide(not dropped)
 			press.settled = True
 			if press.looked is not None:
 				press.looked.set()
-			if self._environment is not None and not dropUndecided and press.follows is None:
+			if self._environment is not None and not dropped and press.follows is None:
 				# The helper passes on what it has not had a verdict on as it lets go, kept here or not: so
 				# passed, that its release is told of too.
 				with press.lock:
