@@ -397,6 +397,44 @@ def test_settledLookTakesOneRoundTrip(tmp_path: Path) -> None:
 	)
 
 
+def test_readsThatCannotMoveTheForegroundHoldNoLook(tmp_path: Path) -> None:
+	runLogic(
+		tmp_path,
+		"""\
+		feed = anchoredOnFirst(t)
+		# Another program, starting up or stuck, is slow to say what its widget that has shown is.
+		widget = (":1.20", "/org/a11y/atspi/accessible/9")
+		feed._onStateChanged(widget, "showing", 1, t + 1)
+		feed.requestLook(1, t + 1.01, feed.done)
+		feed._takeLooks(t + 1.01)
+		feed.clock = t + 1.02
+		feed.answer("roundTrip", None, True)
+		assert feed.ended == [(1, True)], feed.ended
+		# It is a window, asked a while later whether it has become active without saying so.
+		feed.answer("parent", widget, ROOT_PATH)
+		feed.fire()
+		assert feed.asked("state") == [widget], feed.requests
+		feed.requestLook(2, t + 1.2, feed.done)
+		feed._takeLooks(t + 1.2)
+		feed.clock = t + 1.21
+		feed.answer("roundTrip", None, True)
+		assert feed.ended == [(1, True), (2, True)], feed.ended
+		assert feed.captureState.focused
+		# Whether an object that says it is active is a window can move the foreground now.
+		cell = (":1.20", "/org/a11y/atspi/accessible/12")
+		feed._onStateChanged(cell, "active", 1, t + 2)
+		feed.requestLook(3, t + 2 + QUIET, feed.done)
+		feed._takeLooks(t + 2 + QUIET)
+		feed.clock = t + 2 + QUIET + 0.005
+		feed.answer("roundTrip", None, True)
+		assert feed.ended[-1][0] == 2, feed.ended
+		feed.answer("parent", cell, "/org/a11y/atspi/accessible/11")
+		feed._serviceLooks(t + 2 + QUIET + 0.01)
+		assert feed.ended[-1] == (3, True), feed.ended
+		""",
+	)
+
+
 def test_newWindowThatSaysNothing(tmp_path: Path) -> None:
 	runLogic(
 		tmp_path,

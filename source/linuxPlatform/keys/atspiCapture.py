@@ -146,7 +146,9 @@ class AtspiCaptureFeed:
 		self._nextWindowNumber = 1
 		self._lastWindowEventAt = float("-inf")
 		self._mayMoveAt = float("-inf")
-		#: Reads in flight whose answer may move the foreground: no look ends known before them.
+		#: Reads in flight whose answer may move the foreground now: no look ends known before them. A
+		#: read about a window that has only shown is not one, as another program starting up or stuck
+		#: would otherwise leave every look unknown for as long as it takes to answer.
 		self._reading = 0
 		self._looks: collections.deque[_Look] = collections.deque()
 		self._openLooks: list[_Look] = []
@@ -433,7 +435,9 @@ class AtspiCaptureFeed:
 			if topLevel:
 				self._onWindowEvent(key, bool(value), now)
 			else:
-				self._findTopLevel(key, lambda: self._onWindowEvent(key, bool(value), self._now()))
+				self._findTopLevel(
+					key, lambda: self._onWindowEvent(key, bool(value), self._now()), holdsLooks=True
+				)
 			return
 		if state == "defunct":
 			if value:
@@ -450,7 +454,7 @@ class AtspiCaptureFeed:
 		if topLevel:
 			self._watchNewWindow(key, now)
 		else:
-			self._findTopLevel(key, lambda: self._watchNewWindow(key, now))
+			self._findTopLevel(key, lambda: self._watchNewWindow(key, now), holdsLooks=False)
 
 	def _checkStillShown(self, key: Key, states: list[int] | None) -> None:
 		if states is not None and not (_hasState(states, STATE_SHOWING) and _hasState(states, STATE_VISIBLE)):
@@ -461,16 +465,16 @@ class AtspiCaptureFeed:
 			self._topLevels.clear()
 		self._topLevels[key] = topLevel
 
-	def _findTopLevel(self, key: Key, then: Callable[[], None]) -> None:
+	def _findTopLevel(self, key: Key, then: Callable[[], None], holdsLooks: bool) -> None:
 		"""Find out whether key is a top-level window, the child of its application's root, and call then
-		if it is."""
+		if it is; while holdsLooks, no look ends known before the answer."""
 		if len(self._asking) >= MAX_ASKING:
 			return
 		self._asking.add(key)
-		self._reading += 1
+		self._reading += holdsLooks
 
 		def answered(parent: str | None) -> None:
-			self._reading -= 1
+			self._reading -= holdsLooks
 			self._asking.discard(key)
 			if parent is None:
 				return
@@ -498,7 +502,7 @@ class AtspiCaptureFeed:
 			if key in self._heardFrom or self._lastWindowEventAt > shown or self._foreground == key:
 				self._asking.discard(key)
 				return
-			self._readState(key, answered)
+			self._readState(key, answered, holdsLooks=False)
 
 		def answered(_key: Key, states: list[int] | None) -> None:
 			if (
@@ -516,11 +520,13 @@ class AtspiCaptureFeed:
 
 		ask()
 
-	def _readState(self, key: Key, then: Callable[[Key, list[int] | None], None]) -> None:
-		self._reading += 1
+	def _readState(
+		self, key: Key, then: Callable[[Key, list[int] | None], None], holdsLooks: bool = True
+	) -> None:
+		self._reading += holdsLooks
 
 		def answered(states: list[int] | None) -> None:
-			self._reading -= 1
+			self._reading -= holdsLooks
 			then(key, states)
 
 		self._request("state", key, answered)
