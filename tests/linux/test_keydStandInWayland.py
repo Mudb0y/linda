@@ -533,6 +533,21 @@ def test_typedKeysNotYetOutAreLostWhenItLetsGo(socketPath: str, served: Served):
 	assert sink.passed() == [(B, True), (X, True), (X, False), (B, False)]
 
 
+def test_aHelperThatDiesAnswersNoTypedKey(socketPath: str, served: Served):
+	sink = NullSink()
+	keyboard, client = served(socketPath, sink, decide=holding(X))
+	keyboard.down("x")
+	client.waitFor(lambda: client.told())
+	client.type(1, A, True)
+	client.type(2, A, False)
+	time.sleep(0.2)
+	keyboard.vanish()
+	client.waitFor(lambda: client.closed.is_set())
+	assert client.typed() == [] and keyboard.typed == []
+	assert sink.passed() == [(X, True), (X, False)]
+	keyboard.up("x")
+
+
 def test_typedKeysAreLostOnTheEmergencyChord(socketPath: str, served: Served):
 	sink = NullSink()
 	keyboard, client = served(socketPath, sink, decide=holding(X, 14, 1, 28))

@@ -681,7 +681,7 @@ class StandIn:
 				self._listener.close()
 				self._listener = None
 			os.unlink(self.path)
-			self._dropClient(sendGoodbye=None)
+			self._dropClient(sendGoodbye=None, answerTyped=False)
 		self._note("vanished")
 
 	def comeBack(self) -> None:
@@ -859,11 +859,17 @@ class StandIn:
 		dropUndecided: bool,
 		taps: tuple[str | int, ...] = (),
 		device: int = DEVICE_NUMBER,
+		answerTyped: bool = True,
 	) -> None:
+		"""
+		:param answerTyped: Whether typed keys dropped are answered TYPED_LOST, as they are unless the
+			helper dies.
+		"""
 		# A key typed for one moment must not land in the next, unlike the user's own keys still waiting.
 		for entry in [entry for entry in self._line if entry.tag is not None]:
 			self._line.remove(entry)
-			self._sendTyped(entry, TYPED_LOST)
+			if answerTyped:
+				self._sendTyped(entry, TYPED_LOST)
 		for entry in self._line:
 			# The kept key of a LATE_PASS goes out only at its press's turn, which letting go is not.
 			entry.lateKept.clear()
@@ -900,8 +906,8 @@ class StandIn:
 		if reason is not None:
 			self._sendClient(struct.pack("<BB", RELEASED, reason))
 
-	def _dropClient(self, sendGoodbye: tuple[int, str] | None) -> None:
-		self._letGo(None, dropUndecided=False)
+	def _dropClient(self, sendGoodbye: tuple[int, str] | None, answerTyped: bool = True) -> None:
+		self._letGo(None, dropUndecided=False, answerTyped=answerTyped)
 		if self._client is None:
 			return
 		if sendGoodbye is not None:
