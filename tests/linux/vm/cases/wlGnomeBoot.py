@@ -147,7 +147,10 @@ def run(ground: "Ground") -> None:
 				lambda then=then: (w := ground.activeWindow()) and w["title"] == then and w,
 				f"{then} to be active",
 			)
-			ground.machine.log(f"Alt+Tab made {active['title']} active within {ground.now() - mark:.2f} s")
+			# An upper bound only: each look at AT-SPI is a program started through the runner.
+			ground.machine.log(
+				f"Alt+Tab made {active['title']} active, seen {ground.now() - mark:.2f} s after"
+			)
 			typedTo(ground, keyboard, then)
 
 	with ground.subtest("a new window takes the focus"):

@@ -31,8 +31,9 @@ if TYPE_CHECKING:
 #: Seconds after IsEnabled is claimed before the desktop is listed again, for toolkits that load
 #: their bridge only then.
 CLAIM_SETTLE = 3.0
-#: Events listed in order, after which they are only counted.
-FIRST_EVENTS = 300
+#: Events listed in order, after which they are only counted. gnome-shell sends some three hundred
+#: defunct states for one Alt+Tab, ahead of the windows' own events.
+FIRST_EVENTS = 3000
 EVENTS = (
 	"window:",
 	"focus:",

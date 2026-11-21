@@ -94,6 +94,9 @@ def build(record: Recorder, title: str, loop: GLib.MainLoop) -> Gtk.Window:
 
 
 def main() -> None:
+	# GTK 4 names a program with no GApplication "Unnamed" on the accessibility bus; GTK 3 takes the
+	# script's own name, which this gives the twin too.
+	GLib.set_prgname("testWindow4.py")
 	Gtk.init()
 	record = Recorder(sys.argv[1])
 	loop = GLib.MainLoop()
