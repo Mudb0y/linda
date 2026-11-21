@@ -220,12 +220,20 @@ def _mutterSwitch(title: str) -> None:
 @cache
 def _layoutKeys() -> tuple[dict[str, tuple[int, ...]], dict[int, tuple[int, ...]]]:
 	"""What the pl layout types and which key symbols it gives, each with the evdev codes that make it,
-	modifiers first, the fewest modifiers that do; with Caps Lock off, as DesktopSession leaves it."""
+	modifiers first; with Caps Lock off, as DesktopSession leaves it. A key symbol is found on the key
+	that gives it with the fewest modifiers, a character on the lowest key that types it, as xdotool
+	types one.
+
+	The fewest modifiers would put characters on keys a person does not type them on, which reach
+	Linda as other keys: plus and asterisk on the keypad, which NVDA binds to commands of its own, the
+	parentheses on the keypad's own keys, the dollar on KEY_DOLLAR. The keypad's key symbols type no
+	character at all, for the same reason."""
 	from xkbcommon import xkb
 
 	keymap = xkb.Context().keymap_new_from_names(layout=waylandKeyboard.LAYOUT)
 	characters: dict[str, tuple[int, ...]] = {}
 	keysyms: dict[int, tuple[int, ...]] = {}
+	typed: list[tuple[int, str, tuple[int, ...]]] = []
 	for modifiers in _LEVEL_MODIFIERS:
 		for keycode in range(keymap.min_keycode(), keymap.max_keycode() + 1):
 			if keycode - 8 in modifiers:
@@ -234,10 +242,16 @@ def _layoutKeys() -> tuple[dict[str, tuple[int, ...]], dict[int, tuple[int, ...]
 			for modifier in modifiers:
 				state.update_key(modifier + 8, xkb.KeyDirection.XKB_KEY_DOWN)
 			codes = (*modifiers, keycode - 8)
-			if (keysym := state.key_get_one_sym(keycode)) != 0:
-				keysyms.setdefault(keysym, codes)
+			if (keysym := state.key_get_one_sym(keycode)) == 0:
+				continue
+			keysyms.setdefault(keysym, codes)
+			if xkb.keysym_get_name(keysym).startswith("KP_"):
+				continue
 			if len(character := state.key_get_string(keycode)) == 1:
-				characters.setdefault(character, codes)
+				typed.append((keycode, character, codes))
+	# A stable sort: on one key, the fewest modifiers still come first.
+	for _keycode, character, codes in sorted(typed, key=lambda entry: entry[0]):
+		characters.setdefault(character, codes)
 	# xdotool types a new line with Return, which gives a carriage return, not with the Linefeed key.
 	characters["\n"] = characters["\r"]
 	return characters, keysyms

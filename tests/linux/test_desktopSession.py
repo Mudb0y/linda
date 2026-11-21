@@ -298,6 +298,15 @@ def test_keyNamesAndCharactersFindTheirKeys(desktop: DesktopSession):
 	assert desktopSession.characterCodes("Ł") == (42, 100, 38)
 	assert desktopSession.characterCodes(" ") == (57,)
 	assert desktopSession.characterCodes("\n") == (28,)
+	# On the main block, as xdotool types them, though the keypad's plus and asterisk, which NVDA takes
+	# as commands, and keys such as KEY_DOLLAR need no Shift.
+	assert desktopSession.characterCodes("+") == (42, 13)
+	assert desktopSession.characterCodes("*") == (42, 9)
+	assert desktopSession.characterCodes("$") == (42, 5)
+	assert desktopSession.characterCodes("#") == (42, 4)
+	assert desktopSession.characterCodes("(") == (42, 10)
+	for character in "0123456789+-*/.=,<>()$#\r\n":
+		assert max(desktopSession.characterCodes(character)) <= 57, character
 	with pytest.raises(ValueError):
 		desktopSession.characterCodes("\N{SNOWMAN}")
 	with pytest.raises(ValueError):
