@@ -60,8 +60,9 @@ GNOME = {"XDG_SESSION_TYPE": "wayland", "XDG_CURRENT_DESKTOP": "GNOME", "WAYLAND
 SWAY_FROM_CONSOLE = {
 	"XDG_SESSION_TYPE": "tty",
 	"WAYLAND_DISPLAY": "wayland-1",
-	"SWAYSOCK": "/run/user/1000/sway-ipc.1000.1234.sock",
+	"SWAYSOCK": "$RUN/sway-ipc.1000.1234.sock",
 }
+SWAY_SOCKETS = ("wayland-1", "sway-ipc.1000.1234.sock")
 #: What gamescope's main.cpp gives the programs it starts: its Xwayland's DISPLAY and its own
 #: socket's name, with WAYLAND_DISPLAY unset unless --expose-wayland is given.
 GAMESCOPE_CHILD = {"DISPLAY": ":1", "GAMESCOPE_WAYLAND_DISPLAY": "gamescope-0"}
@@ -81,6 +82,7 @@ class Session:
 
 	def listen(self, name: str) -> Path:
 		"""Listen on a Unix socket called name in the runtime directory, as a compositor does."""
+		(self.runtimeDir / name).parent.mkdir(parents=True, exist_ok=True)
 		server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 		self._sockets.append(server)
 		server.bind(name)
@@ -92,7 +94,10 @@ class Session:
 			server.close()
 
 	def set(self, env: dict[str, str | None]) -> None:
-		"""Give the process exactly env, with XDG_RUNTIME_DIR the runtime directory unless env says."""
+		"""Give the process exactly env, with XDG_RUNTIME_DIR the runtime directory unless env says.
+
+		$RUN in a value stands for the runtime directory.
+		"""
 		for name in READ_VARIABLES:
 			self._monkeypatch.delenv(name, raising=False)
 		self._monkeypatch.setenv("XDG_RUNTIME_DIR", str(self.runtimeDir))
@@ -100,7 +105,7 @@ class Session:
 			if value is None:
 				self._monkeypatch.delenv(name, raising=False)
 			else:
-				self._monkeypatch.setenv(name, value)
+				self._monkeypatch.setenv(name, value.replace("$RUN", str(self.runtimeDir)))
 		displayServer._decision.cache_clear()
 
 	def change(self, name: str, value: str) -> None:
@@ -151,8 +156,8 @@ CASES = [
 	),
 	(
 		"owner's session with a nested sway's socket and its own variables",
-		{**OWNER_SESSION, "WAYLAND_DISPLAY": "wayland-1", "SWAYSOCK": "/run/user/1000/sway-ipc.sock"},
-		("wayland-1",),
+		{**OWNER_SESSION, "WAYLAND_DISPLAY": "wayland-1", "SWAYSOCK": "$RUN/sway-ipc.sock"},
+		("wayland-1", "sway-ipc.sock"),
 		("x11", 2, "sway"),
 	),
 	("DISPLAY=:99 alone, as in the rig", {"DISPLAY": ":99"}, (), ("x11", 6, "other")),
@@ -185,12 +190,50 @@ CASES = [
 	(
 		"sway from a console with Xwayland",
 		{**SWAY_FROM_CONSOLE, "DISPLAY": ":0"},
-		("wayland-1",),
+		SWAY_SOCKETS,
 		("wayland", 4, "sway"),
 	),
-	("sway from a console without Xwayland", SWAY_FROM_CONSOLE, ("wayland-1",), ("wayland", 4, "sway")),
+	("sway from a console without Xwayland", SWAY_FROM_CONSOLE, SWAY_SOCKETS, ("wayland", 4, "sway")),
 	("GNOME with DISPLAY", {**GNOME, "DISPLAY": ":0"}, ("wayland-0",), ("wayland", 4, "gnome")),
 	("GNOME without DISPLAY", GNOME, ("wayland-0",), ("wayland", 4, "gnome")),
+	# The user manager keeps what an earlier sway or Hyprland session imported into it, and GNOME
+	# overwrites the display variables there but never unsets these.
+	(
+		"GNOME with a stale SWAYSOCK",
+		{**GNOME, "SWAYSOCK": "$RUN/sway-ipc.1000.999.sock"},
+		("wayland-0",),
+		("wayland", 4, "gnome"),
+	),
+	(
+		"GNOME with a stale HYPRLAND_INSTANCE_SIGNATURE",
+		{**GNOME, "HYPRLAND_INSTANCE_SIGNATURE": "deadbeef"},
+		("wayland-0",),
+		("wayland", 4, "gnome"),
+	),
+	(
+		"GNOME with a stale NIRI_SOCKET",
+		{**GNOME, "NIRI_SOCKET": "$RUN/niri.wayland-1.999.sock"},
+		("wayland-0",),
+		("wayland", 4, "gnome"),
+	),
+	(
+		"GNOME with a SWAYSOCK that names no socket",
+		{**GNOME, "SWAYSOCK": "$RUN/notASocket"},
+		("wayland-0",),
+		("wayland", 4, "gnome"),
+	),
+	(
+		"GNOME with a relative SWAYSOCK",
+		{**GNOME, "SWAYSOCK": "sway-ipc.sock"},
+		("wayland-0", "sway-ipc.sock"),
+		("wayland", 4, "gnome"),
+	),
+	(
+		"sway nested in GNOME",
+		{**GNOME, "WAYLAND_DISPLAY": "wayland-1", "SWAYSOCK": "$RUN/sway-ipc.sock"},
+		("wayland-0", "wayland-1", "sway-ipc.sock"),
+		("wayland", 4, "sway"),
+	),
 	(
 		"Ubuntu's GNOME",
 		{**GNOME, "XDG_CURRENT_DESKTOP": "ubuntu:GNOME", "DISPLAY": ":0"},
@@ -213,10 +256,10 @@ CASES = [
 		"niri",
 		{
 			"XDG_CURRENT_DESKTOP": "niri",
-			"NIRI_SOCKET": "/run/user/1000/niri.sock",
+			"NIRI_SOCKET": "$RUN/niri.sock",
 			"WAYLAND_DISPLAY": "wayland-1",
 		},
-		("wayland-1",),
+		("wayland-1", "niri.sock"),
 		("wayland", 4, "niri"),
 	),
 	(
@@ -226,8 +269,14 @@ CASES = [
 			"HYPRLAND_INSTANCE_SIGNATURE": "abc",
 			"WAYLAND_DISPLAY": "wayland-1",
 		},
-		("wayland-1",),
+		("wayland-1", "hypr/abc/.socket.sock"),
 		("wayland", 4, "hyprland"),
+	),
+	(
+		"Hyprland's signature with no runtime directory to find its socket in",
+		{"HYPRLAND_INSTANCE_SIGNATURE": "abc", "XDG_RUNTIME_DIR": None, "DISPLAY": ":0"},
+		("hypr/abc/.socket.sock",),
+		("x11", 6, "other"),
 	),
 	(
 		"session type wayland with DISPLAY alone",

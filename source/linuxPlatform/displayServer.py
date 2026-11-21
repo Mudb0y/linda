@@ -31,6 +31,14 @@ def _variable(name: str) -> str | None:
 	return os.environ.get(name) or None
 
 
+def _isSocket(path: str) -> bool:
+	try:
+		mode = os.stat(path).st_mode
+	except OSError:
+		return False
+	return mode & _FILE_TYPE_BITS == _SOCKET_TYPE
+
+
 def _desktops() -> list[str]:
 	"""XDG_CURRENT_DESKTOP's names, casefolded: a list joined by colons, the session's own first."""
 	return [name.casefold() for name in (_variable("XDG_CURRENT_DESKTOP") or "").split(":") if name]
@@ -51,11 +59,7 @@ def waylandSocket() -> str | None:
 		if runtimeDir is None:
 			return None
 		name = os.path.join(runtimeDir, name)
-	try:
-		mode = os.stat(name).st_mode
-	except OSError:
-		return None
-	return name if mode & _FILE_TYPE_BITS == _SOCKET_TYPE else None
+	return name if _isSocket(name) else None
 
 
 def isGamescope() -> bool:
@@ -139,16 +143,24 @@ def compositor() -> str:
 
 	This only chooses per desktop feeds and wording; it never decides between X11 and Wayland. A
 	compositor's own socket variable comes before the desktop names, since it is set by the innermost
-	compositor while XDG_CURRENT_DESKTOP may be inherited from the session around it.
+	compositor while XDG_CURRENT_DESKTOP may be inherited from the session around it. It counts only
+	while its socket is there: sway and uwsm import these variables into the user's systemd manager,
+	which can outlive their session, and GNOME and Plasma started from it later never unset them.
 	"""
 	if isGamescope():
 		return "gamescope"
-	if _variable("HYPRLAND_INSTANCE_SIGNATURE") is not None:
+	signature = _variable("HYPRLAND_INSTANCE_SIGNATURE")
+	runtimeDir = _variable("XDG_RUNTIME_DIR")
+	if (
+		signature is not None
+		and runtimeDir is not None
+		and _isSocket(os.path.join(runtimeDir, "hypr", signature, ".socket.sock"))
+	):
 		return "hyprland"
-	if _variable("NIRI_SOCKET") is not None:
-		return "niri"
-	if _variable("SWAYSOCK") is not None:
-		return "sway"
+	for variable, name in (("NIRI_SOCKET", "niri"), ("SWAYSOCK", "sway")):
+		path = _variable(variable)
+		if path is not None and os.path.isabs(path) and _isSocket(path):
+			return name
 	desktops = _desktops()
 	for name in ("gnome", "kde", "cosmic", "sway", "niri", "hyprland"):
 		if name in desktops:
