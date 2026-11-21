@@ -772,6 +772,26 @@ def test_stopDuringASlowStartLeavesNoThread(tmp_path: Path) -> None:
 	assert value == {"alive": [], "forgotten": True}, value
 
 
+def test_startAfterAStopThatTimedOut(tmp_path: Path) -> None:
+	assert runStarts(
+		tmp_path,
+		"""\
+		feed = Feed([True, True])
+		feed.ending = 0
+		feed.start()
+		before = feed._thread
+		# The feed's thread is in a callback past stop's join, and quits only after it.
+		feed._later(0, lambda: time.sleep(STOP_TIMEOUT + 1))
+		time.sleep(0.1)
+		feed.stop()
+		answer = feed.start()
+		before.join(5)
+		result = [answer, feed.canLook, looked(feed)]
+		feed.stop()
+		""",
+	) == [True, True, True]
+
+
 #: The child of the alternation test: the feed started, the anchor set in each window in turn while it
 #: is the foreground, and the keyboard moved between it and the next window by marco, each move checked
 #: 200 ms after the X server says it happened, while the main thread computes all the while.

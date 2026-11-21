@@ -721,6 +721,9 @@ class AtspiCaptureFeed:
 				return
 			from gi.repository import GLib
 
+			# Should the join run out, the thread still quits once its loop gets to it, and a start
+			# before then must wait for it rather than take it for one that listens.
+			self._ending = True
 			source = GLib.idle_source_new()
 			source.set_callback(lambda *_args: self._loop.quit() or GLib.SOURCE_REMOVE)
 			source.attach(self._context)
