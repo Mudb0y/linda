@@ -20,7 +20,6 @@ from wl.lindaAcceptance import (
 	HINT,
 	LET_GO,
 	LOST,
-	MARKER,
 	NO_HELPER,
 	ONCE,
 	STARTED_FROM_PATH,
@@ -52,17 +51,6 @@ CONSOLE_TEXT = "/tmp/ground/console.txt"
 NVDA_LOG = "/tmp/ground/linda/nvda.log"
 OLD_LOG = "/tmp/ground/linda/nvda-old.log"
 STOPPED_LETTERS = "abcdefghijklmnop"
-#: NVDA's own logging of input, which every key source reaches alike.
-GESTURE_LINES = (
-	"inputCore.InputManager.executeGesture logs every gesture but a lone modifier at IO level, which "
-	"--debug-logging takes in, so each key typed is in Linda's log as Input: kb(desktop):LETTER"
-)
-
-
-def typedMarker(ground: "Ground", keyboard: "FakeKeyboard") -> None:
-	mark = ground.mark()
-	keyboard.tap(*[f"KEY_{c.upper()}" for c in MARKER])
-	ground.waitForKeys("app", [(f"KEY_{c.upper()}", v) for c in MARKER for v in (1, 0)], mark)
 
 
 def noHelper(ground: "Ground", keyboard: "FakeKeyboard") -> int:
@@ -116,7 +104,7 @@ def keptKeys(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 	with ground.subtest("letters reach the program through the virtual keyboard and are echoed"):
 		for key, letter in (("KEY_A", "a"), ("KEY_B", "b")):
 			typedThrough(ground, keyboard, key, letter, echo=letter)
-		typedMarker(ground, keyboard)
+		acceptance.typedMarker(ground, keyboard, NVDA_LOG)
 
 
 def polish(ground: "Ground", keyboard: "FakeKeyboard") -> None:
@@ -360,22 +348,20 @@ def emergency(ground: "Ground", keyboard: "FakeKeyboard") -> int:
 
 def nothingLogged(ground: "Ground", keyboard: "FakeKeyboard", pid: int) -> None:
 	with ground.subtest("what was typed is in neither copy's log nor the helper's journal"):
-		typedMarker(ground, keyboard)
+		acceptance.typedMarker(ground, keyboard, NVDA_LOG)
 		ground.shell(f"kill -TERM {pid}")
 		ground.waitFor(lambda: not acceptance.processRunning(ground, pid), "Linda to exit", 30)
 		journal = ground.shell(f"journalctl -b -o cat --no-pager -u {KEYD} || true")
-		logs = {"nvda.log": ground.shell(f"cat {NVDA_LOG}"), "nvda-old.log": ground.shell(f"cat {OLD_LOG}")}
 		assert not acceptance.holdingMarker({"journal": journal}), "the helper's journal holds what was typed"
+		logs = {"nvda.log": ground.shell(f"cat {NVDA_LOG}"), "nvda-old.log": ground.shell(f"cat {OLD_LOG}")}
+		# The field the marker went into holds it, and NVDA's speech at IO level writes the field's text
+		# each time it is read aloud, as when the focus comes back to it; nothing else may hold it.
 		for name, text in logs.items():
-			ground.machine.log(f"the marker's letters in {name}: {acceptance.markerEvidence(text)}")
-		stripped = {name: acceptance.withoutGestureLines(text) for name, text in logs.items()}
-		holding = acceptance.holdingMarker(stripped)
-		assert not holding, (
-			f"beyond NVDA's gesture lines, what the test typed is written in {', '.join(holding)}"
-		)
-		with ground.expectedFailure(GESTURE_LINES):
-			holding = acceptance.holdingMarker(logs)
-			assert not holding, f"what the test typed is written in {', '.join(holding)}"
+			lines = acceptance.linesHoldingMarker(text)
+			ground.machine.log(f"{name}: {len(lines)} lines hold the marker, the first: {lines[:1]}")
+		spokenAside = {name: acceptance.withoutSpokenLines(text) for name, text in logs.items()}
+		holding = acceptance.holdingMarker(spokenAside)
+		assert not holding, f"beyond what was spoken, what the test typed is written in {', '.join(holding)}"
 		# ground.main holds nvda.log to a clean log; the first copy's is held to the same here.
 		errors = acceptance.logErrors(logs["nvda-old.log"])
 		assert not errors, f"the first copy's log holds {len(errors)} records at ERROR or above: {errors}"

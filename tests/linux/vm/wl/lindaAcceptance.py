@@ -274,24 +274,41 @@ def holdingMarker(texts: dict[str, str]) -> list[str]:
 	]
 
 
-def withoutGestureLines(text: str) -> str:
-	"""An NVDA log without the lines inputCore.executeGesture writes at IO level for every gesture,
-	"Input: kb(desktop):a", so that what typed keys reach by any other way is still found."""
-	return "\n".join(line for line in text.splitlines() if not line.startswith("Input: "))
+#: How speech.speak writes what it says at IO level, which --debug-logging takes in: a field's text
+#: is in it whenever the field is read aloud, whatever was typed into it and however.
+SPOKEN_LINE = "Speaking ["
 
 
-def markerEvidence(text: str) -> dict:
-	"""Where a log holds the marker's letters a line each: how many gesture lines name one of them,
-	and every other line that ends in one. They are the test's own letters, so the test log may show
-	them."""
-	letters = set(MARKER)
-	gestures = [line for line in text.splitlines() if line.startswith("Input: ") and line[-1:] in letters]
-	others = [
-		line
-		for line in withoutGestureLines(text).splitlines()
-		if (words := re.findall(r"[^\W_]+", line.casefold())) and words[-1] in letters
-	]
-	return {"gestureLines": len(gestures), "gestureSample": gestures[:10], "otherLines": others[:40]}
+def withoutSpokenLines(text: str) -> str:
+	return "\n".join(line for line in text.splitlines() if not line.startswith(SPOKEN_LINE))
+
+
+def logSize(ground: "Ground", path: str) -> int:
+	return int(ground.shell(f"stat -c %s {shlex.quote(path)} 2>/dev/null || echo 0").strip())
+
+
+def logSince(ground: "Ground", path: str, offset: int) -> str:
+	return ground.shell(f"tail -c +{offset + 1} {shlex.quote(path)} 2>/dev/null || true")
+
+
+def typedMarker(ground: "Ground", keyboard: "FakeKeyboard", log: str) -> None:
+	"""Type MARKER into the program, and fail if the log at path log, from just before it was typed to a
+	second after, holds it: the window in which the keys go through Linda, before anything reads the
+	field they went into back aloud."""
+	offset = logSize(ground, log)
+	mark = ground.mark()
+	keys = [f"KEY_{c.upper()}" for c in MARKER]
+	keyboard.tap(*keys)
+	ground.waitForKeys("app", [(key, value) for key in keys for value in (1, 0)], mark)
+	ground.settle(1)
+	holding = holdingMarker({"Linda's log as the marker was typed": logSince(ground, log, offset)})
+	assert not holding, f"what the test typed is written in {', '.join(holding)}"
+	holding = holdingMarker({"linda-keyd's journal": "\n".join(m for _t, m in ground.helperLog(mark))})
+	assert not holding, f"what the test typed is written in {', '.join(holding)}"
+
+
+def linesHoldingMarker(text: str) -> list[str]:
+	return [line for line in text.splitlines() if MARKER in _letters(line)]
 
 
 # Experiment E4: window events against the keys that cause them.
