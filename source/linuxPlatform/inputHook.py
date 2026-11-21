@@ -41,6 +41,8 @@ WATCH_INTERVAL = 0.05
 BROWSE_KEYS_VARIABLE = "LINDA_BROWSE_KEYS"
 
 _source: KeySource | None = None
+#: Whether NVDA has said it cannot send keys to the programs, which it says once.
+_saidCannotSend = False
 _delivering = threading.local()
 _lastKeyDown: KeyEvent | None = None
 #: Whether Caps Lock was on before the press NVDA blocked that is still held; None when none is.
@@ -94,7 +96,12 @@ def _startSource() -> None:
 	try:
 		source.start(_onKey, _modeNow)
 	except Exception:
-		log.warning("NVDA cannot read the keyboard from the X display", exc_info=True)
+		from linuxPlatform import displayServer
+
+		if displayServer.isWayland():
+			log.warning("NVDA cannot read the keyboard", exc_info=True)
+		else:
+			log.warning("NVDA cannot read the keyboard from the X display", exc_info=True)
 		return
 	_source = source
 	_stopWatching.clear()
@@ -433,7 +440,25 @@ def keybdEvent(vk: int, scan: int, flags: int, extraInfo: int) -> None:
 		return
 	if _source is None:
 		raise NoLinuxImplementation("key injection", "sending a key needs the X display")
+	if not _canSend():
+		return
 	_source.inject(vk, scan, bool(flags & KEYEVENTF_EXTENDEDKEY), bool(flags & KEYEVENTF_KEYUP))
+
+
+def _canSend() -> bool:
+	"""Whether a key sent now reaches the programs; once, when it does not, says so.
+
+	Only a source that may have nothing to send keys through, as in a Wayland session, says.
+	"""
+	global _saidCannotSend
+	if getattr(_source, "canSend", True):
+		return True
+	if not _saidCannotSend:
+		_saidCannotSend = True
+		# Translators: Said on Linux, once, when NVDA would send a key to a program, as some of its
+		# commands do, and has no way to here, as in a Wayland session.
+		_announce(_("NVDA cannot type into programs here."))
+	return False
 
 
 def typeKey(vk: int, extended: bool, isUp: bool, scan: int | None = None) -> None:
@@ -454,6 +479,8 @@ def typeKey(vk: int, extended: bool, isUp: bool, scan: int | None = None) -> Non
 		from logHandler import log
 
 		log.debugWarning("No keyboard to type a key on")
+		return
+	if not _canSend():
 		return
 	_source.typeKey(vk, extended, isUp)
 

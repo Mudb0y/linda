@@ -162,11 +162,21 @@ def helperVirtualKeyboard() -> str:
 def createSource(route: str = "auto", notify: Callable[[str], None] | None = None) -> KeySource | None:
 	"""The key source for this session, or None when there is none to watch.
 
-	:param route: Where keys come from, as route.ROUTES names it: the first release takes them from the
-		kernel only in an X session, whose layout it follows.
+	:param route: Where keys come from, as route.ROUTES names it. In a Wayland session they come from
+		linda-keyd alone, whatever it says.
 	:param notify: Says a message to the user, as when the helper has let go of the keyboard.
 	"""
-	if not isEnabled() or not os.environ.get("DISPLAY"):
+	if not isEnabled():
+		return None
+	from linuxPlatform import displayServer
+
+	kind = displayServer.kind()
+	if kind == "wayland":
+		from . import waylandRoute
+
+		return waylandRoute.WaylandRoute(route, helperSocketPath(), notify)
+	# The kind is x11 only with a display to read.
+	if kind != "x11":
 		return None
 	from . import route as keyRoute
 

@@ -9,6 +9,20 @@ ROUTES = ("auto", "x11")
 
 
 def _labels() -> list[str]:
+	from linuxPlatform import displayServer
+
+	if displayServer.isWayland():
+		return [
+			# Translators: A choice on Linux in the Advanced settings panel, of where NVDA takes keys from,
+			# as it reads in a Wayland session: linda-keyd, the program that takes the keyboard in the
+			# kernel, and nothing else, as a Wayland session has no X display to read keys from.
+			_("linda-keyd"),
+			# Translators: A choice on Linux in the Advanced settings panel, of where NVDA takes keys from,
+			# as it reads in a Wayland session: the X display alone in an X session, which a Wayland session
+			# does not have, so that keys come from linda-keyd, the program that takes the keyboard in the
+			# kernel, here too.
+			_("the X display alone in an X session, linda-keyd in this one"),
+		]
 	return [
 		# Translators: A choice on Linux in the Advanced settings panel, of where NVDA takes keys from:
 		# linda-keyd, the program that takes the keyboard in the kernel, when it runs and lets NVDA, and
