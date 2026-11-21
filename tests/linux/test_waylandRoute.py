@@ -647,6 +647,104 @@ def test_routesOwnTranslatorFollowsTheDesktopsLayout(tmp_path: Path):
 	assert value == {"ogonek": [6, ord("A")], "z": ord("z")}
 
 
+LAYOUT_CHANGE_CHILD = r"""
+from linuxPlatform.keys import desktopLayout, waylandEnvironment, waylandRoute
+
+
+class Feed:
+	def start(self, onChange):
+		self.onChange = onChange
+		return desktopLayout.LayoutSnapshot(("evdev", "pc105", "pl", "", ""))
+
+	def stop(self):
+		pass
+
+
+feed = Feed()
+environment = waylandEnvironment.WaylandEnvironment(None, layoutFeed=feed)
+source = waylandRoute.WaylandRoute("auto", path, said.append, environment=environment)
+source.start(deliver)
+source.setConsumed(x11.EXTENDED_INSERT, True)
+wait(lambda: source.isKernel, 10, "the route did not take the helper's keys")
+
+
+def now():
+	try:
+		vk = source.vkForChar("\N{LATIN SMALL LETTER A WITH OGONEK}")
+	except LookupError:
+		vk = None
+	before = len(delivered)
+	keyboard.press("ISO_Level3_Shift+a")
+	time.sleep(0.3)
+	typed = [e["text"] for e in delivered[before:] if e["vk"] == ord("A") and not e["up"]]
+	return {"vk": vk, "kernel": source._kernel._tables.names[2], "typed": typed}
+
+
+states = {"pl": now()}
+feed.onChange(desktopLayout.LayoutSnapshot(("evdev", "pc105", "us", "", "")))
+states["us"] = now()
+feed.onChange(desktopLayout.LayoutSnapshot(("evdev", "pc105", "nosuchlayout", "", "")))
+states["broken"] = now()
+source.stop()
+result = states
+"""
+
+
+def test_aLayoutChangeReachesTheRouteAndTheKernelSource(tmp_path: Path):
+	"""A change from the desktop reaches the route's own translator and the attached kernel source; one
+	that cannot be compiled leaves the layout before it."""
+	value = runRouteChild(tmp_path, LAYOUT_CHANGE_CHILD, standIn={})
+	ogonek = "\N{LATIN SMALL LETTER A WITH OGONEK}"
+	assert value["pl"] == {"vk": [6, ord("A")], "kernel": "pl", "typed": [ogonek]}
+	assert value["us"] == {"vk": None, "kernel": "us", "typed": ["a"]}
+	assert value["broken"] == value["us"]
+
+
+KEEPER_CHILD = r"""
+from gi.repository import GLib
+from linuxPlatform.keys import waylandEnvironment
+
+source = startRoute(waitForKernel=False)
+feed = source._environment.feed
+wait(lambda: feed.canLook, 10, "the capture feed never connected")
+first = feed._thread
+# As when the accessibility bus goes away: the feed's loop ends, and nothing in the feed starts it again.
+ending = GLib.idle_source_new()
+ending.set_callback(lambda *_args: feed._loop.quit() or GLib.SOURCE_REMOVE)
+ending.attach(feed._context)
+wait(lambda: not feed.canLook, 5, "the capture feed did not stop")
+lost = time.monotonic()
+wait(lambda: feed.canLook, 10, "the capture feed was not started again")
+back = time.monotonic() - lost
+again = feed._thread is not first
+source.stop()
+left = sorted(t.name for t in threading.enumerate() if t.name in ("lindaCaptureKeeper", "lindaAtspiCapture"))
+result = {"back": back, "again": again, "left": left, "interval": waylandEnvironment.KEEP_INTERVAL}
+"""
+
+
+def test_aLostCaptureFeedIsStartedAgain(tmp_path: Path):
+	value = runRouteChild(tmp_path, KEEPER_CHILD)
+	assert value["again"]
+	assert value["back"] <= value["interval"] + 2, value["back"]
+	assert value["left"] == []
+
+
+FEATURES_CHILD = r"""
+source = startRoute()
+result = {"granted": keyboard.granted}
+source.stop()
+"""
+
+
+def test_theRouteAsksForEveryFeature(tmp_path: Path):
+	typing, wait, latePass, virtualSeen = 1, 2, 4, 8
+	value = runRouteChild(
+		tmp_path, FEATURES_CHILD, standIn={"features": typing | wait | latePass | virtualSeen}
+	)
+	assert value["granted"] == typing | wait | latePass | virtualSeen
+
+
 NO_SENDER_CHILD = r"""
 from linuxPlatform import inputHook
 
