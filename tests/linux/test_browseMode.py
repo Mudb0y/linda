@@ -348,7 +348,7 @@ def test_fieldBuiltAgainWhenFocusedIsInFocusMode(desktop: DesktopSession):
 	expect(desktop, "Search box page…", "The search box is built again…", since=0, timeout=BUFFER_BOUND)
 	time.sleep(SETTLE)
 	step(desktop, "control+Home", "banner landmark search landmark Search the site edit…")
-	step(desktop, "Return", "Focus mode", "combo box Search the site…")
+	step(desktop, "Return", "Focus mode", "Search the site combo box…")
 	step(desktop, "Escape", "Browse mode")
 	step(desktop, "Down", "main landmark…")
 	quit(desktop, nvda)
