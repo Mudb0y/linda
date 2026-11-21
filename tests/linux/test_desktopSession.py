@@ -321,6 +321,21 @@ def test_keyNamesAndCharactersFindTheirKeys(desktop: DesktopSession):
 
 
 @pytest.mark.parametrize("standIn", [False], ids=["display"], indirect=True)
+def test_aKeyThatFailsLetsGoOfTheModifiersHeld(desktop: DesktopSession, monkeypatch: pytest.MonkeyPatch):
+	sent: list[tuple[int, bool]] = []
+
+	def key(code: int, pressed: bool) -> None:
+		if code == 9 and pressed:
+			raise RuntimeError("the injector answered an error")
+		sent.append((code, pressed))
+
+	monkeypatch.setattr(waylandKeyboard, "key", key)
+	with pytest.raises(RuntimeError):
+		desktop._pressCodes([42, 100, 9])
+	assert sent == [(42, True), (100, True), (100, False), (42, False)]
+
+
+@pytest.mark.parametrize("standIn", [False], ids=["display"], indirect=True)
 def test_activateGivesEachWindowTheKeyboard(desktop: DesktopSession):
 	"""Under Mutter, which has no way to name a window, the oldest of three needs the most switching."""
 	titles = ["Fixture window", "GTK4 fixture", "wx fixture"]

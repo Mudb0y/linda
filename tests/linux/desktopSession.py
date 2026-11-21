@@ -480,20 +480,28 @@ class DesktopSession:
 			time.sleep(TYPE_DELAY)
 
 	def _pressCodes(self, codes: Sequence[int]) -> None:
-		"""Each of codes down in order, then up in the reverse, on the stand-in or the rig's keyboard."""
+		"""Each of codes down in order, then up in the reverse, on the stand-in or the rig's keyboard.
+
+		A key that fails to go down still lets go of those before it: the rig's keyboard outlives the
+		test, and a Shift or Alt left held would change every key a later test presses."""
 		standIn = self.standIn
-		for code in codes:
-			if standIn is not None:
-				standIn.down(code)
-			else:
-				waylandKeyboard.key(code, True)
-			time.sleep(KEY_HOLD)
-		for code in reversed(codes):
-			if standIn is not None:
-				standIn.up(code)
-			else:
-				waylandKeyboard.key(code, False)
-			time.sleep(KEY_HOLD)
+		held: list[int] = []
+		try:
+			for code in codes:
+				if standIn is not None:
+					standIn.down(code)
+				else:
+					waylandKeyboard.key(code, True)
+				held.append(code)
+				time.sleep(KEY_HOLD)
+		finally:
+			while held:
+				code = held.pop()
+				if standIn is not None:
+					standIn.up(code)
+				else:
+					waylandKeyboard.key(code, False)
+				time.sleep(KEY_HOLD)
 
 	def mark(self) -> int:
 		"""How many speak records NVDA has made so far, to give spokenSince or expect."""
