@@ -512,6 +512,9 @@ class KernelKeySource:
 		#: Key code: (its virtual-key code, the TYPE mode, the press's tag) of each key typed down and not
 		#: yet released, replaced whole, as keyState reads it from other threads.
 		self._typedDown: dict[int, tuple[int, int, int]] = {}
+		#: Key code: the KEY's number of each key typed to be decided whose press was refused as it went
+		#: out, until its release is answered.
+		self._refusedOut: dict[int, int] = {}
 		#: Whether Num Lock was on before a numpad key was typed under the other state, until it is put
 		#: back as the last such key is released.
 		self._numLockBefore: bool | None = None
@@ -926,9 +929,13 @@ class KernelKeySource:
 				self._inject(keycode, vk, True)
 		self._putNumLockBack()
 
-	def _onTyped(self, message: keydClient.Typed) -> None:
+	def _onTyped(self, message: keydClient.Typed, now: float) -> None:
 		sent = self._typing.pop(message.tag, None)
-		if sent is None or message.outcome not in TYPED_UNDONE:
+		if sent is None:
+			return
+		if not sent.down and sent.mode == keydClient.TYPE_DECIDE:
+			self._releaseRefusedOut(sent.keycode, now)
+		if message.outcome not in TYPED_UNDONE:
 			return
 		# By tag only, as which key it was is what was typed.
 		outcome = keydClient.TYPED_NAMES.get(message.outcome, f"had outcome {message.outcome}")
@@ -936,16 +943,30 @@ class KernelKeySource:
 		if not sent.down:
 			return
 		held = self._typedDown.get(sent.keycode)
-		if held is not None and held[2] == message.tag:
+		if sent.mode == keydClient.TYPE_DECIDE and message.seq and message.outcome != keydClient.TYPED_LOST:
+			# Refused as it went out, after its KEY came back and was passed: the helper has it typed down
+			# until its release, which must still go, and NVDA has it down until that release ends it.
+			self._refusedOut[sent.keycode] = message.seq
+		elif held is not None and held[2] == message.tag:
 			vk, mode, _tag = held
 			self._typedNow(sent.keycode, vk, mode, None)
 		if sent.light:
 			self._locks ^= sent.light
 
+	def _releaseRefusedOut(self, keycode: int, now: float) -> None:
+		"""End NVDA's press of a key typed and refused as it went out, once its release is answered, if no
+		KEY release came back to end it: a helper that dropped the key at the refusal answers its release
+		at once, with no KEY, and the press would repeat to NVDA until the helper next lets go."""
+		seq = self._refusedOut.pop(keycode, None)
+		press = self._bySeq.get(seq) if seq is not None else None
+		if press is not None and self._presses.get(keycode) is press:
+			self._onKey(keydClient.Key(0, press.device, keycode - 8, KEY_RELEASE, keydClient.KEY_TYPED), now)
+
 	def _forgetTyping(self) -> None:
 		"""The helper let go, which lets go of every key typed down and drops those not yet out."""
 		self._typing.clear()
 		self._typedDown = {}
+		self._refusedOut.clear()
 		self._numLockBefore = None
 
 	def _post(self, command: Callable[[], None]) -> None:
@@ -1412,7 +1433,7 @@ class KernelKeySource:
 					self.lostReason = message.reason
 				self._loseHelper(f"it said goodbye: {message.describe()}")
 			case keydClient.Typed() if self._environment is not None:
-				self._onTyped(message)
+				self._onTyped(message, now)
 			case _:
 				# A message of a later version or feature, which this client did not ask for.
 				pass

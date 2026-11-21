@@ -41,10 +41,12 @@ everySession = pytest.mark.rigSession("x11", "wayland")
 
 #: What the route asks for, and the stand-in grants when told to.
 TYPING = FEATURE_WAIT | FEATURE_TYPING | FEATURE_LATE_PASS
-TYPED_OUT, TYPED_KEPT, TYPED_REFUSED_KEY = 1, 2, 4
+TYPED_OUT, TYPED_KEPT, TYPED_REFUSED_KEY, TYPED_NOT_DOWN = 1, 2, 4, 6
 VK_TAB, VK_SHIFT, VK_INSERT, VK_SNAPSHOT = 0x09, 0x10, 0x2D, 0x2C
 VK_HOME, VK_NUMPAD5, VK_NUMLOCK, VK_LSHIFT = 0x24, 0x65, 0x90, 0xA0
+VK_LMENU = 0xA4
 TAB, SHIFT, ALT, NUM_LOCK = code("Tab"), code("shift"), code("alt"), code("Num_Lock")
+SYSRQ = keydStandIn.SYSRQ
 KP_HOME, KP_5 = code("KP_Home"), code("KP_Begin")
 #: The bit of Num Lock in the protocol's LOCKS.
 LOCK_NUM = 1
@@ -342,6 +344,61 @@ def test_aRefusedKeyIsForgottenAndLoggedByItsTagAlone(tmp_path: Path):
 		"linda-keyd's typed key 1 was refused, as the helper does not type that key now"
 	]
 	assert value["canSend"]
+
+
+REFUSED_OUT_CHILD = r"""
+source = startRoute()
+k = source._kernel
+alt = k._keycodeToType(VK_LMENU, False)
+sysrq = k._keycodeToType(VK_SNAPSHOT, False)
+# In one turn of the source's thread, as the controlling computer's Alt+Print come in one read: SysRq is
+# taken, as no Alt is out yet, comes back and is passed, but the Alt ahead of it went out first.
+k._post(lambda: (k._typeKey(alt, VK_LMENU, False, False), k._typeKey(sysrq, VK_SNAPSHOT, False, False)))
+time.sleep(0.5)
+source.typeKey(VK_SNAPSHOT, False, True)
+time.sleep(0.1)
+source.typeKey(VK_LMENU, False, True)
+time.sleep(0.6)
+events = [[e["vk"], e["up"], e["repeat"]] for e in delivered if e["vk"] == VK_SNAPSHOT]
+held = {"events": events, "presses": sorted(k._presses), "typed": keyboard.typed[:]}
+before = len(sink.passed())
+source.typeKey(VK_SNAPSHOT, False, False)
+time.sleep(0.2)
+source.typeKey(VK_SNAPSHOT, False, True)
+time.sleep(0.3)
+result = {"held": held, "again": sink.passed()[before:], "outcomes": outcomes(), "lines": typedLines()}
+source.stop()
+"""
+
+
+@forcedSession
+def test_aTypedPressRefusedAsItGoesOutIsStillReleased(tmp_path: Path):
+	"""A typed press the helper refuses only as it goes out, as keys ahead of it changed what is down,
+	stays typed down there: its release still goes out, ends NVDA's press of it, and the key can be typed
+	again."""
+	value = runTypingChild(
+		tmp_path, f"VK_LMENU, VK_SNAPSHOT = {VK_LMENU}, {VK_SNAPSHOT}\n" + REFUSED_OUT_CHILD
+	)
+	held = value["held"]
+	# Refused as it went out, after its KEY came back.
+	assert held["typed"][1][1] != 0
+	assert [outcome for _tag, _seq, outcome in held["typed"]] == [
+		TYPED_OUT,
+		TYPED_REFUSED_KEY,
+		TYPED_NOT_DOWN,
+		TYPED_OUT,
+	]
+	events = held["events"]
+	assert events[0] == [VK_SNAPSHOT, False, False]
+	assert events[-1] == [VK_SNAPSHOT, True, False]
+	assert [VK_SNAPSHOT, True, False] not in events[:-1]
+	assert held["presses"] == []
+	assert value["again"] == [[SYSRQ, True], [SYSRQ, False]]
+	assert value["outcomes"][4:] == [TYPED_OUT, TYPED_OUT]
+	assert value["lines"] == [
+		"linda-keyd's typed key 2 was refused, as the helper does not type that key now",
+		"linda-keyd's typed key 3 was refused, as its key was not typed down",
+	]
 
 
 WITHOUT_CHILD = r"""
