@@ -22,12 +22,14 @@
 # the host's own addresses shut off, and names resolved through a nameserver
 # address that pasta passes to the host's resolver and nowhere else.
 #
-# LINDA_RIG_SESSION=wayland gives the sandbox a Wayland session instead of
-# the X display: Mutter, headless on a virtual monitor of the same size, with
-# its accessibility manager on the sandbox's session bus, and a virtual
-# keyboard that tests press keys on through tests/linux/waylandKeyboard.py.
-# LINDA_RIG_XWAYLAND=1 lets Mutter start Xwayland beside it. Nothing about
-# the X mode changes when the variable is unset.
+# LINDA_RIG_COMPOSITOR=mutter or sway gives the sandbox a Wayland session
+# instead of the X display, with a headless compositor on a virtual monitor of
+# the same size and a virtual keyboard in the pl layout that tests press keys
+# on through tests/linux/waylandKeyboard.py. Mutter has its accessibility
+# manager on the sandbox's session bus; sway puts swaymsg on PATH.
+# LINDA_RIG_SESSION=wayland alone means Mutter, and LINDA_RIG_XWAYLAND=1 lets
+# the compositor start Xwayland beside it, whose display alone is then
+# DISPLAY. Nothing about the X mode changes when the variables are unset.
 #
 # The exit status is the command's, or 125 when the rig itself failed.
 set -euo pipefail
@@ -61,11 +63,30 @@ if [ "${1:-}" = --inside ]; then
 		fail "--inside is the rig's own second half and runs only in its sandbox"
 	fi
 	shift
-	session=${LINDA_RIG_SESSION:-x11}
+	compositor=${LINDA_RIG_COMPOSITOR:-}
+	case $compositor in
+	'' | mutter | sway) ;;
+	*) fail "LINDA_RIG_COMPOSITOR is mutter or sway, not $compositor" ;;
+	esac
+	session=${LINDA_RIG_SESSION:-}
 	case $session in
-	x11 | wayland) ;;
+	'') session=x11 && [ -n "$compositor" ] && session=wayland ;;
+	x11) [ -z "$compositor" ] || fail "LINDA_RIG_COMPOSITOR is for a Wayland session, not x11" ;;
+	wayland) ;;
 	*) fail "LINDA_RIG_SESSION is x11 or wayland, not $session" ;;
 	esac
+	case ${LINDA_RIG_XWAYLAND:-} in
+	'' | 0) xwayland= ;;
+	1) xwayland=1 ;;
+	*) fail "LINDA_RIG_XWAYLAND is 1 for Xwayland or unset for none, not $LINDA_RIG_XWAYLAND" ;;
+	esac
+	if [ "$session" = wayland ]; then
+		[ -z "${LINDA_RIG_WM:-}" ] || fail "LINDA_RIG_WM is for the X session; the compositor manages windows here"
+		compositor=${compositor:-mutter}
+		export LINDA_RIG_COMPOSITOR=$compositor LINDA_RIG_SESSION=wayland
+	else
+		[ -z "$xwayland" ] || fail "LINDA_RIG_XWAYLAND is for a Wayland session"
+	fi
 	if [ "$session" = x11 ]; then
 		# -noreset, because the server otherwise resets when its first client
 		# leaves and drops the root window property the accessibility bus is
@@ -112,35 +133,93 @@ if [ "${1:-}" = --inside ]; then
 	# Only some at-spi2-core builds have this one.
 	set_status ScreenReaderEnabled 2>/dev/null || true
 	if [ "$session" = wayland ]; then
-		[ -z "${LINDA_RIG_WM:-}" ] || fail "LINDA_RIG_WM is for the X session; Mutter is the window manager here"
-		[ -n "${LINDA_MUTTER:-}" ] || fail "LINDA_MUTTER is not set; run inside the dev shell"
-		# Headless, so that it opens no device and reads no input of its own:
-		# its only keyboard is the virtual one below. Xwayland only on request,
-		# so that a client which falls back to X fails instead of passing
-		# quietly through it.
-		xwayland=(--no-x11)
-		[ "${LINDA_RIG_XWAYLAND:-}" = 1 ] && xwayland=()
-		env XDG_DATA_DIRS="$LINDA_MUTTER_SCHEMAS:$XDG_DATA_DIRS" \
-			__EGL_VENDOR_LIBRARY_FILENAMES="$LINDA_MESA/share/glvnd/egl_vendor.d/50_mesa.json" \
-			LIBGL_DRIVERS_PATH="$LINDA_MESA/lib/dri" GBM_BACKENDS_PATH="$LINDA_MESA/lib/gbm" \
-			"$LINDA_MUTTER" --headless --wayland "${xwayland[@]}" --wayland-display=wayland-rig \
-			--virtual-monitor 1280x1024 >"$XDG_RUNTIME_DIR/mutter.log" 2>&1 &
-		for _ in $(seq 200); do
-			[ -S "$XDG_RUNTIME_DIR/wayland-rig" ] && break
-			sleep 0.05
-		done
-		if [ ! -S "$XDG_RUNTIME_DIR/wayland-rig" ]; then
-			cat "$XDG_RUNTIME_DIR/mutter.log" >&2
-			fail "Mutter did not start"
+		# A compositor's socket, by its name in the runtime directory: the
+		# command's WAYLAND_DISPLAY, and what each waits for below.
+		socket=
+		if [ -n "$xwayland" ]; then
+			# Both compositors refuse a socket directory anyone could replace
+			# sockets in, and both take the first display number whose lock file
+			# names no live process. These name the sandbox's first process, so
+			# that the display is none a live desktop has, as Xvfb's is.
+			chmod 1777 /tmp/.X11-unix
+			for number in $(seq 0 9); do
+				printf '%10d\n' 1 >"/tmp/.X$number-lock"
+			done
 		fi
-		export WAYLAND_DISPLAY=wayland-rig XDG_SESSION_TYPE=wayland
-		if [ "${LINDA_RIG_XWAYLAND:-}" = 1 ]; then
-			# Mutter gives the display and its cookie only to programs it starts.
-			display=$(grep -o 'Using public X11 display :[0-9]*' "$XDG_RUNTIME_DIR/mutter.log" |
-				grep -o ':[0-9]*$') || fail "Mutter named no X display"
-			cookie=$(ls "$XDG_RUNTIME_DIR"/.mutter-Xwaylandauth.* 2>/dev/null) ||
-				fail "Mutter wrote no X cookie"
-			export DISPLAY=$display XAUTHORITY=$cookie
+		if [ "$compositor" = mutter ]; then
+			[ -n "${LINDA_MUTTER:-}" ] || fail "LINDA_MUTTER is not set; run inside the dev shell"
+			# Headless, so that it opens no device and reads no input of its own:
+			# its only keyboard is the virtual one below. Xwayland only on request,
+			# so that a client which falls back to X fails instead of passing
+			# quietly through it.
+			x11=(--no-x11)
+			[ -n "$xwayland" ] && x11=()
+			env XDG_DATA_DIRS="$LINDA_MUTTER_SCHEMAS:$XDG_DATA_DIRS" \
+				__EGL_VENDOR_LIBRARY_FILENAMES="$LINDA_MESA/share/glvnd/egl_vendor.d/50_mesa.json" \
+				LIBGL_DRIVERS_PATH="$LINDA_MESA/lib/dri" GBM_BACKENDS_PATH="$LINDA_MESA/lib/gbm" \
+				"$LINDA_MUTTER" --headless --wayland "${x11[@]}" --wayland-display=wayland-rig \
+				--virtual-monitor 1280x1024 >"$XDG_RUNTIME_DIR/mutter.log" 2>&1 &
+			for _ in $(seq 200); do
+				[ -S "$XDG_RUNTIME_DIR/wayland-rig" ] && break
+				sleep 0.05
+			done
+			if [ ! -S "$XDG_RUNTIME_DIR/wayland-rig" ]; then
+				cat "$XDG_RUNTIME_DIR/mutter.log" >&2
+				fail "Mutter did not start"
+			fi
+			socket=wayland-rig
+			if [ -n "$xwayland" ]; then
+				# Mutter gives the display and its cookie only to programs it starts.
+				display=$(grep -o 'Using public X11 display :[0-9]*' "$XDG_RUNTIME_DIR/mutter.log" |
+					grep -o ':[0-9]*$') || fail "Mutter named no X display"
+				cookie=$(ls "$XDG_RUNTIME_DIR"/.mutter-Xwaylandauth.* 2>/dev/null) ||
+					fail "Mutter wrote no X cookie"
+			fi
+		else
+			[ -n "${LINDA_SWAY_BIN:-}" ] || fail "LINDA_SWAY_BIN is not set; run inside the dev shell"
+			# sway names its own socket and its Xwayland's display only to the
+			# programs it starts, so the first of them writes them down.
+			# Xwayland, when asked for, starts as Mutter's does: when a client
+			# first connects.
+			if [ -n "$xwayland" ]; then
+				x11='xwayland enable'
+			else
+				x11='xwayland disable'
+			fi
+			cat >"$XDG_RUNTIME_DIR/sway.conf" <<-EOF
+				output HEADLESS-1 resolution 1280x1024
+				$x11
+				exec printf '%s %s\\n' "\$WAYLAND_DISPLAY" "\${DISPLAY:--}" >"$XDG_RUNTIME_DIR/sway.names.new" && mv "$XDG_RUNTIME_DIR/sway.names.new" "$XDG_RUNTIME_DIR/sway.names"
+			EOF
+			export SWAYSOCK=$XDG_RUNTIME_DIR/sway.sock
+			# The headless backend, which wants no seat, session or device, and
+			# the renderer that draws in memory, which wants no GPU. Without the
+			# first wlroots would pick a backend from what it finds.
+			env WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_HEADLESS_OUTPUTS=1 \
+				"$LINDA_SWAY_BIN/sway" --config "$XDG_RUNTIME_DIR/sway.conf" \
+				>"$XDG_RUNTIME_DIR/sway.log" 2>&1 &
+			for _ in $(seq 200); do
+				[ -s "$XDG_RUNTIME_DIR/sway.names" ] && [ -S "$SWAYSOCK" ] && break
+				sleep 0.05
+			done
+			if [ ! -s "$XDG_RUNTIME_DIR/sway.names" ] || [ ! -S "$SWAYSOCK" ]; then
+				cat "$XDG_RUNTIME_DIR/sway.log" >&2
+				fail "sway did not start"
+			fi
+			read -r socket display <"$XDG_RUNTIME_DIR/sway.names"
+			[ -S "$XDG_RUNTIME_DIR/$socket" ] || fail "sway named no socket of its own"
+			if [ -n "$xwayland" ]; then
+				[ "$display" != - ] || fail "sway named no X display"
+				cookie=
+			fi
+			export PATH=$LINDA_SWAY_BIN:$PATH
+		fi
+		export WAYLAND_DISPLAY=$socket XDG_SESSION_TYPE=wayland
+		# Never Xvfb's: a Wayland run with it would quietly test the X route.
+		unset DISPLAY XAUTHORITY
+		if [ -n "$xwayland" ]; then
+			export DISPLAY=$display
+			[ -z "$cookie" ] || export XAUTHORITY=$cookie
 		fi
 		# The seat has a keyboard only while a virtual one exists, and a
 		# window without the keyboard never becomes active; this one also

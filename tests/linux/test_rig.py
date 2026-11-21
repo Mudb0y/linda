@@ -8,10 +8,14 @@ nix develop . -c tests/linux/rig python -m pytest tests/linux/test_rig.py
 The tests of the rig's internet run only in a rig that has it, and are skipped otherwise:
 
 LINDA_RIG_NET=1 nix develop . -c tests/linux/rig python -m pytest tests/linux/test_rig.py
+
+They all expect the X display, and see the rig's Wayland sessions from outside, in a rig of their own.
 """
 
 import errno
+import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -21,6 +25,8 @@ from pathlib import Path
 
 import network
 import pytest
+
+pytestmark = pytest.mark.rigSession("x11")
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -67,6 +73,11 @@ ALLOWED_VARIABLES = {
 	"XDG_STATE_HOME",
 	"_",
 }
+
+
+#: What a Wayland session's environment holds besides what the X one may: the compositor's socket, the
+#: session's kind, the cookie of Mutter's Xwayland and sway's command socket.
+WAYLAND_VARIABLES = {"WAYLAND_DISPLAY", "XDG_SESSION_TYPE", "XAUTHORITY", "SWAYSOCK"}
 
 
 def rig(
@@ -251,6 +262,89 @@ def test_unknownWindowManagerIsRefused(monkeypatch: pytest.MonkeyPatch):
 	done = rig("true")
 	assert done.returncode == 125
 	assert "unknown window manager" in done.stderr
+
+
+@pytest.mark.parametrize(
+	("variables", "complaint"),
+	[
+		({"LINDA_RIG_COMPOSITOR": "kwin"}, "LINDA_RIG_COMPOSITOR is mutter or sway"),
+		({"LINDA_RIG_SESSION": "mir"}, "LINDA_RIG_SESSION is x11 or wayland"),
+		({"LINDA_RIG_SESSION": "x11", "LINDA_RIG_COMPOSITOR": "sway"}, "is for a Wayland session"),
+		({"LINDA_RIG_XWAYLAND": "1"}, "LINDA_RIG_XWAYLAND is for a Wayland session"),
+		({"LINDA_RIG_COMPOSITOR": "sway", "LINDA_RIG_XWAYLAND": "yes"}, "LINDA_RIG_XWAYLAND is 1"),
+		({"LINDA_RIG_COMPOSITOR": "mutter", "LINDA_RIG_WM": "marco"}, "LINDA_RIG_WM is for the X session"),
+	],
+)
+def test_sessionChoiceIsChecked(monkeypatch: pytest.MonkeyPatch, variables: dict[str, str], complaint: str):
+	for name, value in variables.items():
+		monkeypatch.setenv(name, value)
+	done = rig("true")
+	assert done.returncode == 125
+	assert complaint in done.stderr, done.stderr
+
+
+#: Run in a rig: prints its environment, the names of its processes, the X sockets it has and the
+#: sockets named by WAYLAND_DISPLAY and SWAYSOCK it has, as JSON.
+INSPECT = """
+import json, os, pathlib
+names = []
+for entry in pathlib.Path("/proc").iterdir():
+	try:
+		names.append((entry / "comm").read_text().strip())
+	except OSError:
+		pass
+named = {
+	"WAYLAND_DISPLAY": pathlib.Path(os.environ["XDG_RUNTIME_DIR"], os.environ.get("WAYLAND_DISPLAY", "-")),
+	"SWAYSOCK": pathlib.Path(os.environ.get("SWAYSOCK", "/-")),
+}
+print(json.dumps({
+	"environment": dict(os.environ),
+	"processes": names,
+	"sockets": sorted(path.name for path in pathlib.Path("/tmp/.X11-unix").iterdir()),
+	"named": sorted(name for name, path in named.items() if path.is_socket()),
+}))
+"""
+
+
+@pytest.mark.parametrize("xwayland", ["", "1"], ids=["noXwayland", "xwayland"])
+@pytest.mark.parametrize("compositor", ["mutter", "sway"])
+def test_waylandSessionHasNoXvfb(compositor: str, xwayland: str):
+	"""No Xvfb and none of its display: DISPLAY names the compositor's Xwayland when it was asked for, and
+	nothing otherwise, so that a Wayland test can never pass by taking the X route."""
+	env = {**withoutNetwork(), "LINDA_RIG_COMPOSITOR": compositor, "LINDA_RIG_XWAYLAND": xwayland}
+	done = rig(sys.executable, "-c", INSPECT, env=env)
+	assert done.returncode == 0, done.stderr
+	seen = json.loads(done.stdout)
+	environment = seen["environment"]
+	strangers = {
+		name
+		for name in environment
+		if name not in ALLOWED_VARIABLES | WAYLAND_VARIABLES and not name.startswith(("LINDA_", "BENCH_"))
+	}
+	assert not strangers, sorted(strangers)
+	assert environment["XDG_SESSION_TYPE"] == "wayland"
+	assert environment["LINDA_RIG_COMPOSITOR"] == compositor
+	assert seen["named"] == (["SWAYSOCK", "WAYLAND_DISPLAY"] if compositor == "sway" else ["WAYLAND_DISPLAY"])
+	# Nix's wrapper makes Mutter .mutter-wrapped.
+	assert any(compositor in name for name in seen["processes"]), seen["processes"]
+	assert "Xvfb" not in seen["processes"]
+	assert "X99" not in seen["sockets"]
+	if xwayland:
+		number = re.fullmatch(r":(\d+)", environment["DISPLAY"])
+		assert number, environment["DISPLAY"]
+		# Above the numbers a live desktop takes, as Xvfb's :99 is.
+		assert int(number[1]) >= 10 and f"X{number[1]}" in seen["sockets"]
+	else:
+		assert "DISPLAY" not in environment and "XAUTHORITY" not in environment
+		assert seen["sockets"] == [] and "Xwayland" not in seen["processes"]
+
+
+def test_waylandSessionAloneMeansMutter():
+	done = rig(sys.executable, "-c", INSPECT, env={**withoutNetwork(), "LINDA_RIG_SESSION": "wayland"})
+	assert done.returncode == 0, done.stderr
+	seen = json.loads(done.stdout)
+	assert seen["environment"]["LINDA_RIG_COMPOSITOR"] == "mutter"
+	assert ".mutter-wrapped" in seen["processes"]
 
 
 @pytest.mark.parametrize(
