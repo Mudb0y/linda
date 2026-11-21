@@ -11,9 +11,8 @@ helper passes is shown by the evdev recorder's records of the virtual keyboard, 
 compositor from a keyboard itself by the evdev recorder's records of that keyboard, which no reader
 has while the helper grabs it, and what reaches a program by the native GTK window's records. The
 lock lights are read from the kernel, by ground-poke. A release the kernel makes itself as a device
-goes, the virtual keyboard's at a helper's end among them, carries the stamp of that device's last
-event, which was seen to be the press it releases, so such a release is timed by when the recorder
-read it.
+goes, the virtual keyboard's at a helper's end among them, is timed by when the recorder read it,
+which is no earlier than it happened, so that a bound it is held to is never met by a stamp.
 
 In the guest, as ground-helper-safety, which a case's module installs (cases/wlGnomeHelper.nix), it
 watches for the moment the compositor opens a keyboard:
@@ -133,6 +132,12 @@ def deviceAdded(ground: "Ground", name: str, since: "Mark") -> float:
 
 def appKeyvals(records: list[dict]) -> list[str]:
 	return [r["keyval"] for r in records if r["value"] == 1]
+
+
+def released(records: list[dict]) -> dict:
+	"""The first release among records, past the kernel's repeats of a key held on the virtual
+	keyboard, which it repeats as it does a real one's."""
+	return next(r for r in records if r["value"] == 0)
 
 
 def logTimeline(ground: "Ground", client: "KeydClient", since: "Mark", zero: float, what: str) -> None:
@@ -500,7 +505,7 @@ def hotplug(ground: "Ground", client: "KeydClient", figures: dict) -> None:
 		gone = client.waitForDevice(USB_KEYBOARD, "GONE", mark)
 		releases = [r for r in client.keys(mark) if r["device"] == gone["device"] and r["value"] == 0]
 		figures["hotplug"] = {
-			"shiftHeld": round(release[1]["received"] - pressed[0]["received"], 3),
+			"shiftHeld": round(released(release)["received"] - pressed[0]["received"], 3),
 			"clientToldOfReleaseAfterUnplugAsked": round(releases[0]["t"] - unplugging, 3)
 			if releases
 			else None,
@@ -707,7 +712,7 @@ def watchdogThread(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClie
 		systemd = [t for t, line in ground.helperLog(mark) if "Watchdog timeout" in line]
 		figures["watchdogThread"] = {
 			"saidAfterStall": round(said[0] - stoppedAt, 3),
-			"shiftReleasedAfterStall": round(release[1]["received"] - stoppedAt, 3),
+			"shiftReleasedAfterStall": round(released(release)["received"] - stoppedAt, 3),
 			"endedAfterStall": round(ended[0] - stoppedAt, 3),
 			"systemdWatchdogAfterStall": round(systemd[0] - stoppedAt, 3) if systemd else None,
 		}
@@ -763,10 +768,10 @@ def stopped(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 		# a key from the real keyboard that comes just after; it must not stay applied.
 		shifted = [r for r in app if r["value"] == 1 and r["keyval"] == "Q"]
 		assert app and set(appKeyvals(app)) <= {"q", "Q"}, app
-		assert not [r for r in shifted if r["t"] > release[1]["received"] + SHIFT_CLEARS], shifted
+		assert not [r for r in shifted if r["t"] > released(release)["received"] + SHIFT_CLEARS], shifted
 		typedAfterBack = [r for r in written if r["value"] == 1 and r["t"] >= back - STREAM_GAP]
 		figures["stopped"] = {
-			"shiftReleasedAfterStop": round(release[1]["received"] - stoppedAt, 3),
+			"shiftReleasedAfterStop": round(released(release)["received"] - stoppedAt, 3),
 			"keyboardBackAfterStop": round(back - stoppedAt, 3),
 			"firstKeyAtProgramAfterStop": round(app[0]["t"] - stoppedAt, 3),
 			"tapsTyped": len([r for r in written if r["value"] == 1]),
@@ -774,7 +779,7 @@ def stopped(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 			"tapsAtProgram": len(appKeyvals(app)),
 			"shiftedAtProgram": len(shifted),
 			"lastShiftedAfterShiftReleaseRead": (
-				round(shifted[-1]["t"] - release[1]["received"], 3) if shifted else None
+				round(shifted[-1]["t"] - released(release)["received"], 3) if shifted else None
 			),
 		}
 		ground.machine.log(f"a stopped helper, seconds from the stop: {figures['stopped']}")
@@ -782,7 +787,7 @@ def stopped(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 		# late.
 		assert len(appKeyvals(app)) <= len(typedAfterBack), (figures["stopped"], app)
 		# The watchdog's two seconds count from the loop's last feed, before the stop.
-		assert release[1]["received"] - stoppedAt < WATCHDOG + SLACK, release
+		assert released(release)["received"] - stoppedAt < WATCHDOG + SLACK, release
 		assert back - stoppedAt < WATCHDOG + SLACK, back - stoppedAt
 
 	with ground.subtest("systemd starts it again, and it serves a client"):
