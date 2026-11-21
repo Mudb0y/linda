@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
 POINTER_KEYBOARD = "Ground pointer keyboard"
 KEYD = "linda-keyd.service"
+KEYD_LET_GO = "linda-keyd let go of the keyboard"
 #: AltGr letters of the Polish layout: (GDK's name for what it types, the letter).
 ALTGR_LETTERS = {
 	"KEY_A": ("aogonek", "\N{LATIN SMALL LETTER A WITH OGONEK}"),
@@ -257,12 +258,13 @@ def console(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 		f"until [ -e {CONSOLE_TEXT} ]; do sleep 0.05; done"
 	)
 	without = len(ground.lindaLogRecords(WITHOUT_KEYS))
+	letGo = len(ground.lindaLogRecords(KEYD_LET_GO))
 
 	with ground.subtest("Control, Alt and a function key, passed by Linda, switch to a text console"):
 		mark = ground.mark()
 		keyboard.chord("KEY_LEFTCTRL", "KEY_LEFTALT", f"KEY_F{text}")
 		ground.waitFor(lambda: ground.shell("fgconsole").strip() == str(text), "the switch to the console")
-		ground.waitForLindaLog("linda-keyd let go of the keyboard")
+		ground.waitForLindaLog(KEYD_LET_GO, count=letGo + 1)
 		# Under load the kernel has taken a second to put the console in front (V2-gnome-helper.md).
 		ground.settle(1.5)
 		mark = ground.mark()
