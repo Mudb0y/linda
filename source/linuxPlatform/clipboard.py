@@ -632,6 +632,8 @@ class _Selection:
 		self._selections = 0
 		#: NVDA's own source and the text it serves, while the clipboard is NVDA's.
 		self._source: tuple[int, bytes] | None = None
+		#: Every source NVDA has made and not yet destroyed.
+		self._liveSources: set[int] = set()
 
 	def _onDeviceEvent(self, opcode: int, arguments: list, primary: int | None = None) -> None:
 		if opcode == self._DEVICE_DATA_OFFER:
@@ -672,7 +674,16 @@ class _Selection:
 		elif opcode == self._SOURCE_CANCELLED:
 			if current:
 				self._source = None
-			self.wire.send(source, self._SOURCE_DESTROY)
+			self._destroySource(source)
+
+	def _destroySource(self, source: int) -> None:
+		# Once only: a source NVDA replaced may still be cancelled by an event already on its way, and a
+		# request to a destroyed object ends the connection.
+		with self.wire.condition:
+			if source not in self._liveSources:
+				return
+			self._liveSources.discard(source)
+		self.wire.send(source, self._SOURCE_DESTROY)
 
 	def _offerSource(self, data: bytes) -> int:
 		"""A new source for data, which becomes NVDA's own; the one before it is destroyed."""
@@ -680,31 +691,34 @@ class _Selection:
 			self._sourceInterface,
 			lambda opcode, arguments: self._onSourceEvent(source, opcode, arguments),
 		)
+		with self.wire.condition:
+			self._liveSources.add(source)
 		self.wire.send(self._manager, 0, _uint(source))
 		for mimeType in OFFERED_TYPES:
 			self.wire.send(source, self._SOURCE_OFFER, _string(mimeType))
 		with self.wire.condition:
 			old, self._source = self._source, (source, data)
 		if old is not None:
-			self.wire.send(old[0], self._SOURCE_DESTROY)
+			self._destroySource(old[0])
 		return source
 
-	def _isCopied(self, source: int, text: str, selectionsBefore: int, timeout: float) -> bool:
-		"""Whether the clipboard is source now, by the compositor's word and by text coming back
-		through it."""
+	def _isCopied(self, text: str, selectionsBefore: int, timeout: float) -> bool:
+		"""Whether the clipboard has been set since selectionsBefore, by the compositor's word, and
+		holds text as it comes back through the compositor.
+
+		The clipboard need not still be NVDA's own source: a clipboard manager, such as Plasma's, may
+		have taken the text over already, and the copy is as good.
+		"""
 		wire = self.wire
 		if not wire.roundTrip(timeout):
 			return False
-		said = wire.waitFor(lambda: self._selections > selectionsBefore, timeout)
-		with wire.condition:
-			ours = self._source is not None and self._source[0] == source
-		if not (said and ours):
-			log.debugWarning(
-				f"The compositor did not take NVDA's copy: it {'said' if said else 'never said'} what the "
-				f"clipboard is, and {'still' if ours else 'no longer'} asks NVDA for it"
-			)
+		if not wire.waitFor(lambda: self._selections > selectionsBefore, timeout):
+			log.debugWarning("The compositor did not take NVDA's copy: it never said what the clipboard is")
 			return False
-		return self._readSelection(timeout) == text
+		if self._readSelection(timeout) != text:
+			log.debugWarning("The compositor did not take NVDA's copy: the clipboard holds something else")
+			return False
+		return True
 
 	def _readSelection(self, timeout: float) -> str:
 		"""The text of the clipboard as the compositor last named it, or "" when it holds none."""
@@ -748,7 +762,7 @@ class _DataControlRoute(_Selection):
 			before = self._selections
 		source = self._offerSource(text.encode("utf-8"))
 		self.wire.send(self._device, self._DEVICE_SET_SELECTION, _uint(source))
-		return self._isCopied(source, text, before, ROUND_TRIP_TIMEOUT)
+		return self._isCopied(text, before, ROUND_TRIP_TIMEOUT)
 
 	def read(self, timeout: float) -> str:
 		if not self.wire.roundTrip():
@@ -874,7 +888,7 @@ class _WindowRoute(_Selection):
 				before = self._selections
 			source = self._offerSource(text.encode("utf-8"))
 			self.wire.send(self._device, self._DEVICE_SET_SELECTION, _uint(source) + _uint(serial))
-			return self._isCopied(source, text, before, ROUND_TRIP_TIMEOUT)
+			return self._isCopied(text, before, ROUND_TRIP_TIMEOUT)
 
 		try:
 			return bool(self._withKeyboard(put))
