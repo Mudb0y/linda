@@ -19,8 +19,11 @@ from pathlib import Path
 import harness
 import pytest
 
-#: Within which a change must reach onChange while the main thread is kept busy.
-CHANGE_BOUND = 0.1
+#: Within which a change must reach onChange while the main thread is kept busy for 0.3 s at a time:
+#: well short of that, so that a change which waited for the main thread would fail. Each call the
+#: feed's thread makes through GObject then waits its turn for the interpreter, 5 to 15 ms a time, and a
+#: change of layout makes enough of them to take 0.16 s on a quiet machine.
+CHANGE_BOUND = 0.25
 #: Changes each busy test makes of each kind.
 SWITCHES = 5
 DEBUG = 10
