@@ -162,6 +162,8 @@ class AtspiCaptureFeed:
 		self._connection = None
 		self._subscriptions: list[int] = []
 		self._lookTimer = None
+		#: Made at the first start and never closed: the answering thread may be about to write to it as
+		#: the feed stops, and a closed descriptor's number can be another file's by then.
 		self._wakeRead: int | None = None
 		self._wakeWrite: int | None = None
 		self._ready = threading.Event()
@@ -637,7 +639,8 @@ class AtspiCaptureFeed:
 		self._forgetConnection()
 		self._context = GLib.MainContext.new()
 		self._loop = GLib.MainLoop.new(self._context, False)
-		self._wakeRead, self._wakeWrite = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+		if self._wakeWrite is None:
+			self._wakeRead, self._wakeWrite = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
 		self._ready.clear()
 		self._thread = threading.Thread(target=self._run, name="lindaAtspiCapture", daemon=True)
 		self._thread.start()
@@ -679,12 +682,6 @@ class AtspiCaptureFeed:
 			log.debugWarning("AT-SPI capture feed: its thread did not end in time")
 			return
 		self._thread = None
-		# Taken away before they are closed, so that a look asked meanwhile writes to no other file.
-		fds = (self._wakeRead, self._wakeWrite)
-		self._wakeRead = self._wakeWrite = None
-		for fd in fds:
-			if fd is not None:
-				os.close(fd)
 
 	def _run(self) -> None:
 		self._context.push_thread_default()

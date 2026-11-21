@@ -683,7 +683,10 @@ RESTART = textwrap.dedent(
 	found = awaitForeground(feed)
 	time.sleep(0.1)
 	before = look(feed, 1)
+	wake = feed._wakeWrite
 	feed.stop()
+	# A look asked as the feed stops writes to the pipe it always had, never to a descriptor reused.
+	pipeKept = feed._wakeWrite == wake and os.get_blocking(wake) is False
 	os.kill(PID, signal.SIGSTOP)
 	try:
 		feed.start()
@@ -697,7 +700,15 @@ RESTART = textwrap.dedent(
 	time.sleep(0.1)
 	after = look(feed, 2)
 	feed.stop()
-	result = {"found": found, "before": before, "inFlight": inFlight, "refound": refound, "after": after}
+	pipeKept = pipeKept and feed._wakeWrite == wake
+	result = {
+		"found": found,
+		"before": before,
+		"pipeKept": pipeKept,
+		"inFlight": inFlight,
+		"refound": refound,
+		"after": after,
+	}
 	"""
 )
 
@@ -712,6 +723,7 @@ if not WAYLAND:
 		assert done.error is None, f"{done.error}\n{done.stderr[-4000:]}"
 		results = done.value
 		assert results["before"][0], results
+		assert results["pipeKept"], results
 		assert results["inFlight"] >= 1, f"no read was out at the stop: {results}"
 		assert results["after"][0], f"a look after the restart ended unknown: {results}"
 		print(
