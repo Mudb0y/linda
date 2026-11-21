@@ -642,6 +642,84 @@ if not WAYLAND:
 		)
 
 
+#: The child of the restart test: the feed started while a window already has the keyboard, stopped
+#: while a read is out to that window's program, which the test has paused, and started again.
+RESTART = textwrap.dedent(
+	"""\
+	import os
+	import signal
+	import threading
+	import time
+
+	from linuxPlatform.keys.atspiCapture import AtspiCaptureFeed
+
+
+	def awaitForeground(feed, timeout=5):
+		started = time.monotonic()
+		while (feed.foreground or (None, None, None))[2] != PID:
+			assert time.monotonic() - started < timeout, f"the active window was never found: {feed.foreground}"
+			time.sleep(0.005)
+		return time.monotonic() - started
+
+
+	def look(feed, number):
+		ended = []
+		heard = threading.Event()
+
+		def done(n, known):
+			ended.append(known)
+			heard.set()
+
+		asked = time.monotonic()
+		feed.requestLook(number, asked, done)
+		assert heard.wait(2), "the look never ended"
+		return [ended[0], time.monotonic() - asked]
+
+
+	feed = AtspiCaptureFeed()
+	feed.start()
+	assert feed.canLook
+	# The window had the keyboard before the feed started, so only its scan at the start can say so.
+	found = awaitForeground(feed)
+	time.sleep(0.1)
+	before = look(feed, 1)
+	feed.stop()
+	os.kill(PID, signal.SIGSTOP)
+	try:
+		feed.start()
+		time.sleep(0.3)
+		inFlight = feed._reading
+		feed.stop()
+	finally:
+		os.kill(PID, signal.SIGCONT)
+	feed.start()
+	refound = awaitForeground(feed)
+	time.sleep(0.1)
+	after = look(feed, 2)
+	feed.stop()
+	result = {"found": found, "before": before, "inFlight": inFlight, "refound": refound, "after": after}
+	"""
+)
+
+if not WAYLAND:
+	from desktopSession import activate
+
+	def test_startsAgainAfterAStopWithAReadOut(tmp_path: Path) -> None:
+		with DesktopSession(tmp_path / "desktop") as desktop:
+			fixture = desktop.startApp(desktop.fixture("gtkFixture"), title="Fixture window")
+			activate("Fixture window")
+			done = harness.runChild(tmp_path, f"PID = {fixture.pid}\n" + RESTART, timeout=120)
+		assert done.error is None, f"{done.error}\n{done.stderr[-4000:]}"
+		results = done.value
+		assert results["before"][0], results
+		assert results["inFlight"] >= 1, f"no read was out at the stop: {results}"
+		assert results["after"][0], f"a look after the restart ended unknown: {results}"
+		print(
+			f"found {results['found'] * 1000:.0f} ms and again {results['refound'] * 1000:.0f} ms after start; "
+			f"looks took {results['before'][1] * 1000:.1f} and {results['after'][1] * 1000:.1f} ms"
+		)
+
+
 #: The child of the Wayland test: the feed started with no other listener in the session, and a
 #: program started, whose window it must hear come to the front, and then its program end.
 NEW_WINDOW = textwrap.dedent(

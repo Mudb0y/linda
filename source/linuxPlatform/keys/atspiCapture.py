@@ -634,6 +634,7 @@ class AtspiCaptureFeed:
 			return
 		from gi.repository import GLib
 
+		self._forgetConnection()
 		self._context = GLib.MainContext.new()
 		self._loop = GLib.MainLoop.new(self._context, False)
 		self._wakeRead, self._wakeWrite = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
@@ -642,6 +643,27 @@ class AtspiCaptureFeed:
 		self._thread.start()
 		if not self._ready.wait(START_TIMEOUT):
 			log.debugWarning("AT-SPI capture feed: still connecting to the accessibility bus")
+
+	def _forgetConnection(self) -> None:
+		"""Forget what was heard on the connection before: the answers to reads still out on it never
+		come, so they would hold every look for good, and windows and programs may have come and gone
+		while nothing listened. What NVDA last said stays, and NVDA says it again."""
+		with self._lock:
+			self._reading = 0
+			self._askingProcess.clear()
+			self._asking.clear()
+			self._askingParent.clear()
+			self._lookTimer = None
+			self._foreground = None
+			self._active = []
+			self._processes.clear()
+			self._topLevels.clear()
+			self._heardFrom.clear()
+			self._windowNumbers.clear()
+			self._lastWindowEventAt = float("-inf")
+			self._documentUntil = None
+			self._dropAnchor()
+			self._publish()
 
 	def stop(self) -> None:
 		thread = self._thread
