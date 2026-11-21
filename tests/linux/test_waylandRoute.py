@@ -542,6 +542,32 @@ def test_layoutFromTheEnvironmentAndItsNoticeOnce(tmp_path: Path):
 	assert len(value["routeLines"]) == 1
 
 
+BROKEN_LAYOUT_CHILD = r"""
+from linuxPlatform.keys import desktopLayout, waylandEnvironment, waylandRoute
+
+environment = waylandEnvironment.WaylandEnvironment(None, layoutFeed=desktopLayout.EnvironmentLayoutFeed())
+source = waylandRoute.WaylandRoute("auto", path, said.append, environment=environment)
+source.start(deliver)
+source.setConsumed(x11.EXTENDED_INSERT, True)
+wait(lambda: source.isKernel, 10, "the route did not take the helper's keys")
+keyboard.press("Insert+t")
+time.sleep(0.3)
+source.stop()
+result = {"said": said, "downs": [[e["vk"], e["nvda"]] for e in downs()], "layout": environment.layout.names}
+"""
+
+
+def test_aLayoutThatCannotBeCompiledLeavesUSEnglish(tmp_path: Path):
+	"""A layout xkbcommon cannot compile would keep every kernel source from starting: US English is
+	read instead, and said."""
+	value = runRouteChild(
+		tmp_path, BROKEN_LAYOUT_CHILD, standIn={}, env={"XKB_DEFAULT_LAYOUT": "nosuchlayout"}
+	)
+	assert value["layout"] == ["evdev", "pc105", "us", "", ""]
+	assert value["said"] == [US_NOTICE, HINT]
+	assert value["downs"] == [[0x2D, True], [ord("T"), True]]
+
+
 POLISH_QUERIES_CHILD = r"""
 source = startRoute(waitForKernel=False)
 result = {

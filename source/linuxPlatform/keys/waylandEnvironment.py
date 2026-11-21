@@ -129,8 +129,31 @@ class WaylandEnvironment:
 			log.exception("Keyboard layout: the desktop's layout cannot be followed")
 			self._layoutFeed = None
 			snapshot = desktopLayout.environmentSnapshot()
-		self._useLayout(snapshot)
-		self.feed.start()
+		try:
+			try:
+				self._useLayout(snapshot)
+			except Exception:
+				# Without a layout no kernel source can start, and NVDA would have no keys at all.
+				log.exception("Keyboard layout: the desktop's layout cannot be compiled")
+				self._useLayout(
+					desktopLayout.LayoutSnapshot(
+						(
+							desktopLayout.DEFAULT_RULES,
+							desktopLayout.DEFAULT_MODEL,
+							desktopLayout.DEFAULT_LAYOUT,
+							"",
+							"",
+						),
+						source="fallback",
+						notice=desktopLayout._usNotice(),
+					)
+				)
+			self.feed.start()
+		except BaseException:
+			# The route does not start, and nothing else would stop the layout's thread.
+			if self._layoutFeed is not None:
+				self._layoutFeed.stop()
+			raise
 		self._stopping.clear()
 		self._keeper = threading.Thread(target=self._keep, name="lindaCaptureKeeper", daemon=True)
 		self._keeper.start()
