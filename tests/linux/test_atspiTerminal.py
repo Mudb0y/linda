@@ -36,10 +36,10 @@ def desktop(tmp_path: Path) -> Iterator[DesktopSession]:
 		yield session
 
 
-def startTerminal(desktop: DesktopSession, config: Path) -> harness.Launch:
+def startTerminal(desktop: DesktopSession, config: Path, env: dict[str, str] | None = None) -> harness.Launch:
 	desktop.startApp(desktop.fixture("terminal"), title=TITLE)
 	desktopSession.activate(TITLE)
-	nvda = desktop.startNVDA(config, env=TIMED_SPEECH)
+	nvda = desktop.startNVDA(config, env={**TIMED_SPEECH, **(env or {})})
 	desktop.expect(TITLE, "terminal $", since=0, timeout=STARTUP_BOUND)
 	return nvda
 
@@ -188,4 +188,30 @@ def test_fullScreenProgramWithLaptopLayout(desktop: DesktopSession, tmp_path: Pa
 	time.sleep(SETTLE)
 	assert spoken(desktop, mark) == ["chose banana", "$"], spoken(desktop, mark)
 
+	assertExitedCleanly(desktop, nvda)
+
+
+def test_addOnOverridingNvdasReportNewLines(desktop: DesktopSession):
+	# fixtures/globalPlugins/terminalAddon.py: an add-on that keeps to NVDA's interface.
+	nvda = startTerminal(desktop, SESSION_CONFIG, env={"LINDA_TERMINAL_ADDON": "1"})
+	said = run(desktop, "echo hello there", "hello there", "$")
+	assert said == ["hello there", "$"], said
+	assert "terminal add-on: reporting ['hello there'" in nvda.text("nvda.log"), nvda.describe()
+
+	# What was found before a key stopped speech is still dropped before the add-on is given it.
+	mark = desktop.mark()
+	desktop.typeText("lines 50000")
+	desktop.press("Return", gap=0)
+	deadline = time.monotonic() + 10
+	while not any(text.startswith("line ") for text in spoken(desktop, mark)):
+		assert time.monotonic() < deadline, f"the listing was not read\n{nvda.describe()}"
+		time.sleep(0.01)
+	desktop.press("Control_L", gap=0)
+	time.sleep(2)
+	records = harness.transcriptRecords().readRecords(nvda.directory / "transcript.jsonl")
+	cancels = [r for r in records if r["kind"] == "cancel"]
+	assert cancels, records[-20:]
+	after = [r for r in records if r["kind"] == "speak" and r["t"] > cancels[-1]["t"]]
+	assert not after, after
+	step(desktop, "Insert+Up", "$")
 	assertExitedCleanly(desktop, nvda)

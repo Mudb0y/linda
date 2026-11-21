@@ -982,7 +982,7 @@ class VteTerminal(EnhancedTermTypedCharSupport):
 				if lines and config.conf["presentation"]["reportDynamicContentChanges"]:
 					queueHandler.queueFunction(
 						queueHandler.eventQueue,
-						self._reportNewLines,
+						self._reportFoundLines,
 						lines,
 						now,
 						_immediate=True,
@@ -1022,10 +1022,15 @@ class VteTerminal(EnhancedTermTypedCharSupport):
 			self._cancelledAt = at
 			self._tracker.cancel(at, now)
 
-	def _reportNewLines(self, lines: list[str], foundAt: float | None = None) -> None:
-		if foundAt is not None and foundAt <= self._cancelledAt:
+	def _reportFoundLines(self, lines: list[str], foundAt: float) -> None:
+		"""Report lines the monitor found at foundAt, through _reportNewLines, whose signature stays
+		NVDA's because add-ons override it."""
+		if foundAt <= self._cancelledAt:
 			# Found before speech was stopped, and so dropped with what was waiting.
 			return
+		self._reportNewLines(lines)
+
+	def _reportNewLines(self, lines: list[str]) -> None:
 		speech.clearTypedWordBuffer()
 		self._queuedChars = []
 		LiveText._reportNewLines(self, lines)
