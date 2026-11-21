@@ -694,16 +694,24 @@ def test_startStraightAfterTheConnectionClosed(tmp_path: Path) -> None:
 	assert runStarts(
 		tmp_path,
 		"""\
-		feed = Feed([True, True])
+		class Held(Feed):
+			# canLook goes False in the closed handler, before the thread reaches its finally: a start
+			# then must be held to that thread's ending too, not only to the finally's.
+			def _onClosed(self, *args):
+				super()._onClosed(*args)
+				time.sleep(0.5)
+
+
+		feed = Held([True, True])
 		feed.start()
 		assert feed.canLook and looked(feed)
 		closeUnder(feed)
-		feed.start()
+		answer = feed.start()
 		listening = feed.canLook
-		result = [listening, looked(feed)]
+		result = [answer, listening, looked(feed)]
 		feed.stop()
 		""",
-	) == [True, True]
+	) == [True, True, True]
 
 
 def test_startSaysWhenTheThreadBeforeDoesNotEnd(tmp_path: Path) -> None:
