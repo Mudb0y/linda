@@ -11,6 +11,7 @@ of them:
 	LINDA_RIG_COMPOSITOR=sway nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_waylandKeys.py
 """
 
+import contextlib
 import os
 import shutil
 import tempfile
@@ -118,7 +119,7 @@ class WaylandLinda:
 	desktop: DesktopSession
 	keyboard: StandIn
 	sink: object
-	probe: KeyProbe
+	probe: KeyProbe | None
 	directory: Path
 	nvda: harness.Launch | None = None
 
@@ -171,6 +172,31 @@ class WaylandLinda:
 			time.sleep(0.05)
 		time.sleep(SETTLE)
 
+	def passedMark(self) -> int:
+		return len(self.sink.passed())
+
+	def pressesPassed(self, since: int) -> list[int]:
+		"""The evdev codes of the presses Linda passed on to the session since passedMark gave since."""
+		return [evdev for evdev, down in self.sink.passed()[since:] if down]
+
+	def answers(self, evdev: int, since: float) -> list[dict]:
+		"""What became of each press of evdev the stand-in told Linda of after since: the verdicts Linda
+		gave, whether its bound ran out first, and how long a WAIT held it."""
+		keyboard = self.keyboard
+		events = list(keyboard.events)
+		return [
+			{
+				"seq": seq,
+				"t": round(event[0] - since, 3),
+				"given": keyboard.given.get(seq),
+				"expired": any(e[1] == "expired" and e[2] == seq for e in events),
+				"waited": [round(held, 3) for waited, held in keyboard.waits if waited == seq],
+			}
+			for event in events
+			if event[1] == "key" and event[3] == evdev and event[4] == 1 and event[0] >= since
+			for seq in (event[2],)
+		]
+
 	def probeLines(self) -> int:
 		return len(self.probe.lines)
 
@@ -207,20 +233,29 @@ def socketDir() -> Iterator[Path]:
 		shutil.rmtree(directory, ignore_errors=True)
 
 
-@pytest.fixture
-def linda(tmp_path: Path, socketDir: Path) -> Iterator[WaylandLinda]:
+@contextlib.contextmanager
+def waylandLinda(directory: Path, socketDir: Path, *, probe: bool = True) -> Iterator[WaylandLinda]:
+	"""The stand-in, the desktop session pressing keys on it, and the key probe unless probe is False;
+	Linda is started by the test."""
 	harness.requireRig()
 	sink = keydStandIn.compositorSink()
 	with (
 		StandIn(socketDir / "socket", sink=sink) as keyboard,
-		DesktopSession(tmp_path / "desktop", standIn=keyboard) as desktop,
+		DesktopSession(directory / "desktop", standIn=keyboard) as desktop,
 	):
-		probe = KeyProbe(tmp_path)
+		keyProbe = KeyProbe(directory) if probe else None
 		try:
-			yield WaylandLinda(desktop, keyboard, sink, probe, tmp_path)
+			yield WaylandLinda(desktop, keyboard, sink, keyProbe, directory)
 		finally:
 			desktop.close()
-			probe.stop()
+			if keyProbe is not None:
+				keyProbe.stop()
+
+
+@pytest.fixture
+def linda(tmp_path: Path, socketDir: Path) -> Iterator[WaylandLinda]:
+	with waylandLinda(tmp_path, socketDir) as session:
+		yield session
 
 
 def test_startsAndSpeaksOnTheKernelRouteAlone(linda: WaylandLinda):
