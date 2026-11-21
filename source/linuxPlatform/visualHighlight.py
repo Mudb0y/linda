@@ -33,6 +33,8 @@ from logHandler import log
 from vision import providerBase
 from winGDI import DashStyleDash, DashStyleDashDot, DashStyleDashDotDot, DashStyleDot
 
+from linuxPlatform import displayServer
+
 #: Seconds the X server has to take the connection and answer, the most a start waits.
 START_TIMEOUT = 2.0
 #: Seconds terminate waits for the thread to take the outlines away.
@@ -67,11 +69,12 @@ _startable: bool | None = None
 
 
 def canStart() -> bool:
-	"""Whether there is an X display to draw on that has input shapes, asked once; never in a Wayland
-	session, whose X server draws only over the programs that use it."""
+	"""Whether there is an X display to draw on that has input shapes, asked once; never in a session
+	that says Wayland, whose X server draws only over the programs that use it, and is not asked there,
+	since on GNOME the first connection would start it."""
 	global _startable
 	if _startable is None:
-		_startable = os.environ.get("XDG_SESSION_TYPE") != "wayland" and _probe()
+		_startable = not displayServer.saysWayland() and _probe()
 	return _startable
 
 

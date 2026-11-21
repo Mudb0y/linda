@@ -18,7 +18,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 
-from linuxPlatform import NoLinuxImplementation
+from linuxPlatform import NoLinuxImplementation, displayServer
 
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -68,7 +68,12 @@ _echoLock = threading.Lock()
 
 
 def isAvailable() -> bool:
-	return bool(os.environ.get("DISPLAY"))
+	"""Whether this is an X session, whose X server has the pointer.
+
+	In a Wayland session an X server, if there is one, is Xwayland, which sees the pointer only over its
+	own programs and whose clicks reach only them; on GNOME the first connection would start it.
+	"""
+	return displayServer.kind() == "x11"
 
 
 def _connection():
@@ -76,6 +81,8 @@ def _connection():
 	global _display
 	if _display is None:
 		if not isAvailable():
+			if displayServer.isWayland():
+				raise NoLinuxImplementation("the mouse pointer", "this is a Wayland session")
 			raise NoLinuxImplementation("the mouse pointer", "there is no X display")
 		from Xlib import display
 
@@ -253,10 +260,17 @@ def refreshMouseObject() -> None:
 	"""Make NVDA's mouse object the one under the pointer now.
 
 	On Windows it is the one the last mouse move found, which is stale while mouse tracking is off,
-	as moves are then not followed; asked for, it is better found where the pointer is."""
+	as moves are then not followed; asked for, it is better found where the pointer is.
+
+	In a Wayland session NVDA cannot learn where the pointer is, and says so."""
 	import api
+	import platformFeatures
+	import ui
 	from logHandler import log
 
+	if displayServer.isWayland():
+		ui.message(platformFeatures.unavailableMessage(platformFeatures.Feature.POINTER))
+		return
 	try:
 		x, y = position()
 	except NoLinuxImplementation:

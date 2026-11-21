@@ -46,13 +46,21 @@ class Feature(Enum):
 	DISPLAY_MODEL = auto()
 	#: Help, training and support, and the shop, from NV Access, who support NVDA as they ship it.
 	NV_ACCESS_SUPPORT = auto()
+	#: Clicking, moving and finding the mouse pointer, and the object under it.
+	POINTER = auto()
+	#: Following the pointer as it moves, and the audio coordinates it plays.
+	MOUSE_TRACKING = auto()
 
 
 if sys.platform == "win32":
 	_UNSUPPORTED: frozenset[Feature] = frozenset()
 	#: What a command of a feature this platform lacks says when something still runs it.
 	UNAVAILABLE_MESSAGE = ""
+	_WAYLAND_UNSUPPORTED: frozenset[Feature] = frozenset()
+	WAYLAND_UNAVAILABLE_MESSAGE = ""
 else:
+	from linuxPlatform import displayServer
+
 	# A feature that has been made to work on Linux is switched on by deleting its line.
 	_UNSUPPORTED = frozenset(
 		{
@@ -78,47 +86,75 @@ else:
 		},
 	)
 	UNAVAILABLE_MESSAGE = "Not available on Linux."
+	# These work through the X server, which in a Wayland session is Xwayland, if there is one: it sees
+	# the pointer only over its own programs, cannot draw over the others, and on GNOME a first
+	# connection to it would start it.
+	_WAYLAND_UNSUPPORTED = frozenset(
+		{
+			Feature.SCREEN_CURTAIN,
+			Feature.VISUAL_HIGHLIGHT,
+			Feature.POINTER,
+			Feature.MOUSE_TRACKING,
+		},
+	)
+	WAYLAND_UNAVAILABLE_MESSAGE = "Not available in this Wayland session."
+	if displayServer.saysWayland():
+		_UNSUPPORTED |= _WAYLAND_UNSUPPORTED
 
 
 def isSupported(feature: Feature) -> bool:
 	return feature not in _UNSUPPORTED
 
 
+def unavailableMessage(feature: Feature) -> str:
+	"""What a command of feature says when it runs where the feature is unsupported."""
+	return WAYLAND_UNAVAILABLE_MESSAGE if feature in _WAYLAND_UNSUPPORTED else UNAVAILABLE_MESSAGE
+
+
 def hideUnsupportedScripts(
 	cls: type,
 	features: dict[str, Feature],
 	categoryFeatures: dict[str, Feature] | None = None,
+	keepGestures: frozenset[Feature] | set[Feature] = frozenset(),
 ) -> None:
 	"""Leaves out of a scriptable class, before any instance of it is made, each script of a feature
 	this platform lacks: it is bound to no gesture and has no description, so that the Input Gestures
 	dialog does not list it, and a gesture a user's or a driver's map still binds to it speaks
-	UNAVAILABLE_MESSAGE.
+	unavailableMessage.
 
 	:param features: The feature of each script, by its name without script_.
 	:param categoryFeatures: The feature of every script in a category, by the category's name.
+	:param keepGestures: Features whose scripts keep the class's own gestures, so that a key a person
+		knows for one says why nothing happens rather than reaching the application.
 	"""
-	unsupported = {name for name, feature in features.items() if not isSupported(feature)}
+	unsupported = {name: feature for name, feature in features.items() if not isSupported(feature)}
 	for category, feature in (categoryFeatures or {}).items():
 		if not isSupported(feature):
 			unsupported.update(
-				attribute[len("script_") :]
+				(attribute[len("script_") :], feature)
 				for attribute, script in vars(cls).items()
 				if attribute.startswith("script_") and getattr(script, "category", None) == category
 			)
 	if not unsupported:
 		return
 	gestures = vars(cls).get(f"_{cls.__name__}__gestures", {})
-	for gesture in [gesture for gesture, name in gestures.items() if name in unsupported]:
+	for gesture in [
+		gesture
+		for gesture, name in gestures.items()
+		if name in unsupported and unsupported[name] not in keepGestures
+	]:
 		del gestures[gesture]
-	for name in unsupported:
-		setattr(cls, f"script_{name}", _unavailableScript(name))
+	for name, feature in unsupported.items():
+		setattr(cls, f"script_{name}", _unavailableScript(name, feature))
 
 
-def _unavailableScript(name: str):
+def _unavailableScript(name: str, feature: Feature | None = None):
+	message = UNAVAILABLE_MESSAGE if feature is None else unavailableMessage(feature)
+
 	def script(self, gesture) -> None:
 		import ui
 
-		ui.message(UNAVAILABLE_MESSAGE)
+		ui.message(message)
 
 	script.__name__ = script.__qualname__ = f"script_{name}"
 	return script
