@@ -192,7 +192,9 @@ fn admit_reading(
         .take(Instant::now());
     match unlogged {
         Some(0) => log!("{client}"),
-        Some(n) => log!("{client} ({n} more admitted before were not logged)"),
+        // Logged before the helper decides between admitting the caller and turning it away as
+        // busy, so the count is of callers allowed, not admitted.
+        Some(n) => log!("{client} ({n} more allowed before were not logged)"),
         None => {}
     }
     Ok(s.id)
