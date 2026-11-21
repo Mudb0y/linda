@@ -58,7 +58,9 @@ class KernelEnvironment(Protocol):
 		"""
 
 	def detach(self, source: "KernelKeySource") -> None:
-		"""Stop telling source anything; it is stopping or has lost the helper."""
+		"""Stop telling source anything; it is stopping or has lost the helper. It must not block, as it
+		may be called on the thread that answers keys. On stop, the notes of the keys it lets go of may
+		still come after it."""
 
 	@property
 	def captureState(self) -> "x11.CaptureState":
