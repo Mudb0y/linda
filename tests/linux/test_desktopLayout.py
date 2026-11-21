@@ -508,7 +508,9 @@ def test_plasmaSnapshots(tmp_path: Path):
 		# when ResetOldOptions, read as KConfig reads a bool, is false; xkbcommon then drops a variant
 		# that came without a layout.
 		"environmentUnused": snap(("evdev", "pc104", "pl", "", ""), repeat=KDE_REPEAT, source="kde"),
-		"variantWithoutLayout": snap(("evdev", "pc104", "us", "", "caps:none"), repeat=KDE_REPEAT, source="kde"),
+		"variantWithoutLayout": snap(
+			("evdev", "pc104", "us", "", "caps:none"), repeat=KDE_REPEAT, source="kde"
+		),
 		"environmentLayout": snap(
 			("evdev", "pc104", "fr", "dvorak", "caps:none"), repeat=KDE_REPEAT, source="kde"
 		),
@@ -708,7 +710,9 @@ result["keymap"] = started(desktopLayout.create("sway"))
 		assert f"Keyboard layout: no {name} module" in records
 	# A module that is there but fails its own imports is broken, not absent: both are absent only for
 	# the six desktops asked before the fakes were written.
-	absent = [records.count(f"Keyboard layout: no {name} module") for name in ("swayLayout", "gamescopeLayout")]
+	absent = [
+		records.count(f"Keyboard layout: no {name} module") for name in ("swayLayout", "gamescopeLayout")
+	]
 	assert absent == [6, 6]
 	assert "Keyboard layout: the gamescopeLayout module could not be loaded" in records
 	assert "Keyboard layout: taken from the swayLayout module" in records
