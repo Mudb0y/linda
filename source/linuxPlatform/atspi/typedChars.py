@@ -11,10 +11,12 @@ character, whatever the field holds.
 """
 
 import ctypes
+import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from difflib import SequenceMatcher
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import inputCore
 import textUtils
@@ -44,6 +46,13 @@ INSIDE_FOCUS_DEPTH = 4
 PARAGRAPH_SEPARATOR = " "
 #: UTF-16 units at most of a field whose text keepText keeps.
 KEPT_LIMIT = 200_000
+#: Of the last LAYOUT_SPAN characters compared with what NVDA's layout has their keys type, how many
+#: must differ before NVDA says its layout is not the desktop's.
+LAYOUT_SPAN = 8
+LAYOUT_MISMATCHES = 5
+#: Keys passed on and not yet paired with what they inserted, at most: more than a person types within
+#: TYPING_WINDOW.
+LAYOUT_PENDING_LIMIT = 32
 
 #: The last text removed from an object, as (its node, offset, text, time.monotonic()).
 _lastRemoved: tuple[object, int, str, float] | None = None
@@ -348,6 +357,10 @@ def handleTextChange(
 		return
 	if kind != "insert":
 		return
+	if _layoutCheck is not None and not inside:
+		# A rich editor's paragraph and the run of text in it may both report one insert, which would
+		# pair the second with the next key.
+		_layoutCheck.compare(focus, text)
 	# Without a key source there is nothing to tell typing from an application's own inserts by.
 	afterTyping = False
 	if key is not None and not (isRecent and key.typing and key.text >= " "):
@@ -378,3 +391,170 @@ def handleTextChange(
 		_interruptsForCharacters(),
 		lambda: eventHandler.executeEvent("typedCharacter", focus, ch=character),
 	)
+
+
+class _PassedKey(NamedTuple):
+	#: What the key types in NVDA's layout.
+	text: str
+	#: time.monotonic() when the key went down.
+	time: float
+	#: Whether it came after a key that typed nothing, as a dead key or the compose key does, and may be
+	#: part of a character that key began.
+	composing: bool
+
+
+class LayoutCheck:
+	"""Whether the desktop types what NVDA's layout says the keys it passes on type, in a Wayland
+	session, where that layout is only NVDA's reading of the desktop's settings and a compositor that
+	types in another tells nobody. The characters applications insert just after such keys say so.
+
+	Each key passed on that types text is paired with the next single character inserted into an
+	editable focus, in memory, and only how many matched and how many differed is kept. Nothing is
+	compared in a protected field, whose characters are bullets, in a terminal, where a key's effect on
+	the screen is the program's to choose, or while an input method makes the characters.
+	"""
+
+	def __init__(self, inputMethod: Callable[[], bool] | None = None) -> None:
+		"""
+		:param inputMethod: Whether an input method makes the characters now; by default, the layout
+			the key source follows says.
+		"""
+		from linuxPlatform.keys import x11
+
+		#: The modifiers and locks, which type nothing and begin no character.
+		self._modifiers = x11.KEPT_UNDER_GRAB
+		self._inputMethod = inputMethod if inputMethod is not None else _layoutUsesInputMethod
+		# Held only to add or take a key, as keys are noted on the key source's thread.
+		self._lock = threading.Lock()
+		self._pending: deque[_PassedKey] = deque(maxlen=LAYOUT_PENDING_LIMIT)
+		self._composing = False
+		#: Of the last comparisons, whether each differed.
+		self._recent: deque[bool] = deque(maxlen=LAYOUT_SPAN)
+		self.matches = 0
+		self.mismatches = 0
+		self._said = False
+
+	def noteKey(self, pressed: bool) -> bool:
+		"""Note a key going down, on the key source's thread, where it is being delivered."""
+		if not pressed:
+			return True
+		from linuxPlatform import inputHook
+
+		event = inputHook.deliveringKey()
+		if event is None or event.isUp:
+			return True
+		if event.typing and event.text >= " ":
+			if event.reachedApplication:
+				with self._lock:
+					self._pending.append(_PassedKey(event.text, event.time, self._composing))
+		elif event.vkCode not in self._modifiers:
+			# A dead key or the compose key, or one that moves or edits: what the next keys insert may be
+			# a character they make together.
+			self._composing = True
+		return True
+
+	def compare(self, focus, text: str | None) -> None:
+		"""Pair what was just inserted into focus with the oldest key still waiting for its character.
+
+		:param text: What was inserted, or None when it must not be read.
+		"""
+		if not self._pending:
+			return
+		if self._inputMethod():
+			with self._lock:
+				self._pending.clear()
+				self._composing = False
+			return
+		if (
+			"editable" not in getattr(focus, "atspiStates", ())
+			or getattr(focus, "role", None) == _terminalRole()
+		):
+			return
+		comparable = text is not None and not focus.isProtected and isOneCharacter(text)
+		now = time.monotonic()
+		with self._lock:
+			pending = self._pending
+			while pending and now - pending[0].time > TYPING_WINDOW:
+				pending.popleft()
+			if not pending:
+				return
+			if not comparable:
+				pending.popleft()
+				return
+			differed = self._pair(pending, text)
+		if differed is None:
+			return
+		self._recent.append(differed)
+		if differed:
+			self.mismatches += 1
+			if not self._said and sum(self._recent) >= LAYOUT_MISMATCHES:
+				self._say()
+		else:
+			self.matches += 1
+
+	def _pair(self, pending: deque[_PassedKey], text: str) -> bool | None:
+		"""Whether text differs from what its key types, taking that key and any before it from pending;
+		None when it is not known which key that was."""
+		for index, key in enumerate(pending):
+			if key.text == text:
+				# The keys before it inserted nothing here, or what they inserted came before them.
+				for _ in range(index + 1):
+					pending.popleft()
+				if key.composing:
+					self._composing = False
+				return False
+		for index, key in enumerate(pending):
+			if key.composing:
+				# Most likely the character a dead key or the compose key made with it.
+				for _ in range(index + 1):
+					pending.popleft()
+				self._composing = False
+				return None
+		pending.popleft()
+		return True
+
+	def _say(self) -> None:
+		import queueHandler
+		import ui
+		from logHandler import log
+
+		self._said = True
+		log.info(
+			f"Keyboard layout: {sum(self._recent)} of the last {len(self._recent)} characters typed differed "
+			f"from NVDA's layout; {self.matches} matched it and {self.mismatches} differed since NVDA started",
+		)
+		queueHandler.queueFunction(
+			queueHandler.eventQueue,
+			ui.message,
+			# Translators: Said on Linux in a Wayland session when the characters programs insert as keys are
+			# typed are not those NVDA's reading of the desktop's keyboard layout says the keys type.
+			_("NVDA's idea of the keyboard layout differs from the desktop's"),
+		)
+
+
+def _layoutUsesInputMethod() -> bool:
+	"""Whether the layout the key source follows says an input method makes the characters."""
+	from linuxPlatform import inputHook
+
+	environment = getattr(inputHook._source, "_environment", None)
+	return bool(getattr(getattr(environment, "layout", None), "inputMethod", False))
+
+
+def _startLayoutCheck() -> LayoutCheck | None:
+	"""The layout check, in a Wayland session only: in an X session NVDA's layout is the X server's own."""
+	from linuxPlatform import displayServer
+
+	if not displayServer.isWayland():
+		return None
+	check = LayoutCheck()
+	inputCore.decide_handleRawKey.register(check.noteKey)
+	return check
+
+
+_layoutCheck = _startLayoutCheck()
+
+
+def layoutMatches() -> int:
+	"""How many characters typed have matched what NVDA's layout says their keys type: each one a sign
+	that keys NVDA passes on reach the desktop. Always 0 in an X session."""
+	return _layoutCheck.matches if _layoutCheck is not None else 0
