@@ -339,6 +339,30 @@ def test_aKeyWaitingOnALookAsksTheHelperToHoldItAtOnce(tmp_path: Path):
 	assert latency < 0.06, value
 
 
+#: NVDA holds the key longer than its bound, so that the source answers it itself, CAPTURE_TIMEOUT
+#: after the look ended; lateness of this source's own only makes the answer later.
+FULL_TIME_CHILD = r"""
+environment = FakeEnvironment(lookAfter=0.1, until=0.3, state=AWAY)
+source = startSource(environment)
+nvdaTakes["seconds"] = 0.3
+keyboard.press("h")
+time.sleep(0.8)
+seq = keySeqs(35)[0]
+pressed = [e for e in keyboard.events if e[1] == "key" and e[2] == seq][0][0]
+result = {"verdict": verdictOf(seq), "expired": expired(), "lookEndedAfter": environment.lookEnds[0] - pressed}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_NVDAHasAFullCaptureTimeoutFromTheLooksEnd(tmp_path: Path):
+	value = runEnvironmentChild(tmp_path, FULL_TIME_CHILD).value
+	[[keep, latency]] = value["verdict"]
+	# CAPTURE_TIMEOUT is 0.1 s; passed by the source, as NVDA did not answer in it.
+	assert keep is False and latency - value["lookEndedAfter"] >= 0.095, value
+	assert latency < 0.5 and value["expired"] == [], value
+
+
 #: A look whose environment says it may take five seconds: the press is answered by this source by
 #: DOCUMENT_WAIT from its coming, within the helper's bound for a press it was asked to hold.
 LONG_LOOK_CHILD = r"""
