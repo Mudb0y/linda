@@ -486,6 +486,38 @@ def test_chordsThatMayMoveTheFocusAreNoted(tmp_path: Path):
 	assert value["detached"] == 1 and value["detachedAfterStop"] == 1
 
 
+#: An environment that fails as one keeping a set of keys down would, with a KeyError of the key code.
+RAISING_NOTE_CHILD = r"""
+class Raising(FakeEnvironment):
+	def notePassed(self, keycode, isUp):
+		raise KeyError(keycode)
+
+
+environment = Raising()
+source = startSource(environment)
+keyboard.press("a")
+time.sleep(0.3)
+result = {"verdicts": [keep for _seq, keep, _latency in keyboard.verdicts]}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_whatANoteRaisesIsLoggedWithoutTheKey(tmp_path: Path):
+	done = runEnvironmentChild(tmp_path, RAISING_NOTE_CHILD)
+	assert done.value["verdicts"] == [False]
+	records = [e for e in done.events if e["kind"] == "log" and e["levelno"] >= 40]
+	# The press and its release, each told and each failing.
+	assert len(records) == 2, records
+	for record in records:
+		assert not record["exception"], record
+		heading, *frames = record["message"].splitlines()
+		assert heading == "Telling the kernel key source's environment: KeyError", record
+		assert frames and all(line.startswith("  ") for line in frames), record
+		# 38 is a's X key code; a frame's file and line number may hold the digits too.
+		assert "38" not in re.sub(r'File "[^"]*", line \d+', "", record["message"]), record
+
+
 REPEAT_CHILD = r"""
 environment = FakeEnvironment(layout=Layout(repeat=(True, 0.2, 0.05)))
 source = startSource(environment)

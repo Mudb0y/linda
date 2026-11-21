@@ -9,6 +9,10 @@ The kernel source calls every method below except attach and detach from the thr
 keys, which must answer the helper in time however busy NVDA's other threads keep the interpreter. So
 each of them only reads state replaced whole, or appends and writes to a pipe, and never calls into a
 C library or waits: whatever follows the layout or the focus does its work on threads of its own.
+
+The notes are handed key codes, which are the user's typing: none may go into a log, nor into an
+exception, as a KeyError of one would. The kernel source logs what a method raises by its type and
+frames only, but whatever else catches it may not.
 """
 
 from typing import TYPE_CHECKING, Protocol

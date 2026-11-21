@@ -34,6 +34,7 @@ import struct
 import sys
 import threading
 import time
+import traceback
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -248,6 +249,19 @@ def _tables(keymap: xkb.Keymap, names: tuple[str, ...], group: tuple[int, int, i
 
 def _lockedMods(locks: int) -> int:
 	return (X.LockMask if locks & LOCK_CAPS else 0) | (x11.NUM_LOCK_MASK if locks & LOCK_NUM else 0)
+
+
+def _logEnvironmentError(message: str) -> None:
+	"""x11._logError for what an environment raised, with the exception's type and frames and never its
+	value: the environment is handed key codes, and a KeyError of one would carry the key typed."""
+	kind, _value, frames = sys.exc_info()
+	try:
+		log.error(
+			f"{message}: {kind.__name__ if kind is not None else 'no exception'}\n"
+			+ "".join(traceback.format_tb(frames))
+		)
+	except Exception:  # noqa: BLE001, S110
+		pass
 
 
 @dataclass(eq=False)
@@ -535,7 +549,7 @@ class KernelKeySource:
 		try:
 			self._environment.detach(self)
 		except Exception:  # noqa: BLE001
-			x11._logError("Detaching the kernel key source from its environment")
+			_logEnvironmentError("Detaching the kernel key source from its environment")
 
 	def useLayout(self, layout: "Layout") -> None:
 		"""Read keys in layout from now on, as the environment has it: compiled here, on the caller's
@@ -1383,7 +1397,7 @@ class KernelKeySource:
 		try:
 			note(*args)
 		except Exception:  # noqa: BLE001
-			x11._logError("Telling the kernel key source's environment")
+			_logEnvironmentError("Telling the kernel key source's environment")
 
 	def _onExpired(self, seq: int) -> None:
 		# By number only, as a key typed is kept out of the log; a count of these says how often NVDA
@@ -1476,7 +1490,7 @@ class KernelKeySource:
 		try:
 			press.lookUntil = self._environment.requestLook(number, press.arrival)
 		except Exception:  # noqa: BLE001
-			x11._logError("Asking the kernel key source's environment where the focus is")
+			_logEnvironmentError("Asking the kernel key source's environment where the focus is")
 			press.lookUntil = press.arrival
 			self._lookEnds[number] = False
 
