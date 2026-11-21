@@ -161,6 +161,13 @@ def main() -> NoReturn:
 		isAlreadyRunning = any(lock.holder() is not None for lock in instanceLocks)
 	except OSError as e:
 		_fail(f"cannot open the lock that keeps one copy per display: {e}")
+	# Before the copy running is stopped: with LINDA_SESSION_TYPE=x11 and no DISPLAY in a Wayland
+	# session, the lock is the Wayland copy's, and stopping it would leave no screen reader at all.
+	if sessionKind == "none" and not (appArgs.quit or appArgs.check_running):
+		if os.environ.get(displayServer.OVERRIDE_VARIABLE):
+			_fail(f"there is no display to start on, as the session kind is {displayServer.reason()}")
+		# wx would fail later with a line that names only X.
+		_fail("neither WAYLAND_DISPLAY nor DISPLAY names a display")
 	if isAlreadyRunning and not appArgs.easeOfAccess:
 		if appArgs.check_running:
 			sys.exit(0)
@@ -174,9 +181,6 @@ def main() -> NoReturn:
 		sys.exit(0)
 	elif appArgs.check_running:
 		sys.exit(1)
-	if sessionKind == "none":
-		# wx would fail later with a line that names only X.
-		_fail("neither WAYLAND_DISPLAY nor DISPLAY names a display")
 	quitSignals.install()
 	for lock in instanceLocks:
 		try:

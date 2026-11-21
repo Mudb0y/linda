@@ -629,6 +629,28 @@ def test_copyGivenOnlyTheWaylandSocketReplacesOneGivenBoth(start: Start):
 
 
 @pytest.mark.rigSession("x11")
+def test_noDisplayByTheOverrideLeavesTheWaylandCopyRunning(start: Start):
+	with _waylandSocket() as wayland:
+		first = start("wayland", "wait", welcome=False, env=wayland)
+		first.waitForSpeech(SENTENCE, STARTUP_BOUND)
+		# Its lock is named after the Wayland socket, the one this launch would look at.
+		refused = start(
+			"x11WithNoDisplay", "exit", env={**wayland, "DISPLAY": None, "LINDA_SESSION_TYPE": "x11"}
+		)
+		assert refused.waitForExit(SHUTDOWN_BOUND) == 1, refused.describe()
+		assert refused.text("stderr.txt") == (
+			"linda: there is no display to start on, as the session kind is none by rule 1: "
+			"LINDA_SESSION_TYPE is x11, but DISPLAY is not set\n"
+		)
+		refused.assertClean(ignoring={"returnCode", "stderr"})
+		assert first.process.poll() is None
+		assert "Exiting on SIGTERM" not in first.text("nvda.log")
+		first.process.send_signal(signal.SIGTERM)
+		assert first.waitForExit(SHUTDOWN_BOUND) == 0, first.describe()
+		first.assertClean(logNames=("nvda.log",))
+
+
+@pytest.mark.rigSession("x11")
 @pytest.mark.parametrize("session", ["x11", "wayland"])
 def test_curtainLeftBehindIsLookedForOnlyInAnXSession(start: Start, session: str):
 	# An unreadable record, which liftStale removes and logs without connecting anywhere.
