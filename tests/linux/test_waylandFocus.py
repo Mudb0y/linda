@@ -36,6 +36,13 @@ QUIET = 1.0
 SPOKEN_BOUND = 8.0
 #: Seconds a window kept from the keyboard as it maps waits for it, as E3 measured 2.3 to 4.1.
 LATE_SECONDS = 2.5
+#: Seconds past the last of handler.SHOWN_PROBE_SECONDS.
+NEVER_ACTIVE_SECONDS = 7.5
+#: handler._lookForInitialFocus's line, how many times it is written when no focus is found, and a little
+#: more than the seconds between them, after which the last scheduled look has ended.
+STARTUP_LOOK = "AT-SPI focus: none found yet; looking again"
+STARTUP_LOOKS = 4
+STARTUP_LOOK_GAP = 3.0
 
 wayland = pytest.mark.rigSession("wayland")
 swayOnly = pytest.mark.rigSession("sway")
@@ -85,7 +92,7 @@ MISSING = textwrap.dedent(
 
 #: A GTK 4 window named by its argument, with two buttons, the first focused; says "active" once it is.
 GTK4_WINDOW = textwrap.dedent(
-	'''\
+	"""\
 	import sys
 
 	import gi
@@ -110,12 +117,12 @@ GTK4_WINDOW = textwrap.dedent(
 
 	app.connect("activate", activate)
 	app.run([])
-	''',
+	""",
 )
 
 #: The same in Qt 6.
 QT6_WINDOW = textwrap.dedent(
-	'''\
+	"""\
 	import sys
 
 	from PyQt6.QtCore import QEvent
@@ -144,7 +151,7 @@ QT6_WINDOW = textwrap.dedent(
 	print("backend", app.platformName(), flush=True)
 	window.show()
 	sys.exit(app.exec())
-	''',
+	""",
 )
 
 #: The same in Electron, its page's first button focused.
@@ -234,6 +241,15 @@ class Linda:
 		while not Path(str(self.flag) + ".ready").exists():
 			assert time.monotonic() < deadline, f"the plugin never started\n{self.launch.describe()}"
 			time.sleep(0.05)
+		# NVDA looks for a focus again a few times after it starts while it has none, which would find a
+		# window opened meanwhile whatever was or was not heard of it.
+		deadline = time.monotonic() + STARTUP_BOUND
+		while self.launch.text("nvda.log").count(STARTUP_LOOK) < STARTUP_LOOKS:
+			assert time.monotonic() < deadline, (
+				f"NVDA's looks for a focus never ended\n{self.launch.describe()}"
+			)
+			time.sleep(0.1)
+		time.sleep(STARTUP_LOOK_GAP)
 		self.waitForQuiet()
 
 	def mark(self) -> int:
@@ -442,3 +458,25 @@ def test_lateActivationIsFound(linda: Linda, windows: list[Window], tmp_path: Pa
 		if missing:
 			linda.flag.unlink()
 	linda.waitForQuiet()
+
+
+@swayOnly
+def test_windowThatNeverHasTheKeyboardIsNotSpoken(
+	linda: Linda, windows: list[Window], tmp_path: Path
+) -> None:
+	"""A window that maps without the keyboard and never gets it is read for an activation for some seconds
+	and found to have none: nothing is said, and the window that has the keyboard keeps NVDA's focus."""
+	holder = Window("gtk4", "Holder window", tmp_path / "holder")
+	windows.append(holder)
+	holder.waitUntilActive()
+	linda.waitForQuiet()
+	title = "Background window"
+	_sway(f'no_focus [title="^{title}$"]')
+	mark = linda.mark()
+	logBefore = len(linda.launch.text("nvda.log"))
+	window = Window("gtk4", title, tmp_path / "background")
+	windows.append(window)
+	time.sleep(NEVER_ACTIVE_SECONDS)
+	assert not window.isActive(), "sway gave the window the keyboard"
+	assert linda.spokenSince(mark) == [], linda.spokenSince(mark)
+	assert "says it is active" not in linda.launch.text("nvda.log")[logBefore:]
