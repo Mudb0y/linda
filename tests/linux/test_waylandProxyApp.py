@@ -23,7 +23,7 @@ import test_browseKeys as browseKeys
 import webSession
 from keydStandIn import code
 from test_sandboxedBrowser import sandboxed
-from test_waylandBrowse import USABLE_WALK, lettersKept, processNamed, sessionName
+from test_waylandBrowse import USABLE_WALK, lettersKept, processNamed, sessionName, waitForTheWholePage
 from test_waylandKeys import MARKER, WaylandLinda, socketDir, waylandLinda  # noqa: F401
 
 pytestmark = pytest.mark.rigSession("wayland")
@@ -159,6 +159,7 @@ def test_aProxiedBrowsersProcessIsTheSameToTheFeedAndToNVDA(
 	assert record["windowProcess"] == record["processID"] == record["feed"], record
 	# Both have the proxy's process, which the bus records for the browser's connection.
 	assert record["feed"] in proxies, (record, proxies)
+	waitForTheWholePage(session, USABLE_WALK[0])
 	lettersKept(session, USABLE_WALK)
 	lettersKept(session, (USABLE_WALK[0], ("e", "Your name edit")))
 	session.step("Return", "Focus mode")

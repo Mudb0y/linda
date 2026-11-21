@@ -111,6 +111,21 @@ def startReading(session: WaylandLinda, program: str, tmp_path: Path) -> webSess
 	return browser
 
 
+def waitForTheWholePage(session: WaylandLinda, top: tuple[str, str]) -> None:
+	"""Press the walk's first chord until Linda says what it says at the page's top: a buffer rendered
+	while the browser was still exposing the page can read it as one line, its heading without its
+	level, until the browser's changes come in."""
+	chord, said = top
+	deadline = time.monotonic() + BUFFER_BOUND / 4
+	while True:
+		mark = session.desktop.mark()
+		session.desktop.press(chord, gap=browseKeys.SETTLE * 2)
+		spoken = session.desktop.spokenSince(mark)
+		if any(said in text for text in spoken):
+			return
+		assert time.monotonic() < deadline, f"the page's top was never read as {said!r}: {spoken}"
+
+
 def lettersKept(session: WaylandLinda, walk: tuple[tuple[str, str], ...]) -> None:
 	"""Walk the page, each step's words anywhere in what Linda says to it; no letter of a step reaches
 	the session."""
@@ -159,6 +174,7 @@ def test_browseLettersAreLindasAndTheWholePageIsRead(session: WaylandLinda, tmp_
 	if program != "firefox":
 		# Experiment E18: the browser joined the desktop for Linda's switching the status on alone.
 		assert processNamed("orca") == []
+	waitForTheWholePage(session, walk[0])
 	lettersKept(session, walk)
 	if program != "electron":
 		print(f"{sessionName()}: {program}'s window coordinates: {windowCoordinates()}")
