@@ -449,6 +449,7 @@ class Ground:
 		"app4", as the session's program name, and wait until its text field has the focus, and with
 		grab, until it has taken the keyboard for itself. In a Wayland guest the window is the
 		compositor's own client, never Xwayland's."""
+		assert not (gtk4 and grab), "the GTK 4 test window takes no keyboard grab"
 		mark = Mark(0, self.now())
 		log = "app4" if gtk4 else "app"
 		program = ["ground-window4", LOGS[log], title] if gtk4 else ["ground-window", LOGS[log], title]
