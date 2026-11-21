@@ -706,6 +706,14 @@ class BrowseModeTreeInterceptor(treeInterceptorHandler.TreeInterceptor):
 			if not location.width or not location.height:
 				obj = obj.parent
 				continue
+			if sys.platform != "win32":
+				from linuxPlatform import pointer
+
+				if not pointer.isAvailable():
+					# Translators: Said on Linux when activating an element in browse mode needs a click,
+					# which NVDA cannot make in this session, as in a Wayland session.
+					ui.message(_("NVDA cannot click here"))
+					break
 			log.debugWarning("Clicking with mouse")
 			oldX, oldY = winUser.getCursorPos()
 			winUser.setCursorPos(*location.center)

@@ -395,6 +395,10 @@ source/browseMode.py
   Linux runtime: the elements list's tree passes on Tab and keys with Alt
   or Control, which wx on GTK hands it as characters to search for, so
   that they move between the dialog's controls as on Windows
+  Linux runtime: activating an element whose action fails says NVDA
+  cannot click here, in place of clicking at it, when linuxPlatform.pointer
+  is not available, as in a Wayland session, where asking for the pointer
+  would raise
 source/buildVersion.py
   Linux runtime: name is Linda, the name NVDA has on Linux, so that the
   main window, the notification area icon and versionInfo say it
