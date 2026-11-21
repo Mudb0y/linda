@@ -415,7 +415,7 @@ def serve(path: str) -> None:
 					self.wfile.write(answer.encode() + b"\n")
 				except Exception as e:  # noqa: BLE001
 					# The error alone: the request may name a key a test typed.
-					self.wfile.write(f"error {type(e).__name__}: {e}\n".encode())
+					self.wfile.write(f"error {type(e).__name__}\n".encode())
 
 	class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 		daemon_threads = True
