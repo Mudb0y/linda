@@ -19,7 +19,7 @@ import re
 import shlex
 from typing import TYPE_CHECKING
 
-from ground import GROUND, KERNEL_ROUTE, USER
+from ground import GROUND, KERNEL_ROUTE, LOG_HEADER, USER
 
 if TYPE_CHECKING:
 	from ground import FakeKeyboard, Ground, Mark
@@ -100,15 +100,83 @@ def passwordUnspoken(ground: "Ground", since: "Mark", password: str = MARKER) ->
 	return spoken
 
 
+#: How long a password must be for its letters strung together in a log to be no accident, as
+#: tests/linux/harness.py's MARKER_LENGTH; ground does not hand a case that module.
+PASSWORD_LENGTH = 8
+_word = re.compile(r"[^\W_]+")
+
+
+def _letters(text: str) -> str:
+	return "".join(character for character in text.casefold() if character.isalnum())
+
+
+def _runsCollapsed(text: str) -> str:
+	return "".join(character for i, character in enumerate(text) if i == 0 or text[i - 1] != character)
+
+
+def _keyPerLine(text: str) -> str:
+	"""The last word of each line that ends in a word of one letter or digit, with a run taken once, as
+	a press and its release would write it. Linda's record headers are passed over: their thread number
+	is such a word."""
+	keys = []
+	for line in text.splitlines():
+		if LOG_HEADER.match(line):
+			continue
+		words = _word.findall(line.casefold())
+		if words and len(words[-1]) == 1:
+			keys.append(words[-1])
+	return _runsCollapsed("".join(keys))
+
+
+def passwordHeldIn(password: str, text: str) -> list[str]:
+	"""The ways text holds password, in any case, as harness.textsHoldingMarker matches a marker: as
+	written; with only punctuation and white space between its letters; and as the last words of
+	successive lines, as a log writing one key a record, such as NVDA's "Input: kb(desktop):h" or a
+	helper's "key pressed h", would hold it."""
+	wanted = password.casefold()
+	if len(wanted) < PASSWORD_LENGTH or _letters(wanted) != wanted or _runsCollapsed(wanted) != wanted:
+		raise ValueError(
+			f"a password to look for is {PASSWORD_LENGTH} or more letters and digits and nothing else,"
+			" with no character twice in a row"
+		)
+	ways = {
+		"as written": wanted in text.casefold(),
+		"letters only": wanted in _letters(text),
+		"one key a line": wanted in _keyPerLine(text),
+	}
+	return [way for way, held in ways.items() if held]
+
+
+def _proveMatch(password: str) -> None:
+	"""The match finds password written whole and written one key a record, and passes a text that
+	holds its letters only by chance, so that a clean result below means a clean log."""
+	header = "IO - inputCore.InputManager.executeGesture (12:00:00.000) - MainThread (1):"
+	perRecord = "".join(f"{header}\nInput: kb(desktop):{c}\n" for c in password)
+	perLine = "".join(f"key pressed {c}\nkey released {c}\n" for c in password)
+	spaced = " ".join(password)
+	for name, text in {
+		"whole": password,
+		"per record": perRecord,
+		"per line": perLine,
+		"spaced": spaced,
+	}.items():
+		assert passwordHeldIn(password, text), f"the password check cannot see it written {name}"
+	byChance = "\n".join(f"{header}\nthe word {c}ompass" for c in password)
+	assert not passwordHeldIn(password, byChance), passwordHeldIn(password, byChance)
+
+
 def assertPasswordAbsent(ground: "Ground", password: str = MARKER) -> dict:
-	"""Neither Linda's log nor the helper's journal holds password. The whole journal is only looked
-	at, for the record: what the desktop's own programs log is not Linda's."""
-	inLog = ground.lindaLog().count(password)
-	inHelper = sum(message.count(password) for _t, message in ground.helperLog())
-	journal = ground.shell(f"journalctl -b --no-pager -o cat | grep -c {shlex.quote(password)} || true")
-	found = {"lindaLog": inLog, "helperJournal": inHelper, "wholeJournal": int(journal.strip() or 0)}
-	ground.machine.log(f"the password's occurrences: {found}")
-	assert inLog == 0 and inHelper == 0, found
+	"""Neither Linda's log nor the helper's journal holds password, by passwordHeldIn. The whole
+	journal is only looked at, for the record: what the desktop's own programs log is not Linda's."""
+	_proveMatch(password)
+	texts = {
+		"lindaLog": ground.lindaLog(),
+		"helperJournal": "\n".join(message for _t, message in ground.helperLog()),
+		"wholeJournal": ground.shell("journalctl -b --no-pager -o cat"),
+	}
+	found = {name: passwordHeldIn(password, text) for name, text in texts.items()}
+	ground.machine.log(f"where the password is held, and how: {found}")
+	assert not found["lindaLog"] and not found["helperJournal"], found
 	return found
 
 
