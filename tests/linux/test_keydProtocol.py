@@ -8,9 +8,11 @@ that file gives them, and HELLO as Linda sends it today. Run under the rig:
 import importlib.util
 import inspect
 import re
+import shutil
 import socket
 import struct
 import sys
+import tempfile
 import threading
 import types
 from pathlib import Path
@@ -237,21 +239,26 @@ class _Helper:
 )
 def test_connectSendsTodaysHelloUnlessAskedForOtherFeatures(
 	client: types.ModuleType,
-	tmp_path: Path,
 	features: int | None,
 	sent: bytes,
 ):
 	assert inspect.signature(client.connect).parameters["features"].default == client.FEATURE_WAIT
-	path = tmp_path / "socket"
-	helper = _Helper(path, client.FEATURE_WAIT)
+	# A Unix socket's path is limited to 107 bytes, which a basetemp under someone's scratch folder can
+	# pass on its own.
+	socketDir = Path(tempfile.mkdtemp(prefix="keyd", dir="/tmp"))
+	path = socketDir / "socket"
 	try:
-		if features is None:
-			sock, welcome = client.connect(str(path), 5)
-		else:
-			sock, welcome = client.connect(str(path), 5, features)
-		sock.close()
-		helper.thread.join(5)
+		helper = _Helper(path, client.FEATURE_WAIT)
+		try:
+			if features is None:
+				sock, welcome = client.connect(str(path), 5)
+			else:
+				sock, welcome = client.connect(str(path), 5, features)
+			sock.close()
+			helper.thread.join(5)
+		finally:
+			helper.close()
 	finally:
-		helper.close()
+		shutil.rmtree(socketDir, ignore_errors=True)
 	assert helper.hello == sent
 	assert welcome.features == client.FEATURE_WAIT
