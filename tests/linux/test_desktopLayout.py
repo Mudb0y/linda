@@ -40,6 +40,7 @@ ALLOWED_RECORDS = [
 	for p in (
 		r"Keyboard layout from (gnome|kde|localed|environment|sway|keymap): [\w-]+( [\w-]+)?",
 		r"Keyboard layout: no (waylandKeymap|swayLayout|gamescopeLayout) module",
+		r"Keyboard layout: the (waylandKeymap|swayLayout|gamescopeLayout) module could not be loaded",
 		r"Keyboard layout: taken from the (waylandKeymap|swayLayout|gamescopeLayout) module",
 		r"Keyboard layout: the (waylandKeymap|swayLayout|gamescopeLayout) feed did not start",
 		r"Keyboard layout: GNOME's input sources schema is not installed",
@@ -705,5 +706,10 @@ result["keymap"] = started(desktopLayout.create("sway"))
 	records = moduleRecords(result)
 	for name in ("waylandKeymap", "swayLayout", "gamescopeLayout"):
 		assert f"Keyboard layout: no {name} module" in records
+	# A module that is there but fails its own imports is broken, not absent: both are absent only for
+	# the six desktops asked before the fakes were written.
+	absent = [records.count(f"Keyboard layout: no {name} module") for name in ("swayLayout", "gamescopeLayout")]
+	assert absent == [6, 6]
+	assert "Keyboard layout: the gamescopeLayout module could not be loaded" in records
 	assert "Keyboard layout: taken from the swayLayout module" in records
 	assert "Keyboard layout: the swayLayout feed did not start" in records

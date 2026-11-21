@@ -660,10 +660,14 @@ def create(currentDesktop: str | None) -> LayoutFeed:
 	:param currentDesktop: XDG_CURRENT_DESKTOP as the caller has it.
 	"""
 	for name in OPTIONAL_MODULES:
+		fullName = f"{__package__}.{name}"
 		try:
-			module = importlib.import_module(f"{__package__}.{name}")
-		except ImportError:
-			log.debug(f"Keyboard layout: no {name} module")
+			module = importlib.import_module(fullName)
+		except ModuleNotFoundError as e:
+			if e.name == fullName:
+				log.debug(f"Keyboard layout: no {name} module")
+			else:
+				log.debugWarning(f"Keyboard layout: the {name} module could not be loaded", exc_info=True)
 			continue
 		except Exception:  # noqa: BLE001
 			log.debugWarning(f"Keyboard layout: the {name} module could not be loaded", exc_info=True)
