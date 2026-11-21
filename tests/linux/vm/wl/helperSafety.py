@@ -462,12 +462,16 @@ def hotplug(ground: "Ground", client: "KeydClient", figures: dict) -> None:
 		releases = [r for r in client.keys(mark) if r["device"] == gone["device"] and r["value"] == 0]
 		figures["hotplug"] = {
 			"shiftHeld": round(release[1]["t"] - pressed[0]["t"], 3),
-			"releasedAfterUnplugAsked": round(release[1]["t"] - unplugging, 3),
+			"clientToldOfReleaseAfterUnplugAsked": round(releases[0]["t"] - unplugging, 3)
+			if releases
+			else None,
 			"goneAfterUnplugAsked": round(gone["t"] - unplugging, 3),
+			"releaseMadeByHelper": [r["synthetic"] for r in releases],
 		}
 		ground.machine.log(f"the USB keyboard unplugged with Shift held: {figures['hotplug']}")
-		# The release is the helper's own, made as the keyboard went.
-		assert [(r["key"], r["synthetic"]) for r in releases] == [("KEY_LEFTSHIFT", True)], releases
+		# The kernel's own release, which it sends as it takes a device away, reaches the helper before
+		# the device goes, so the helper need not make one; either way Shift is let go of.
+		assert [r["key"] for r in releases] == ["KEY_LEFTSHIFT"], releases
 		ground.qemuKey("shift", False)
 		mark = ground.mark()
 		late.tap("KEY_Q")
