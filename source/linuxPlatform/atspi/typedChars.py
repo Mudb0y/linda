@@ -452,6 +452,7 @@ class LayoutCheck:
 		if event.typing and event.text >= " ":
 			if event.reachedApplication:
 				with self._lock:
+					self._forget(time.monotonic())
 					self._pending.append(_PassedKey(event.text, event.time, self._composing, self._textless))
 		elif event.vkCode not in self._modifiers:
 			# A dead key or the compose key, or one that moves or edits: what the next keys insert may be
@@ -466,8 +467,11 @@ class LayoutCheck:
 
 		:param text: What was inserted, or None when it must not be read.
 		"""
-		if not self._pending:
-			return
+		now = time.monotonic()
+		with self._lock:
+			self._forget(now)
+			if not self._pending:
+				return
 		if self._inputMethod():
 			with self._lock:
 				self._pending.clear()
@@ -479,11 +483,8 @@ class LayoutCheck:
 		):
 			return
 		comparable = text is not None and not focus.isProtected and isOneCharacter(text)
-		now = time.monotonic()
 		with self._lock:
 			pending = self._pending
-			while pending and now - pending[0].time > LAYOUT_HOLD:
-				pending.popleft()
 			if not pending:
 				return
 			if not comparable:
@@ -499,6 +500,12 @@ class LayoutCheck:
 				self._say()
 		else:
 			self.matches += 1
+
+	def _forget(self, now: float) -> None:
+		"""Forget the keys that have waited too long for their characters, which are what was typed."""
+		pending = self._pending
+		while pending and now - pending[0].time > LAYOUT_HOLD:
+			pending.popleft()
 
 	def _pair(self, pending: deque[_PassedKey], text: str, now: float) -> bool | None:
 		"""Whether text differs from what its key types, taking that key and any before it from pending;

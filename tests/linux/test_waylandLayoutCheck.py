@@ -240,7 +240,8 @@ def test_lateInsertsArePairedWithTheirOwnKeys(tmp_path: Path):
 		tmp_path,
 		r"""
 text = "the quick brown"
-start = time.monotonic() - 0.6 - 0.15 * len(text)
+# Ahead of the clock the key thread forgets keys by, so that a slow machine forgets none.
+start = time.monotonic()
 events = []
 for index, character in enumerate(text):
 	events.append((start + index * 0.15, "key", character))
@@ -271,6 +272,25 @@ result["said"] = said
 """,
 	)
 	assert value == {"steady": [15, 0], "stall": [31, 0], "said": []}
+
+
+def test_keysAreForgottenWhenTheirTimeIsUp(tmp_path: Path):
+	"""What was typed is held only while a key may still be paired: keys older than the hold are
+	forgotten when a terminal's insert compares nothing, and when the next key goes down."""
+	value = runCheck(
+		tmp_path,
+		r"""
+for character in "hunter2":
+	key(character, at=time.monotonic() - typedChars.LAYOUT_HOLD - 1)
+insert("x", TERMINAL)
+result["after terminal"] = len(check._pending)
+for character in "hunter2":
+	key(character, at=time.monotonic() - typedChars.LAYOUT_HOLD - 1)
+key("m")
+result["after key"] = [entry.text for entry in check._pending]
+""",
+	)
+	assert value == {"after terminal": 0, "after key": ["m"]}
 
 
 def test_aDeadKeysCharacterIsNotAMismatch(tmp_path: Path):
