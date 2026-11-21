@@ -25,13 +25,13 @@ What works today:
 * Scripts that speak through Orca keep working: while Linda runs it answers `PresentMessage` on `org.gnome.Orca.Service`.
 * `linda say`, which speaks one sentence from the command line and exits.
 * Braille displays, through BRLTTY.
+* Remote Access: controlling one computer from another through a relay server, with NVDA on Windows at the other end too.
 
 What does not work yet:
 
 * Wayland sessions. Linda needs an X11 session.
 * The login screen and screen lockers.
 * The parts of NVDA built on Windows services: the magnifier, sound split, audio ducking, touch, Windows OCR, the installer, portable copies and the update check.
-* Remote Access starts and can host or join a relay server, but nobody has yet controlled one machine from another with it.
 * A Chromium or Electron program that was started before any screen reader was running stays silent until you restart it. Linda tells you which one a few seconds after it starts.
 * Anything but 64-bit Intel and AMD machines, and any Unix but Linux.
 
