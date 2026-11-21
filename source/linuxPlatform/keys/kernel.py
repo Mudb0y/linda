@@ -588,7 +588,7 @@ class KernelKeySource:
 			guess = layout.locksGuess & (LOCK_CAPS | LOCK_NUM | LOCK_SCROLL)
 			if self._thread is None:
 				self._locks = guess
-			else:
+			elif self._attached:
 				# The thread that answers keys has the locks; the helper's word, come meanwhile, stands.
 				self._post(lambda: None if self._locksHeard else setattr(self, "_locks", guess))
 		if tables is None or names != tables.names:
@@ -597,7 +597,8 @@ class KernelKeySource:
 	def lookDone(self, number: int, known: bool) -> None:
 		"""The environment's answer to its look number: whether it found where the focus is. From any
 		thread."""
-		if 0 < number <= self._looksAsked:
+		# Once detached, the pipe may be closed and its number another file's.
+		if self._attached and 0 < number <= self._looksAsked:
 			self._lookEnds[number] = known
 			self._wake()
 
