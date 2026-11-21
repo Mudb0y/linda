@@ -744,6 +744,34 @@ def test_startSaysWhenTheThreadBeforeDoesNotEnd(tmp_path: Path) -> None:
 	assert value["again"] == [True, True, True], value
 
 
+def test_stopDuringASlowStartLeavesNoThread(tmp_path: Path) -> None:
+	"""The environment's keeper may still be in a start, which can take STOP_TIMEOUT and START_TIMEOUT,
+	as the environment stops the feed; that stop must end the thread the start makes."""
+	value = runStarts(
+		tmp_path,
+		"""\
+		class Slow(Feed):
+			def _connect(self):
+				time.sleep(1.5)
+				return super()._connect()
+
+
+		feed = Slow([True, True])
+		feed.ending = 1.5
+		feed.start()
+		closeUnder(feed)
+		starter = threading.Thread(target=feed.start)
+		starter.start()
+		time.sleep(0.2)
+		feed.stop()
+		starter.join(10)
+		alive = [thread.name for thread in threading.enumerate() if thread.name == "lindaAtspiCapture"]
+		result = {"alive": alive, "forgotten": feed._thread is None}
+		""",
+	)
+	assert value == {"alive": [], "forgotten": True}, value
+
+
 #: The child of the alternation test: the feed started, the anchor set in each window in turn while it
 #: is the foreground, and the keyboard moved between it and the next window by marco, each move checked
 #: 200 ms after the X server says it happened, while the main thread computes all the while.
