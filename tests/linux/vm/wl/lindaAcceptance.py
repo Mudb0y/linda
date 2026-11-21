@@ -264,23 +264,51 @@ def _keyPerLine(text: str) -> str:
 	return "".join(c for i, c in enumerate(joined) if i == 0 or joined[i - 1] != c)
 
 
+#: How speech.speak writes what it says at IO level, which --debug-logging takes in.
+SPOKEN_LINE = "Speaking ["
+#: How speakTypedCharacters writes each word typed, at IO level, once a character ends it.
+TYPED_WORD_LINE = "typed word: "
+#: A string item of a speak record, as Python's repr writes a str.
+_STRING_ITEM = re.compile(r"'((?:[^'\\\n]|\\.)*)'|\"((?:[^\"\\\n]|\\.)*)\"")
+#: The fault that the IO records above hold what was typed: typing echo speaks each typed character
+#: as a speak record of its own, and inputHook's _TypedKeyMask masks only inputCore's "Input:" records.
+TYPED_IN_IO = (
+	"Linda's log at --debug-logging writes what was typed, in speech.speak's IO-level 'Speaking' records "
+	"(each typed character's echo) and speakTypedCharacters' 'typed word' records, which "
+	"inputHook._TypedKeyMask, masking only inputCore's 'Input:' records, does not cover"
+)
+
+
+def _spokenCharacters(text: str) -> str:
+	"""The one-character string items of the speak records in turn, as typing echo writes a typed
+	character in each."""
+	characters = []
+	for line in text.splitlines():
+		if line.startswith(SPOKEN_LINE):
+			characters += [s or d for s, d in _STRING_ITEM.findall(line) if len(s or d) == 1]
+	return "".join(characters).casefold()
+
+
 def holdingMarker(texts: dict[str, str]) -> list[str]:
 	"""The names of the texts that hold MARKER, matched the three ways tests/linux/harness.py's
-	textsHoldingMarker matches it, which the cases cannot import."""
+	textsHoldingMarker matches it, which the cases cannot import, and as typing echo's speak records
+	write it, a character to a record, which harness.py does not see."""
 	return [
 		name
 		for name, text in texts.items()
-		if MARKER in text.casefold() or MARKER in _letters(text) or MARKER in _keyPerLine(text)
+		if MARKER in text.casefold()
+		or MARKER in _letters(text)
+		or MARKER in _keyPerLine(text)
+		or MARKER in _spokenCharacters(text)
 	]
 
 
-#: How speech.speak writes what it says at IO level, which --debug-logging takes in: a field's text
-#: is in it whenever the field is read aloud, whatever was typed into it and however.
-SPOKEN_LINE = "Speaking ["
-
-
-def withoutSpokenLines(text: str) -> str:
-	return "\n".join(line for line in text.splitlines() if not line.startswith(SPOKEN_LINE))
+def withoutTypedInIo(text: str) -> str:
+	"""text without the IO records of TYPED_IN_IO, to hold the rest of the log to the rule while that
+	fault stands."""
+	return "\n".join(
+		line for line in text.splitlines() if not line.startswith((SPOKEN_LINE, TYPED_WORD_LINE))
+	)
 
 
 def logSize(ground: "Ground", path: str) -> int:
@@ -291,20 +319,33 @@ def logSince(ground: "Ground", path: str, offset: int) -> str:
 	return ground.shell(f"tail -c +{offset + 1} {shlex.quote(path)} 2>/dev/null || true")
 
 
+def assertNotHolding(texts: dict[str, str]) -> None:
+	holding = holdingMarker(texts)
+	assert not holding, f"what the test typed is written in {', '.join(holding)}"
+
+
+def assertLogClean(ground: "Ground", texts: dict[str, str]) -> None:
+	"""Nothing in Linda's logs texts holds MARKER: beyond the IO records of TYPED_IN_IO, as must hold
+	today, and with them, which fails until that fault is fixed."""
+	assertNotHolding(
+		{f"{name}, IO speech and typed words aside": withoutTypedInIo(t) for name, t in texts.items()}
+	)
+	with ground.expectedFailure(TYPED_IN_IO):
+		assertNotHolding(texts)
+
+
 def typedMarker(ground: "Ground", keyboard: "FakeKeyboard", log: str) -> None:
-	"""Type MARKER into the program, and fail if the log at path log, from just before it was typed to a
-	second after, holds it: the window in which the keys go through Linda, before anything reads the
-	field they went into back aloud."""
+	"""Type MARKER into the program, and hold the log at path log, from just before it was typed to a
+	second after, to assertLogClean: the window in which the keys go through Linda, before anything
+	reads the field they went into back aloud. The helper's journal must not hold it at all."""
 	offset = logSize(ground, log)
 	mark = ground.mark()
 	keys = [f"KEY_{c.upper()}" for c in MARKER]
 	keyboard.tap(*keys)
 	ground.waitForKeys("app", [(key, value) for key in keys for value in (1, 0)], mark)
 	ground.settle(1)
-	holding = holdingMarker({"Linda's log as the marker was typed": logSince(ground, log, offset)})
-	assert not holding, f"what the test typed is written in {', '.join(holding)}"
-	holding = holdingMarker({"linda-keyd's journal": "\n".join(m for _t, m in ground.helperLog(mark))})
-	assert not holding, f"what the test typed is written in {', '.join(holding)}"
+	assertLogClean(ground, {"Linda's log as the marker was typed": logSince(ground, log, offset)})
+	assertNotHolding({"linda-keyd's journal": "\n".join(m for _t, m in ground.helperLog(mark))})
 
 
 def linesHoldingMarker(text: str) -> list[str]:

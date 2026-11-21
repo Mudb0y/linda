@@ -354,14 +354,10 @@ def nothingLogged(ground: "Ground", keyboard: "FakeKeyboard", pid: int) -> None:
 		journal = ground.shell(f"journalctl -b -o cat --no-pager -u {KEYD} || true")
 		assert not acceptance.holdingMarker({"journal": journal}), "the helper's journal holds what was typed"
 		logs = {"nvda.log": ground.shell(f"cat {NVDA_LOG}"), "nvda-old.log": ground.shell(f"cat {OLD_LOG}")}
-		# The field the marker went into holds it, and NVDA's speech at IO level writes the field's text
-		# each time it is read aloud, as when the focus comes back to it; nothing else may hold it.
 		for name, text in logs.items():
 			lines = acceptance.linesHoldingMarker(text)
-			ground.machine.log(f"{name}: {len(lines)} lines hold the marker, the first: {lines[:1]}")
-		spokenAside = {name: acceptance.withoutSpokenLines(text) for name, text in logs.items()}
-		holding = acceptance.holdingMarker(spokenAside)
-		assert not holding, f"beyond what was spoken, what the test typed is written in {', '.join(holding)}"
+			ground.machine.log(f"{name}: {len(lines)} lines hold the marker whole, the first: {lines[:1]}")
+		acceptance.assertLogClean(ground, logs)
 		# ground.main holds nvda.log to a clean log; the first copy's is held to the same here.
 		errors = acceptance.logErrors(logs["nvda-old.log"])
 		assert not errors, f"the first copy's log holds {len(errors)} records at ERROR or above: {errors}"
