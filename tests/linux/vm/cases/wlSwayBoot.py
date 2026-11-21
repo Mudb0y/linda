@@ -3,8 +3,9 @@ native GTK 3 and GTK 4 windows record keys from a uhid keyboard in the Polish la
 the focus and times it, and linda-keyd admits a client started from sway's exec and passes its keys
 on through its virtual keyboard, which sway gives the Polish layout too.
 
-All of it runs twice in one boot: first in the session as the guest starts it, with Xwayland, which
-an X client of the test's own then starts; then in the session started again with Xwayland disabled,
+All of it runs twice in one boot: first in the session as the guest starts it, with Xwayland on
+demand, which the user's PipeWire starts once the first test window has brought up the portal, and
+which serves an X client of the test's own; then in the session started again with Xwayland disabled,
 with a user manager of its own as at a fresh login, where neither the runner nor the user manager
 has DISPLAY.
 
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 UHID = "Ground uhid keyboard"
 GTK3 = "Ground window"
 GTK4 = "Ground window 4"
-#: A GTK 3 test window made an X client, which starts Xwayland in the variant that has it.
+#: A GTK 3 test window made an X client, served by Xwayland in the variant that has it.
 XWINDOW = "Ground X window"
 #: The record each window's keys go to.
 WINDOW_LOGS = {GTK3: "app", GTK4: "app4", XWINDOW: "app"}
@@ -161,7 +162,9 @@ def watchWindows(ground: "Ground", name: str) -> str:
 
 
 def openXWindow(ground: "Ground") -> None:
-	"""The GTK 3 test window as an X client, which makes sway start Xwayland."""
+	"""The GTK 3 test window as an X client, to show an X window really served by Xwayland. Xwayland is
+	usually running before it: the portal the first native window brings up starts PipeWire, whose
+	x11-bell module connects to DISPLAY."""
 	mark = Mark(0, ground.now())
 	ground.start("xwindow", ["ground-window", LOGS["app"], XWINDOW], env={"GDK_BACKEND": "x11"})
 	ground.waitFor(
@@ -180,7 +183,8 @@ def variant(ground: "Ground", keyboard: "FakeKeyboard", xwayland: bool) -> None:
 		ground.machine.log(f"sway {name}: {facts}")
 		assert facts["xwaylandConfigured"] == ("xwayland enable" if xwayland else "xwayland disable"), facts
 		assert (facts["display"] is not None) == xwayland, facts
-		# On demand: nothing has asked for it yet.
+		# On demand: nothing has asked for it yet, as PipeWire, which would, starts only with the portal
+		# that the first test window brings up.
 		assert not facts["xwaylandRunning"], facts
 		memory(ground, f"{name}, once the session is ready")
 
