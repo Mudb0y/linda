@@ -237,8 +237,59 @@ Then make sure of the three things under "On every distribution", and start Lind
 
 ### linda-keyd on other distributions
 
-Nix cannot install a system service outside NixOS, so there linda-keyd is built from Linda's source with Meson and installed as your distribution's own packages would be.
-This has been built and installed by Linda's tests, and the service it installs is the one the NixOS module runs, but it has not yet been tried on another distribution, so please say how it went.
+Nix cannot install a system service outside NixOS, so there linda-keyd comes as a package of your distribution's own kind, for Debian and Ubuntu, Fedora, and Arch Linux, on 64-bit Intel and AMD processors.
+The helper in it is linked statically, so it needs none of your distribution's libraries, and the service it installs is the one the NixOS module runs.
+Each package is installed and removed in a container of its distribution whenever it is built, but none has yet been tried on a real machine, so please say how it went.
+
+On Debian and Ubuntu, this downloads the package into the folder you are in, since apt cannot install from a web address.
+
+```
+curl -fLO https://github.com/Mudb0y/linda/releases/download/linda-keyd/linda-keyd_amd64.deb
+```
+
+This installs it, makes the helper's system user, loads the kernel's virtual keyboard module, and starts the service now and at every boot, as Debian does with a service a package installs.
+
+```
+sudo apt install ./linda-keyd_amd64.deb
+```
+
+On Fedora, this downloads and installs the package, makes the helper's system user and loads the kernel's virtual keyboard module. The packages are not signed until there is a package repository for them, and Fedora 45 refuses a package without a signature unless `--no-gpgchecks` is given.
+
+```
+sudo dnf install --no-gpgchecks https://github.com/Mudb0y/linda/releases/download/linda-keyd/linda-keyd.x86_64.rpm
+```
+
+On Arch Linux, this downloads the package into the folder you are in, since pacman takes a package without a signature only from a file.
+
+```
+curl -fLO https://github.com/Mudb0y/linda/releases/download/linda-keyd/linda-keyd-x86_64.pkg.tar.zst
+```
+
+This installs it, makes the helper's system user and loads the kernel's virtual keyboard module.
+
+```
+sudo pacman -U ./linda-keyd-x86_64.pkg.tar.zst
+```
+
+Fedora and Arch do not start a service a package installs. On either, this starts it now and at every boot.
+
+```
+sudo systemctl enable --now linda-keyd
+```
+
+On any of them, this prints `active` when the helper runs.
+
+```
+systemctl is-active linda-keyd
+```
+
+Updates are not automatic: until there is a package repository, your distribution's updater does not know about linda-keyd.
+When you update Linda, update the helper too, by running the same download and install commands again, which replace it with the newest build.
+Debian, Ubuntu and Fedora restart the service after the update; on Arch restart it yourself with `sudo systemctl restart linda-keyd`.
+Removing the package stops the service: `sudo apt remove linda-keyd`, `sudo dnf remove linda-keyd` or `sudo pacman -R linda-keyd`.
+
+On any other distribution or processor, openSUSE among them until its package has been tried, build linda-keyd from Linda's source with Meson and install it as your distribution's own packages would be.
+This has been built and installed by Linda's tests, but not yet on another distribution.
 
 The build needs git, Meson 1.4 or later, Ninja, pkg-config, a C++ compiler with C++20, Rust 1.89 or later with cargo, libclang, and PipeWire's development files, which are in your distribution's packages under those names or close to them. libclang is `libclang-dev` on Debian and Ubuntu, `clang-devel` on Fedora and `clang` on Arch.
 Where the distribution's own Rust is older than 1.89, as Debian 13's is, [rustup](https://rustup.rs) installs a newer one for your user.
