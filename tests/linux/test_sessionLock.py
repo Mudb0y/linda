@@ -19,6 +19,7 @@ from desktopSession import DesktopSession
 
 SERVICES = harness.HERE / "fixtures" / "lockServices.py"
 SESSION_PATH = "/org/freedesktop/login1/session/_31"
+ANOTHER_SESSION = "/org/freedesktop/login1/session/_32"
 SESSION_CONFIG = harness.HERE / "fixtures" / "sessionConfig" / "nvda.ini"
 
 #: Starts the stand-ins and defines the helpers the tests share.
@@ -176,8 +177,6 @@ def lockedAfter(command=None, target=None, settle=0.0, within=5.0):
 #: process is of.
 PRELUDE += r"""
 import json
-
-ANOTHER_SESSION = "/org/freedesktop/login1/session/_32"
 
 
 def environment(**variables):
@@ -716,7 +715,7 @@ def test_inNoSessionWithoutTheDisplaySessionNothingLocks(tmp_path, settings):
 			id="inNoSessionWithThisTheDisplaySession",
 		),
 		pytest.param(
-			("{pid}=/org/freedesktop/login1/session/_32",),
+			("{pid}=" + ANOTHER_SESSION,),
 			{
 				"lockCarriedOut": False,
 				"withheld": [False, False],
@@ -727,7 +726,7 @@ def test_inNoSessionWithoutTheDisplaySessionNothingLocks(tmp_path, settings):
 			id="inAnotherSession",
 		),
 		pytest.param(
-			("{pid}=none", "display=/org/freedesktop/login1/session/_32"),
+			("{pid}=none", "display=" + ANOTHER_SESSION),
 			{
 				"lockCarriedOut": False,
 				"withheld": [False, False],
