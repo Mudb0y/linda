@@ -236,6 +236,10 @@ class WaylandEnvironment:
 	def canLook(self) -> bool:
 		return self.feed.canLook
 
+	def settled(self, now: float) -> bool:
+		"""Whether no chord that may move the focus waits for its window event, as of now."""
+		return self.feed.settled(now)
+
 	def requestLook(self, number: int, now: float) -> float:
 		source = self._source
 		if source is None:
