@@ -814,10 +814,9 @@ def test_hungProgramsRenamingWaitsOnlyForTheShell(tmp_path: Path) -> None:
 	assert done.value == {"shell": "AppHung", "editor": ["nameChange"]}, done.value
 
 
-#: A window:activate of the frame that holds NVDA's focus, with no focus found in it, while the field
-#: is or is not still focused; then a focus and the frame's activation deferred while the program is
-#: hung, and whether a later event of it is accepted and its focus tried first.
-KEEPS_FOCUS = """
+#: A Qt program's frame, which finds no focus in itself, and its field, with a client that answers for
+#: them.
+FRAME_AND_FIELD = """
 	import types
 
 	import core
@@ -876,6 +875,14 @@ KEEPS_FOCUS = """
 		positionInfo={}, atspiRole="frame",
 	)
 	other = Node(":1.7", "/other", None)
+"""
+
+#: A window:activate of the frame that holds NVDA's focus, with no focus found in it, while the field
+#: is or is not still focused; then a focus and the frame's activation deferred while the program is
+#: hung, and whether a later event of it is accepted.
+KEEPS_FOCUS = (
+	FRAME_AND_FIELD
+	+ """
 	result = {}
 	for session, wayland in (("x11", False), ("wayland", True)):
 		handler._waylandRules = wayland
@@ -895,22 +902,35 @@ KEEPS_FOCUS = """
 		handler._backgroundEventsOf = lambda n: frozenset()
 		handler._setForeground(frame)
 		result[f"{session} accepted"] = handler._shouldAccept("stateChange", field)
-		result[f"{session} focus first"] = handler._waylandRules and handler._focusBefore(
-			("window:activate", frame, 0, 0, None), [("object:state-changed:focused", field, 1, 0, None)]
-		)
 		activation = handler._activationWhileHung.get(BUS)
 		result[f"{session} waiting"] = [
 			handler._focusWhileHung[BUS][0][1].path,
 			activation[1].path if activation else None,
 		]
 """
+)
+
+#: One batch through handler.pumpAll: the field's focus event, then the activation of its frame, while
+#: NVDA's focus is in another program.
+FOCUS_FIRST = (
+	FRAME_AND_FIELD
+	+ """
+	handler._waylandRules = WAYLAND
+	handler._setForeground(other)
+	eventHandler.lastQueuedFocusObject = types.SimpleNamespace(node=other)
+	with handler._queueLock:
+		handler._queue.append(("object:state-changed:focused", field, 1, 0, None))
+		handler._queue.append(("window:activate", frame, 0, 0, None))
+	handler.pumpAll()
+	result = queued
+"""
+)
 
 
 def test_activationKeepsAFocusStillInsideIt(tmp_path: Path) -> None:
 	"""In a Wayland session a window:activate whose window gives no focus leaves NVDA's focus inside
-	it while that is still focused, a deferred focus is not replaced by the program's activation,
-	events of the window activated last are accepted, and a focus is tried before a later activation
-	in its batch; in an X session each is as on main."""
+	it while that is still focused, a deferred focus is not replaced by the program's activation, and
+	events of the window activated last are accepted; in an X session each is as on main."""
 	done = harness.runChild(tmp_path, KEEPS_FOCUS, prepare="config", timeout=120)
 	done.assertClean()
 	assert done.value == {
@@ -922,6 +942,16 @@ def test_activationKeepsAFocusStillInsideIt(tmp_path: Path) -> None:
 		"wayland waiting": ["/frame/field", "/frame"],
 		"x11 accepted": False,
 		"wayland accepted": True,
-		"x11 focus first": False,
-		"wayland focus first": True,
 	}, done.value
+
+
+@pytest.mark.parametrize("session", ["x11", "wayland"])
+def test_focusTriedBeforeItsWindowsActivation(tmp_path: Path, session: str) -> None:
+	"""In a Wayland session a program's focus event is tried before its window's activation later in
+	the same batch, as a Qt Quick window cannot say what in it has the focus; in an X session the
+	activation, newest, is tried first, as on main."""
+	code = FOCUS_FIRST.replace("WAYLAND", str(session == "wayland"))
+	done = harness.runChild(tmp_path, code, prepare="config", timeout=120)
+	done.assertClean()
+	expected = {"x11": [["gainFocus", "/frame"]], "wayland": [["gainFocus", "/frame/field"]]}
+	assert done.value == expected[session], done.value
