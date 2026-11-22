@@ -488,3 +488,133 @@ def test_importInAFreshCloneBuildsOnOriginUpstream(repo: Repo, nvda: Repo, tmp_p
 	clone = Repo(tmp_path / "clone")
 	repo.run("git", "clone", "-q", "--branch", "main", repo.path, clone.path)
 	importUpstream(clone, nvda, "release-2027.1", "refs/remotes/origin/upstream")
+
+
+DELETED_FILES = ("ci/build.ps1", "ci/scripts/sign.ps1", "ci/scripts/keep.ps1", "launcher.nsi")
+
+
+def deleteOnMain(r: Repo, *entries: str) -> None:
+	"""Adds the files an NVDA does not need here to upstream, and has main delete them as its list says."""
+	r.git("checkout", "-q", "upstream")
+	for path in DELETED_FILES:
+		r.write(path, "one\n")
+	r.git("add", "--", *DELETED_FILES)
+	r.git("commit", "-q", "-m", "Windows build files")
+	r.git("checkout", "-q", "main")
+	r.git("merge", "-q", "--no-edit", "upstream")
+	r.git("rm", "-q", "-r", "ci", "launcher.nsi")
+	r.write("ci/scripts/keep.ps1", "one\n")
+	r.write(
+		"tools/upstream-edits.txt",
+		r.read("tools/upstream-edits.txt")
+		+ "".join(f"{entry}\n  repository: deleted. Windows only\n" for entry in entries),
+	)
+	r.git("add", "-A")
+	r.git("commit", "-q", "-m", "Delete them")
+
+
+def newerNvdaOnUpstream(r: Repo, editsEdited: bool) -> None:
+	r.git("checkout", "-q", "upstream")
+	r.write("ci/build.ps1", "two\n")
+	r.write("ci/scripts/new.ps1", "added\n")
+	r.write("launcher.nsi", "two\n")
+	if editsEdited:
+		r.write("source/edited.py", "value = 5\n")
+	r.git("add", "-A")
+	r.git("commit", "-q", "-m", "A newer NVDA")
+	r.git("checkout", "-q", "main")
+
+
+def test_aDirectoryListedOnceStandsForItsFilesExceptWhatIsKept(repo: Repo):
+	deleteOnMain(repo, "ci/ except scripts/keep.ps1", "launcher.nsi")
+	assertPasses(repo)
+	assert "4 upstream files differ" in check(repo).stdout
+
+
+def test_aKeptFileUpstreamLacksFails(repo: Repo):
+	deleteOnMain(repo, "ci/ except scripts/gone.ps1", "launcher.nsi")
+	done = check(repo)
+	assert done.returncode == 1
+	assert "ci/ keeps scripts/gone.ps1, which upstream does not have there" in done.stderr
+
+
+def test_aFileBackUnderADeletedDirectoryFails(repo: Repo):
+	deleteOnMain(repo, "ci/ except scripts/keep.ps1", "launcher.nsi")
+	repo.write("ci/scripts/sign.ps1", "one\n")
+	repo.git("add", "ci/scripts/sign.ps1")
+	assertFails(repo, "listed but identical to upstream:\nci/scripts/sign.ps1")
+
+
+def test_aDirectoryThatIsNotADeletionFails(repo: Repo):
+	deleteOnMain(repo, "launcher.nsi")
+	repo.write(
+		"tools/upstream-edits.txt",
+		repo.read("tools/upstream-edits.txt") + "source/\n  Linux runtime: why\n",
+	)
+	done = check(repo)
+	assert done.returncode == 1
+	assert "source/ is a directory, and only a deletion can be listed as one" in done.stderr
+
+
+def mergeNewerNvda(repo: Repo, editsEdited: bool = False) -> None:
+	newerNvdaOnUpstream(repo, editsEdited)
+	done = repo.run("git", "merge", "--no-edit", "upstream", check=False)
+	assert done.returncode == 1, done.stdout + done.stderr
+
+
+def test_aMergeThatBringsDeletedFilesBackIsPutRight(repo: Repo):
+	deleteOnMain(repo, "ci/ except scripts/keep.ps1", "launcher.nsi")
+	repo.write("source/edited.py", "value = 1\nother = 2\n")
+	repo.commit("Edit", "source")
+	mergeNewerNvda(repo, editsEdited=True)
+	unmerged = repo.git("diff", "--name-only", "--diff-filter=U").splitlines()
+	assert "ci/build.ps1" in unmerged and "launcher.nsi" in unmerged and "source/edited.py" in unmerged
+	done = repo.tool("keep-upstream-deletions")
+	assert done.returncode == 0, done.stdout + done.stderr
+	for path in ("ci/build.ps1", "ci/scripts/new.ps1", "launcher.nsi"):
+		assert f"removed {path}\n" in done.stdout, done.stdout
+		assert not (repo.path / path).exists(), path
+	assert "scripts/keep.ps1" not in done.stdout
+	assert "scripts/sign.ps1" not in done.stdout
+	assert (repo.path / "ci/scripts/keep.ps1").is_file()
+	assert repo.git("diff", "--name-only", "--diff-filter=U").splitlines() == ["source/edited.py"]
+
+
+def test_theMergeCanFinishOnceTheOtherConflictsAreSettled(repo: Repo):
+	deleteOnMain(repo, "ci/ except scripts/keep.ps1", "launcher.nsi")
+	mergeNewerNvda(repo)
+	assert repo.tool("keep-upstream-deletions").returncode == 0
+	repo.write("source/edited.py", LINUX_EDIT)
+	repo.git("add", "source/edited.py")
+	repo.git("commit", "-q", "--no-edit")
+	assertPasses(repo)
+
+
+def test_deletionsAreKeptOutsideAMergeOnlyWhenChecking(repo: Repo):
+	deleteOnMain(repo, "ci/ except scripts/keep.ps1", "launcher.nsi")
+	done = repo.tool("keep-upstream-deletions")
+	assert done.returncode == 2
+	assert "no merge is in progress" in done.stderr
+	assert repo.tool("keep-upstream-deletions", "--check").returncode == 0
+	repo.write("launcher.nsi", "back\n")
+	repo.git("add", "launcher.nsi")
+	assert repo.tool("keep-upstream-deletions").returncode == 2
+	assert repo.read("launcher.nsi") == "back\n"
+	done = repo.tool("keep-upstream-deletions", "--check")
+	assert done.returncode == 1
+	assert "present: launcher.nsi" in done.stdout
+	assert repo.read("launcher.nsi") == "back\n"
+	assert "launcher.nsi" in repo.git("ls-files")
+
+
+def test_checkingInAMergeChangesNothing(repo: Repo):
+	deleteOnMain(repo, "ci/ except scripts/keep.ps1", "launcher.nsi")
+	mergeNewerNvda(repo)
+	done = repo.tool("keep-upstream-deletions", "--check")
+	assert done.returncode == 1
+	assert "present: ci/build.ps1" in done.stdout
+	assert (repo.path / "ci/build.ps1").is_file()
+
+
+def test_keepingDeletionsRefusesAnUnknownArgument(repo: Repo):
+	assert repo.tool("keep-upstream-deletions", "--now").returncode == 2

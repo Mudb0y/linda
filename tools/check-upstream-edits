@@ -122,6 +122,16 @@ def readLedger(path: str) -> dict[str, Entry]:
 	return entries
 
 
+def keptInDirectory(path: str, entry: Entry) -> list[str]:
+	"""The paths beneath the directory that its entry says this tree keeps."""
+	if not entry.reason[0].startswith(DELETED):
+		raise Failure(f"{EDITS}: {path} is a directory, and only a deletion can be listed as one")
+	kept = entry.words[2:] if entry.words[1:2] == ["except"] else []
+	if entry.words[1:] and not kept:
+		raise Failure(f"{EDITS}: {path} may be followed only by except and the paths it keeps")
+	return kept
+
+
 def deletedDirectories(base: str, ledger: dict[str, Entry]) -> dict[str, Entry]:
 	"""The ledger with each entry for a directory given as an entry for every file of upstream's in it.
 
@@ -133,11 +143,7 @@ def deletedDirectories(base: str, ledger: dict[str, Entry]) -> dict[str, Entry]:
 		if not path.endswith("/"):
 			expanded[path] = entry
 			continue
-		if not entry.reason[0].startswith(DELETED):
-			raise Failure(f"{EDITS}: {path} is a directory, and only a deletion can be listed as one")
-		kept = entry.words[2:] if entry.words[1:2] == ["except"] else []
-		if entry.words[1:] and not kept:
-			raise Failure(f"{EDITS}: {path} may be followed only by except and the paths it keeps")
+		kept = keptInDirectory(path, entry)
 		inside = paths("ls-tree", "-r", "--name-only", base, "--", path)
 		if missing := [k for k in kept if path + k not in inside]:
 			raise Failure(f"{EDITS}: {path} keeps {', '.join(missing)}, which upstream does not have there")

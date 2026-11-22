@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Removes again what this tree deletes from NVDA's and a merge of a new release brought back.
+
+Run it during `git merge upstream` that stopped on conflicts. Every path that tools/upstream-edits.txt
+lists with the kind repository: deleted, and every file under a directory it lists so, is removed
+from the index and the working tree if the merge left it there, whether as a file upstream changed
+that this tree deleted, which git reports as a modify/delete conflict, or as a file upstream added.
+It prints each path it removes. Other conflicts it leaves alone.
+
+keep-upstream-deletions [--check]
+
+Outside a merge it does nothing and exits 2. With --check it changes nothing, in a merge or not, and
+exits 1 after printing the deleted paths the tree holds, which also shows a deletion that went wrong
+by hand.
+"""
+
+import importlib.machinery
+import importlib.util
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+TOOLS = Path(__file__).resolve().parent
+
+
+def loadChecker():
+	"""check-upstream-edits, which reads the list, so that the two cannot disagree about its format."""
+	loader = importlib.machinery.SourceFileLoader("checkUpstreamEdits", str(TOOLS / "check-upstream-edits"))
+	spec = importlib.util.spec_from_loader(loader.name, loader)
+	module = importlib.util.module_from_spec(spec)
+	loader.exec_module(module)
+	return module
+
+
+def deletedPathsHeld(checker) -> list[str]:
+	held = checker.paths("ls-files", "--cached", "--")
+	found = set()
+	for path, entry in checker.readLedger(checker.EDITS).items():
+		if not entry.reason[0].startswith(checker.DELETED):
+			continue
+		if not path.endswith("/"):
+			if path in held:
+				found.add(path)
+			continue
+		kept = {path + name for name in checker.keptInDirectory(path, entry)}
+		found |= {p for p in held if p.startswith(path) and p not in kept}
+	return sorted(found)
+
+
+def inMerge() -> bool:
+	done = subprocess.run(
+		["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+		capture_output=True,
+		text=True,
+		check=False,
+	)
+	return done.returncode == 0
+
+
+def main() -> int:
+	arguments = sys.argv[1:]
+	if arguments not in ([], ["--check"]):
+		print("usage: keep-upstream-deletions [--check]", file=sys.stderr)
+		return 2
+	onlyCheck = bool(arguments)
+	checker = loadChecker()
+	try:
+		os.chdir(checker.git("rev-parse", "--show-toplevel").strip())
+		if not onlyCheck and not inMerge():
+			print("keep-upstream-deletions: no merge is in progress, so nothing was done", file=sys.stderr)
+			return 2
+		held = deletedPathsHeld(checker)
+		if not held:
+			print("none of the paths this tree deletes is back")
+			return 0
+		if onlyCheck:
+			for path in held:
+				print(f"present: {path}")
+			print(f"{len(held)} paths this tree deletes are present", file=sys.stderr)
+			return 1
+		for start in range(0, len(held), 200):
+			checker.git("rm", "-q", "-r", "-f", "--", *held[start : start + 200])
+		for path in held:
+			print(f"removed {path}")
+	except (checker.Failure, OSError, ValueError) as error:
+		print(error, file=sys.stderr)
+		return 1
+	print(f"{len(held)} paths that this tree deletes were back, and are gone again")
+	return 0
+
+
+if __name__ == "__main__":
+	sys.exit(main())
