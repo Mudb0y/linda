@@ -36,6 +36,7 @@ What does not work yet:
 * The parts of NVDA built on Windows services: the magnifier, sound split, audio ducking, touch, Windows OCR, the installer, portable copies and the update check.
 * A Chromium or Electron program that was started before any screen reader was running stays silent until you restart it. Linda tells you which one a few seconds after it starts.
 * Steam's gamescope session, which has not been tested.
+* Screen lockers other than MATE's, such as those of Xfce and Cinnamon, light-locker and xscreensaver, which have not been tested.
 * Anything but 64-bit Intel and AMD machines, and any Unix but Linux.
 
 ## What you need
@@ -344,6 +345,7 @@ What does not work yet in a Wayland session:
 * On sway, keyboard options set in sway's own configuration, such as `xkb_options`, are not seen by Linda.
 * A keyboard that is also a pointing device, as some wireless keyboards with a touchpad are, is left alone by linda-keyd: its keys reach programs without Linda, which says so once.
 * With Orca running beside Linda, both speak everything you type, and Orca's commands made with Insert are out of reach. On GNOME Linda says so once, and how to turn Orca off.
+* Lock screens other than those of GNOME 51 and Plasma 6.8 have not been tested: neither those of GNOME 49 and 50 and Plasma 6.5 and 6.6, nor swaylock or any other locker on sway.
 * Steam's gamescope session has not been tested, and nothing is claimed for it yet.
 
 ### The emergency chord
