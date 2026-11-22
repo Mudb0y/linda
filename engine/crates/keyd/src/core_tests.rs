@@ -5603,6 +5603,56 @@ fn a_probe_while_the_session_was_away_proves_nothing() {
     assert!(!T::locks_told(&sent).contains(&LOCK_NUM), "{sent:?}");
 }
 
+/// The kernel hands the console's locks to a keyboard as it is made, inside UI_DEV_CREATE and so
+/// before the probe lights it: here Num Lock, as setleds at boot leaves the graphical console. KWin
+/// with every lock off then writes nothing. That is no desktop's write: UNSEEN, and none of the
+/// probe's lights is told or shown.
+#[test]
+fn the_consoles_lights_at_creation_are_no_desktops_write() {
+    let mut t = T::new();
+    let k = t.w.plug("keyboard");
+    t.w.desktop_writes_leds(&[(LED_NUML, true)]);
+    let asked = FEATURE_WAIT | FEATURE_VIRTUAL_SEEN;
+    assert_eq!(t.admit_asking(CLIENT, asked), asked);
+    t.send(FromClient::Start);
+    t.core.virtual_ready(t.now);
+    t.take();
+    t.pass(VIRTUAL_SETTLE);
+    let sent = t.sent();
+    assert!(t.w.grabbed(k));
+    assert_eq!(
+        T::virtual_word(&sent),
+        (vec![VIRTUAL_UNSEEN], true),
+        "{sent:?}"
+    );
+    assert_eq!(T::locks_told(&sent), vec![0], "{sent:?}");
+    assert_eq!((t.w.virtual_leds(), t.w.leds(k)), (0, 0));
+}
+
+/// A keyboard added while the virtual keyboard settles makes the kernel hand the console's locks,
+/// here none, to every keyboard: Num, Caps, Scroll and Kana Lock go off on the virtual keyboard, and
+/// Compose, which no trigger drives, stays on. KWin with every lock off writes nothing: UNSEEN, and
+/// the Compose light is neither told nor shown.
+#[test]
+fn the_consoles_lights_on_a_keyboard_added_are_no_desktops_write() {
+    let (mut t, k) = T::probing(0);
+    t.pass(ms(300));
+    t.w.desktop_writes_leds(&[
+        (LED_NUML, false),
+        (LED_CAPSL, false),
+        (LED_SCROLLL, false),
+        (LED_KANA, false),
+    ]);
+    t.core.virtual_ready(t.now);
+    t.take();
+    t.pass(VIRTUAL_SETTLE);
+    let sent = t.sent();
+    assert!(t.w.grabbed(k));
+    assert_eq!(T::virtual_word(&sent).0, vec![VIRTUAL_UNSEEN], "{sent:?}");
+    assert_eq!(T::locks_told(&sent), vec![0], "{sent:?}");
+    assert_eq!((t.w.virtual_leds(), t.w.leds(k)), (0, 0));
+}
+
 /// A virtual keyboard that cannot be lit for the probe is one that does not take writes: it fails
 /// as one that cannot be made does, and nothing is grabbed.
 #[test]

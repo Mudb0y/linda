@@ -305,7 +305,7 @@
 //! [`VIRTUAL_SETTLE`] the lights are left as the desktop wrote them, and are LOCKS only when one is
 //! on, as with no probe they would have been; with no write they are put back to none, as a new
 //! keyboard has them. VIRTUAL then says, once for each client, before any keyboard is grabbed for it:
-//! - [`VIRTUAL_SEEN`]: something wrote the lights before VIRTUAL_SETTLE;
+//! - [`VIRTUAL_SEEN`]: something wrote the lights, Compose off, before VIRTUAL_SETTLE;
 //! - [`VIRTUAL_UNSEEN`]: nothing did by then;
 //! - [`VIRTUAL_OLD`]: nothing can be seen, as the virtual keyboard was made before this client's
 //!   START, or its session left the front or the client asked to stop while it settled.
@@ -315,8 +315,9 @@
 //! whatever the locks; KWin and the X server write only while a lock is on, and then every light. So
 //! SEEN proves the keyboard is read. UNSEEN proves nothing on KWin or X with every lock off, nor on a
 //! desktop never measured; it means the keyboard is not read only where the desktop writes whatever
-//! the locks are. A keyboard added while the virtual keyboard settles seems to make the kernel put
-//! the console's lights on every other keyboard, which on this one would count as SEEN.
+//! the locks are. The kernel's own lock triggers also write the console's locks to the virtual
+//! keyboard, as it is made and whenever another keyboard is added, but never Compose, which every
+//! desktop writes off: so only a write that leaves Compose off counts as the desktop's.
 //!
 //! # Time bounds
 //!

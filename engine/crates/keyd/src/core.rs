@@ -42,8 +42,8 @@ use std::time::{Duration, Instant};
 use crate::device::{Devices, Found, GrabError, InputEvent, Keyboard, ReadError, VirtualKeyboard};
 use crate::keys::{
     Assessment, CHORD, EV_KEY, EV_SYN, KEY_CAPSLOCK, KEY_CNT, KEY_KP0, KEY_LEFTALT, KEY_RIGHTALT,
-    KEY_SYSRQ, KeySet, LED_NUML, LEDS, MODIFIERS, READER_MODIFIERS, SYN_DROPPED, is_virtual_key,
-    modifies, typeable,
+    KEY_SYSRQ, KeySet, LED_COMPOSE, LED_NUML, LEDS, MODIFIERS, READER_MODIFIERS, SYN_DROPPED,
+    is_virtual_key, modifies, typeable,
 };
 use crate::protocol::*;
 
@@ -119,6 +119,21 @@ struct Probe {
     /// The client's session left the front, or the client stopped wanting, while it settled: what
     /// came meanwhile may be another session's, or the console's.
     spoiled: bool,
+}
+
+impl Probe {
+    /// The lights as a read of the virtual keyboard left them. The kernel's lock triggers hand the
+    /// console's locks to a keyboard as it is made, inside UI_DEV_CREATE and so before the probe's
+    /// write, and to every keyboard each time one is added; they drive every light but Compose. Every
+    /// desktop writes all five, Compose off. So lights with Compose still on are the kernel's doing,
+    /// never a desktop's.
+    fn heard(&mut self, leds: u16, now: Instant, by: Option<String>) {
+        if leds & 1 << LED_COMPOSE != 0 {
+            return;
+        }
+        let first = self.written.as_ref().map_or(now, |w| w.0);
+        self.written = Some((first, leds, by));
+    }
 }
 
 /// Every light the virtual keyboard has, which the probe turns on.
@@ -818,8 +833,7 @@ impl<D: Devices> Core<D> {
         match r {
             // The probe's lights are none of the client's business until the desktop's are whole.
             Ok(Some(leds)) if let Virt::Settling { probe: Some(p), .. } = &mut self.virt => {
-                let first = p.written.as_ref().map_or(now, |w| w.0);
-                p.written = Some((first, leds, by));
+                p.heard(leds, now, by);
             }
             Ok(Some(leds)) => self.set_leds(leds),
             Ok(None) => {}
