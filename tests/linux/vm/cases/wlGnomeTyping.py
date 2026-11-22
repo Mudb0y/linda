@@ -107,6 +107,16 @@ SETTINGS_SPOKEN = "Linda Settings: General (normal configuration) dialog"
 NOT_REACHED = "Linda's window opened but did not get the keyboard. Press Alt plus Tab to reach it."
 #: Seconds from the key to the window's activation, as the package asks of the menu window.
 ACTIVATION_BOUND = 1.0
+#: Seconds from its key by which the listener hears the settings dialog opened anew activated on GNOME,
+#: from the menu or by its command. Over the boots of package MW (results/MW-windows.txt) GTK had Mutter's
+#: focus-in for it, and sent window:activate from that, 0.60 to 0.98 s after the key, but the listener
+#: heard it 0.61 to 1.16 s after the key: up to 0.35 s after Linda sent it. In the boot that recorded both,
+#: the case's own watcher heard the same signal 0.05 s after the focus-in and the listener 0.16 s after,
+#: so that time is the listener's, neither Mutter's nor Linda's. The menu is heard within 0.07 s of its
+#: focus-in and is held to ACTIVATION_BOUND.
+DIALOG_BOUND = 1.5
+#: The windows held to DIALOG_BOUND, as ownWindow names them.
+DIALOGS_ANEW = ("the settings dialog from the menu", "the settings dialog")
 #: How many times the menu is opened, each held to ACTIVATION_BOUND: the first is the first window Linda
 #: shows, which loads what GTK has not loaded before.
 MENU_RUNS = 5
@@ -122,8 +132,7 @@ UNREACHED_SAID_BY = ACTIVATION_BOUND + 2.0
 #: GTK first paints it only 0.91 to 1.45 s after the key, and it is active 0.28 to 0.38 s after that, 1.25
 #: to 1.72 s after the key in all. Between the configure and the paint Linda's Python is idle and next to
 #: nothing reaches it over the accessibility bus, but its main loop runs nothing of lower priority than its
-#: default one; where that time goes inside GTK is not known. The menu and the dialog opened anew are held
-#: to the bound.
+#: default one; where that time goes inside GTK is not known.
 DIALOG_AGAIN_LATE = (
 	"on GNOME Linda's settings dialog brought forward again from behind another window is active only some "
 	"1.2 to 1.7 s after its key: GTK first paints it 0.9 to 1.45 s after it maps it again"
@@ -668,11 +677,11 @@ def ownWindowEvents(ground: "Ground", since: float) -> list[dict]:
 	return [r for r in ground.readJsonLines(OWN_WINDOWS) if r.get("t", 0) >= since]
 
 
-def withinBound(activated: dict[str, float]) -> None:
-	"""Every one of Linda's windows was activated within ACTIVATION_BOUND of its key, given as seconds
-	after it by the window's name."""
-	late = {what: delay for what, delay in activated.items() if delay >= ACTIVATION_BOUND}
-	assert not late, f"activated {ACTIVATION_BOUND} s or more after the key: {late}"
+def withinBound(activated: dict[str, float], bound: float = ACTIVATION_BOUND) -> None:
+	"""Every one of Linda's windows was activated within bound of its key, given as seconds after it by
+	the window's name."""
+	late = {what: delay for what, delay in activated.items() if delay >= bound}
+	assert not late, f"activated {bound} s or more after the key: {late}"
 
 
 def reachRefused(ground: "Ground", keyboard: "FakeKeyboard", title: str) -> None:
@@ -748,9 +757,7 @@ def menu(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 
 def settingsFromTheMenu(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 	what = "the settings dialog from the menu"
-	with ground.subtest(
-		"the menu's Settings item opens the settings dialog, active within a second of Enter"
-	):
+	with ground.subtest("the menu's Settings item opens the settings dialog, timed from Enter"):
 		ground.activate(WINDOW_TITLE)
 		ground.settle(APART)
 		mark = ground.mark()
@@ -781,7 +788,7 @@ def settingsFromTheMenu(ground: "Ground", keyboard: "FakeKeyboard", figures: dic
 
 
 def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
-	with ground.subtest("Linda's command opens its settings dialog, active within a second"):
+	with ground.subtest("Linda's command opens its settings dialog, timed from its key"):
 		ground.activate(WINDOW_TITLE)
 		ground.settle(APART)
 		mark = ground.mark()
@@ -847,14 +854,17 @@ def windows(ground: "Ground", keyboard: "FakeKeyboard") -> dict:
 	finally:
 		for job in ("windowEvents", "ownWindows"):
 			ground.session({"op": "signal", "name": job, "signal": "SIGTERM"})
-	with ground.subtest("Linda's menu window and settings dialog are each active within a second of the key"):
+	with ground.subtest(
+		"Linda's menu window is heard active within a second of the key, its new settings dialog within 1.5 s"
+	):
 		# A refused window is held to its spoken line, not to the bound.
 		activated = {what: f["activated"] for what, f in figures.items() if f.get("activated") is not None}
-		again = {what: activated.pop(what) for what in ["the settings dialog again"] if what in activated}
-		if activated:
-			withinBound(activated)
-		else:
+		if not activated:
 			ground.machine.log(f"no window of Linda's was activated to time: {figures}")
+		again = {what: activated.pop(what) for what in ["the settings dialog again"] if what in activated}
+		anew = {what: activated.pop(what) for what in DIALOGS_ANEW if what in activated}
+		withinBound(activated)
+		withinBound(anew, DIALOG_BOUND)
 		if again:
 			with ground.expectedFailure(DIALOG_AGAIN_LATE):
 				withinBound(again)
