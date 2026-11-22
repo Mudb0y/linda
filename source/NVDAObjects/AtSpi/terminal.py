@@ -740,6 +740,26 @@ def _commonPrefix(a: str, b: str) -> str:
 	return a[:length]
 
 
+def _isWordCharacter(ch: str) -> bool:
+	category = unicodedata.category(ch)
+	return category[0] in "LNM" or category == "Pc"
+
+
+def _isPathPunctuation(ch: str) -> bool:
+	"""Punctuation and the symbols a path, an option or an address is written with."""
+	category = unicodedata.category(ch)
+	return (category[0] == "P" and category != "Pc") or category in ("Sm", "Sc", "Sk")
+
+
+def _punctuationEnd(text: str, index: int) -> int:
+	"""Where the punctuation at index in text ends, with the spaces after it, as a word keeps its own."""
+	while index < len(text) and _isPathPunctuation(text[index]):
+		index += 1
+	while index < len(text) and text[index].isspace():
+		index += 1
+	return index
+
+
 class VteTextInfo(AtspiTextInfo):
 	"""A terminal's text, with the caret the program draws when it hides the terminal's own, and rows
 	read without their framing."""
@@ -747,6 +767,28 @@ class VteTextInfo(AtspiTextInfo):
 	def _getCaretOffset(self) -> int:
 		offset = self.obj._drawnCaretOffset()
 		return offset if offset is not None else super()._getCaretOffset()
+
+	def _getWordOffsets(self, offset: int) -> tuple[int, int]:
+		# A shell's word movement stops at the end of a word, on the slash or dash after it, which ICU
+		# makes a word of its own: "/usr/bin/bash" was read as "slash, slash". Punctuation written on to
+		# a word goes with that word instead, as the spaces after a word do in NVDA's words.
+		start, end = super()._getWordOffsets(offset)
+		line = self.__dict__.get("lineCache")
+		if self.encoding is not None or not line or not line[0] <= start < end <= line[1]:
+			return (start, end)
+		lineStart, _lineEnd, text = line
+		first, last = start - lineStart, end - lineStart
+		if _isPathPunctuation(text[first]):
+			wordEnd = first
+			while wordEnd > 0 and _isPathPunctuation(text[wordEnd - 1]):
+				wordEnd -= 1
+			if wordEnd == 0 or not _isWordCharacter(text[wordEnd - 1]):
+				return (start, end)
+			wordStart = super()._getWordOffsets(lineStart + wordEnd - 1)[0]
+			return (wordStart, lineStart + _punctuationEnd(text, wordEnd))
+		if _isWordCharacter(text[last - 1]) and last < len(text) and _isPathPunctuation(text[last]):
+			return (start, lineStart + _punctuationEnd(text, last))
+		return (start, end)
 
 	def getTextWithFields(self, formatConfig: dict | None = None) -> textInfos.TextInfo.TextWithFieldsT:
 		fields = super().getTextWithFields(formatConfig)
