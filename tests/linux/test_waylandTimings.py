@@ -388,9 +388,12 @@ def landedRight(results: list[dict]) -> None:
 
 def waitedForActivation(results: list[dict]) -> None:
 	blame(results, misplaced(results))
-	# The letter came before the feed heard of the switch, and waited for it.
-	assert all(r["pressedAfterHeard"] is not None and r["pressedAfterHeard"] < 0 for r in results)
-	assert all(r["answers"] and r["answers"][0]["given"][:1] == [VERDICT_WAIT] for r in results)
+	# A letter bound for Firefox came before the feed heard of the switch, and waited for it. One bound
+	# for the probe may pass at once: NVDA's own focus reaches the probe first and turns capture off.
+	toFirefox = [r for r in results if r["right"] == TO_FIREFOX]
+	assert toFirefox
+	assert all(r["pressedAfterHeard"] is not None and r["pressedAfterHeard"] < 0 for r in toFirefox)
+	assert all(r["answers"] and r["answers"][0]["given"][:1] == [VERDICT_WAIT] for r in toFirefox)
 
 
 def wentToOnePlace(results: list[dict]) -> None:
@@ -478,6 +481,17 @@ def test_theRaceChecksCallOnlyTheKnownFaultMisplaced():
 		is None
 	)
 	assert raised(wentToOnePlace, [toProbe, toFirefox] * 49 + [toProbe, both]) is Misplaced
+
+
+def test_theHeldBackCheckAsksAWaitOnlyOfLettersBoundForFirefox():
+	passedToProbe = trialOf(TO_PROBE, TO_PROBE, [0], pressedAfterHeard=0.01)
+	waitedInFirefox = trialOf(TO_FIREFOX, TO_FIREFOX, [VERDICT_WAIT, 1])
+	passedInFirefox = trialOf(TO_FIREFOX, TO_FIREFOX, [1])
+	lateInFirefox = trialOf(TO_FIREFOX, TO_FIREFOX, [VERDICT_WAIT, 1], pressedAfterHeard=0.01)
+	assert raised(waitedForActivation, [passedToProbe, waitedInFirefox] * 50) is None
+	for wrong in (passedInFirefox, lateInFirefox):
+		results = [passedToProbe, waitedInFirefox] * 49 + [passedToProbe, wrong]
+		assert raised(waitedForActivation, results) is AssertionError, wrong
 
 
 def test_aSecondWindowOfTheSameProgramIsCounted(tmp_path: Path, socketDir: Path):  # noqa: F811
