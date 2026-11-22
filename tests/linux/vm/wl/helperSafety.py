@@ -83,9 +83,11 @@ CONSOLE_LETTERS = "abcdefghijklmnopqrstuvwxyz"
 #: console in front a second after chvt, where the X server lets it go at once, so the letters run
 #: some five seconds, to go on well past it.
 CONSOLE_GAP = 0.2
-#: Seconds after the helper holds again on a switch back by which every desktop E15 measured takes
-#: keys from the virtual keyboard again: the helper's VIRTUAL_SETTLE, which it waits once for a new one.
-RESETTLE = 1.0
+#: Seconds after the helper holds again on a switch back before the key console() asserts on is
+#: typed. E15 found one second, the helper's VIRTUAL_SETTLE, enough in every trial but a loaded one;
+#: in this suite on sway, where the switch back follows a switch away made while typing, a key typed
+#: 1.01 s after the grab was lost (results/VX-guests.txt), so twice that.
+RESETTLE = 2.0
 #: Taps typed while the helper is stopped, one every STREAM_GAP seconds: past systemd's watchdog.
 STREAM_TAPS = 80
 STREAM_GAP = 0.05
