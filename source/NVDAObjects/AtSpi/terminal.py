@@ -751,11 +751,19 @@ def _isPathPunctuation(ch: str) -> bool:
 	return (category[0] == "P" and category != "Pc") or category in ("Sm", "Sc", "Sk")
 
 
+def _isPunctuationRun(ch: str) -> bool:
+	"""Path punctuation, or a mark or format character, which ICU keeps with the character before it,
+	as in an emoji's variation selector or a keycap. A zero-width space is not one: ICU breaks there."""
+	category = unicodedata.category(ch)
+	return _isPathPunctuation(ch) or category[0] == "M" or (category == "Cf" and ch != "\u200b")
+
+
 def _punctuationEnd(text: str, index: int) -> int:
 	"""Where the punctuation at index in text ends, with the spaces after it, as a word keeps its own."""
-	while index < len(text) and _isPathPunctuation(text[index]):
+	while index < len(text) and _isPunctuationRun(text[index]):
 		index += 1
-	while index < len(text) and text[index].isspace():
+	# NVDA's words take a NUL for a space.
+	while index < len(text) and (text[index].isspace() or text[index] == "\0"):
 		index += 1
 	return index
 
@@ -778,17 +786,19 @@ class VteTextInfo(AtspiTextInfo):
 			return (start, end)
 		lineStart, _lineEnd, text = line
 		first, last = start - lineStart, end - lineStart
+		word = (start, end)
 		if _isPathPunctuation(text[first]):
 			wordEnd = first
-			while wordEnd > 0 and _isPathPunctuation(text[wordEnd - 1]):
+			while wordEnd > 0 and _isPunctuationRun(text[wordEnd - 1]):
 				wordEnd -= 1
-			if wordEnd == 0 or not _isWordCharacter(text[wordEnd - 1]):
-				return (start, end)
-			wordStart = super()._getWordOffsets(lineStart + wordEnd - 1)[0]
-			return (wordStart, lineStart + _punctuationEnd(text, wordEnd))
-		if _isWordCharacter(text[last - 1]) and last < len(text) and _isPathPunctuation(text[last]):
-			return (start, lineStart + _punctuationEnd(text, last))
-		return (start, end)
+			if wordEnd > 0 and _isWordCharacter(text[wordEnd - 1]):
+				wordStart = super()._getWordOffsets(lineStart + wordEnd - 1)[0]
+				word = (wordStart, lineStart + _punctuationEnd(text, wordEnd))
+		elif _isWordCharacter(text[last - 1]) and last < len(text) and _isPathPunctuation(text[last]):
+			word = (start, lineStart + _punctuationEnd(text, last))
+		# A word that leaves out its own offset stops the review cursor there, on text ICU split in a way
+		# not foreseen here; ICU's own word is the safe answer.
+		return word if word[0] <= offset < word[1] else (start, end)
 
 	def getTextWithFields(self, formatConfig: dict | None = None) -> textInfos.TextInfo.TextWithFieldsT:
 		fields = super().getTextWithFields(formatConfig)
