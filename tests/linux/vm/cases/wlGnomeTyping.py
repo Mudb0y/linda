@@ -9,15 +9,17 @@ another window; and nothing typed is in Linda's log or the helper's journal.
 Where Linda's window is not given the keyboard, the case asserts that Linda says how to reach it and
 writes the limitation down after "AT limitation".
 
-The file has two halves. On the host, run(ground) is the case. In the guest, as ground-remote-leader,
+The file has two halves. On the host, run(ground) is the case. In the guest, as ground-typing-guest,
 which cases/wlGnomeTyping.nix installs with tests/linux/remotePeer.py named by GROUND_REMOTE_PEER:
 
 	wlGnomeTyping.py lead STEPS
+	wlGnomeTyping.py watch OUT
 
-joins the Remote Access channel of the Linda running in the guest as the leader, runs STEPS, a JSON
+lead joins the Remote Access channel of the Linda running in the guest as the leader, runs STEPS, a JSON
 list of {"key": VK, "pressed": BOOL, "extended": BOOL}, {"sleep": SECONDS} and {"speak": TEXT,
 "timeout": SECONDS}, which waits for the follower to send speech holding TEXT, and prints as JSON
-whether each speak step was heard.
+whether each speak step was heard. watch writes each window created and activated to OUT, as
+watch's own text says.
 """
 
 import difflib
@@ -88,7 +90,8 @@ REMOTE_SECTION = (
 	f"\t\tconnectionMode = 0\n\t\tport = {REMOTE_PORT}\n\t\tkey = {REMOTE_CHANNEL}\n"
 	"\t[[ui]]\n\t\tconfirmDisconnectAsFollower = False\n"
 )
-LEADER = "ground-remote-leader"
+#: The guest half of this file, as cases/wlGnomeTyping.nix installs it.
+GUEST_TOOL = "ground-typing-guest"
 #: Windows virtual-key codes, as NVDA's keyboard hook on Windows reports them to a leader.
 VK_INSERT = 0x2D
 VK_NUMPAD5 = 0x65
@@ -105,6 +108,8 @@ NOT_REACHED = "Linda's window opened but did not get the keyboard. Press Alt plu
 ACTIVATION_BOUND = 1.0
 #: Seconds a window of Linda's is given to be activated at all before the case takes it as refused.
 REFUSED_AFTER = 5.0
+#: Where the guest half's watch writes each window created and activated, with the process it is of.
+OWN_WINDOWS = "/tmp/ground/ownWindows.jsonl"
 
 
 def startLinda(ground: "Ground", settings: dict[str, dict[str, str]], extra: str = "") -> None:
@@ -377,7 +382,7 @@ def caretScripts(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 
 
 def lead(ground: "Ground", steps: list[dict], timeout: float = 60) -> dict:
-	answer = ground.shell(f"timeout {timeout} {LEADER} lead {shlex.quote(json.dumps(steps))}")
+	answer = ground.shell(f"timeout {timeout} {GUEST_TOOL} lead {shlex.quote(json.dumps(steps))}")
 	return json.loads(answer.strip().splitlines()[-1])
 
 
@@ -487,9 +492,14 @@ def ownWindow(
 		event = None
 	if event is not None:
 		delay = round(event["t"] - pressed, 3)
-		figures[what] = {"activated": delay}
-		ground.machine.log(f"{what}: activated {delay} s after the key")
-		assert delay < ACTIVATION_BOUND, f"{what} was activated {delay} s after the key"
+		created = next(
+			(e["t"] for e in ownWindowEvents(ground, pressed) if e["type"] == "window:create"), None
+		)
+		figures[what] = {
+			"activated": delay,
+			"created": None if created is None else round(created - pressed, 3),
+		}
+		ground.machine.log(f"{what}: {figures[what]} s after the key")
 		assert NOT_REACHED not in said(ground, mark), said(ground, mark)
 		return True
 	saidOnce(ground, mark, NOT_REACHED)
@@ -499,6 +509,17 @@ def ownWindow(
 		f"said {NOT_REACHED!r} once; the windows: {acceptance.windowEvents(ground, pressed)}"
 	)
 	return False
+
+
+def ownWindowEvents(ground: "Ground", since: float) -> list[dict]:
+	return [r for r in ground.readJsonLines(OWN_WINDOWS) if r.get("t", 0) >= since]
+
+
+def withinBound(figure: dict) -> None:
+	"""A window of Linda's that was activated was activated within ACTIVATION_BOUND of its key; held at
+	the end of a subtest, so that the window is used however long it took."""
+	if figure.get("activated") is not None:
+		assert figure["activated"] < ACTIVATION_BOUND, f"activated later than {ACTIVATION_BOUND} s: {figure}"
 
 
 def reachRefused(ground: "Ground", keyboard: "FakeKeyboard", title: str) -> None:
@@ -547,6 +568,7 @@ def menu(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 			ground, mark, ("KEY_INSERT", "KEY_N", "KEY_DOWN", "KEY_RIGHT", "KEY_LEFT", "KEY_UP", "KEY_ESC")
 		)
 		assert not reached, f"the test window had {reached}"
+		withinBound(figures["the menu"])
 
 
 def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
@@ -568,6 +590,7 @@ def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		ground.machine.log(f"Tab in the settings dialog: Linda said {said(ground, step)}")
 		reached = appKeys(ground, mark, ("KEY_INSERT", "KEY_G", "KEY_TAB"))
 		assert not reached, f"the test window had {reached}"
+		withinBound(figures["the settings dialog"])
 
 	with ground.subtest("the settings dialog, behind another window, comes forward at the command again"):
 		ground.activate(WINDOW_TITLE)
@@ -593,14 +616,25 @@ def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		ground.settle(0.5)
 		reached = appKeys(ground, mark, ("KEY_INSERT", "KEY_G", "KEY_ESC"))
 		assert not reached, f"the test window had {reached}"
+		withinBound(figures["the settings dialog again"])
 
 
 def windows(ground: "Ground", keyboard: "FakeKeyboard") -> dict:
 	figures: dict = {}
 	acceptance.startListening(ground)
-	menu(ground, keyboard, figures)
-	dialogs(ground, keyboard, figures)
-	ground.session({"op": "signal", "name": "windowEvents", "signal": "SIGTERM"})
+	ground.shell(f"rm -f {OWN_WINDOWS}")
+	ground.start("ownWindows", [GUEST_TOOL, "watch", OWN_WINDOWS])
+	ground.waitFor(
+		lambda: any(r.get("kind") == "ready" for r in ground.readJsonLines(OWN_WINDOWS)),
+		"the watcher of new windows",
+		30,
+	)
+	try:
+		menu(ground, keyboard, figures)
+		dialogs(ground, keyboard, figures)
+	finally:
+		for job in ("windowEvents", "ownWindows"):
+			ground.session({"op": "signal", "name": job, "signal": "SIGTERM"})
 	return figures
 
 
@@ -671,8 +705,37 @@ def leadInGuest(steps: list[dict]) -> dict:
 	return {"joined": peer.joined.get("type"), "heard": heard}
 
 
+def watch(out: str) -> None:
+	"""Write each window:create and window:activate to out, one JSON object a line, on the guest's
+	CLOCK_MONOTONIC, with the window's title and process, so that a window's mapping can be told from
+	its activation."""
+	import gi
+
+	gi.require_version("Atspi", "2.0")
+	from gi.repository import Atspi, GLib
+
+	stream = open(out, "a", buffering=1)  # noqa: SIM115
+
+	def onEvent(event: Atspi.Event) -> None:
+		t = time.monotonic()
+		try:
+			title, pid = event.source.get_name(), event.source.get_process_id()
+		except GLib.Error:
+			title, pid = "?", 0
+		stream.write(json.dumps({"t": t, "type": event.type, "title": title, "pid": pid}) + "\n")
+
+	Atspi.init()
+	listener = Atspi.EventListener.new(onEvent)
+	for name in ("window:create", "window:activate"):
+		listener.register(name)
+	stream.write(json.dumps({"kind": "ready", "t": time.monotonic()}) + "\n")
+	Atspi.event_main()
+
+
 if __name__ == "__main__":
 	if sys.argv[1:2] == ["lead"] and len(sys.argv) == 3:
 		print(json.dumps(leadInGuest(json.loads(sys.argv[2]))))
+	elif sys.argv[1:2] == ["watch"] and len(sys.argv) == 3:
+		watch(sys.argv[2])
 	else:
-		sys.exit("usage: wlGnomeTyping.py lead STEPS")
+		sys.exit("usage: wlGnomeTyping.py lead STEPS | watch OUT")
