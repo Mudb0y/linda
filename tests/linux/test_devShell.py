@@ -184,6 +184,18 @@ def _bash(value: str) -> None:
 	assert result.returncode == 0, result.stderr
 
 
+def _java(value: str) -> None:
+	path = Path(value)
+	assert path.name == "java" and os.access(path, os.X_OK), value
+
+
+def _javaAtkWrapper(value: str) -> None:
+	# What a Java program needs to reach AT-SPI: the library the JVM loads and the classes that load it.
+	wrapper = Path(value)
+	assert (wrapper / "lib" / "libatk-wrapper.so").is_file(), value
+	assert (wrapper / "share" / "java" / "java-atk-wrapper.jar").is_file(), value
+
+
 def _brltty(value: str) -> None:
 	path = _elfFile(value)
 	assert path.name == "brltty" and os.access(path, os.X_OK), value
@@ -293,6 +305,8 @@ SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
 	"LINDA_MATE_DESKTOP_SCHEMAS": _mateDesktopSchemas,
 	"LINDA_BASH": _bash,
 	"LINDA_BRLTTY": _brltty,
+	"LINDA_JAVA": _java,
+	"LINDA_JAVA_ATK_WRAPPER": _javaAtkWrapper,
 	"LINDA_SPEECHD": _speechd,
 	"LINDA_MUTTER": _mutter,
 	"LINDA_MUTTER_SCHEMAS": _mutterSchemas,
