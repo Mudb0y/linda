@@ -6,7 +6,9 @@ GNOME keeps its input sources in GSettings and its shell compiles them; only the
 compiled here, alone, as group 0, which gives every key the symbols the shell's keymap gives it in
 that source without mirroring how the shell packs sources into groups. KWin compiles kxkbrc's layout
 list whole and says over the session bus which of it is in use. Elsewhere localed's system layout is
-taken, then the XKB_DEFAULT variables, then US English with a notice.
+taken, then the XKB_DEFAULT variables, then US English with a notice; neither says which group of
+several layouts is in use, so those two feeds follow it from the keys NVDA passes on, which reach them
+through notePassed (shadowGroup).
 
 Each feed follows its desktop on a thread with a GLib main context of its own, so that a change is
 passed on whatever NVDA's main thread is doing. Only layout names and where they came from are
@@ -292,22 +294,56 @@ class _ThreadedFeed:
 			log.exception("Keyboard layout: passing a change on failed")
 
 
-class EnvironmentLayoutFeed:
-	"""The XKB_DEFAULT variables, else US English with a notice; they never change."""
+class _FollowsGroup:
+	"""A feed of names alone, which follows the group of a keymap of several layouts from the keys NVDA
+	passes on."""
+
+	_shadow = None
+
+	def _shadowFor(self, onChange: Callable[[LayoutSnapshot], None]):
+		from .shadowGroup import ShadowGroup
+
+		self._shadow = ShadowGroup(onChange)
+		return self._shadow
+
+	def notePassed(self, keycode: int, isUp: bool) -> None:
+		"""A key passed on, or its release, as the environment hears of it, on the thread that answers keys."""
+		shadow = self._shadow
+		if shadow is not None:
+			shadow.notePassed(keycode, isUp)
+
+	def _stopShadow(self) -> None:
+		if self._shadow is not None:
+			self._shadow.stop()
+
+
+class EnvironmentLayoutFeed(_FollowsGroup):
+	"""The XKB_DEFAULT variables, else US English with a notice; they never change, the group aside."""
 
 	def start(self, onChange: Callable[[LayoutSnapshot], None]) -> LayoutSnapshot:
 		snapshot = environmentSnapshot()
 		log.info(f"Keyboard layout from {snapshot.source}: {activeLayoutName(snapshot)}")
+		self._shadowFor(onChange).start(snapshot)
 		return snapshot
 
 	def stop(self) -> None:
-		pass
+		self._stopShadow()
 
 
-class LocaledLayoutFeed(_ThreadedFeed):
+class LocaledLayoutFeed(_FollowsGroup, _ThreadedFeed):
 	"""localed's system layout, read once, then the environment's."""
 
 	follows = False
+
+	def start(self, onChange: Callable[[LayoutSnapshot], None]) -> LayoutSnapshot:
+		shadow = self._shadowFor(onChange)
+		snapshot = super().start(shadow.change)
+		shadow.start(snapshot)
+		return snapshot
+
+	def stop(self) -> None:
+		super().stop()
+		self._stopShadow()
 
 	def _open(self) -> LayoutSnapshot:
 		return systemSnapshot()
@@ -642,6 +678,11 @@ class _WithFallback:
 
 	def stop(self) -> None:
 		self._feed.stop()
+
+	def notePassed(self, keycode: int, isUp: bool) -> None:
+		notePassed = getattr(self._feed, "notePassed", None)
+		if notePassed is not None:
+			notePassed(keycode, isUp)
 
 
 def desktopFeed(currentDesktop: str | None) -> LayoutFeed:
