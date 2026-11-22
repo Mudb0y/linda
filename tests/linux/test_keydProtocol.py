@@ -179,8 +179,12 @@ def test_bothClientsNumberThingsAsTheHelperDoes(client: types.ModuleType, guest:
 	statuses = {name: value for name, value in rust.items() if name.startswith("VIRTUAL_") and value < 4}
 	assert {f"VIRTUAL_{name}": value for value, name in guest.VIRTUAL_STATUSES.items()} == statuses
 	assert set(client.TYPED_NAMES) == set(outcomes.values())
-	# The helper grants FEATURE_WAIT alone.
-	assert re.search(r"^pub const FEATURES_KNOWN: u32 = FEATURE_WAIT;$", PROTOCOL.read_text(), re.MULTILINE)
+	# The helper grants FEATURE_WAIT and FEATURE_TYPING.
+	assert re.search(
+		r"^pub const FEATURES_KNOWN: u32 = FEATURE_WAIT \| FEATURE_TYPING;$",
+		PROTOCOL.read_text(),
+		re.MULTILINE,
+	)
 
 
 def test_theNewMessagesAreBuiltAndReadByBothClients(client: types.ModuleType, guest: types.ModuleType):

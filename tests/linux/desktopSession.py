@@ -473,7 +473,7 @@ class DesktopSession:
 		with gap seconds after each.
 
 		Chords use xdotool's key names: "Tab", "Insert+t", "KP_Up", "alt+Tab". The stand-in presses them
-		by its own press, and a chord with a name it does not have, as "ctrl" or "AltGr", key by key on
+		by its own press, and a chord with a name it does not have, as "question" or "aogonek", key by key on
 		the keys the pl layout gives that name.
 		"""
 		for chord in chords:
