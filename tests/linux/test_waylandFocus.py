@@ -582,3 +582,346 @@ def test_shownWindowsLeaveTheFocusWhereItBelongs(tmp_path: Path) -> None:
 		"foreground": {"taken": [], "left": 0},
 		"focusInside": {"taken": [], "left": 0},
 	}, done.value
+
+
+#: Package SH's rules for the shells' own surfaces, each driven with a client that answers for the
+#: programs, as no compositor in the rig has GNOME Shell's or KWin's surfaces. Each sets handler's
+#: _waylandRules itself, so the X and the Wayland rule are both held in every rig session.
+SHELL_COMMON = """
+	import types
+
+	import core
+	import eventHandler
+	from linuxPlatform.atspi import client as atspiClient
+	from linuxPlatform.atspi import handler
+	from linuxPlatform.atspi.client import ROOT_PATH, AppHung, Node
+
+	core.callLater = lambda *args, **kwargs: None
+	core.requestPump = lambda *args, **kwargs: None
+	clock = [1000.0]
+	handler.time = types.SimpleNamespace(monotonic=lambda: clock[0])
+	DESKTOP = Node("org.a11y.atspi.Registry", ROOT_PATH, None)
+	names = {}
+	parents = {}
+	states = {}
+	children = {}
+	queued = []
+	eventHandler.queueEvent = lambda name, obj: queued.append((name, obj.node.path))
+	handler.eventObject = lambda n: types.SimpleNamespace(
+		node=n, role=None, name="", states=set(), value=None, description=None, keyboardShortcut=None,
+		positionInfo={}, atspiRole="frame",
+	)
+
+
+	def node(bus, path, parent, *nodeStates):
+		made = Node(bus, path, None)
+		parents[made.key] = parent
+		states[made.key] = set(nodeStates)
+		if parent is not None:
+			children.setdefault(parent.key, []).append(made)
+		return made
+
+
+	def app(bus, name):
+		made = Node(bus, ROOT_PATH, None)
+		names[made.key] = name
+		parents[made.key] = DESKTOP
+		return made
+"""
+
+#: A rescan while GNOME Shell's stage is active and a program's window is the foreground, not active.
+SWITCHER_RESCAN = (
+	SHELL_COMMON
+	+ """
+	shell = app(":1.10", "gnome-shell")
+	stage = node(":1.10", "/stage", shell, "active")
+	editor = app(":1.20", "pluma")
+	left = node(":1.20", "/left", editor)
+
+
+	class Client:
+		def applications(self):
+			return [shell, editor]
+
+		def desktop(self):
+			return DESKTOP
+
+		def name(self, n):
+			return names.get(n.key, "")
+
+		def children(self, n):
+			return list(children.get(n.key, []))
+
+		def states(self, n):
+			return frozenset(states.get(n.key, ()))
+
+		def parent(self, n):
+			return parents.get(n.key)
+
+		def isHung(self, busName):
+			return False
+
+
+	atspiClient._client = Client()
+	processed = []
+	handler._processFocus = lambda event, mayRetry=True: processed.append((event[0], event[1].path)) or True
+	handler._waylandRules = WAYLAND
+	handler._setForeground(left, active=False)
+	handler._rescans[:] = [clock[0] - 0.01]
+	handler.pumpAll()
+	result = {
+		"processed": processed,
+		"rescansLeft": len(handler._rescans),
+		"foreground": handler._foreground.path if handler._foreground is not None else None,
+	}
+"""
+)
+
+
+@pytest.mark.parametrize("session", ["x11", "wayland"])
+def test_switcherRescanTakesTheShellOnlyInX(tmp_path: Path, session: str) -> None:
+	"""In an X session GNOME Shell's active stage is the foreground a rescan finds, as on main; in a
+	Wayland session the stage is a switcher, looked past until a window takes over."""
+	code = SWITCHER_RESCAN.replace("WAYLAND", str(session == "wayland"))
+	done = harness.runChild(tmp_path, code, prepare="config", timeout=120)
+	done.assertClean()
+	expected = {
+		"x11": {"processed": [["window:activate", "/stage"]], "rescansLeft": 0, "foreground": "/stage"},
+		"wayland": {"processed": [], "rescansLeft": 2, "foreground": "/left"},
+	}
+	assert done.value == expected[session], done.value
+
+
+#: GNOME Shell's switcher choice, queued while the shell answers nothing; from ANSWERS_FROM on it
+#: answers. Each pump is half a second on the stand-in clock.
+HELD_SWITCHER = (
+	SHELL_COMMON
+	+ """
+	shell = app(":1.10", "gnome-shell")
+	stage = node(":1.10", "/stage", shell, "active")
+	item = node(":1.10", "/item", stage, "selected")
+	hungSince = [None]
+
+
+	class Client:
+		def applications(self):
+			return [shell]
+
+		def desktop(self):
+			return DESKTOP
+
+		def name(self, n):
+			return names.get(n.key, "")
+
+		def children(self, n):
+			return list(children.get(n.key, []))
+
+		def states(self, n):
+			return frozenset(states.get(n.key, ()))
+
+		def parent(self, n):
+			return parents.get(n.key)
+
+		def role(self, n):
+			if clock[0] >= ANSWERS_FROM:
+				return "list item"
+			# As client.call does for an application that keeps timing out: refused at once while marked,
+			# and the probe after PROBE_AFTER_SECONDS times out again and marks it anew.
+			if hungSince[0] is None or clock[0] - hungSince[0] >= 2.0:
+				hungSince[0] = clock[0]
+			raise AppHung(n.busName)
+
+		def isHung(self, busName):
+			if clock[0] >= ANSWERS_FROM:
+				return False
+			return hungSince[0] is not None and clock[0] - hungSince[0] < 2.0
+
+
+	atspiClient._client = Client()
+	accepted = []
+	handler._shouldAccept = lambda nvdaEvent, n: accepted.append((nvdaEvent, n.path)) and False
+	handler._waylandRules = True
+	handler._setForeground(stage)
+	with handler._queueLock:
+		handler._queue.append(("object:state-changed:selected", item, 1, 0, None))
+	held = []
+	for _step in range(60):
+		handler.pumpAll()
+		held.append(sum(len(events) for _since, events in handler._switcherEventsWhileHung.values()))
+		clock[0] += 0.5
+	result = {"heldAtFirst": held[0], "heldAfter11s": held[22], "heldAtEnd": held[-1], "accepted": accepted}
+"""
+)
+
+
+@pytest.mark.parametrize("answers", ["never", "within"])
+def test_heldSwitcherChoice(tmp_path: Path, answers: str) -> None:
+	"""A switcher choice that comes while GNOME Shell is marked hung is held, read once the shell
+	answers within handler.HUNG_FOCUS_SECONDS, and given up after it."""
+	code = HELD_SWITCHER.replace("ANSWERS_FROM", "1005.0" if answers == "within" else "float('inf')")
+	done = harness.runChild(tmp_path, code, prepare="config", timeout=120)
+	done.assertClean()
+	assert done.value["heldAtFirst"] == 1, done.value
+	assert done.value["heldAtEnd"] == 0, done.value
+	if answers == "within":
+		assert done.value["accepted"] == [["stateChange", "/item"]], done.value
+	else:
+		assert done.value["heldAfter11s"] == 0, done.value
+		assert done.value["accepted"] == [], done.value
+
+
+#: A renaming from GNOME Shell and one from another program, each while its program is hung, with
+#: the label's role already known.
+NAME_CHANGE_HUNG = (
+	SHELL_COMMON
+	+ """
+	shell = app(":1.10", "gnome-shell")
+	shellLabel = node(":1.10", "/label", shell)
+	editor = app(":1.20", "kate")
+	editorLabel = node(":1.20", "/label", editor)
+
+
+	class Client:
+		def applications(self):
+			return [shell, editor]
+
+		def name(self, n):
+			return names.get(n.key, "")
+
+		def role(self, n):
+			raise AppHung(n.busName)
+
+
+	atspiClient._client = Client()
+	handler._waylandRules = True
+	handler._roles[shellLabel.key] = "label"
+	handler._roles[editorLabel.key] = "label"
+	result = {}
+	for which, n in (("shell", shellLabel), ("editor", editorLabel)):
+		try:
+			result[which] = handler._nvdaEvents(("object:property-change:accessible-name", n, 0, 0, None))
+		except AppHung:
+			result[which] = "AppHung"
+"""
+)
+
+
+def test_hungProgramsRenamingWaitsOnlyForTheShell(tmp_path: Path) -> None:
+	"""In a Wayland session GNOME Shell's renaming waits for the shell to answer, so that it is held
+	with its switcher choice; another hung program's goes by the role already known."""
+	done = harness.runChild(tmp_path, NAME_CHANGE_HUNG, prepare="config", timeout=120)
+	done.assertClean()
+	assert done.value == {"shell": "AppHung", "editor": ["nameChange"]}, done.value
+
+
+#: A window:activate of the frame that holds NVDA's focus, with no focus found in it, while the field
+#: is or is not still focused; then a focus and the frame's activation deferred while the program is
+#: hung, and whether a later event of it is accepted and its focus tried first.
+KEEPS_FOCUS = """
+	import types
+
+	import core
+	import eventHandler
+	from linuxPlatform.atspi import client as atspiClient
+	from linuxPlatform.atspi import handler
+	from linuxPlatform.atspi.client import ROOT_PATH, Node
+
+	# After eventHandler, which settles the import cycle api's own imports enter.
+	import api
+
+	core.callLater = lambda *args, **kwargs: None
+	core.requestPump = lambda *args, **kwargs: None
+	BUS = ":1.42"
+	application = Node(BUS, ROOT_PATH, None)
+	parents = {}
+	states = {}
+
+
+	class Client:
+		def parent(self, node):
+			return parents[node.key]
+
+		def states(self, node):
+			return frozenset(states.get(node.key, ()))
+
+		def toolkit(self, node):
+			return "Qt"
+
+		def matchesWithState(self, node, state, count):
+			return []
+
+		def role(self, node):
+			return "frame"
+
+		def isHung(self, busName):
+			return False
+
+
+	atspiClient._client = Client()
+
+
+	def node(path, parent, *nodeStates):
+		made = Node(BUS, path, None)
+		parents[made.key] = parent
+		states[made.key] = set(nodeStates)
+		return made
+
+
+	frame = node("/frame", application, "active")
+	field = node("/frame/field", frame, "focused")
+	queued = []
+	eventHandler.queueEvent = lambda name, obj: queued.append((name, obj.node.path))
+	handler.eventObject = lambda n: types.SimpleNamespace(
+		node=n, role=None, name="", states=set(), value=None, description=None, keyboardShortcut=None,
+		positionInfo={}, atspiRole="frame",
+	)
+	other = Node(":1.7", "/other", None)
+	result = {}
+	for session, wayland in (("x11", False), ("wayland", True)):
+		handler._waylandRules = wayland
+		handler._setForeground(frame)
+		for fieldFocused in (True, False):
+			states[field.key] = {"focused"} if fieldFocused else set()
+			queued.clear()
+			eventHandler.lastQueuedFocusObject = types.SimpleNamespace(node=field)
+			handler._processFocus(("window:activate", frame, 0, 0, None))
+			result[f"{session} field focused={fieldFocused}"] = list(queued)
+		handler._focusWhileHung.clear()
+		handler._activationWhileHung.clear()
+		handler._deferWhileHung(("object:state-changed:focused", field, 1, 0, None))
+		handler._deferWhileHung(("window:activate", frame, 0, 0, None))
+		api.getFocusObject = lambda: types.SimpleNamespace(node=other)
+		api.getForegroundObject = lambda: types.SimpleNamespace(node=other)
+		handler._backgroundEventsOf = lambda n: frozenset()
+		handler._setForeground(frame)
+		result[f"{session} accepted"] = handler._shouldAccept("stateChange", field)
+		result[f"{session} focus first"] = handler._waylandRules and handler._focusBefore(
+			("window:activate", frame, 0, 0, None), [("object:state-changed:focused", field, 1, 0, None)]
+		)
+		activation = handler._activationWhileHung.get(BUS)
+		result[f"{session} waiting"] = [
+			handler._focusWhileHung[BUS][0][1].path,
+			activation[1].path if activation else None,
+		]
+"""
+
+
+def test_activationKeepsAFocusStillInsideIt(tmp_path: Path) -> None:
+	"""In a Wayland session a window:activate whose window gives no focus leaves NVDA's focus inside
+	it while that is still focused, a deferred focus is not replaced by the program's activation,
+	events of the window activated last are accepted, and a focus is tried before a later activation
+	in its batch; in an X session each is as on main."""
+	done = harness.runChild(tmp_path, KEEPS_FOCUS, prepare="config", timeout=120)
+	done.assertClean()
+	assert done.value == {
+		"x11 field focused=True": [["gainFocus", "/frame"]],
+		"x11 field focused=False": [["gainFocus", "/frame"]],
+		"wayland field focused=True": [],
+		"wayland field focused=False": [["gainFocus", "/frame"]],
+		"x11 waiting": ["/frame", None],
+		"wayland waiting": ["/frame/field", "/frame"],
+		"x11 accepted": False,
+		"wayland accepted": True,
+		"x11 focus first": False,
+		"wayland focus first": True,
+	}, done.value
