@@ -95,9 +95,10 @@ RESETTLE = 2.0
 #: HEARTBEAT_TIMEOUT in protocol.rs: a client silent this long is dropped.
 HEARTBEAT = 2.0
 #: Seconds the helper's own work may take between its line for the kernel's switch and its line for
-#: the let-go, past the time the kernel spent in its ungrabs: reading what each keyboard holds and
-#: putting it out takes a millisecond or two. Each ungrab waits for two RCU grace periods, which a
-#: guest whose virtual processors the host does not run cannot end, so they are left out of it.
+#: the let-go, past the time the kernel spent in its ungrabs: reading what each keyboard holds,
+#: putting it out and ending the watch for keyboards, some 15 ms on sway. Each ungrab waits for two
+#: RCU grace periods, which a guest whose virtual processors the host does not run cannot end, so
+#: they are left out of it.
 LET_GO_OWN = 0.05
 #: Seconds after systemd's SIGKILL within which the kernel, closing the dead helper's devices, must
 #: release what its virtual keyboard held and give the keyboard back to every reader; the evdev
@@ -947,7 +948,15 @@ def console(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 			letGoLinesApart=round(letGo - kernel, 4),
 			letGoSentAfterSwitchSeen=round(hadLetGo - sawSwitch, 4),
 			ungrabsMs=[round((end - begun) * 1000, 2) for begun, end in spans],
-			firstUngrabAfterSwitchSeenMs=round((spans[0][0] - sawSwitch) * 1000, 2) if spans else None,
+			# The helper's own stretches: to the first ungrab, between each two, and to its line.
+			ownGapsMs=[
+				round((later - earlier) * 1000, 2)
+				for earlier, later in zip(
+					[sawSwitch, *(end for _begun, end in spans)],
+					[*(begun for begun, _end in spans), hadLetGo],
+					strict=True,
+				)
+			],
 			letGoOwnMs=round(own * 1000, 2),
 		)
 		ground.machine.log(f"the switch away, seconds from chvt: {switch}")
