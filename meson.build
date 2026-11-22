@@ -119,7 +119,11 @@ if get_option('program')
     'l2m4m', 'markdown_link_attr_modifier', 'mdx_gh_links', 'mdx_truly_sane_lists', 'pymdownx',
   ]
   typelibs = ['Atspi:2.0', 'Gdk:3.0', 'GdkX11:3.0', 'Gtk:3.0']
-  probe = run_command(python, '-c', '''
+  # What it imports where it is there, and does without where it is not: pywayland reads the keymap a
+  # Wayland compositor gives its clients, and without it a Wayland session's keys are read in the layout
+  # the desktop's settings name.
+  optional_modules = ['pywayland']
+  module_probe = '''
 import importlib
 import sys
 
@@ -140,9 +144,14 @@ if "gi" in sys.modules:
         except ValueError:
             missing.append(f"the GObject typelib {namespace} {version}")
 print("; ".join(missing))
-''', ' '.join(modules), ' '.join(typelibs), check: true)
+'''
+  probe = run_command(python, '-c', module_probe, ' '.join(modules), ' '.join(typelibs), check: true)
   if probe.stdout().strip() != ''
     error('@0@ lacks @1@'.format(python.full_path(), probe.stdout().strip()))
+  endif
+  optional_probe = run_command(python, '-c', module_probe, ' '.join(optional_modules), '', check: true)
+  if optional_probe.stdout().strip() != ''
+    warning('@0@ lacks @1@, so in a Wayland session keys are read in the layout the desktop\'s settings name, not in the keymap the compositor compiled'.format(python.full_path(), optional_probe.stdout().strip()))
   endif
 
   dependency('atspi-2')

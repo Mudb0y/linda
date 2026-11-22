@@ -71,6 +71,11 @@
         # The X key source: XI2 events and grabs, and the XKB keymap that turns
         # them into characters.
         python-xlib
+        # The keymap a Wayland compositor gives its clients, which a Wayland
+        # session's keys are read in; the rig's Wayland clients speak the
+        # protocol through it too. Optional: meson.build only warns of its
+        # lack, and without it the desktop's layout names alone are read.
+        pywayland
         regex
         requests
         rpyc
@@ -81,10 +86,6 @@
         xkbcommon
       ];
       python = pythonInterpreter.withPackages pythonPackages;
-      # The rig's Wayland clients, the key injector on sway and the keymap
-      # dump, speak the protocol through pywayland. Only the shell has it, so
-      # that the package Linda runs from stays what it was.
-      shellPython = pythonInterpreter.withPackages (ps: pythonPackages ps ++ [ ps.pywayland ]);
 
       louisTables = pkgs.callPackage ./nix/louis-tables.nix { };
       cargoVendorDir = pkgs.rustPlatform.importCargoLock { lockFile = ./engine/Cargo.lock; };
@@ -220,7 +221,8 @@
 
       devShells.${system}.default = pkgs.mkShell (runtimeEnv // {
         nativeBuildInputs = with pkgs; [
-          shellPython
+          # The program's own; a let binding takes precedence over with.
+          python
           cargo
           rustc
           clippy
