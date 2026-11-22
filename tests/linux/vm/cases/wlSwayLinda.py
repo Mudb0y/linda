@@ -336,8 +336,15 @@ def console(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 			ground.waitFor(
 				lambda: layoutChanges(ground, "pl") > layouts, "Linda to follow sway's layout again", 5
 			)
+		# lindaKeyWorks, with only the title held to the fault: the chord is still to be kept.
+		ground.settle(APART)
+		chord = ground.mark()
+		keyboard.chord("KEY_INSERT", "KEY_T")
 		with ground.expectedFailure(FOCUS_AFTER_CONSOLE):
-			lindaKeyWorks(ground, keyboard)
+			ground.waitForSpeech(WINDOW_TITLE, chord)
+		ground.settle(0.5)
+		acceptance.assertKept(ground, chord, ("KEY_INSERT", "KEY_T"), keyboard.name)
+		ground.machine.log(f"Insert with T after the switch back: Linda said {said(ground, chord)}")
 		ground.machine.log(
 			f"after the switch back Linda said {said(ground, mark)}; the window events: "
 			f"{acceptance.windowEvents(ground, mark.t)}; Linda's layout: "
