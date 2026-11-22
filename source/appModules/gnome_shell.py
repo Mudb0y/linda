@@ -59,6 +59,8 @@ CONTROL_ROLES = frozenset(
 #: renames is the item's name: the window switcher's items are icons, and the title of the one selected
 #: is put in a label beneath them as it is selected.
 CHOICE_LABEL_SECONDS = 0.5
+#: Levels above a switcher's item at which the popup holding it, which has the keyboard, is looked for.
+POPUP_LEVELS = 6
 #: Levels above a renamed label, and below that ancestor, at which a password field counts as beside it:
 #: the field and the label are each in a panel of their own, side by side.
 BESIDE_LEVELS = 2
@@ -87,6 +89,20 @@ class UnnamedPanel(ShellObject):
 class NamedByContent(ShellObject):
 	def _get_name(self) -> str:
 		return super().name or _descendantText(self.node)
+
+
+def _inFocusedPopup(item: NVDAObject) -> bool:
+	"""Whether item lies in a popup that has the keyboard, as the switcher's items lie in the switcher,
+	which takes it as it shows. The calendar's day buttons, which the shell selects as it builds its
+	calendar for the lock screen, do not."""
+	ancestor = item
+	for _level in range(POPUP_LEVELS):
+		ancestor = ancestor.parent
+		if ancestor is None:
+			return False
+		if controlTypes.State.FOCUSED in ancestor.states:
+			return True
+	return False
 
 
 def _besidePasswordField(label: NVDAObject) -> bool:
@@ -126,6 +142,7 @@ class AppModule(appModuleHandler.AppModule):
 			obj.role in ITEM_ROLES
 			and controlTypes.State.SELECTED in obj.states
 			and obj is not api.getFocusObject()
+			and _inFocusedPopup(obj)
 		):
 			name = obj.name
 			if name:
