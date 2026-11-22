@@ -7,6 +7,11 @@
   # brings in. Move it when upstream moves that pin; tests/linux/test_ruff.py
   # fails until the two agree.
   inputs.nixpkgs-ruff.url = "github:NixOS/nixpkgs/8b7dc2ca50dd99ca3af5af1436b06b5adb1e54c9";
+  # The two stable releases, for the test guests of the older desktops alone (tests/linux/vm): 25.11
+  # has GNOME 49 and Plasma 6.5, 26.05 GNOME 50 and Plasma 6.6. Linda and linda-keyd in those guests
+  # are still built from nixpkgs above.
+  inputs.nixpkgs-25_11.url = "github:NixOS/nixpkgs/nixos-25.11";
+  inputs.nixpkgs-26_05.url = "github:NixOS/nixpkgs/nixos-26.05";
   # openevv's source, for its engine library and its NVDA driver, by revision
   # so that a build anywhere compiles the same engine.
   inputs.openevv = {
@@ -14,7 +19,7 @@
     flake = false;
   };
 
-  outputs = { self, nixpkgs, nixpkgs-ruff, openevv }:
+  outputs = { self, nixpkgs, nixpkgs-ruff, nixpkgs-25_11, nixpkgs-26_05, openevv }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
@@ -207,6 +212,10 @@
       checks.${system} = import ./tests/linux/vm {
         inherit pkgs lib linda;
         keydModule = self.nixosModules.linda-keyd;
+        releases = {
+          "25.11" = nixpkgs-25_11.legacyPackages.${system};
+          "26.05" = nixpkgs-26_05.legacyPackages.${system};
+        };
       };
 
       devShells.${system}.default = pkgs.mkShell (runtimeEnv // {
