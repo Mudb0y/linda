@@ -1,8 +1,9 @@
 """Stops a test run that was started outside tests/linux/rig, before any test is collected, fails a
 test that skips unless its skip is expected, leaves out a test marked for another of the rig's sessions
-than this run's, and gives every test the launches fixture and, from pipewireFixture, the pipewire
+than this run's or for a variable that is unset, and gives every test the launches fixture and, from pipewireFixture, the pipewire
 fixture."""
 
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -29,6 +30,11 @@ def pytest_configure(config: pytest.Config) -> None:
 		"and sway, and is deselected in any other. A test that forces Linda's session type while the rig "
 		"gives it the X display is marked x11.",
 	)
+	config.addinivalue_line(
+		"markers",
+		"needsVariable(name): the test reads what is built outside the rig and named to it in this "
+		"environment variable, and is deselected while the variable is unset.",
+	)
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -37,7 +43,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 	kept, left = [], []
 	for item in items:
 		marks = list(item.iter_markers("rigSession"))
-		if all(harness.rigSessionIsOneOf(mark.args) for mark in marks):
+		variables = [mark.args[0] for mark in item.iter_markers("needsVariable")]
+		if all(harness.rigSessionIsOneOf(mark.args) for mark in marks) and all(
+			os.environ.get(name) for name in variables
+		):
 			kept.append(item)
 		else:
 			left.append(item)

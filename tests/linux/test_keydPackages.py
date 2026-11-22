@@ -9,7 +9,7 @@ output directories separated by colons:
 	nix build --no-link --print-out-paths .#linda-keyd-deb .#linda-keyd-rpm .#linda-keyd-arch
 	nix develop . -c env LINDA_KEYD_PACKAGES=DEB:RPM:ARCH tests/linux/rig --bind SCRATCH python3 -m pytest --basetemp=SCRATCH/NAME tests/linux/test_keydPackages.py
 
-Without it the tests are skipped: nothing in the dev shell builds the packages, whose version moves
+Without it the tests are deselected: nothing in the dev shell builds the packages, whose version moves
 with every commit.
 """
 
@@ -29,6 +29,7 @@ import pytest
 
 ROOT = harness.ROOT
 PACKAGES_VARIABLE = "LINDA_KEYD_PACKAGES"
+pytestmark = pytest.mark.needsVariable(PACKAGES_VARIABLE)
 HELPER = "linda-keyd"
 UNIT = "/usr/lib/systemd/system/linda-keyd.service"
 #: Each format, by the name of its file, with the library directory Meson takes on its distributions.
@@ -197,12 +198,7 @@ READERS = {"deb": readDeb, "rpm": readRpm, "archlinux": readArch}
 @pytest.fixture(scope="module")
 def packages() -> dict[str, Package]:
 	harness.requireRig()
-	value = os.environ.get(PACKAGES_VARIABLE)
-	if not value:
-		pytest.skip(
-			f"{PACKAGES_VARIABLE} is unset; build the packages with nix build .#linda-keyd-deb .#linda-keyd-rpm "
-			".#linda-keyd-arch and name their directories in it, separated by colons"
-		)
+	value = os.environ[PACKAGES_VARIABLE]
 	found: dict[str, Path] = {}
 	for entry in value.split(":"):
 		entry = Path(entry)
