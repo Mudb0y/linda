@@ -1062,3 +1062,74 @@ def test_theClipboardChangingAsLindaReadsItsCopyBackEndsNothing(
 	assert route.wire.alive
 	assert copied
 	assert route.read(1.0) == "Taken over"
+
+
+def test_textNoProgramCouldPasteIsTheRefusalAndFalse(
+	clipboardAlone: types.ModuleType, fakeCompositor: Callable[..., FakeCompositor]
+) -> None:
+	clipboard = clipboardAlone
+	fake = fakeCompositor()
+	route = dataControlRoute(clipboard, fake)
+	assert clipboard.copyToClip("Copied first", notify=True) is True
+	assert clipboard.spoken == [COPIED.format("Copied first")]
+	del clipboard.spoken[:]
+	# A lone surrogate, which GTK refuses on X.
+	assert clipboard.copyToClip("a\ud800b", notify=True) is False
+	assert clipboard.spoken == [CANNOT_COPY_UNBRANDED]
+	assert not [record for record in clipboard.logged if "ud800" in record or "\ud800" in record]
+	assert fake.errors == []
+	assert route.read(1.0) == "Copied first"
+
+
+def test_aCopyFromAnotherThreadIsTheRefusalAndFalse(
+	clipboardAlone: types.ModuleType, fakeCompositor: Callable[..., FakeCompositor]
+) -> None:
+	clipboard = clipboardAlone
+	fake = fakeCompositor()
+	route = dataControlRoute(clipboard, fake)
+	assert clipboard.copyToClip("Copied first", notify=True) is True
+	del clipboard.spoken[:]
+	answers: list[object] = []
+
+	def copyFromAnotherThread() -> None:
+		try:
+			answers.append(clipboard.copyToClip("From another thread"))
+		except BaseException as e:  # noqa: BLE001
+			answers.append(e)
+
+	thread = threading.Thread(target=copyFromAnotherThread)
+	thread.start()
+	thread.join(10)
+	assert answers == [False]
+	assert clipboard.spoken == [CANNOT_COPY_UNBRANDED]
+	assert fake.errors == []
+	assert route.read(1.0) == "Copied first"
+
+
+def test_theWindowRouteRefusesWhenTheKeyboardLeavesItsWindowAtOnce(
+	clipboardAlone: types.ModuleType, fakeCompositor: Callable[..., FakeCompositor]
+) -> None:
+	clipboard = clipboardAlone
+	fake = fakeCompositor(dataControl=False, windows=True)
+	route = clipboard._WindowRoute(clipboard._Wire(fake.path))
+	assert route.copy("Before") is True
+	# The user presses Alt+Tab as Linda's window is given the keyboard.
+	fake.leaveOnSync = True
+	assert route.copy("Never copied") is False
+	assert not fake.leaveOnSync
+	assert route.copy("After") is True
+	assert route.read(1.0) == "After"
+	assert fake.errors == []
+	route.wire.close()
+
+
+def test_dataControlWithoutASeatIsARefusal(
+	clipboardAlone: types.ModuleType, fakeCompositor: Callable[..., FakeCompositor]
+) -> None:
+	clipboard = clipboardAlone
+	wire = clipboard._Wire(fakeCompositor(seat=False).path)
+	try:
+		with pytest.raises(clipboard.ClipboardRefused):
+			clipboard._DataControlRoute(wire, "ext_data_control_manager_v1", "ext_data_control")
+	finally:
+		wire.close()

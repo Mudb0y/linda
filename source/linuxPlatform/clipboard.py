@@ -220,11 +220,16 @@ def copyToClip(text: str, notify: bool | None = False) -> bool:
 def _copyOnWayland(text: str, notify: bool | None) -> bool:
 	import ui
 
-	_requireMainThread()
 	try:
+		_requireMainThread()
 		copied = _wayland().copy(text)
 	except OSError:
 		log.debugWarning("Could not copy to the clipboard", exc_info=True)
+		copied = False
+	except Exception:
+		# Whatever went wrong, the user hears that nothing was copied, as on X, where every fault comes
+		# back as False.
+		log.exception("Could not copy to the clipboard")
 		copied = False
 	if copied:
 		if notify:
@@ -440,7 +445,12 @@ class _Wire:
 				raise
 
 	def bind(self, interface: str, version: int, handler: Handler = _ignore) -> int:
-		name, offered = self.globals[interface]
+		""":raises ClipboardRefused: When the compositor offers no such global, such as a seat."""
+		with self.condition:
+			found = self.globals.get(interface)
+		if found is None:
+			raise ClipboardRefused(f"the compositor offers no {interface}")
+		name, offered = found
 		objectId = self.new(interface, handler)
 		self.send(
 			self._registry,
@@ -596,6 +606,15 @@ def _serve(fd: int, data: bytes) -> None:
 			os.close(fd)
 
 	threading.Thread(target=write, name="clipboard send", daemon=True).start()
+
+
+def _encode(text: str) -> bytes:
+	try:
+		return text.encode("utf-8")
+	except UnicodeEncodeError:
+		# A lone surrogate, which no program could paste. The error itself is not kept, as it quotes the
+		# text.
+		raise OSError("the clipboard cannot hold this text: it is not valid Unicode") from None
 
 
 def _decode(data: bytes, isUtf8: bool) -> str:
@@ -778,9 +797,10 @@ class _DataControlRoute(_Selection):
 			raise OSError("the compositor did not answer NVDA's data control")
 
 	def copy(self, text: str) -> bool:
+		data = _encode(text)
 		with self.wire.condition:
 			before = self._selections
-		source = self._offerSource(text.encode("utf-8"))
+		source = self._offerSource(data)
 		self.wire.send(self._device, self._DEVICE_SET_SELECTION, _uint(source))
 		return self._isCopied(text, before, ROUND_TRIP_TIMEOUT)
 
@@ -889,7 +909,12 @@ class _WindowRoute(_Selection):
 			# before it.
 			if not wire.roundTrip():
 				raise OSError("the compositor did not answer")
-			return action(self._keyboardSerial)
+			with wire.condition:
+				serial = self._keyboardSerial
+			if serial is None:
+				# The user moved the keyboard on in that moment, with Alt+Tab or the Super key.
+				raise ClipboardRefused("the compositor took the keyboard from NVDA's window again")
+			return action(serial)
 		finally:
 			with wire.condition:
 				self._surface = None
@@ -902,11 +927,12 @@ class _WindowRoute(_Selection):
 	def copy(self, text: str) -> bool:
 		if _ownWindowHasKeyboard():
 			return _copyWithGtk(text)
+		data = _encode(text)
 
 		def put(serial: int) -> bool:
 			with self.wire.condition:
 				before = self._selections
-			source = self._offerSource(text.encode("utf-8"))
+			source = self._offerSource(data)
 			self.wire.send(self._device, self._DEVICE_SET_SELECTION, _uint(source) + _uint(serial))
 			return self._isCopied(text, before, ROUND_TRIP_TIMEOUT)
 
