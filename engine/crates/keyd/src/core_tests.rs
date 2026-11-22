@@ -5267,11 +5267,14 @@ fn a_late_pass_does_not_outlive_a_let_go() {
 
     let (mut t, k) = T::late_passing();
     let alt = t.kept(k, KEY_LEFTALT);
-    // The session leaves the front with Alt still held, and comes back once it is up.
+    // The session leaves the front with Alt still held, and comes back once it is up. Alt is
+    // pressed and kept afresh, so what is named is all that keeps it from going out.
     t.logind(front("c1", 1000));
     t.w.release(k, KEY_LEFTALT);
     t.logind(front(SESSION, 1000));
     assert!(t.w.grabbed(k));
+    t.sent();
+    t.kept(k, KEY_LEFTALT);
     let tab = t.pressed(k, KEY_TAB);
     t.late_pass(alt, tab);
     t.verdict(tab, false);
