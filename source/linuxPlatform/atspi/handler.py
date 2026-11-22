@@ -977,6 +977,7 @@ def _processFocus(event, mayRetry: bool = True) -> bool:
 		return False
 	_focusWhileHung.clear()
 	_activationWhileHung.clear()
+	_noteSelectionFocus(node, obj)
 	eventHandler.queueEvent("gainFocus", obj)
 	return True
 
@@ -1303,8 +1304,26 @@ def _asWindowEvent(event) -> tuple | None:
 #: The toolkits, by their ToolkitName in lower case, whose menus mark the item the arrows reach both
 #: selected and focused and send only the selection: Chromium's own, which Electron programs share.
 SELECTION_FOCUS_TOOLKITS = frozenset({"chromium"})
-#: The menu item _asMenuItemFocus last made a focus event of, by key.
+#: The menu item of such a toolkit that last took the focus, or that _asMenuItemFocus last made a focus
+#: event of, by key.
 _selectionFocusKey: tuple[str, str] | None = None
+
+
+def _noteSelectionFocus(node: Node, obj) -> None:
+	"""Remember node, about to become the focus, if it is a menu item of a toolkit in
+	SELECTION_FOCUS_TOOLKITS: the item a submenu closes back to gets the focus by its menu's activation
+	and not by a selection _asMenuItemFocus sees, and as the menu is taken down it no longer says it is a
+	menu item."""
+	global _selectionFocusKey
+	toolkit = _clientModule.knownToolkit(node.busName)
+	if (
+		toolkit is not None
+		and toolkit.lower() in SELECTION_FOCUS_TOOLKITS
+		and getattr(obj, "atspiRole", None) in _SELECTED_NOT_A_STATE_ROLES
+	):
+		_selectionFocusKey = node.key
+	else:
+		_selectionFocusKey = None
 
 
 def _asMenuItemFocus(event) -> tuple:
