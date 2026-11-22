@@ -462,6 +462,18 @@ if [ -n "$network" ]; then
 		-- "$self" --network "$root/network-ready" "$root/network-go" --)
 fi
 
+# The dynamic loader of the host's own programs, which /usr/bin/env is
+# when it runs a script's #! line in here. Outside NixOS the ELF header
+# names it under /lib64 or /lib, often links into /usr, and exec fails
+# with "No such file or directory" without them. Either may be absent,
+# as on NixOS.
+loader=()
+for dir in /lib64 /lib; do
+	if [ -e "$dir" ]; then
+		loader+=(--ro-bind "$dir" "$dir")
+	fi
+done
+
 # Python only to close every descriptor the caller left open, which could
 # be a socket to something live, before bwrap takes this process's place.
 # Standard input is named because a background job otherwise gets
@@ -472,7 +484,7 @@ os.closerange(3, 1 << 20)
 os.execvp(sys.argv[1], sys.argv[1:])
 ' "${stack[@]}" bwrap --die-with-parent --new-session \
 	--ro-bind /nix /nix --ro-bind /etc /etc --ro-bind /sys /sys \
-	--ro-bind /bin /bin --ro-bind /usr /usr \
+	--ro-bind /bin /bin --ro-bind /usr /usr "${loader[@]}" \
 	--dev /dev --proc /proc --tmpfs /tmp --dir /tmp/.X11-unix --tmpfs /run \
 	"${namespaces[@]}" \
 	--ro-bind "$checkout" "$checkout" --ro-bind "$history" "$history" \
