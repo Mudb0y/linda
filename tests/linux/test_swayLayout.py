@@ -42,6 +42,11 @@ ALLOWED_RECORDS = [
 		r"Keyboard layout from (sway|localed|environment): [\w-]+( [\w-]+)?",
 		r"Keyboard layout: xkbcommon's registry has no layout sway calls .+, so localed's layout is taken",
 		r"Keyboard layout: sway lists no keyboard with a layout, so localed's layout is taken",
+		(
+			r"Keyboard layout: sway lists none of the session's keyboards, as while a text console is in "
+			r"front, so the layout it gave last is kept"
+		),
+		r"Keyboard layout from (sway|localed|environment) again: [\w-]+( [\w-]+)?",
 		r"Keyboard layout: sway's IPC connection ended",
 		r"Keyboard layout: sway did not list its inputs: \w+",
 		r"Keyboard layout: \d+ sway sockets with a running sway, so none is taken",
@@ -593,6 +598,57 @@ sway.close()
 		"Keyboard layout: sway lists no keyboard with a layout, so localed's layout is taken"
 		in moduleRecords(result)
 	)
+
+
+def test_layoutKeptWhileTheSessionIsAway(tmp_path: Path):
+	"""As a text console comes in front, wlroots suspends libinput and sway reports every device of
+	libinput's removed, while a program's virtual keyboard stays; back in front, wlroots adds them again
+	only at the first input event, which linda-keyd decides before sway sees it. So the layout sway gave
+	last stands through the gap, and its keyboards listed again are followed as before."""
+	result = runFeed(
+		tmp_path,
+		r"""
+virtual = keyboard(LINDA, ["Polish"])
+at = keyboard(AT, ["Polish"])
+program = keyboard(PROGRAM, ["German (no dead keys)"], libinput=False)
+sway = FakeSway([virtual, at])
+feed = swayLayout.SwayLayoutFeed(sway.path)
+result = {"first": plain(feed.start(onChange))}
+sway.inputs = [at]
+sway.emit("removed", virtual)
+sway.inputs = []
+sway.emit("removed", at)
+time.sleep(0.3)
+sway.inputs = [program]
+sway.emit("added", program)
+time.sleep(0.3)
+result["away"] = [plain(s) for _t, _name, s in changes]
+sway.inputs = [at, program]
+sway.emit("added", at)
+sway.inputs = [virtual, at, program]
+sway.emit("added", virtual)
+time.sleep(0.3)
+result["back"] = [plain(s) for _t, _name, s in changes]
+virtual = keyboard(LINDA, ["Polish", "English (US)"], 1)
+sway.inputs = [virtual, keyboard(AT, ["Polish", "English (US)"], 1), program]
+sway.emit("xkb_keymap", virtual)
+time.sleep(0.3)
+feed.stop()
+result["changes"] = [[name, plain(s)] for _t, name, s in changes]
+sway.close()
+""",
+		env={"XKB_DEFAULT_LAYOUT": "cz"},
+	)
+	value = result.value
+	assert value["first"] == snap(names("pl"))
+	assert value["away"] == []
+	assert value["back"] == []
+	assert value["changes"] == [["lindaKeyboardLayout", snap(names("pl,us", ","), group=1)]]
+	records = moduleRecords(result)
+	kept = [r for r in records if "the layout it gave last is kept" in r]
+	assert len(kept) == 1, records
+	assert records.index(kept[0]) < records.index("Keyboard layout from sway again: pl"), records
+	assert not [r for r in records if "localed's layout is taken" in r], records
 
 
 def test_groupChangesReachOnChangeWhileTheMainThreadIsBusy(tmp_path: Path):

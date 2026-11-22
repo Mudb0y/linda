@@ -355,6 +355,10 @@ class SwayLayoutFeed:
 		self._listing = False
 		#: The layout taken in place of descriptions the registry does not have, by those descriptions.
 		self._fallbacks: dict[tuple[str, ...], LayoutSnapshot] = {}
+		#: The last snapshot taken from linda-keyd's keyboard or one it may hold.
+		self._kept: LayoutSnapshot | None = None
+		#: Whether sway lists none of those keyboards now, and _kept stands in for them.
+		self._away = False
 
 	def start(self, onChange: Callable[[LayoutSnapshot], None]) -> LayoutSnapshot:
 		if self._connection is not None:
@@ -456,8 +460,27 @@ class SwayLayoutFeed:
 			self._kernel = kernelKeyboards()
 		choice = self._choose(inputs)
 		self._inputs = inputs
+		ours = choice.isVirtual or bool(choice.held)
+		if not ours and self._kept is not None:
+			# While a text console is in front wlroots suspends libinput and sway lists none of its
+			# devices; nothing is typed through sway then, and wlroots adds them again only at the first
+			# input event after the switch back, which linda-keyd decides in this layout first.
+			self._chosen = None
+			if not self._away:
+				self._away = True
+				log.info(
+					"Keyboard layout: sway lists none of the session's keyboards, as while a text console "
+					"is in front, so the layout it gave last is kept"
+				)
+			return self._kept
 		self._chosen = choice.entry
-		return self._snapshot(choice)
+		snapshot = self._snapshot(choice)
+		if ours:
+			self._kept = snapshot
+			if self._away:
+				self._away = False
+				log.info(f"Keyboard layout from {snapshot.source} again: {activeLayoutName(snapshot)}")
+		return snapshot
 
 	def _snapshot(self, choice: _Choice) -> LayoutSnapshot:
 		entry = choice.entry
