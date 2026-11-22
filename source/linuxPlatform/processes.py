@@ -32,12 +32,19 @@ def _unwrap(name: str) -> str:
 portedAppModules: frozenset[str] = frozenset(
 	{"nvda", "marco", "caja", "chromium", "electron", "discord", "mate_screensaver_dialog"},
 )
+#: The app modules for the desktops' own shells, written for Wayland sessions and proven only there: in
+#: an X session those shells are read as any other program, as they were before the modules existed.
+waylandAppModules: frozenset[str] = frozenset({"gnome_shell", "kwin_wayland", "plasmashell"})
 
 
 def isAppModuleUsable(name: str, origin: str | None, bundledDirectory: str) -> bool:
 	"""Whether the app module named name, found at origin, may serve a Linux process."""
 	if name in portedAppModules or not origin:
 		return True
+	if name in waylandAppModules:
+		from linuxPlatform import displayServer
+
+		return displayServer.isWayland()
 	bundled = os.path.realpath(bundledDirectory) + os.sep
 	return not os.path.realpath(origin).startswith(bundled)
 

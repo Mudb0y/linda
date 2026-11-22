@@ -460,7 +460,6 @@ def test_aLetterAHundredMillisecondsAfterAltTabLandsRight(tmp_path: Path, socket
 
 
 @RACES
-@AWAITS_KL_LOOK
 def test_aLetterWaitsForActivationHeldBack(tmp_path: Path, socketDir: Path):  # noqa: F811
 	with race(tmp_path, socketDir, holdMs=HELD_BACK_MS) as found:
 		results = found.run(0.1)

@@ -273,8 +273,9 @@ source/appModuleHandler.py
   role under the foreground window, where upstream raises NotImplementedError
   and NVDA then looks at whatever lies at the window's bottom corner
 source/appModules/__init__.py
-  every platform: maps the program mate-screensaver-dialog, whose name holds
-  hyphens, to its app module; no Windows program has this name
+  every platform: maps the programs mate-screensaver-dialog and gnome-shell,
+  whose names hold hyphens, to their app modules; no Windows program has these
+  names
 source/appModules/caja.py
   Linux runtime: added. The app module for MATE's file manager, which speaks
   the folder Caja opens in the same view and makes the file it selects

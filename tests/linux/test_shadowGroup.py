@@ -545,13 +545,6 @@ def assertFollowed(value: dict) -> None:
 
 
 @pytest.mark.rigSession("x11")
-@pytest.mark.xfail(
-	strict=True,
-	reason=(
-		"WaylandEnvironment.notePassed does not yet pass keys to the layout feed (package SG's needs); once it"
-		" does, remove this mark, LANDED, WIRING and the tests' uses of them"
-	),
-)
 def test_theEnvironmentGivesTheFeedThePassedKeys(tmp_path: Path):
 	"""As test_theRouteReadsKeysInTheGroupTheDesktopSwitchedTo, with nothing but the environment itself
 	to give the layout feed the keys passed on. Without it the desktop is in pl after the toggle while

@@ -108,6 +108,8 @@ class WaylandEnvironment:
 		#: keydClient's LOCK_ bits of the lights the helper last said are on; None until it has.
 		self.locks: int | None = None
 		self.onPassed: Callable[[int, bool], None] = _nothing
+		#: The layout feed's own note of a key passed on, for a feed that follows the group by the keys.
+		self._feedPassed: Callable[[int, bool], None] = _nothing
 		self.onPassedLock: Callable[[int, float], None] = _nothing
 		self.onLocks: Callable[[int, float], None] = _nothing
 		self.onVirtual: Callable[[int], None] = _nothing
@@ -123,11 +125,13 @@ class WaylandEnvironment:
 		any kernel source is attached."""
 		if self._layoutFeed is None:
 			self._layoutFeed = desktopLayout.create(self._currentDesktop)
+		self._feedPassed = getattr(self._layoutFeed, "notePassed", _nothing)
 		try:
 			snapshot = self._layoutFeed.start(self._onLayout)
 		except Exception:
 			log.exception("Keyboard layout: the desktop's layout cannot be followed")
 			self._layoutFeed = None
+			self._feedPassed = _nothing
 			snapshot = desktopLayout.environmentSnapshot()
 		try:
 			try:
@@ -253,6 +257,7 @@ class WaylandEnvironment:
 		self.onDevice(status)
 
 	def notePassed(self, keycode: int, isUp: bool) -> None:
+		self._feedPassed(keycode, isUp)
 		self.onPassed(keycode, isUp)
 
 	def notePassedLock(self, light: int, now: float) -> None:

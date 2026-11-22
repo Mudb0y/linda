@@ -35,8 +35,8 @@ _VIRTUAL = struct.Struct("<BB")
 
 KEY_RELEASE, KEY_PRESS, KEY_REPEAT = 0, 1, 2
 #: HELLO's and WELCOME's features: TYPE and TYPED; VERDICT may hold a press for longer, up to
-#: VERDICT_WAIT_TIMEOUT; LATE_PASS; VIRTUAL. The helper grants FEATURE_WAIT and FEATURE_TYPING so far, and
-#: the other two's messages are malformed until WELCOME grants them.
+#: VERDICT_WAIT_TIMEOUT; LATE_PASS; VIRTUAL. The helper grants FEATURE_WAIT, FEATURE_TYPING and
+#: FEATURE_LATE_PASS so far, and VIRTUAL's messages are malformed until WELCOME grants them.
 FEATURE_TYPING, FEATURE_WAIT, FEATURE_LATE_PASS, FEATURE_VIRTUAL_SEEN = 1, 2, 4, 8
 #: The value of VERDICT that holds a press longer, with FEATURE_WAIT.
 VERDICT_WAIT = 2
