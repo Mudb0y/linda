@@ -173,6 +173,7 @@ def test_catalogRefreshUpdatesTheListOnTheMainThread(tmp_path: Path):
 		main = threading.current_thread()
 		updates = []
 		callbacks = []
+		coreCallbacks = []
 		vm.listVM = SimpleNamespace(
 			resetListItems=lambda items: updates.append((threading.current_thread() is main, items)),
 			getSelection=lambda: None,
@@ -184,28 +185,39 @@ def test_catalogRefreshUpdatesTheListOnTheMainThread(tmp_path: Path):
 			assert threading.current_thread() is not main
 			return {}
 
-		def schedule(delay, callable, *args, **kwargs):
-			callbacks.append((callable, args, kwargs))
+		def schedule(callback, *args, **kwargs):
+			callbacks.append((callback, args, kwargs))
+
+		def scheduleCore(delay, callable, *args, **kwargs):
+			coreCallbacks.append((callable, args, kwargs))
 
 		with (
 			patch.object(store, "addonDataManager", SimpleNamespace(getLatestCompatibleAddons=fetch)),
-			patch.object(store.core, "callLater", schedule),
+			patch("wx.CallAfter", schedule),
+			patch.object(store.core, "callLater", scheduleCore),
 		):
 			for _ in range(2):
 				vm.refresh()
 				vm._refreshAddonsThread.join(5)
 				assert not vm._refreshAddonsThread.is_alive()
 			before = updates.copy()
+			# Add-ons can queue their own UI work after the worker returns.
+			seen = []
+			schedule(lambda: seen.append(updates[-1][1]))
 			while callbacks:
 				callback, args, kwargs = callbacks.pop(0)
 				callback(*args, **kwargs)
-		result = {"before": before, "after": updates, "loading": vm.listVM._isLoading}
+			while coreCallbacks:
+				callback, args, kwargs = coreCallbacks.pop(0)
+				callback(*args, **kwargs)
+		result = {"before": before, "after": updates, "loading": vm.listVM._isLoading, "seen": seen}
 		""",
 	)
 	done.assertClean()
 	assert done.value == {
 		"before": [[True, []], [True, []]],
 		"after": [[True, []], [True, []], [True, ["loaded"]]],
+		"seen": [["loaded"]],
 		"loading": False,
 	}
 

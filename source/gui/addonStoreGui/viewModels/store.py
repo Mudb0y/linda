@@ -15,6 +15,8 @@ from typing import (
 from collections.abc import Iterable
 import threading
 
+import wx
+
 import addonHandler
 from markdown import markdown
 import ui
@@ -700,7 +702,7 @@ class AddonStoreVM:
 					):
 						availableAddons[channel][addonId] = incompatibleAddons[channel][addonId]
 		log.debug("completed getting addons in the background")
-		core.callLater(0, self._applyAvailableAddons, threading.current_thread(), availableAddons)
+		wx.CallAfter(self._applyAvailableAddons, threading.current_thread(), availableAddons)
 
 	def _applyAvailableAddons(
 		self,
