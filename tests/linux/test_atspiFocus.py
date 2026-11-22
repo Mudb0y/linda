@@ -36,6 +36,13 @@ FLOOD_SECONDS = 6
 #: which the row the flood ended on is spoken, read from a list that answers each call some 0.1 s late.
 KEY_BOUND = 0.5
 LANDING_BOUND = 1.5
+#: Seconds within which a GTK 3 menu item with a submenu is spoken after the key that selects it: less
+#: than the 225 ms after which GTK opens the submenu, and only then says that the item has the focus.
+SUBMENU_ITEM_BOUND = 0.2
+#: Files the fixture's Recent submenu holds beyond its first: more than the ten events of one application
+#: that a batch keeps, as GTK says that each item of a submenu shows just after the item that opens it
+#: is selected, as Caja's Open With does with a program for each.
+RECENT_FILES = 12
 
 #: A global plugin that runs key gestures sent to it through a FIFO as if their keys had been pressed,
 #: so that what a command says is timed apart from how its keys are captured.
@@ -453,5 +460,32 @@ def test_menuFocusSentAsTheLegacyFocusEvent(desktop: DesktopSession, tmp_path: P
 	_legacyFocusStep(desktop, "Down", "Quit 3 of 3")
 	_legacyFocusStep(desktop, "Up", "Save 2 of 3")
 	_legacyFocusStep(desktop, "Escape", "Press me button")
+	probe.close()
+	_closeClean(desktop, nvda)
+
+
+def test_aMenuItemWithASubmenuIsSpokenAsItIsSelected(
+	desktop: DesktopSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+	"""GTK 3 says that an item with a submenu has the focus only once the submenu shows, 225 ms after the
+	item was selected, and not at all when the menu is rebuilt before then, as nm-applet's is while it
+	looks for networks. The item is spoken as it is selected, as an item without a submenu is, and once,
+	however many items of its submenu GTK says show after it."""
+	monkeypatch.setenv("LINDA_RECENTSIZE", str(RECENT_FILES))
+	desktop.startApp(desktop.fixture("gtkFixture"), title=GTK_TITLE)
+	_waitUntilActive(GTK_TITLE)
+	nvda, probe = _startNVDA(desktop, tmp_path)
+	desktop.expect(GTK_TITLE, PRESS_ME, since=0, timeout=STARTUP_BOUND)
+	_waitForQuiet(desktop)
+	_legacyFocusStep(desktop, "F10", "File sub Menu Alt plus F 1 of 2")
+	_legacyFocusStep(desktop, "Down", "Open Ctrl plus O O 1 of 4")
+	recent = "Recent sub Menu R 2 of 4"
+	mark = desktop.mark()
+	pressed = time.monotonic()
+	subprocess.run(["xdotool", "key", "Down"], check=True)
+	spokenAt = _recordAfter(nvda, mark, lambda text: text == recent, timeout=5)["t"]
+	_waitForQuiet(desktop)
+	assert desktop.spokenSince(mark) == [recent], desktop.spokenSince(mark)
+	assert spokenAt - pressed < SUBMENU_ITEM_BOUND, (spokenAt - pressed, nvda.describe())
 	probe.close()
 	_closeClean(desktop, nvda)
