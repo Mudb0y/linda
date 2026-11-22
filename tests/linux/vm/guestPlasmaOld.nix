@@ -37,7 +37,8 @@ let
   programPattern = name: "^[^ ]*${name}(-wrapped)?( |$)";
   guest = {
     kind = "plasma";
-    socket = "/run/user/${toString uid}/wayland-1";
+    # KWin's wrapper numbers its sockets from 0 in 6.5.6 and 6.6.6, and from 1 by 6.8.3.
+    socket = "/run/user/${toString uid}/wayland-0";
     started = "pgrep -u ${toString uid} -f '${programPattern "plasmashell"}' >/dev/null && ! pgrep -u ${toString uid} -f '${programPattern "ksplashqml"}' >/dev/null";
     ready = [
       "/run/current-system/sw/bin/ground-focus"
