@@ -104,13 +104,16 @@ def _closeClean(desktop: DesktopSession) -> None:
 @pytest.mark.parametrize("popups", ["lightweight", "heavyweight"])
 def test_menuBar(desktop: DesktopSession, popups: str):
 	"""F10 opens the File menu, which Swing opens with no item highlighted; the arrows go through its
-	items, into its submenu and across to the next menu, and Escape closes it."""
+	items, into its submenu and out of it again, and across to the next menu, and Escape closes it."""
 	_start(desktop, popups)
 	# Swing says a menu is checked while it is open, and that is read as it says it.
 	_step(desktop, "F10", "File checked sub Menu 1 of 2")
 	_step(desktop, "Down", "New 1 of 4")
 	_step(desktop, "Down", "Open 2 of 4")
 	_step(desktop, "Down", "Recent checked sub Menu 3 of 4")
+	_step(desktop, "Right", "First project 1 of 2")
+	# Left closes the submenu and Swing highlights its menu again, which the wrapper does not announce.
+	_step(desktop, "Left", "Recent checked sub Menu 3 of 4")
 	_step(desktop, "Right", "First project 1 of 2")
 	_step(desktop, "Down", "Second project 2 of 2")
 	_step(desktop, "Escape", "Press me button")

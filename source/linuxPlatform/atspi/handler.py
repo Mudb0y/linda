@@ -630,8 +630,16 @@ def _onEvent(eventType: str, source: Node | None, detail1: int, detail2: int, an
 				# Not queued below, so nothing else asks for the pump that looks at it.
 				core.requestPump()
 		# libatspi sends defunct itself whenever it frees its own proxy for a live object. Active is
-		# kept for _asWindowEvent.
-		if state not in STATE_CHANGE_STATES and state not in ("focused", "showing", "active"):
+		# kept for _asWindowEvent, and a Java menu item's disarming for _asJavaMenuReturn.
+		if (
+			state not in STATE_CHANGE_STATES
+			and state not in ("focused", "showing", "active")
+			and not (
+				state == "armed"
+				and not detail1
+				and _clientModule.knownToolkit(source.busName) == JAVA_TOOLKIT
+			)
+		):
 			return
 	elif eventType.startswith("object:text-changed:"):
 		# Qt sends what is typed into a password field in clear.
@@ -1365,6 +1373,33 @@ def _asMenuItemFocus(event) -> tuple:
 	return ("object:state-changed:focused", source, 1, detail2, anyData)
 
 
+def _asJavaMenuReturn(event) -> tuple | None:
+	"""event, or for a Java menu item's disarming, which only that toolkit's is kept for, a focus on its
+	menu if the item was NVDA's focus and its submenu closed with the menu still open: Swing highlights
+	the menu again as Left closes the submenu, and the Java ATK wrapper says nothing of it. Without the
+	menu as the focus, Right's focus on the item it had would also be dropped as a repeat."""
+	eventType, source, detail1, _detail2, _anyData = event
+	if eventType != "object:state-changed:armed":
+		return event
+	import eventHandler
+
+	if detail1 or getattr(eventHandler.lastQueuedFocusObject, "node", None) != source:
+		return None
+	c = client()
+	try:
+		if "showing" in c.states(source):
+			# The highlight moved on within the submenu, whose next item says so.
+			return None
+		# The menu bar's menus give their items as their children. Swing says a menu is checked while it
+		# is open, which Escape's closing every menu has already undone.
+		menu = c.parent(source)
+		if menu is None or c.role(menu) != "menu" or not {"checked", "showing"} <= c.states(menu):
+			return None
+	except NodeGone:
+		return None
+	return ("object:state-changed:focused", menu, 1, 0, None)
+
+
 #: Seconds after an application last answered slowly during which it counts as busy: a container of it
 #: moved through quickly is not asked about at every step, and it is looked in last for the active window.
 BUSY_SECONDS = 2.0
@@ -1618,6 +1653,7 @@ def pumpAll() -> None:
 	released = _releasedDescendantChanges(now)
 	events = [converted for event in events if (converted := _asWindowEvent(event)) is not None]
 	events = [_asMenuItemFocus(event) for event in events]
+	events = [converted for event in events if (converted := _asJavaMenuReturn(event)) is not None]
 	found = _probeShown(events, now) if _probesShown else []
 	resumed = []
 	for busName, (event, since) in list(_focusWhileHung.items()):
