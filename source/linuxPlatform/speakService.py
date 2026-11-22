@@ -1,14 +1,17 @@
 """Speaks for scripts that ask Orca to speak, while NVDA runs in Orca's place.
 
 Scripts written for Orca speak by calling PresentMessage with a string on Orca's service on the
-session bus, and get back true. This answers that call under the same name, path and interface:
-the text is spoken as NVDA speaks a message of its own, queued after what is being spoken, as Orca
-queues it, and the call returns at once.
+session bus, and get back true. This answers that call under the same name, path and interface,
+and under the name, path and interface Orca 51 and later serve instead, where SpeakMessage speaks
+too: the text is spoken as NVDA speaks a message of its own, queued after what is being spoken, as
+Orca queues it, and the call returns at once.
 
-The name is asked for without taking it from an owner, and while one has it NVDA waits in the
-bus's queue. Orca asks for its name without taking it either, and does not start when it is put in
-the queue, so NVDA gives the name up as soon as an Orca process connects to the bus and asks for
-it again, behind Orca, once Orca has it or has gone.
+Each name is asked for allowing an owner to take it, and while another has it NVDA waits in the
+bus's queue. Orca asks for its name without taking it, and quits when it is put in the queue, so
+NVDA gives both names up as soon as an Orca process connects to the bus, since it cannot tell which
+of the two that Orca serves. Once Orca has one of them, NVDA asks for both again: it waits behind
+Orca for that one and answers the other, which Orca leaves alone. If Orca goes without taking
+either, NVDA asks for both again.
 
 In a Wayland session NVDA says once, when it finds Orca with the name, or Orca 51 and later with
 the name they serve instead, that both will speak: there the desktop's own screen reader switch
@@ -36,8 +39,13 @@ from linuxPlatform import displayServer
 BUS_NAME = "org.gnome.Orca.Service"
 OBJECT_PATH = "/org/gnome/Orca/Service"
 INTERFACE = "org.gnome.Orca.Service"
-#: The name Orca 51 and later serve in place of BUS_NAME, which they leave alone.
+#: The name, path and interface Orca 51 and later serve in place of the ones above, which they leave
+#: alone.
 ORCA1_BUS_NAME = "org.gnome.Orca1.Service"
+ORCA1_OBJECT_PATH = "/org/gnome/Orca1/Service"
+ORCA1_INTERFACE = "org.gnome.Orca1.Service"
+#: Every name NVDA answers.
+BUS_NAMES = (BUS_NAME, ORCA1_BUS_NAME)
 MODULE_INTERFACE = "org.gnome.Orca.Module"
 #: The speech module, under the name Orca gives it.
 SPEECH_MODULE = "SpeechAndVerbosityManager"
@@ -91,6 +99,22 @@ _INTROSPECTION = f"""
 		</method>
 		<method name="ShowPreferences">
 			<arg direction="out" name="return" type="b"/>
+		</method>
+		<method name="Quit">
+			<arg direction="out" name="return" type="b"/>
+		</method>
+	</interface>
+	<interface name="{ORCA1_INTERFACE}">
+		<method name="PresentMessage">
+			<arg direction="in" name="message" type="s"/>
+			<arg direction="out" name="return" type="b"/>
+		</method>
+		<method name="SpeakMessage">
+			<arg direction="in" name="message" type="s"/>
+			<arg direction="out" name="return" type="b"/>
+		</method>
+		<method name="GetVersion">
+			<arg direction="out" name="return" type="s"/>
 		</method>
 		<method name="Quit">
 			<arg direction="out" name="return" type="b"/>
@@ -240,10 +264,10 @@ class _Service:
 		self._connection = None
 		self._subscriptions: list[int] = []
 		self._registrations: list[int] = []
-		#: Whether NVDA has the name.
-		self.isOwner = False
-		#: The connections of an Orca process that NVDA gave the name up for, while that one has not
-		#: taken it.
+		#: The names NVDA has.
+		self._owned: set[str] = set()
+		#: The connections of an Orca process that NVDA gave the names up for, while that one has taken
+		#: neither.
 		self._yieldingTo: set[str] = set()
 		self.thread = threading.Thread(target=self._run, name="lindaSpeakService", daemon=True)
 
@@ -278,6 +302,7 @@ class _Service:
 		nodeInfo = Gio.DBusNodeInfo.new_for_xml(_INTROSPECTION)
 		for path, interface in (
 			(OBJECT_PATH, INTERFACE),
+			(ORCA1_OBJECT_PATH, ORCA1_INTERFACE),
 			(f"{OBJECT_PATH}/{SPEECH_MODULE}", MODULE_INTERFACE),
 		):
 			self._registrations.append(
@@ -287,8 +312,8 @@ class _Service:
 			)
 		for member, argument, handler in (
 			("NameOwnerChanged", None, self._onNameOwnerChanged),
-			("NameAcquired", BUS_NAME, self._onNameAcquired),
-			("NameLost", BUS_NAME, self._onNameLost),
+			("NameAcquired", None, self._onNameAcquired),
+			("NameLost", None, self._onNameLost),
 		):
 			self._subscriptions.append(
 				self._connection.signal_subscribe(
@@ -301,8 +326,7 @@ class _Service:
 					handler,
 				),
 			)
-		self._requestName()
-		self._noteOrcaWithName(ORCA1_BUS_NAME)
+		self._requestNames()
 		return True
 
 	def _disconnect(self) -> None:
@@ -337,26 +361,29 @@ class _Service:
 			None,
 		).unpack()
 
-	def _requestName(self) -> None:
+	def _requestNames(self) -> None:
+		for name in BUS_NAMES:
+			if name not in self._owned:
+				self._requestName(name)
+
+	def _requestName(self, name: str) -> None:
 		from gi.repository import GLib
 
 		try:
-			(reply,) = self._callBus(
-				"RequestName", GLib.Variant("(su)", (BUS_NAME, _ALLOW_REPLACEMENT)), "(u)"
-			)
+			(reply,) = self._callBus("RequestName", GLib.Variant("(su)", (name, _ALLOW_REPLACEMENT)), "(u)")
 		except GLib.Error as e:
-			log.warning(f"Speak service: could not ask for {BUS_NAME}: {e}")
+			log.warning(f"Speak service: could not ask for {name}: {e}")
 			return
-		log.debug(f"Speak service: NVDA {_REQUEST_REPLIES.get(reply, reply)} {BUS_NAME}")
+		log.debug(f"Speak service: NVDA {_REQUEST_REPLIES.get(reply, reply)} {name}")
 		if reply in (2, 3):
-			self._noteOrcaWithName()
+			self._noteOrcaWithName(name)
 
-	def _noteOrcaWithName(self, name: str = BUS_NAME, owner: str | None = None) -> None:
+	def _noteOrcaWithName(self, name: str, owner: str | None = None) -> None:
 		"""Say once in a Wayland session that both readers speak, if the owner of name is Orca.
 
-		NVDA asks for BUS_NAME whenever it does not have it, Orca's taking it included, so its being
-		put in the queue is the one moment to look at that name. Orca 51 and later never take it, and
-		are looked for under ORCA1_BUS_NAME at connecting and whenever that name gets an owner.
+		NVDA asks for a name whenever it does not have it, Orca's taking it included, so its being put
+		in the queue is the moment to look at that name. ORCA1_BUS_NAME is looked at whenever it gets
+		an owner as well, since NVDA may have it then.
 		"""
 		global _orcaNoticed
 		if not displayServer.isWayland() or _orcaNoticed:
@@ -379,45 +406,51 @@ class _Service:
 
 		queueHandler.queueFunction(queueHandler.eventQueue, _sayOrcaNotice, compositor)
 
-	def _releaseName(self) -> None:
+	def _releaseName(self, name: str) -> None:
 		from gi.repository import GLib
 
 		try:
-			self._callBus("ReleaseName", GLib.Variant("(s)", (BUS_NAME,)), "(u)")
+			self._callBus("ReleaseName", GLib.Variant("(s)", (name,)), "(u)")
 		except GLib.Error as e:
-			log.warning(f"Speak service: could not give up {BUS_NAME}: {e}")
+			log.warning(f"Speak service: could not give up {name}: {e}")
 
-	def _onNameAcquired(self, *args) -> None:
-		self.isOwner = True
-		log.debug(f"Speak service: NVDA now answers {BUS_NAME}")
+	def _onNameAcquired(self, connection, sender, path, interface, signal, parameters) -> None:
+		(name,) = parameters.unpack()
+		if name not in BUS_NAMES:
+			return
+		self._owned.add(name)
+		log.debug(f"Speak service: NVDA now answers {name}")
 
-	def _onNameLost(self, *args) -> None:
-		self.isOwner = False
-		log.debug(f"Speak service: NVDA no longer answers {BUS_NAME}")
+	def _onNameLost(self, connection, sender, path, interface, signal, parameters) -> None:
+		(name,) = parameters.unpack()
+		if name not in BUS_NAMES:
+			return
+		self._owned.discard(name)
+		log.debug(f"Speak service: NVDA no longer answers {name}")
 
 	def _onNameOwnerChanged(self, connection, sender, path, interface, signal, parameters) -> None:
 		from gi.repository import GLib
 
 		name, oldOwner, newOwner = parameters.unpack()
-		if name == ORCA1_BUS_NAME:
-			if newOwner:
+		if name in BUS_NAMES:
+			if not newOwner or newOwner == connection.get_unique_name():
+				return
+			if name == ORCA1_BUS_NAME:
 				self._noteOrcaWithName(name, newOwner)
-			return
-		if name == BUS_NAME:
-			if self._yieldingTo and newOwner and newOwner != connection.get_unique_name():
-				# Orca has it: wait behind it, to answer again once it has gone.
+			if self._yieldingTo:
+				# Orca has one: wait behind it for that one, and answer the other, which it leaves alone.
 				self._yieldingTo.clear()
-				self._requestName()
+				self._requestNames()
 			return
 		if not name.startswith(":"):
 			return
 		if not newOwner and name in self._yieldingTo:
 			self._yieldingTo.discard(name)
 			if not self._yieldingTo:
-				log.debug("Speak service: Orca left without taking the name")
-				self._requestName()
+				log.debug("Speak service: Orca left without taking either name")
+				self._requestNames()
 			return
-		if oldOwner or not newOwner or not (self.isOwner or self._yieldingTo):
+		if oldOwner or not newOwner or not (self._owned or self._yieldingTo):
 			return
 		try:
 			(pid,) = self._callBus("GetConnectionUnixProcessID", GLib.Variant("(s)", (name,)), "(u)")
@@ -427,11 +460,12 @@ class _Service:
 		if not _isOrca(pid):
 			return
 		self._yieldingTo.add(name)
-		if self.isOwner:
-			# Orca asks for the name a moment after it connects, and quits when it is not given it.
-			log.info("Speak service: Orca is starting, so NVDA gives it its name")
-			self.isOwner = False
-			self._releaseName()
+		if self._owned:
+			# Orca asks for its name a moment after it connects, and quits when it is not given it.
+			log.info("Speak service: Orca is starting, so NVDA gives it its names")
+			for owned in sorted(self._owned):
+				self._owned.discard(owned)
+				self._releaseName(owned)
 
 	def _onCall(self, connection, sender, path, interface, method, parameters, invocation) -> None:
 		from gi.repository import GLib
@@ -439,7 +473,7 @@ class _Service:
 		try:
 			if interface == MODULE_INTERFACE:
 				invocation.return_value(self._onModuleCall(method, parameters))
-			elif method == "PresentMessage":
+			elif method in ("PresentMessage", "SpeakMessage"):
 				(text,) = parameters.unpack()
 				_queueMessage(text)
 				invocation.return_value(GLib.Variant("(b)", (True,)))
@@ -451,6 +485,11 @@ class _Service:
 				invocation.return_value(GLib.Variant("(as)", ([SPEECH_MODULE],)))
 			elif method == "ListCommands":
 				invocation.return_value(GLib.Variant("(a(ss))", (list(_COMMANDS),)))
+			elif method == "Quit":
+				# Never answered, on either name: use-linda, the script that switches between the
+				# readers, calls Quit to find out whether Orca itself is there, and would take an NVDA
+				# that answered it for Orca.
+				invocation.return_dbus_error(_NOT_SUPPORTED, "Quit is Orca's own; NVDA does not do it")
 			else:
 				invocation.return_dbus_error(_NOT_SUPPORTED, f"{method} is Orca's own; NVDA does not do it")
 		except Exception:
