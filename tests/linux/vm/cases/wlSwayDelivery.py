@@ -44,8 +44,9 @@ OLD_LOG = f"{LINDA_DIRECTORY}/nvda-old.log"
 #: Caps Lock presses passed on under each remap, each pair further apart than the echo's wait.
 CAPS_PRESSES = 20
 CAPS_GAP = 0.7
-#: The Linda keys without Caps Lock, so that a Caps Lock Linda's layout takes for one is passed on.
-WITHOUT_CAPS = {"keyboard": {"NVDAModifierKeys": "3"}}
+#: The Linda keys without Caps Lock, which is 1: the numpad's Insert, 2, and Insert, 4; so that a Caps
+#: Lock Linda's layout takes for one is passed on.
+WITHOUT_CAPS = {"keyboard": {"NVDAModifierKeys": "6"}}
 
 
 def swaymsg(ground: "Ground", *arguments: str) -> str:
