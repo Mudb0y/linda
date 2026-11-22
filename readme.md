@@ -239,7 +239,8 @@ Then make sure of the three things under "On every distribution", and start Lind
 Nix cannot install a system service outside NixOS, so there linda-keyd is built from Linda's source with Meson and installed as your distribution's own packages would be.
 This has been built and installed by Linda's tests, and the service it installs is the one the NixOS module runs, but it has not yet been tried on another distribution, so please say how it went.
 
-The build needs git, Meson 1.4 or later, Ninja, pkg-config, a C++ compiler with C++20, Rust 1.85 or later with cargo, and PipeWire's development files, which are in your distribution's packages under those names or close to them.
+The build needs git, Meson 1.4 or later, Ninja, pkg-config, a C++ compiler with C++20, Rust 1.89 or later with cargo, libclang, and PipeWire's development files, which are in your distribution's packages under those names or close to them. libclang is `libclang-dev` on Debian and Ubuntu, `clang-devel` on Fedora and `clang` on Arch.
+Where the distribution's own Rust is older than 1.89, as Debian 13's is, [rustup](https://rustup.rs) installs a newer one for your user.
 
 Fetch the source and go into it.
 
