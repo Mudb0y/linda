@@ -984,8 +984,24 @@ class KernelKeySource:
 			if mode == keydClient.TYPE_INJECT and message.outcome != keydClient.TYPED_LOST:
 				# No KEY numbers an injected key, so whether it was refused as it went out is not told.
 				self._injectedRefused.add(sent.keycode)
+		if sent.mode == keydClient.TYPE_DECIDE and message.seq and message.outcome == keydClient.TYPED_LOST:
+			self._typedPressLost(message.seq)
 		if sent.light:
 			self._locks ^= sent.light
+
+	def _typedPressLost(self, seq: int) -> None:
+		"""A typed press passed and still in the helper's line behind a press it held, dropped as it let go:
+		the application never had it, so its release, which comes as the helper lets go, has not reached it
+		either. The environment heard it passed and hears of its release, so that its account of what is
+		down comes even."""
+		press = self._bySeq.get(seq)
+		if press is None or not press.typed or not press.passed or press.expired:
+			return
+		with press.lock:
+			press.passed = False
+		# Not given to NVDA now if the decider has yet to come to it, as the application never had it.
+		press.dropped = True
+		self._tell(self._environment.notePassed, press.keycode, True)
 
 	def _releaseRefusedOut(self, keycode: int, now: float) -> None:
 		"""End NVDA's press of a key typed and refused as it went out, once its release is answered, if no

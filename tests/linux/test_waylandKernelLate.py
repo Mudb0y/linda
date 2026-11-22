@@ -508,3 +508,41 @@ def test_aLetterLooksWhileNVDAHasNamedADocumentAndTheFocusIsUnsettled(
 	errors = [line for line in done.logErrors if "whether the focus is settled" in line]
 	assert len(errors) == (1 if settled == "raises" else 0), done.logErrors
 	assert all("RuntimeError" in line for line in errors)
+
+
+# A typed press passed, lost as the helper lets go.
+
+LOST_CHILD = r"""
+away = x11.CaptureState(1, None, False, "browse", None, None, None)
+environment = Environment(state=away)
+source = startSource(environment)
+step("down", "x", 0.03)
+source.typeKey(VK_F12, False, False)
+keyboard.waitFor(lambda: any(e[1] == "key" and e[3] == F12 for e in keyboard.events))
+time.sleep(0.05)
+keyboard.letGo(RELEASED_BACKGROUND)
+time.sleep(0.3)
+step("up", "x", 0.1)
+result = {
+	"opened": opened,
+	"typed": [list(entry) for entry in keyboard.typed],
+	"seq": pressSeqs(F12),
+	"f12": [[e["up"], e["injected"], e["reached"]] for e in delivered if e["vk"] == VK_F12],
+	"passed": [note for note in passedNotes(environment) if note[0] == F12 + 8],
+	"emitted": [entry for entry in emitted() if entry[0] == F12],
+}
+source.stop()
+"""
+
+
+def test_aTypedPressLostAsTheHelperLetsGoNeverReachedTheApplication(tmp_path: Path):
+	"""A typed key passed, still behind a press the helper holds as it lets go, is answered LOST. The
+	press held is a letter waiting on a look, which NVDA is given first, so NVDA has not yet been given
+	the typed key: it never is, nor its release, as the application never had it. Before, NVDA was given
+	both, as having reached the application. The environment, told it passed, hears of its release."""
+	value = runLateChild(tmp_path, LOST_CHILD).value
+	[seq] = value["seq"]
+	assert value["typed"] == [[1, seq, TYPED_LOST]]
+	assert value["emitted"] == []
+	assert value["f12"] == []
+	assert value["passed"] == [[F12 + 8, False], [F12 + 8, True]]
