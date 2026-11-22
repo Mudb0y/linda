@@ -108,12 +108,13 @@ NOT_REACHED = "Linda's window opened but did not get the keyboard. Press Alt plu
 ACTIVATION_BOUND = 1.0
 #: Seconds a window of Linda's is given to be activated at all before the case takes it as refused.
 REFUSED_AFTER = 5.0
-#: Why the menu window misses ACTIVATION_BOUND on GNOME: in runs 3 to 5 of the case it was activated 1.09,
-#: 1.24 and 1.25 s after the key, created 1.01 s after it and activated 0.24 s after that, where sway's
-#: was activated 0.32 s and Plasma's 0.62 s after the key.
-MENU_LATE = (
-	"on GNOME Linda's menu window is created about a second after the Linda key with N, and is active "
-	"only some 1.1 to 1.25 s after the key"
+#: Why Linda's windows miss ACTIVATION_BOUND on GNOME. In runs 3 to 6 of the case the menu window was
+#: activated 1.09 to 1.25 s after the key, created 0.88 to 1.01 s after it; in run 6 the settings dialog
+#: was created 0.49 s after its key and activated 0.76 s after that. Under sway the same windows were
+#: activated 0.32 to 0.43 s after their keys, and under Plasma 0.62 to 0.93 s.
+WINDOWS_LATE = (
+	"on GNOME Linda's menu window and settings dialog are active only some 1.1 to 1.25 s after their "
+	"keys: Linda creates them 0.5 to 1 s after the key, and GNOME activates them 0.25 to 0.75 s after that"
 )
 #: Where the guest half's watch writes each window created and activated, with the process it is of.
 OWN_WINDOWS = "/tmp/ground/ownWindows.jsonl"
@@ -576,7 +577,7 @@ def menu(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 			ground, mark, ("KEY_INSERT", "KEY_N", "KEY_DOWN", "KEY_RIGHT", "KEY_LEFT", "KEY_UP", "KEY_ESC")
 		)
 		assert not reached, f"the test window had {reached}"
-		with ground.expectedFailure(MENU_LATE):
+		with ground.expectedFailure(WINDOWS_LATE):
 			withinBound(figures["the menu"])
 
 
@@ -599,7 +600,8 @@ def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		ground.machine.log(f"Tab in the settings dialog: Linda said {said(ground, step)}")
 		reached = appKeys(ground, mark, ("KEY_INSERT", "KEY_G", "KEY_TAB"))
 		assert not reached, f"the test window had {reached}"
-		withinBound(figures["the settings dialog"])
+		with ground.expectedFailure(WINDOWS_LATE):
+			withinBound(figures["the settings dialog"])
 
 	with ground.subtest("the settings dialog, behind another window, comes forward at the command again"):
 		ground.activate(WINDOW_TITLE)
