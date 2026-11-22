@@ -10,19 +10,24 @@ Admission, asking again every two seconds, losing the helper, asking each new ke
 asked, releasing what a lost source left down, and the emergency chord are RoutedKeySource's own,
 shared with the X route and unchanged. What differs is said here: the X source's part, the wording,
 and a block that only a new helper or the user lifts, since no X display can show that the helper's
-virtual keyboard is read again.
+virtual keyboard is read again. In its place the delivery watch says whether the keys passed on reach
+the desktop, and the helper is given up the moment they are proved not to.
 """
 
 import collections
 import os
 import time
 from functools import partial
+from typing import TYPE_CHECKING
 
 from logHandler import log
 
-from . import VIRTUAL_KEYBOARD, CaptureMode, KeySource, keydClient
+from . import VIRTUAL_KEYBOARD, CaptureMode, KeySource, deliveryWatch, keydClient
 from .route import RoutedKeySource
 from .waylandEnvironment import WaylandEnvironment
+
+if TYPE_CHECKING:
+	from .desktopLayout import LayoutSnapshot
 
 #: What the route asks the helper for. The helper grants those it knows, so this never has to change
 #: as it learns more.
@@ -53,6 +58,7 @@ class WaylandRoute(RoutedKeySource):
 		notify=None,
 		environment: WaylandEnvironment | None = None,
 		holdEvents: float = 0.0,
+		watch: deliveryWatch.DeliveryWatch | None = None,
 	) -> None:
 		"""
 		:param route: One of route.ROUTES; x11 is taken as auto, as there is no X display to read.
@@ -60,11 +66,17 @@ class WaylandRoute(RoutedKeySource):
 			layout and AT-SPI, made as the route starts.
 		:param holdEvents: Seconds the default environment's capture feed holds back window events, for
 			tests.
+		:param watch: Whether the keys passed on reach the desktop; by default one over this desktop's
+			proofs, made as the route starts.
 		"""
 		self._routeLogged = False
 		super().__init__(self._ownRoute(route), socketPath, notify, VIRTUAL_KEYBOARD)
 		self._environment = environment
 		self._holdEvents = holdEvents
+		self._watch = watch
+		#: (the kernel source, why) once the watch has proved that what it passes on goes nowhere, until
+		#: the route's own thread gives it up.
+		self._absent: tuple[KeySource, str] | None = None
 		#: Lines to say, from threads that must not wait on NVDA's speech: said by the route's own thread.
 		self._toSay: collections.deque[str] = collections.deque()
 		self._saidNoHelper = False
@@ -107,16 +119,50 @@ class WaylandRoute(RoutedKeySource):
 				os.environ.get("XDG_CURRENT_DESKTOP"),
 				self._holdEvents or testHooks.captureDelay() / 1000,
 			)
+		watch = self._watch or self._newWatch()
 		environment.onDevice = self._onDevice
 		environment.onNotice = self._onNotice
+		environment.onPassedLock = watch.passedLock
+		environment.onLocks = watch.locks
+		environment.onVirtual = watch.virtual
 		environment.start()
 		with self._lock:
 			self._environment = environment
 			if self._capture[0] != "off":
 				environment.setCapture(*self._capture)
+		self._watch = watch
+		watch.start()
 		log.info(f"{self._withoutKernel}: {why}")
 		if not os.path.exists(self._socketPath):
 			self._sayNoHelper()
+
+	def _newWatch(self) -> deliveryWatch.DeliveryWatch:
+		"""The watch for this desktop. A test's stand-in for the helper puts keys out on no keyboard of
+		its own, so sway is asked only of one the test names, and the record is the test's."""
+		from linuxPlatform import displayServer
+
+		from . import swayLayout
+
+		ownHelper = self._socketPath == keydClient.SOCKET_PATH
+		if ownHelper:
+			from linuxPlatform import logSupport
+
+			recordPath = os.path.join(logSupport.stateDirectory(), deliveryWatch.RECORD_NAME)
+			identifier = swayLayout.VIRTUAL_IDENTIFIER
+		else:
+			recordPath = os.environ.get(deliveryWatch.TEST_RECORD_VARIABLE) or None
+			identifier = os.environ.get(deliveryWatch.TEST_IDENTIFIER_VARIABLE)
+		listing = None
+		if identifier and displayServer.compositor() == "sway":
+			path = swayLayout.socketPath(os.environ.get("XDG_CURRENT_DESKTOP"))
+			if path is not None:
+				listing = deliveryWatch.SwayListing(path, identifier)
+		return deliveryWatch.DeliveryWatch(
+			deliveryWatch.compositorName(),
+			self._onAbsent,
+			record=deliveryWatch.Record(recordPath),
+			listing=listing,
+		)
 
 	def _sayNoHelper(self) -> None:
 		self._saidNoHelper = True
@@ -132,6 +178,8 @@ class WaylandRoute(RoutedKeySource):
 
 	def stop(self) -> None:
 		super().stop()
+		if self._watch is not None:
+			self._watch.stop()
 		environment = self._environment
 		if environment is not None:
 			environment.stop()
@@ -162,6 +210,7 @@ class WaylandRoute(RoutedKeySource):
 
 	def _turn(self) -> None:
 		try:
+			self._giveUpAbsent()
 			super()._turn()
 		finally:
 			while self._toSay:
@@ -225,8 +274,46 @@ class WaylandRoute(RoutedKeySource):
 		super()._onKernelLost(kernel, why, emergency)
 
 	def _dropKernel(self) -> bool:
-		self._dropped = self._kernel
+		kernel = self._dropped = self._kernel
+		if kernel is not None and self._watch is not None:
+			self._watch.released(kernel)
 		return super()._dropKernel()
+
+	def _onKernelHeld(self, kernel: KeySource) -> None:
+		super()._onKernelHeld(kernel)
+		if kernel is self._kernel and self._watch is not None:
+			self._watch.held(kernel)
+
+	def _onAbsent(self, kernel: KeySource, why: str) -> None:
+		"""The watch's word, on its own thread, that what kernel passes on goes nowhere."""
+		self._absent = (kernel, why)
+		self._wake.set()
+
+	def _giveUpAbsent(self) -> None:
+		"""Give the helper up once the keys passed on are proved to go nowhere, and ask it again only once
+		it is another or the user asks: asked at the next look, it would take the keyboard away again."""
+		absent, self._absent = self._absent, None
+		if absent is None or absent[0] is not self._kernel:
+			return
+		self._blocked = self._socketIdentity()
+		self._takingBack = False
+		log.info(
+			f"{self._withoutKernel}: linda-keyd was given up: {absent[1]}; it is asked again once it starts "
+			"again or the user asks"
+		)
+		# Said before the kernel source has stopped, which takes up to half a second, as the helper lets go
+		# the moment its connection closes.
+		self._say(
+			# Translators: Said on Linux in a Wayland session when the desktop does not take the keys NVDA
+			# passes on through linda-keyd, the program that takes the keyboard in the kernel, so NVDA has
+			# let go of the keyboard and has no keys; typing reaches programs without it meanwhile.
+			_(
+				"Keys NVDA passes on do not reach the desktop, so NVDA has let go of the keyboard. "
+				"Start NVDA again once that is put right.",
+			),
+		)
+		self._dropKernel()
+		self._dropped = None
 
 	def _sayFellBack(self) -> None:
 		dropped, self._dropped = self._dropped, None
@@ -298,6 +385,9 @@ class WaylandRoute(RoutedKeySource):
 			self._say(_("NVDA has the keyboard"))
 		if not self._hinted:
 			self._hinted = True
+			if self._watch is not None and self._watch.remembered():
+				log.debug("The rescue hint is not said: keys passed on have reached this desktop before")
+				return
 			self._say(
 				# Translators: Said on Linux in a Wayland session the first time NVDA takes the keyboard
 				# through linda-keyd, the program that takes it in the kernel: what to do should the keys
@@ -374,3 +464,10 @@ class WaylandRoute(RoutedKeySource):
 	def _layout(self):
 		environment = self._environment
 		return environment.queries if environment is not None else None
+
+	@property
+	def layout(self) -> "LayoutSnapshot | None":
+		"""The desktop's keyboard layout as the environment has it now, replaced whole as it changes; None
+		before there is an environment."""
+		environment = self._environment
+		return environment.layout if environment is not None else None
