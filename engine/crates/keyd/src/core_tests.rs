@@ -5603,6 +5603,26 @@ fn a_probe_while_the_session_was_away_proves_nothing() {
     assert!(!T::locks_told(&sent).contains(&LOCK_NUM), "{sent:?}");
 }
 
+/// The session left and came back while the virtual keyboard settled, and is in front as it ends:
+/// what wrote the lights meanwhile may still have been the console or another session, so OLD.
+#[test]
+fn a_probe_while_the_session_was_away_and_back_proves_nothing() {
+    let (mut t, k) = T::probing(0);
+    t.console(X_CONSOLE);
+    t.console(2);
+    t.desktop_writes(LOCK_NUM);
+    t.console(X_CONSOLE);
+    t.logind(front(SESSION, 1000));
+    t.pass(VIRTUAL_SETTLE);
+    let sent = t.sent();
+    assert!(t.w.grabbed(k));
+    assert_eq!(
+        T::virtual_word(&sent),
+        (vec![VIRTUAL_OLD], true),
+        "{sent:?}"
+    );
+}
+
 /// The kernel hands the console's locks to a keyboard as it is made, inside UI_DEV_CREATE and so
 /// before the probe lights it: here Num Lock, as setleds at boot leaves the graphical console. KWin
 /// with every lock off then writes nothing. That is no desktop's write: UNSEEN, and none of the
