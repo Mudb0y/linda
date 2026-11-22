@@ -115,8 +115,15 @@ FOLLOW_BOUND = 5.0
 TRIAL_SETTLE = 1.5
 TO_WINDOW = ["window"]
 TO_FIREFOX = ["linda"]
-#: Why letters land in the wrong place on GNOME today; filled in once the case has measured it.
-RACE_FAULT = ""
+#: Why every letter landed in the wrong place on GNOME in the case's first run, 50 of 50, 47 of the looks
+#: ending unknown. Packages CF and KL mend the feed and the look in wave 4; this turns into a failure
+#: to fail once they do.
+RACE_FAULT = (
+	"on GNOME the window events of an Alt+Tab come after the capture feed's grace, so a letter typed "
+	"100 ms after Alt's release is passed once its look ends unknown: bound for Firefox it reaches the "
+	"page and not Linda, and bound for the window it reaches the window while Linda, its focus still "
+	"in Firefox, runs quick navigation there too"
+)
 
 
 def startLinda(ground: "Ground", settings: dict[str, dict[str, str]]) -> None:

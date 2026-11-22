@@ -95,8 +95,6 @@ VK_NUMPAD5 = 0x65
 VK_LSHIFT = 0xA0
 #: Seconds between the events of a key the leader types, as a person types.
 LEADER_GAP = 0.03
-#: Typed through Remote Access, and never to be found in a log.
-REMOTE_MARKER = "jqzmxkwv"
 
 #: Linda's own windows, as their titles are and as the transcript has what Linda says of them.
 MENU_TITLE = "Linda"
@@ -421,7 +419,7 @@ def remoteAccess(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 			{"sleep": 0.5},
 			*tap(VK_NUMPAD5),
 			{"sleep": 0.5},
-			*typeText(REMOTE_MARKER),
+			*typeText(acceptance.MARKER),
 			{"sleep": 1.0},
 		]
 		answer = lead(ground, steps)
@@ -436,7 +434,7 @@ def remoteAccess(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 			f"through Remote Access the program had {letters}, Num Lock pressed {len(numLocks)} times; "
 			f"Linda's log on its typed keys: {[r.splitlines()[-1] for _t, r in ground.lindaLogRecords('typed key')]}"
 		)
-		assert letters == ["A", "b", "KP_5", *REMOTE_MARKER], letters
+		assert letters == ["A", "b", "KP_5", *acceptance.MARKER], letters
 		assert len(numLocks) % 2 == 0, numLocks
 		assert not [r for r in app if r["key"] in ("KEY_INSERT", "KEY_T")], app
 		virtual = [
@@ -450,7 +448,7 @@ def remoteAccess(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 			ground, {"Linda's log as the leader typed": acceptance.logSince(ground, NVDA_LOG, offset)}
 		)
 		journal = "\n".join(m for _t, m in ground.helperLog(mark))
-		assert REMOTE_MARKER not in journal.casefold(), "the helper's journal holds what the leader typed"
+		assert not acceptance.holdingMarker({"journal": journal}), "the helper's journal holds what was typed"
 		keyboard.chord("KEY_LEFTCTRL", "KEY_A")
 		keyboard.tap("KEY_DELETE")
 		lindaKeyWorks(ground, keyboard)
@@ -612,7 +610,6 @@ def nothingLogged(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 		acceptance.typedMarker(ground, keyboard, NVDA_LOG)
 		journal = ground.shell(f"journalctl -b -o cat --no-pager -u {KEYD} || true")
 		assert not acceptance.holdingMarker({"journal": journal}), "the helper's journal holds what was typed"
-		assert REMOTE_MARKER not in journal.casefold(), "the helper's journal holds what the leader typed"
 		log = ground.shell(f"cat {NVDA_LOG}")
 		lines = acceptance.linesHoldingMarker(log)
 		ground.machine.log(f"nvda.log: {len(lines)} lines hold the marker whole, the first: {lines[:1]}")
