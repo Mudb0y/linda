@@ -95,6 +95,9 @@ RETRY_DELAY_SECONDS = 0.02
 #: How long after the foreground deactivated, with no window activated since, to look for an active
 #: window again.
 RESCAN_DELAYS_SECONDS = (0.25, 1.0)
+#: The same after a shell's own surface deactivated, in a Wayland session: GNOME Shell lets go of the
+#: keyboard for some 2.3 s while it checks a password typed into its prompts, and takes it back.
+SHELL_RESCAN_DELAYS_SECONDS = (0.25, 1.0, 2.0, 3.0, 4.0)
 #: Seconds after a top-level shows at which its states are read, in a Wayland session, for an activation
 #: nothing announced: GTK 4 now and then sends no window event, active state or focus for a window it
 #: maps, whose states say active once it has the keyboard (experiment E3). The keyboard came 20 ms after
@@ -140,6 +143,8 @@ _firstSeen: dict[tuple[str, str], float] = {}
 _retries: list[tuple[float, tuple]] = []
 #: When to look again for an active window, after the foreground deactivated and none took its place.
 _rescans: list[float] = []
+#: Whether those looks have been made longer once, in a Wayland session, for an application that is busy.
+_rescansExtended = False
 #: Roles of event sources, read once each, to know a password field before keeping what it sent.
 _roles: dict[tuple[str, str], str] = {}
 #: The name each accessible was last given by an event, by key.
@@ -147,6 +152,14 @@ _names: dict[tuple[str, str], str] = {}
 #: Whether shown top-levels are read for an activation nothing announced. Only in a Wayland session: in
 #: an X session no toolkit has been seen to miss one, and what is said there stays as it is.
 _probesShown = False
+#: Whether the rules for what the desktops' own shells and lock screens send apply, which were seen only
+#: in a Wayland session: a window activated with no focus found in it leaves NVDA's focus inside it
+#: alone, a focus that waited for its application is not replaced by that window's activation, a focus
+#: in a window wins over the window's activation in the same batch, the events of the window activated
+#: last are heard before NVDA's foreground follows it, GNOME Shell's switcher's choice is never dropped
+#: among its other events, and a shell that lets go of the keyboard, or an application that is busy, is
+#: waited for longer before the desktop is given the focus. In an X session what is said stays as it is.
+_waylandRules = False
 #: Accessibles whose showing or visible state changed, with when, not yet looked at.
 _shown: collections.deque = collections.deque(maxlen=MAX_QUEUED)
 #: Top-levels shown with no window event for them since, by key: the node, when it showed, and how many
@@ -173,7 +186,13 @@ def knownName(node: Node) -> str | None:
 _applicationNames: dict[str, str] = {}
 #: Applications whose only objects that name themselves and vanish at once are status bars: marco's
 #: switcher, a popup that lives about 60 ms, names the window or workspace a key chose in one.
-_SWITCHER_APPLICATIONS = frozenset({"marco"})
+_STATUS_BAR_POPUP_APPLICATIONS = frozenset({"marco"})
+#: Applications whose top-level says it is active while Alt+Tab is held, before the window chosen
+#: does: marco's switcher, GNOME Shell's stage, which holds its switcher, and KWin's switcher, by the
+#: names they give the accessibility bus.
+_SWITCHER_APPLICATIONS = frozenset({"marco", "gnome-shell", "kwin"})
+#: Of those, the ones whose switcher marks the item chosen selected and never gives it the focus.
+_SELECTING_SWITCHERS = frozenset({"gnome-shell"})
 
 
 def _applicationName(busName: str) -> str:
@@ -192,7 +211,7 @@ def _applicationName(busName: str) -> str:
 def roleOfVanished(node: Node) -> str | None:
 	"""The role an accessible gone before its event is handled had, where it can be known."""
 	role = knownRole(node)
-	if role is None and _applicationName(node.busName) in _SWITCHER_APPLICATIONS:
+	if role is None and _applicationName(node.busName) in _STATUS_BAR_POPUP_APPLICATIONS:
 		role = "status bar"
 		_roles[node.key] = role
 	return role
@@ -300,9 +319,25 @@ def _scanForActiveWindow() -> Node | None:
 	return None
 
 
+def _isSwitcherChoice(event) -> bool:
+	"""Whether event is an item of a switcher in _SELECTING_SWITCHERS becoming the one chosen. GNOME Shell
+	selects the first as it shows its switcher, among some thirty other events of its own."""
+	return (
+		event[0] == "object:state-changed:selected"
+		and bool(event[2])
+		and _applicationName(event[1].busName) in _SELECTING_SWITCHERS
+	)
+
+
+def _anyApplicationBusy() -> bool:
+	"""Whether an application has answered slowly within BUSY_SECONDS, which a window it is about to
+	activate waits for."""
+	return any(_clientModule.answeredSlowlyWithin(app.busName, BUSY_SECONDS) for app in applications())
+
+
 def _isSwitcher(window: Node) -> bool:
-	"""Whether window is marco's switcher, which says it is active while Alt is held though it never has
-	the keyboard: a switch is under way, and the window it ends in will say so."""
+	"""Whether window is a switcher's, which says it is active while Alt is held, as marco's does though it
+	never has the keyboard: a switch is under way, and the window it ends in will say so."""
 	return _applicationName(window.busName) in _SWITCHER_APPLICATIONS
 
 
@@ -664,13 +699,14 @@ def _sayThereIsNoBus() -> None:
 
 
 def initialize() -> None:
-	global _listening, _exiting, _probesShown
+	global _listening, _exiting, _probesShown, _waylandRules
 	_exiting = False
 	import core
 
 	from linuxPlatform import displayServer
 
 	_probesShown = displayServer.isWayland()
+	_waylandRules = displayServer.isWayland()
 	if not client().hasBus:
 		core.postNvdaStartup.register(_sayThereIsNoBus)
 		return
@@ -680,7 +716,7 @@ def initialize() -> None:
 
 
 def terminate() -> None:
-	global _listening, _desktopNode, _settleStartedAt, _probePumpAt
+	global _listening, _desktopNode, _settleStartedAt, _probePumpAt, _rescansExtended
 	import core
 
 	core.postNvdaStartup.unregister(_onPostNvdaStartup)
@@ -711,6 +747,9 @@ def terminate() -> None:
 	_topLevels.clear()
 	_underRoot.clear()
 	_focusWhileHung.clear()
+	_activationWhileHung.clear()
+	_switcherEventsWhileHung.clear()
+	_rescansExtended = False
 	_setForeground(None)
 	_settleStartedAt = None
 	_desktopNode = None
@@ -811,6 +850,37 @@ def _focusCandidate(event) -> Node | None:
 	return source
 
 
+def _focusBefore(event, earlier: list) -> bool:
+	"""Whether event is a window's activation with a focus event of the same application among the
+	earlier ones of its batch, which is tried first."""
+	return event[0] == "window:activate" and any(
+		other[0] != "window:activate" and other[1].busName == event[1].busName for other in earlier
+	)
+
+
+def _keepsFocusIn(window: Node) -> bool:
+	"""Whether a window activated with no focus found in it is to leave NVDA's focus where it is: inside
+	that window, on an object that still says it is focused. Plasma's lock screen activated its frame
+	twice just after its password field took the focus, and the frame took it from the field, which was
+	not found in it.
+
+	Only in a Wayland session, where that was seen: what an X session says stays as it is.
+
+	:raise AppHung: The focus's application does not answer.
+	"""
+	import eventHandler
+
+	if not _waylandRules:
+		return False
+	focus = getattr(eventHandler.lastQueuedFocusObject, "node", None)
+	if focus is None or focus == window or not _hasFocusIn(window):
+		return False
+	try:
+		return "focused" in client().states(focus)
+	except NodeGone:
+		return False
+
+
 def _focusKeptIn(container: Node) -> Node | None:
 	"""The focus NVDA has, if it is an item of container that still has the focus: GTK focuses a
 	container again whenever its window gets the keyboard back, as after every NVDA key, while the item
@@ -869,6 +939,15 @@ def _processFocus(event, mayRetry: bool = True) -> bool:
 	if node is None:
 		log.debug(f"AT-SPI focus: {event[0]} on {source} no longer holds")
 		return False
+	if event[0] == "window:activate" and node == source:
+		try:
+			kept = _keepsFocusIn(source)
+		except AppHung:
+			_deferWhileHung(event)
+			return True
+		if kept:
+			log.debug(f"AT-SPI focus: {event[0]} on {source} leaves the focus inside it where it is")
+			return True
 	# Toolkits announce one focus several times, and a bounce can announce it again; NVDA on Windows
 	# drops a repeat of the last queued focus in the same layer.
 	last = eventHandler.lastQueuedFocusObject
@@ -901,6 +980,7 @@ def _processFocus(event, mayRetry: bool = True) -> bool:
 			_retries.append((time.monotonic() + INVALID_RETRY_SECONDS, again))
 		return False
 	_focusWhileHung.clear()
+	_activationWhileHung.clear()
 	eventHandler.queueEvent("gainFocus", obj)
 	return True
 
@@ -908,6 +988,10 @@ def _processFocus(event, mayRetry: bool = True) -> bool:
 #: The newest focus event from each application that stopped answering while it was handled, with when,
 #: handled again once the application answers.
 _focusWhileHung: dict[str, tuple[tuple, float]] = {}
+#: In a Wayland session, a window:activate from such an application that came while the focus event of
+#: an object waited, handled after it: Plasma's lock screen, slow to answer as it started, activated
+#: its frame after its password field took the focus, and the frame cannot say the field is in it.
+_activationWhileHung: dict[str, tuple] = {}
 #: Seconds after which such a focus event is given up.
 HUNG_FOCUS_SECONDS = 10.0
 #: Seconds before the focus is looked for again when the object a focus event named went as it was read.
@@ -922,8 +1006,47 @@ def _deferWhileHung(event) -> None:
 	log.debug(f"AT-SPI focus: {event[0]} on {event[1]} waits for its application to answer")
 	busName = event[1].busName
 	waiting = _focusWhileHung.get(busName)
-	_focusWhileHung[busName] = (event, waiting[1] if waiting else time.monotonic())
+	if (
+		_waylandRules
+		and waiting is not None
+		and event[0] == "window:activate"
+		and waiting[0][0] != "window:activate"
+	):
+		_activationWhileHung[busName] = event
+	else:
+		_activationWhileHung.pop(busName, None)
+		_focusWhileHung[busName] = (event, waiting[1] if waiting else time.monotonic())
 	core.requestPump()
+
+
+#: In a Wayland session, the choices and renamings of a switcher in _SELECTING_SWITCHERS that could not
+#: be read because it did not answer, by bus name, with since when, handled once it answers: GNOME
+#: Shell, drawing its window switcher's thumbnails, did not answer as it selected the first window.
+_switcherEventsWhileHung: dict[str, tuple[float, list]] = {}
+#: How many such events are kept for each switcher, the newest.
+MAX_SWITCHER_EVENTS_WHILE_HUNG = 20
+
+
+def _holdWhileHung(event, now: float) -> None:
+	import core
+
+	since, held = _switcherEventsWhileHung.get(event[1].busName, (now, []))
+	held.append(event)
+	_switcherEventsWhileHung[event[1].busName] = (since, held[-MAX_SWITCHER_EVENTS_WHILE_HUNG:])
+	core.requestPump()
+
+
+def _switcherEventsAnswered(now: float) -> list:
+	"""The held events of each switcher that answers again, in the order they came; those of one that
+	has not answered for HUNG_FOCUS_SECONDS are given up."""
+	answered = []
+	for busName, (since, held) in list(_switcherEventsWhileHung.items()):
+		if now - since > HUNG_FOCUS_SECONDS:
+			del _switcherEventsWhileHung[busName]
+		elif not client().isHung(busName):
+			del _switcherEventsWhileHung[busName]
+			answered += held
+	return answered
 
 
 def _resumeFocusIn(event, since: float) -> None:
@@ -988,6 +1111,13 @@ def _nvdaEvents(event) -> list[str]:
 	if eventType == "object:property-change:accessible-name":
 		try:
 			role = client().role(source)
+		except AppHung:
+			if _waylandRules:
+				# Not gone: asked again once its application answers, where that is kept for.
+				raise
+			role = roleOfVanished(source)
+			if role is None:
+				return []
 		except NodeGone:
 			role = roleOfVanished(source)
 			if role is None:
@@ -1025,6 +1155,15 @@ def _shouldAccept(nvdaEvent: str, node: Node) -> bool:
 	for obj in (api.getFocusObject(), api.getForegroundObject()):
 		if getattr(obj, "node", None) is not None and obj.node.busName == node.busName:
 			return True
+	if (
+		_waylandRules
+		and _foregroundActive
+		and _foreground is not None
+		and _foreground.busName == node.busName
+	):
+		# The window activated in this batch, whose focus NVDA has not had yet: GNOME Shell selects its
+		# switcher's first choice in the batch that activates the switcher.
+		return True
 	return nvdaEvent in _backgroundEventsOf(node)
 
 
@@ -1358,6 +1497,7 @@ def _probeShown(events: list, now: float) -> list:
 
 
 def pumpAll() -> None:
+	global _rescansExtended
 	import core
 	import eventHandler
 
@@ -1389,11 +1529,18 @@ def pumpAll() -> None:
 				# focus never left it.
 				if window != left:
 					due.append(("window:activate", window, 0, 0, None))
+			elif not _rescans and _waylandRules and not _rescansExtended and _anyApplicationBusy():
+				# KWin, building its switcher the first time it is asked for, answered nothing for two
+				# seconds, and the desktop would have been said before the switcher.
+				_rescansExtended = True
+				_rescans[:] = [now + delay for delay in SHELL_RESCAN_DELAYS_SECONDS]
 			elif not _rescans:
 				_focusDesktop()
 	with _queueLock:
 		events = list(_queue)
 		_queue.clear()
+	if _switcherEventsWhileHung:
+		events = _switcherEventsAnswered(now) + events
 	for event in events:
 		if event[0] == "object:active-descendant-changed":
 			_heldDescendantChanges.pop(event[1].key, None)
@@ -1408,11 +1555,12 @@ def pumpAll() -> None:
 	for busName, (event, since) in list(_focusWhileHung.items()):
 		if now - since > HUNG_FOCUS_SECONDS:
 			del _focusWhileHung[busName]
+			_activationWhileHung.pop(busName, None)
 		elif not client().isHung(busName):
 			del _focusWhileHung[busName]
 			log.debug(f"AT-SPI focus: trying {event[0]} on {event[1]} again")
 			resumed.append((event, since))
-	if _retries or _rescans or _focusWhileHung:
+	if _retries or _rescans or _focusWhileHung or _switcherEventsWhileHung:
 		core.requestPump()
 	if not events and not due and not resumed and not released and not found:
 		if _heldDescendantChanges:
@@ -1425,8 +1573,13 @@ def pumpAll() -> None:
 	for event in released:
 		_processFocus(event)
 	for event, since in resumed:
+		# Taken first: a focus that holds forgets every event still waiting.
+		activation = _activationWhileHung.pop(event[1].busName, None)
 		if not _processFocus(event, mayRetry=False):
 			_resumeFocusIn(event, since)
+		if activation is not None:
+			log.debug(f"AT-SPI focus: trying {activation[0]} on {activation[1]} after it")
+			_processFocus(activation, mayRetry=False)
 	if len(_firstSeen) > MAX_QUEUED:
 		for key in [k for k, at in _firstSeen.items() if now - at >= NEW_OBJECT_SECONDS]:
 			del _firstSeen[key]
@@ -1470,6 +1623,7 @@ def pumpAll() -> None:
 			or _isBlur(event)
 			or event[0] in WINDOW_ACTIVATION_EVENTS
 			or event[0] == ANNOUNCEMENT_EVENT
+			or (_waylandRules and _isSwitcherChoice(event))
 		):
 			continue
 		node = event[1]
@@ -1479,9 +1633,20 @@ def pumpAll() -> None:
 				overLimit.add(index)
 
 	def flushFocus() -> None:
-		for focusEvent in reversed(focusEvents):
+		activations: list = []
+		for index in range(len(focusEvents) - 1, -1, -1):
+			focusEvent = focusEvents[index]
+			if _waylandRules and _focusBefore(focusEvent, focusEvents[:index]):
+				# Qt Quick's windows, KWin's switcher and Plasma's lock screen among them, cannot say what
+				# in them has the focus; the object that said so before the window was activated can.
+				activations.append(focusEvent)
+				continue
 			if _processFocus(focusEvent):
 				break
+		else:
+			for focusEvent in activations:
+				if _processFocus(focusEvent):
+					break
 		focusEvents.clear()
 
 	for index, event in enumerate(kept):
@@ -1513,6 +1678,16 @@ def pumpAll() -> None:
 			continue
 		try:
 			nvdaEvents = _nvdaEvents(event)
+		except AppHung:
+			if _waylandRules and (
+				_isSwitcherChoice(event)
+				or (
+					eventType == "object:property-change:accessible-name"
+					and _applicationName(event[1].busName) in _SELECTING_SWITCHERS
+				)
+			):
+				_holdWhileHung(event, now)
+			continue
 		except NodeGone:
 			continue
 		if not nvdaEvents:
@@ -1541,6 +1716,10 @@ def pumpAll() -> None:
 		# without that window saying so, as when a dialog closes, nor does it always say so at once. The
 		# look asks every application, one of which may be busy, so it waits until what came with the
 		# deactivation has been spoken: marco's switcher names the window Alt+Tab chose just after.
-		_rescans[:] = [now + delay for delay in (SETTLE_QUIET_SECONDS, *RESCAN_DELAYS_SECONDS)]
+		delays = RESCAN_DELAYS_SECONDS
+		if _waylandRules and _foreground is not None and _isSwitcher(_foreground):
+			delays = SHELL_RESCAN_DELAYS_SECONDS
+		_rescans[:] = [now + delay for delay in (SETTLE_QUIET_SECONDS, *delays)]
+		_rescansExtended = False
 		core.requestPump()
 	log.debug(f"AT-SPI pump: {len(events)} raw events, {len(kept)} after coalescing")

@@ -19,13 +19,5 @@ def run(ground: "Ground") -> None:
 	ground.machine.log(f"the desktop: {json.dumps(ground.focus('facts'))}")
 	# E9 found KWin and plasmashell on the bus once a reader claims it, and the greeter is a Qt program
 	# that starts after Linda's claim. A key that is no character wakes it without typing into it.
-	figures = lockScreen.run(
-		ground,
-		promptIsRead=True,
-		raisePrompt=["KEY_LEFTCTRL"],
-		promptFault=(
-			"the greeter's window:activate after its password field took the focus moves Linda's focus "
-			"back to the greeter's frame, which cuts the field's announcement off before the synth has it"
-		),
-	)
+	figures = lockScreen.run(ground, promptIsRead=True, raisePrompt=["KEY_LEFTCTRL"])
 	ground.machine.log("LK figures " + json.dumps(figures, sort_keys=True))
