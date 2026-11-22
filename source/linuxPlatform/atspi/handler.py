@@ -869,8 +869,6 @@ def _keepsFocusIn(window: Node) -> bool:
 	not found in it.
 
 	Only in a Wayland session, where that was seen: what an X session says stays as it is.
-
-	:raise AppHung: The focus's application does not answer.
 	"""
 	import eventHandler
 
@@ -943,15 +941,9 @@ def _processFocus(event, mayRetry: bool = True) -> bool:
 	if node is None:
 		log.debug(f"AT-SPI focus: {event[0]} on {source} no longer holds")
 		return False
-	if event[0] == "window:activate" and node == source:
-		try:
-			kept = _keepsFocusIn(source)
-		except AppHung:
-			_deferWhileHung(event)
-			return True
-		if kept:
-			log.debug(f"AT-SPI focus: {event[0]} on {source} leaves the focus inside it where it is")
-			return True
+	if event[0] == "window:activate" and node == source and _keepsFocusIn(source):
+		log.debug(f"AT-SPI focus: {event[0]} on {source} leaves the focus inside it where it is")
+		return True
 	# Toolkits announce one focus several times, and a bounce can announce it again; NVDA on Windows
 	# drops a repeat of the last queued focus in the same layer.
 	last = eventHandler.lastQueuedFocusObject
