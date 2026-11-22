@@ -42,8 +42,8 @@ OTHER_LAYOUT = "The desktop gives linda-keyd's keyboard another layout than your
 PRESENT = "Keys NVDA passes on reach the desktop: sway lists linda-keyd's keyboard with its events on"
 DISABLED = "Keys NVDA passes on do not reach the desktop: sway takes no events from linda-keyd's keyboard"
 NOT_HINTED = "The rescue hint is not said: keys passed on have reached this desktop before"
-UNANSWERED = re.compile(r"Key delivery: (\d+) lock keys passed on running were not answered")
-SWAY_SAYS = "sway says it takes linda-keyd's keyboard's events, so that proves nothing"
+UNANSWERED = re.compile(r"Key delivery: \d+ lock keys passed on running were not answered")
+DECLINED = "lock keys passed on running were not answered, which proves nothing"
 #: The helper's journal as a client is admitted, and as it lets go when its client goes.
 ADMITTED = "admitted process "
 HELPER_LET_GO = "let go of every keyboard: the client went"
@@ -238,12 +238,11 @@ def remaps(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 		swaymsg(ground, "input", "type:keyboard", "xkb_options", "caps:escape")
 		ground.settle(1)
 		capsPresses(ground, keyboard, "Escape")
-		counts = [int(m.group(1)) for m in UNANSWERED.finditer(ground.lindaLog())]
-		guarded = len(ground.lindaLogRecords(SWAY_SAYS))
-		ground.machine.log(
-			f"Linda's layout without caps:escape: {len(counts)} Caps Locks went unanswered, most {max(counts, default=0)} "
-			f"running; sway's listing held {guarded} times"
-		)
+		declined = [record for _t, record in ground.lindaLogRecords(DECLINED)]
+		ground.machine.log(f"Linda's layout without caps:escape: {declined}")
+		# Once for the hold, and for the layout, which on sway cannot hold sway's own options.
+		assert len(declined) == 1, declined
+		assert "NVDA's layout comes from " in declined[0], declined
 
 	with ground.subtest("Linda's layout with caps:escape: twenty Caps Locks are no lock keys"):
 		# Caps Lock's key stays a Linda key by where it is whatever it types, and would be kept.

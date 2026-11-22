@@ -189,8 +189,13 @@ def test_aLayoutWithoutTheDesktopsOptionsTakesNoEcho(tmp_path: Path):
 	assert value["kernel"]
 	assert value["said"] == [HINT]
 	assert value["unanswered"] == 4
-	assert not [line for line in value["lines"] if "do not reach" in line], value["lines"]
-	assert value["lines"][0].startswith(f"Key delivery: NVDA's layout comes from {value['layout']},")
+	# One line for the hold, not one for each press after the second, which would say when each came.
+	assert value["lines"] == [
+		(
+			"Key delivery: 2 lock keys passed on running were not answered, which proves nothing: NVDA's "
+			f"layout comes from {value['layout']}, which may not hold the desktop's own options"
+		)
+	]
 
 
 TYPED_MATCH_CHILD = r"""
@@ -210,6 +215,7 @@ result = {
 	"state": source._watch.state,
 	"unanswered": source._watch._unanswered,
 	"since": sum("a character typed has matched since" in line for line in logged.lines),
+	"perPress": sum("lock keys passed on running" in line for line in logged.lines),
 }
 source.stop()
 """
@@ -223,7 +229,9 @@ def test_aCharacterTypedSinceTheLastAnswerKeepsTheKeyboard(tmp_path: Path):
 	# The match is a proof of presence of its own.
 	assert value["state"] == "present"
 	assert value["unanswered"] == 4
-	assert value["since"] == 3
+	# Said once for the hold, though three presses ran on unanswered.
+	assert value["since"] == 1
+	assert value["perPress"] == 1
 
 
 UNANSWERED_LIGHT_CHILD = r"""

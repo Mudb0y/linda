@@ -285,6 +285,8 @@ class DeliveryWatch:
 		self._unanswered = 0
 		self._virtual: int | None = None
 		self._remembered = False
+		#: Whether this hold has logged that the echo proved nothing.
+		self._echoDeclined = False
 
 	def start(self) -> None:
 		if self._listing is not None:
@@ -390,6 +392,7 @@ class DeliveryWatch:
 		self._pending.clear()
 		self._unanswered = 0
 		self._virtual = None
+		self._echoDeclined = False
 		self.state = UNKNOWN
 
 	def _on_released(self, source: object) -> None:
@@ -445,22 +448,27 @@ class DeliveryWatch:
 			if press.followed or not press.light & self._answered or not holding:
 				continue
 			self._unanswered += 1
-			log.debug(f"Key delivery: {self._unanswered} lock keys passed on running were not answered")
 			if self._unanswered < ECHO_RUN:
 				continue
 			if (layout := self._layoutSource()) not in ECHO_LAYOUTS:
-				log.debug(
-					f"Key delivery: NVDA's layout comes from {layout or 'nowhere known'}, which may not hold "
-					"the desktop's own options, so that proves nothing"
+				why = (
+					f"NVDA's layout comes from {layout or 'nowhere known'}, which may not hold the desktop's "
+					"own options"
 				)
 			elif self._matches() != self._matchesAtAnswer:
-				log.debug("Key delivery: a character typed has matched since, so that proves nothing")
+				why = "a character typed has matched since"
 			elif self._listed is not None and self._listed.listed and self._listed.eventsEnabled:
-				log.debug(
-					"Key delivery: sway says it takes linda-keyd's keyboard's events, so that proves nothing"
-				)
+				why = "sway says it takes linda-keyd's keyboard's events"
 			else:
 				self._absent("lock keys passed on changed no light, which the desktop has answered before")
+				return
+			# Once a hold, as a line for each press would say when a lock key was pressed.
+			if not self._echoDeclined:
+				self._echoDeclined = True
+				log.debug(
+					f"Key delivery: {ECHO_RUN} lock keys passed on running were not answered, which proves "
+					f"nothing: {why}"
+				)
 
 	def _takeListing(self, listed: Listing) -> None:
 		self._listed = listed
