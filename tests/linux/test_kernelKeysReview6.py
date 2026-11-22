@@ -7,8 +7,12 @@ still taken for Caps Lock. Each test fails while the fault is there. Run under t
 
 from pathlib import Path
 
+import harness
 import pytest
 from test_kernelKeys import runKernelChild
+
+#: keydClient's lights, as the tests do not import the product.
+LOCK_NUM, LOCK_CAPS, LOCK_SCROLL = 1, 2, 4
 
 BUSY_MESSAGE = (
 	"Another program holds linda-keyd for this session, so NVDA takes its keys from the X display. "
@@ -210,3 +214,65 @@ def test_fault_capsLockKeyMadeControlIsNoModifier(tmp_path: Path, route: str):
 		f"NVDA took it for browse mode's h and not Control+h: {value}"
 	)
 	assert value["window"] == [[58, True], [35, True], [35, False], [58, False]], value
+
+
+#: The tables kernel.py builds for the owner's layouts, with and without the option NixOS sets: which
+#: modifiers the Caps Lock, Num Lock and Scroll Lock keys count as, and which light each key changes.
+OWNER_TABLES_CHILD = r"""
+from xkbcommon import xkb
+from linuxPlatform.keys import kernel
+
+result = []
+for model in ("pc104", "pc105"):
+	for layout in ("pl", "us"):
+		for options in (None, "terminate:ctrl_alt_bksp"):
+			keymap = xkb.Context().keymap_new_from_names(rules="evdev", model=model, layout=layout, options=options)
+			tables = kernel._tables(keymap, (), (0, 0, 0))
+			result.append(
+				{
+					"names": [model, layout, options],
+					"lockMods": {str(k): tables.keyMods[k] for k in (66, 77, 78) if k in tables.keyMods},
+					"lockLights": {str(k): v for k, v in tables.lockLights.items()},
+				}
+			)
+"""
+
+
+def test_ownerLockKeysAreNoModifiers(tmp_path: Path):
+	done = harness.runChild(tmp_path, OWNER_TABLES_CHILD)
+	assert done.error is None, f"{done.error}\n{done.stderr[-6000:]}"
+	lights = {"66": LOCK_CAPS, "77": LOCK_NUM, "78": LOCK_SCROLL}
+	for tables in done.value:
+		# Held, a lock key holds no modifier: the Caps Lock key counted as Lock would be put down through
+		# XTEST under a key NVDA passes on, and turn Caps Lock on in the X server.
+		assert tables["lockMods"] == {}, tables
+		assert tables["lockLights"] == lights, tables
+
+
+#: Insert is the only NVDA key, and Insert+Caps_Lock+x is pressed, of which NVDA passes x on: whether
+#: Caps Lock in the X server is as it was, and what the window has.
+CAPS_UNDER_NVDA_KEY_CHILD = r"""
+import desktopSession
+keep = lambda event: event.vkCode != ord("X")
+source = startSource(consumed=x11.EXTENDED_INSERT)
+before = desktopSession.capsLockIsOn()
+keyboard.press("Insert+Caps_Lock+x")
+time.sleep(0.5)
+result = {
+	"kernel": source.isKernel,
+	"before": before,
+	"after": desktopSession.capsLockIsOn(),
+	"window": windowKeys(),
+}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_capsLockUnderTheNVDAKeyStaysOutOfTheXServer(tmp_path: Path):
+	value = runKernelChild(tmp_path, CAPS_UNDER_NVDA_KEY_CHILD)
+	assert value["kernel"], value
+	assert value["after"] == value["before"], (
+		f"Insert+Caps_Lock+x with x passed on changed Caps Lock in the X server: {value}"
+	)
+	assert value["window"] == [[45, True], [45, False]], value
