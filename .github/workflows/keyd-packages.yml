@@ -1,0 +1,167 @@
+# linda-keyd's packages for Debian and Ubuntu, Fedora and Arch Linux: built with Nix, installed and
+# removed in a container of each distribution, and published from main as the assets of the release
+# tagged linda-keyd, whose addresses stay the same from one build to the next.
+name: linda-keyd packages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - engine/Cargo.toml
+      - engine/Cargo.lock
+      - engine/crates/keyd/**
+      - linux/keyd/**
+      - meson.build
+      - meson.options
+      - packaging/**
+      - nix/keyd-packages.nix
+      - flake.nix
+      - flake.lock
+      - .github/workflows/keyd-packages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A run publishing while another replaces the same assets could leave a mixed set.
+concurrency:
+  group: keyd-packages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - id: build
+        name: Build the packages
+        run: |
+          nix build --print-build-logs --out-link deb .#linda-keyd-deb
+          nix build --print-build-logs --out-link rpm .#linda-keyd-rpm
+          nix build --print-build-logs --out-link arch .#linda-keyd-arch
+          mkdir dist
+          # Names without the version, so that the release's addresses do not change.
+          cp deb/*.deb dist/linda-keyd_amd64.deb
+          cp rpm/*.rpm dist/linda-keyd.x86_64.rpm
+          cp arch/*.pkg.tar.zst dist/linda-keyd-x86_64.pkg.tar.zst
+          echo "version=$(nix eval --raw .#linda-keyd-deb.version)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist/
+          if-no-files-found: error
+
+  install:
+    needs: build
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    # The Fedora package is meant to install on openSUSE too; until a run shows it does, a failure
+    # there does not hold the others back.
+    continue-on-error: ${{ matrix.image == 'opensuse/tumbleweed' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:13
+            file: linda-keyd_amd64.deb
+            libdir: /usr/lib/x86_64-linux-gnu
+            install: apt-get update && apt-get install --yes ./linda-keyd_amd64.deb
+            remove: apt-get purge --yes linda-keyd
+          - image: ubuntu:26.04
+            file: linda-keyd_amd64.deb
+            libdir: /usr/lib/x86_64-linux-gnu
+            install: apt-get update && apt-get install --yes ./linda-keyd_amd64.deb
+            remove: apt-get purge --yes linda-keyd
+          - image: fedora:latest
+            file: linda-keyd.x86_64.rpm
+            libdir: /usr/lib64
+            # Fedora 45 refuses a package without a signature unless told; the package is unsigned
+            # until there is a signed repository.
+            install: dnf install --assumeyes --no-gpgchecks ./linda-keyd.x86_64.rpm
+            remove: dnf remove --assumeyes linda-keyd
+          - image: archlinux:latest
+            file: linda-keyd-x86_64.pkg.tar.zst
+            libdir: /usr/lib
+            install: pacman -Syu --noconfirm && pacman -U --noconfirm ./linda-keyd-x86_64.pkg.tar.zst
+            remove: pacman -R --noconfirm linda-keyd
+          - image: opensuse/tumbleweed
+            file: linda-keyd.x86_64.rpm
+            libdir: /usr/lib64
+            install: zypper --non-interactive install --allow-unsigned-rpm ./linda-keyd.x86_64.rpm
+            remove: zypper --non-interactive remove linda-keyd
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+      - name: Install
+        run: ${{ matrix.install }}
+      - name: Check the files, the user, the unit and the helper
+        env:
+          LIBDIR: ${{ matrix.libdir }}
+        run: |
+          set -eu
+          test -x "$LIBDIR/linda/linda-keyd"
+          for file in \
+            /usr/lib/systemd/system/linda-keyd.service \
+            /usr/lib/sysusers.d/linda-keyd.conf \
+            /usr/lib/modules-load.d/linda-keyd.conf \
+            /usr/share/polkit-1/actions/io.github.mudb0y.linda.keyd.policy
+          do
+            test -f "$file"
+          done
+          grep -qx "ExecStart=$LIBDIR/linda/linda-keyd" /usr/lib/systemd/system/linda-keyd.service
+          getent passwd linda-keyd
+          systemd-analyze verify /usr/lib/systemd/system/linda-keyd.service
+          "$LIBDIR/linda/linda-keyd" --version
+      - name: Remove
+        run: ${{ matrix.remove }}
+      - name: Check that nothing is left
+        env:
+          LIBDIR: ${{ matrix.libdir }}
+        run: |
+          set -eu
+          for file in \
+            "$LIBDIR/linda/linda-keyd" \
+            /usr/lib/systemd/system/linda-keyd.service \
+            /usr/lib/sysusers.d/linda-keyd.conf \
+            /usr/lib/modules-load.d/linda-keyd.conf \
+            /usr/share/polkit-1/actions/io.github.mudb0y.linda.keyd.policy \
+            /etc/systemd/system/multi-user.target.wants/linda-keyd.service
+          do
+            if [ -e "$file" ] || [ -L "$file" ]; then
+              echo "left behind: $file"
+              exit 1
+            fi
+          done
+
+  publish:
+    needs: [build, install]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - name: Point the tag at this commit
+        run: |
+          gh api --method PATCH "repos/$GH_REPO/git/refs/tags/linda-keyd" -f sha="$GITHUB_SHA" -F force=true ||
+            gh api --method POST "repos/$GH_REPO/git/refs" -f ref=refs/tags/linda-keyd -f sha="$GITHUB_SHA"
+      - name: Publish the packages
+        run: |
+          notes="linda-keyd $VERSION, built from $GITHUB_SHA. Each build from main replaces these packages; the readme's section linda-keyd on other distributions says how to install and update them."
+          if gh release view linda-keyd > /dev/null 2>&1; then
+            gh release edit linda-keyd --notes "$notes" --latest=false
+            gh release upload linda-keyd dist/* --clobber
+          else
+            gh release create linda-keyd dist/* --title "linda-keyd packages" --notes "$notes" --latest=false
+          fi
