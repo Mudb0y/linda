@@ -29,7 +29,7 @@ let
     wl65 = "25.11";
     wl66 = "26.05";
   };
-  # 25.11 has no Plasma Login Manager, so the older Plasma guests sign in through SDDM.
+  # guestPlasmaOld.nix falls back to SDDM where the release, 25.11, has no Plasma Login Manager.
   olderGuests = {
     wlGnome = ./guestGnome.nix;
     wlPlasma = ./guestPlasmaOld.nix;
