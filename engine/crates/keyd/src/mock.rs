@@ -10,9 +10,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::device::{
-    Devices, Found, GrabError, Guard, InputEvent, Keyboard, ReadError, VirtualKeyboard,
+    Devices, Found, GrabError, Guard, InputEvent, Keyboard, Lights, ReadError, VirtualKeyboard,
 };
-use crate::keys::{self, Assessment, Description, EV_KEY, EV_SYN, KeySet, SYN_DROPPED, SYN_REPORT};
+use crate::keys::{
+    self, Assessment, Description, EV_KEY, EV_SYN, KeySet, LEDS, SYN_DROPPED, SYN_REPORT,
+};
 
 struct Wake {
     ours: UnixStream,
@@ -66,8 +68,29 @@ struct Virt {
     down: KeySet,
     /// Destroyed by the guard, from outside the loop, which still has it: it takes no more keys.
     destroyed: bool,
-    from_desktop: VecDeque<u16>,
+    /// Its lights as the kernel holds them, and each change of them the kernel has handed the device
+    /// and the helper has not read, whoever made it, as (light, on).
+    leds: u16,
+    handed: VecDeque<(u16, bool)>,
+    /// The lights the helper set itself, each time it did.
+    own: Vec<u16>,
     wake: Option<Arc<Wake>>,
+}
+
+impl Virt {
+    /// A write of lights to the device, by a reader or by the helper: as the kernel does, only what
+    /// changes is kept and handed to the device.
+    fn write_leds(&mut self, lights: &[(u16, bool)]) {
+        for &(code, on) in lights {
+            if (self.leds & 1 << code != 0) != on {
+                self.leds ^= 1 << code;
+                self.handed.push_back((code, on));
+            }
+        }
+        if let Some(w) = &self.wake {
+            w.poke();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -307,13 +330,25 @@ impl World {
         self.lock().virt.down.clone()
     }
 
-    /// The X server or the console sets the lock lights on the virtual keyboard.
+    /// The X server, the compositor or the console sets every lock light on the virtual keyboard.
     pub fn desktop_sets_leds(&self, leds: u16) {
-        let mut s = self.lock();
-        s.virt.from_desktop.push_back(leds);
-        if let Some(w) = &s.virt.wake {
-            w.poke();
-        }
+        let lights: Vec<(u16, bool)> = LEDS.iter().map(|c| (*c, leds & 1 << c != 0)).collect();
+        self.desktop_writes_leds(&lights);
+    }
+
+    /// A reader of the virtual keyboard writes some of its lights, as (light, on).
+    pub fn desktop_writes_leds(&self, lights: &[(u16, bool)]) {
+        self.lock().virt.write_leds(lights);
+    }
+
+    /// The virtual keyboard's lights, as the kernel holds them.
+    pub fn virtual_leds(&self) -> u16 {
+        self.lock().virt.leds
+    }
+
+    /// The lights the helper set on the virtual keyboard itself, each time it did.
+    pub fn own_leds(&self) -> Vec<u16> {
+        self.lock().virt.own.clone()
     }
 }
 
@@ -328,6 +363,7 @@ pub struct MockKeyboard {
 pub struct MockVirtual {
     world: World,
     wake: Arc<Wake>,
+    leds: Lights,
 }
 
 impl Devices for MockDevices {
@@ -381,6 +417,7 @@ impl Devices for MockDevices {
         Ok(MockVirtual {
             world: self.0.clone(),
             wake,
+            leds: Lights::default(),
         })
     }
 
@@ -518,8 +555,35 @@ impl VirtualKeyboard for MockVirtual {
     }
 
     fn read_leds(&mut self) -> io::Result<Option<u16>> {
+        self.take_leds();
+        Ok(self.leds.read())
+    }
+
+    fn set_own_leds(&mut self, leds: u16) -> io::Result<()> {
+        self.take_leds();
+        let lights: Vec<(u16, bool)> = self
+            .leds
+            .own(leds, &LEDS)
+            .into_iter()
+            .map(|(code, value)| (code, value != 0))
+            .collect();
+        let mut s = self.world.lock();
+        if s.fail_emit || s.virt.destroyed {
+            return Err(io::Error::from_raw_os_error(libc::ENODEV));
+        }
+        s.virt.own.push(leds);
+        s.virt.write_leds(&lights);
+        Ok(())
+    }
+}
+
+impl MockVirtual {
+    fn take_leds(&mut self) {
         self.wake.drain();
-        Ok(self.world.lock().virt.from_desktop.drain(..).next_back())
+        let handed: Vec<(u16, bool)> = self.world.lock().virt.handed.drain(..).collect();
+        for (code, on) in handed {
+            self.leds.event(code, on);
+        }
     }
 }
 
@@ -534,6 +598,9 @@ impl Drop for MockVirtual {
         s.virt.down = KeySet::new();
         s.virt.exists = false;
         s.virt.wake = None;
+        // The next is a new device, which starts with every light off.
+        s.virt.leds = 0;
+        s.virt.handed.clear();
     }
 }
 

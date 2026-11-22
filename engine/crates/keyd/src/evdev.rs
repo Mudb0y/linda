@@ -24,7 +24,7 @@ use rustix::fs::inotify;
 use rustix::ioctl::{Direction, Opcode, opcode};
 
 use crate::device::{
-    Devices, Found, GrabError, Guard, InputEvent, Keyboard, ReadError, VirtualKeyboard,
+    Devices, Found, GrabError, Guard, InputEvent, Keyboard, Lights, ReadError, VirtualKeyboard,
 };
 use crate::keys::{
     self, Assessment, Description, EV_KEY, EV_LED, EV_MAX, EV_REP, EV_SYN, KEY_CNT, KEY_MAX,
@@ -562,7 +562,7 @@ impl Devices for Evdev {
             grabs: self.grabs.clone(),
             kept: self.uinput.clone(),
             dir: PathBuf::new(),
-            leds: 0,
+            leds: Lights::default(),
             down: VirtualDown::default(),
         };
         let mut name = [0u8; 64];
@@ -778,8 +778,8 @@ pub struct EvVirtual {
     kept: Arc<Mutex<Option<File>>>,
     /// Its directory in sysfs, inputN.
     dir: PathBuf,
-    /// The lights as the desktop set them, from which the kernel sends only changes.
-    leds: u16,
+    /// The lights as the kernel has them, from which it sends only changes.
+    leds: Lights,
     down: VirtualDown,
 }
 
@@ -823,22 +823,40 @@ impl VirtualKeyboard for EvVirtual {
     }
 
     fn read_leds(&mut self) -> io::Result<Option<u16>> {
+        self.take_leds()?;
+        Ok(self.leds.read())
+    }
+
+    fn set_own_leds(&mut self, leds: u16) -> io::Result<()> {
+        // What came before is read first, so that the echo awaited is of what this write changes.
+        self.take_leds()?;
+        let mut events: Vec<(u16, u16, i32)> = self
+            .leds
+            .own(leds, &LEDS)
+            .into_iter()
+            .map(|(code, value)| (EV_LED, code, value))
+            .collect();
+        if events.is_empty() {
+            return Ok(());
+        }
+        events.push((EV_SYN, SYN_REPORT, 0));
+        (&self.file).write_all(&event_bytes(&events))
+    }
+}
+
+impl EvVirtual {
+    /// Follows every light the kernel has handed the device.
+    fn take_leds(&mut self) -> io::Result<()> {
         let mut events = Vec::new();
         match read_events(&self.file, &mut events) {
             Ok(()) => {}
             Err(ReadError::Gone) => return Err(io::Error::from_raw_os_error(libc::ENODEV)),
             Err(ReadError::Io(e)) => return Err(e),
         }
-        let mut changed = false;
-        for e in events.iter().filter(|e| e.kind == EV_LED && e.code < 16) {
-            if e.value != 0 {
-                self.leds |= 1 << e.code;
-            } else {
-                self.leds &= !(1 << e.code);
-            }
-            changed = true;
+        for e in events.iter().filter(|e| e.kind == EV_LED) {
+            self.leds.event(e.code, e.value != 0);
         }
-        Ok(changed.then_some(self.leds))
+        Ok(())
     }
 }
 

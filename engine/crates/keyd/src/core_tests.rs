@@ -1340,7 +1340,8 @@ fn unknown_features_are_not_granted() {
     t.take();
     assert!(matches!(
         t.sent()[0],
-        ToClient::Welcome { features, .. } if features == FEATURE_TYPING | FEATURE_LATE_PASS
+        ToClient::Welcome { features, .. }
+            if features == FEATURE_TYPING | FEATURE_LATE_PASS | FEATURE_VIRTUAL_SEEN
     ));
 }
 
@@ -5377,4 +5378,268 @@ fn nothing_is_remembered_for_a_client_not_granted_the_late_pass() {
     t.release(k, KEY_LEFTALT);
     assert!(alt > 0);
     assert!(t.core.told.is_empty() && t.core.late.is_empty());
+}
+
+// The light probe.
+
+const EVERY_LIGHT: u16 = 0b1_1111;
+
+impl T {
+    /// A keyboard with `leds` lit, and a client granted the light probe, which asks to capture: the
+    /// virtual keyboard is made and lit, and the kernel has handed back the echo.
+    fn probing(leds: u16) -> (T, u32) {
+        let mut t = T::new();
+        let k = t.w.plug("keyboard");
+        t.w.set_device_leds(k, leds);
+        let asked = FEATURE_WAIT | FEATURE_TYPING | FEATURE_LATE_PASS | FEATURE_VIRTUAL_SEEN;
+        assert_eq!(t.admit_asking(CLIENT, asked), asked);
+        t.send(FromClient::Start);
+        t.core.virtual_ready(t.now);
+        t.take();
+        (t, k)
+    }
+
+    /// What the desktop does once it has the virtual keyboard: writes every light.
+    fn desktop_writes(&mut self, leds: u16) {
+        self.pass(ms(60));
+        self.desktop_leds(leds);
+    }
+
+    /// The VIRTUAL sent, and whether it came before the first DEVICE.
+    fn virtual_word(sent: &[ToClient]) -> (Vec<u8>, bool) {
+        let words: Vec<u8> = sent
+            .iter()
+            .filter_map(|m| match m {
+                ToClient::Virtual { status } => Some(*status),
+                _ => None,
+            })
+            .collect();
+        let at = |f: &dyn Fn(&ToClient) -> bool| sent.iter().position(f);
+        let before = match (
+            at(&|m| matches!(m, ToClient::Virtual { .. })),
+            at(&|m| matches!(m, ToClient::Device { .. })),
+        ) {
+            (Some(v), Some(d)) => v < d,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        (words, before)
+    }
+
+    fn locks_told(sent: &[ToClient]) -> Vec<u16> {
+        sent.iter()
+            .filter_map(|m| match m {
+                ToClient::Locks { leds } => Some(*leds),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// GNOME with every lock off: mutter writes every light off some 0.06 s after the keyboard is made,
+/// which changes each one the probe lit. SEEN comes before the keyboard is grabbed, nothing of the
+/// probe's lights reaches the client or a keyboard, and the locks are the keyboard's, as without it.
+#[test]
+fn a_desktop_that_writes_the_lights_is_seen() {
+    let (mut t, k) = T::probing(0);
+    assert_eq!(t.w.own_leds(), vec![EVERY_LIGHT]);
+    assert_eq!(t.w.virtual_leds(), EVERY_LIGHT);
+    assert!(t.sent().is_empty(), "the echo of the probe was told");
+    t.desktop_writes(0);
+    assert!(
+        t.sent().is_empty(),
+        "told before the virtual keyboard was ready"
+    );
+    assert!(!t.w.is_open(k));
+    t.pass(VIRTUAL_SETTLE);
+    let sent = t.sent();
+    assert!(t.w.grabbed(k), "{sent:?}");
+    assert_eq!(
+        T::virtual_word(&sent),
+        (vec![VIRTUAL_SEEN], true),
+        "{sent:?}"
+    );
+    assert_eq!(T::locks_told(&sent), vec![0]);
+    assert_eq!((t.w.virtual_leds(), t.w.leds(k)), (0, 0));
+    assert_eq!(
+        t.w.own_leds(),
+        vec![EVERY_LIGHT],
+        "a desktop's lights were put back"
+    );
+    // A later change of the locks is the desktop's word, as ever.
+    t.desktop_leds(LOCK_CAPS);
+    assert_eq!(t.sent(), vec![ToClient::Locks { leds: LOCK_CAPS }]);
+    assert_eq!(t.w.leds(k), LOCK_CAPS);
+}
+
+/// GNOME, and KWin or X, with Num Lock on: the desktop writes Num Lock on, which the probe had lit
+/// already, and the rest off. Seen, and Num Lock is the desktop's word on the locks, as it would have
+/// been with no probe; the keyboard shows it and no other light.
+#[test]
+fn a_desktop_with_num_lock_on_is_seen_and_its_lock_told() {
+    let (mut t, k) = T::probing(0);
+    t.desktop_writes(LOCK_NUM);
+    t.pass(VIRTUAL_SETTLE);
+    let sent = t.sent();
+    assert_eq!(T::virtual_word(&sent).0, vec![VIRTUAL_SEEN]);
+    let locks = T::locks_told(&sent);
+    assert!(
+        !locks.is_empty() && locks.iter().all(|l| *l == LOCK_NUM),
+        "{sent:?}"
+    );
+    assert_eq!((t.w.virtual_leds(), t.w.leds(k)), (LOCK_NUM, LOCK_NUM));
+}
+
+/// sway writes every light off whatever the locks: seen, and the locks then come from the first
+/// keyboard grabbed, as they did before the probe.
+#[test]
+fn sways_lights_off_are_seen_and_the_locks_come_as_before() {
+    let (mut t, k) = T::probing(LOCK_NUM);
+    t.desktop_writes(0);
+    t.pass(VIRTUAL_SETTLE);
+    let sent = t.sent();
+    assert_eq!(T::virtual_word(&sent).0, vec![VIRTUAL_SEEN]);
+    assert_eq!(T::locks_told(&sent), vec![LOCK_NUM]);
+    assert_eq!(t.w.leds(k), LOCK_NUM);
+}
+
+/// KWin and X with every lock off write nothing: unseen, the lights are put back to none before
+/// anything is grabbed, and the locks come from the first keyboard grabbed, as before.
+#[test]
+fn a_desktop_that_writes_nothing_is_unseen_and_the_lights_are_put_back() {
+    let (mut t, k) = T::probing(0);
+    t.pass(VIRTUAL_SETTLE);
+    let sent = t.sent();
+    assert!(t.w.grabbed(k));
+    assert_eq!(
+        T::virtual_word(&sent),
+        (vec![VIRTUAL_UNSEEN], true),
+        "{sent:?}"
+    );
+    assert_eq!(t.w.own_leds(), vec![EVERY_LIGHT, 0]);
+    assert_eq!(t.w.virtual_leds(), 0);
+    // The echo of putting them back is nobody's word either.
+    t.core.virtual_ready(t.now);
+    t.take();
+    assert_eq!(T::locks_told(&sent), vec![0]);
+    assert!(t.sent().is_empty());
+    assert_eq!(t.w.leds(k), 0);
+}
+
+/// VIRTUAL comes once for each client. A client after it finds the virtual keyboard made already:
+/// OLD, and nothing is lit. The same client asking again after STOP is told nothing more.
+#[test]
+fn a_virtual_keyboard_made_before_the_client_is_old() {
+    let (mut t, k) = T::probing(0);
+    t.desktop_writes(0);
+    t.pass(VIRTUAL_SETTLE);
+    assert_eq!(T::virtual_word(&t.sent()).0, vec![VIRTUAL_SEEN]);
+    t.send(FromClient::Stop);
+    t.send(FromClient::Start);
+    let sent = t.sent();
+    assert!(t.w.grabbed(k));
+    assert!(T::virtual_word(&sent).0.is_empty(), "{sent:?}");
+    t.core.disconnected(CLIENT, t.now);
+    t.take();
+    let asked = FEATURE_WAIT | FEATURE_VIRTUAL_SEEN;
+    assert_eq!(t.admit_asking(OTHER, asked), asked);
+    t.from(OTHER, FromClient::Start);
+    let sent = t.sent_to(OTHER);
+    assert!(t.w.grabbed(k));
+    assert_eq!(
+        T::virtual_word(&sent),
+        (vec![VIRTUAL_OLD], true),
+        "{sent:?}"
+    );
+    assert_eq!(t.w.own_leds(), vec![EVERY_LIGHT]);
+    assert_eq!(t.w.virtual_made(), 1);
+}
+
+/// A client that left while the virtual keyboard settled: the lights are still put back, and the
+/// next client is told OLD, as the keyboard was made before its START.
+#[test]
+fn a_probe_whose_client_left_is_put_back_and_its_successor_told_old() {
+    let (mut t, k) = T::probing(0);
+    t.core.disconnected(CLIENT, t.now);
+    t.take();
+    let asked = FEATURE_WAIT | FEATURE_VIRTUAL_SEEN;
+    assert_eq!(t.admit_asking(OTHER, asked), asked);
+    t.from(OTHER, FromClient::Start);
+    t.pass(VIRTUAL_SETTLE);
+    let sent = t.sent_to(OTHER);
+    assert!(t.w.grabbed(k));
+    assert_eq!(
+        T::virtual_word(&sent),
+        (vec![VIRTUAL_OLD], true),
+        "{sent:?}"
+    );
+    assert_eq!(t.w.own_leds(), vec![EVERY_LIGHT, 0]);
+    assert_eq!(t.w.virtual_leds(), 0);
+}
+
+/// The session left the front while the virtual keyboard settled, and what wrote the lights may
+/// have been the console or another session: OLD once the client captures again, and the lights,
+/// with none of the client's session's, are not told it.
+#[test]
+fn a_probe_while_the_session_was_away_proves_nothing() {
+    let (mut t, k) = T::probing(0);
+    t.console(X_CONSOLE);
+    t.console(2);
+    t.desktop_writes(LOCK_NUM);
+    t.pass(VIRTUAL_SETTLE);
+    let sent = t.sent();
+    assert!(!t.w.is_open(k));
+    assert!(T::virtual_word(&sent).0.is_empty(), "{sent:?}");
+    assert!(T::locks_told(&sent).is_empty(), "{sent:?}");
+    t.console(X_CONSOLE);
+    t.logind(front(SESSION, 1000));
+    let sent = t.sent();
+    assert!(t.w.grabbed(k));
+    assert_eq!(
+        T::virtual_word(&sent),
+        (vec![VIRTUAL_OLD], true),
+        "{sent:?}"
+    );
+    assert!(!T::locks_told(&sent).contains(&LOCK_NUM), "{sent:?}");
+}
+
+/// A virtual keyboard that cannot be lit for the probe is one that does not take writes: it fails
+/// as one that cannot be made does, and nothing is grabbed.
+#[test]
+fn a_virtual_keyboard_that_cannot_be_lit_fails() {
+    let mut t = T::new();
+    let k = t.w.plug("keyboard");
+    t.w.fail_emit(true);
+    let asked = FEATURE_WAIT | FEATURE_VIRTUAL_SEEN;
+    assert_eq!(t.admit_asking(CLIENT, asked), asked);
+    t.send(FromClient::Start);
+    t.pass(VIRTUAL_SETTLE);
+    let sent = t.sent();
+    assert!(
+        sent.contains(&released(Released::VirtualKeyboard)),
+        "{sent:?}"
+    );
+    assert!(T::virtual_word(&sent).0.is_empty());
+    assert!(!t.w.virtual_exists() && !t.w.is_open(k));
+}
+
+/// Linda's X route asks for FEATURE_WAIT alone: the virtual keyboard is never lit, no VIRTUAL comes,
+/// and the desktop's lights are its word on the locks the moment it writes them, as before.
+#[test]
+fn a_client_not_asking_for_the_probe_has_the_lights_as_before() {
+    let mut t = T::new();
+    let k = t.w.plug("keyboard");
+    assert_eq!(t.admit_asking(CLIENT, FEATURE_WAIT), FEATURE_WAIT);
+    t.send(FromClient::Start);
+    t.core.virtual_ready(t.now);
+    t.take();
+    assert!(t.w.own_leds().is_empty());
+    assert_eq!(t.w.virtual_leds(), 0);
+    t.desktop_writes(LOCK_NUM);
+    assert_eq!(t.sent(), vec![ToClient::Locks { leds: LOCK_NUM }]);
+    t.pass(VIRTUAL_SETTLE);
+    let sent = t.sent();
+    assert!(t.w.grabbed(k));
+    assert!(T::virtual_word(&sent).0.is_empty(), "{sent:?}");
+    assert_eq!(t.w.leds(k), LOCK_NUM);
 }

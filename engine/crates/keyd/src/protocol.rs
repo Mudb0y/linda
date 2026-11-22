@@ -169,13 +169,13 @@
 //!
 //! # Typing, the late pass and the virtual keyboard seen
 //!
-//! Three more features of version 1 are specified here. This helper grants [`FEATURE_TYPING`] and
-//! [`FEATURE_LATE_PASS`], and not yet [`FEATURE_VIRTUAL_SEEN`], which is not in
-//! [`FEATURES_KNOWN`], so a client may ask for it and WELCOME leaves it out. Until WELCOME grants a
-//! feature its messages are malformed, as for any other: the helper ends the connection of a client
-//! that sends TYPE without FEATURE_TYPING granted, or LATE_PASS without FEATURE_LATE_PASS, and sends
-//! no VIRTUAL, nor TYPED to a client not granted typing. A client written from this text asks for
-//! what it wants, and sends a feature's messages only once WELCOME has granted it.
+//! Three more features of version 1 are specified here, [`FEATURE_TYPING`], [`FEATURE_LATE_PASS`]
+//! and [`FEATURE_VIRTUAL_SEEN`], and this helper grants them all. Until WELCOME grants a feature its
+//! messages are malformed, as for any other: the helper ends the connection of a client that sends
+//! TYPE without FEATURE_TYPING granted, or LATE_PASS without FEATURE_LATE_PASS, and sends no VIRTUAL
+//! to a client not granted the light probe, nor TYPED to a client not granted typing. A client
+//! written from this text asks for what it wants, and sends a feature's messages only once WELCOME
+//! has granted it.
 //!
 //! ## Typing, with FEATURE_TYPING
 //!
@@ -297,20 +297,26 @@
 //! ## The virtual keyboard seen, with FEATURE_VIRTUAL_SEEN
 //!
 //! Whether the desktop took up the virtual keyboard, where nothing else tells: a compositor that
-//! opens a new keyboard writes the seat's lock lights to it. The kernel passes a light on to a device
-//! only when it changes, so for a client granted the feature, a virtual keyboard made after its
-//! START starts with every light the opposite of the real keyboards', for the compositor's write to
-//! change them; the helper ignores the echo of its own write, and puts the real lights on the
-//! virtual keyboard at [`VIRTUAL_SETTLE`]. VIRTUAL then says, once for each client, before any
-//! keyboard is grabbed for it:
-//! - [`VIRTUAL_SEEN`]: the compositor wrote the lights before VIRTUAL_SETTLE;
-//! - [`VIRTUAL_UNSEEN`]: nothing came by then;
-//! - [`VIRTUAL_OLD`]: the virtual keyboard was made before this client's START, so nothing can be
-//!   seen.
+//! opens a new keyboard writes lock lights to it. The kernel passes a light on to a device only when
+//! it changes, so for a client granted the feature, a virtual keyboard made for its START starts with
+//! every light on, for the compositor's write to change at least one: no desktop has every light lit,
+//! Compose and Kana among them. The helper ignores the echo of its own write. Nothing of the lights is
+//! reported, nor shown on the real keyboards, while the virtual keyboard settles. At
+//! [`VIRTUAL_SETTLE`] the lights are left as the desktop wrote them, and are LOCKS only when one is
+//! on, as with no probe they would have been; with no write they are put back to none, as a new
+//! keyboard has them. VIRTUAL then says, once for each client, before any keyboard is grabbed for it:
+//! - [`VIRTUAL_SEEN`]: something wrote the lights before VIRTUAL_SETTLE;
+//! - [`VIRTUAL_UNSEEN`]: nothing did by then;
+//! - [`VIRTUAL_OLD`]: nothing can be seen, as the virtual keyboard was made before this client's
+//!   START, or its session left the front or the client asked to stop while it settled.
 //!
-//! SEEN proves the keyboard is read. UNSEEN proves nothing on a desktop that never writes the
-//! lights, and means something only on one that was seen to before. The feature is built only for
-//! desktops where that write is shown to come, and may never be granted.
+//! What desktops write, measured in November 2026: GNOME's mutter writes the seat's locks, every
+//! light, as it takes a keyboard up, some 0.06 s after it is made; sway writes every light off,
+//! whatever the locks; KWin and the X server write only while a lock is on, and then every light. So
+//! SEEN proves the keyboard is read. UNSEEN proves nothing on KWin or X with every lock off, nor on a
+//! desktop never measured; it means the keyboard is not read only where the desktop writes whatever
+//! the locks are. A keyboard added while the virtual keyboard settles seems to make the kernel put
+//! the console's lights on every other keyboard, which on this one would count as SEEN.
 //!
 //! # Time bounds
 //!
@@ -469,11 +475,11 @@ pub const FEATURE_TYPING: u32 = 1;
 pub const FEATURE_WAIT: u32 = 2;
 /// LATE_PASS: a kept modifier goes on the virtual keyboard ahead of a press the client passes.
 pub const FEATURE_LATE_PASS: u32 = 4;
-/// VIRTUAL: whether the desktop wrote the lights of a new virtual keyboard. Specified, and not yet
-/// granted by this helper.
+/// VIRTUAL: whether the desktop wrote the lights of a new virtual keyboard.
 pub const FEATURE_VIRTUAL_SEEN: u32 = 8;
 /// The features this helper grants.
-pub const FEATURES_KNOWN: u32 = FEATURE_WAIT | FEATURE_TYPING | FEATURE_LATE_PASS;
+pub const FEATURES_KNOWN: u32 =
+    FEATURE_WAIT | FEATURE_TYPING | FEATURE_LATE_PASS | FEATURE_VIRTUAL_SEEN;
 /// How many of the KEYs last sent the helper remembers, with [`FEATURE_LATE_PASS`], to judge a
 /// LATE_PASS by. A client names a press it has just been sent as the second, one still waiting
 /// for its verdict, and as the first a modifier the user is still holding; a thousand KEYs is some
@@ -769,6 +775,10 @@ pub enum ToClient {
         seq: u64,
         outcome: u8,
     },
+    /// With [`FEATURE_VIRTUAL_SEEN`]: one of the VIRTUAL_ values.
+    Virtual {
+        status: u8,
+    },
 }
 
 /// A message that breaks the protocol, with what was wrong in words.
@@ -869,6 +879,10 @@ impl ToClient {
                 b.extend_from_slice(&seq.to_le_bytes());
                 b.push(*outcome);
             }
+            ToClient::Virtual { status } => {
+                b.push(VIRTUAL);
+                b.push(*status);
+            }
         }
         b
     }
@@ -942,6 +956,14 @@ impl ToClient {
                     return Err(Malformed(format!("unknown TYPED outcome {outcome}")));
                 }
                 ToClient::Typed { tag, seq, outcome }
+            }
+            VIRTUAL => {
+                r.fixed("VIRTUAL", 2)?;
+                let status = r.u8();
+                if !(VIRTUAL_SEEN..=VIRTUAL_OLD).contains(&status) {
+                    return Err(Malformed(format!("unknown VIRTUAL status {status}")));
+                }
+                ToClient::Virtual { status }
             }
             t => return Err(Malformed(format!("unknown message type {t:#04x}"))),
         };
@@ -1239,6 +1261,9 @@ mod tests {
             },
             ToClient::Locks { leds: LOCK_CAPS },
             ToClient::HeartbeatEcho { counter: 42 },
+            ToClient::Virtual {
+                status: VIRTUAL_UNSEEN,
+            },
         ]
     }
 
@@ -1282,6 +1307,7 @@ mod tests {
         assert_eq!(size(&all[5]), 7 + "Logitech K400".len());
         assert_eq!(size(&all[6]), 3);
         assert_eq!(size(&all[7]), 5);
+        assert_eq!(all[8].encode(), vec![VIRTUAL, VIRTUAL_UNSEEN]);
         let key = all[2].encode();
         assert_eq!(key[0], KEY);
         assert_eq!(&key[1..9], &[8, 7, 6, 5, 4, 3, 2, 1], "little-endian");
@@ -1339,6 +1365,14 @@ mod tests {
                 .contains("UTF-8")
         );
         assert!(ToClient::decode(&[RELEASED, 99]).is_err());
+        for broken in [
+            &[VIRTUAL][..],
+            &[VIRTUAL, 0],
+            &[VIRTUAL, 4],
+            &[VIRTUAL, 1, 0],
+        ] {
+            assert!(ToClient::decode(broken).is_err(), "{broken:?}");
+        }
     }
 
     /// TYPE and LATE_PASS of their documented sizes, 9 and 17 bytes.
@@ -1354,7 +1388,7 @@ mod tests {
     }
 
     #[test]
-    fn every_feature_is_specified_and_all_but_virtual_seen_are_granted() {
+    fn every_feature_is_specified_and_granted() {
         let features = [
             FEATURE_TYPING,
             FEATURE_WAIT,
@@ -1363,10 +1397,7 @@ mod tests {
         ];
         assert!(features.iter().all(|f| f.count_ones() == 1));
         assert_eq!(features.iter().fold(0, |all, f| all | f), 0b1111);
-        assert_eq!(
-            FEATURES_KNOWN,
-            FEATURE_WAIT | FEATURE_TYPING | FEATURE_LATE_PASS
-        );
+        assert_eq!(FEATURES_KNOWN, 0b1111);
         let client = [HELLO, START, STOP, VERDICT, HEARTBEAT, TYPE, LATE_PASS];
         let helper = [
             WELCOME,
@@ -1395,8 +1426,8 @@ mod tests {
         }
     }
 
-    /// A helper built from this tree, asked for every feature, grants all but FEATURE_VIRTUAL_SEEN,
-    /// answers a TYPE, and reads a LATE_PASS, judging this one, which names keys never sent,
+    /// A helper built from this tree, asked for every feature, grants every one, answers a TYPE, and
+    /// reads a LATE_PASS, judging this one, which names keys never sent,
     /// malformed for that; one asking for FEATURE_WAIT alone, as Linda's X route does, is granted
     /// that alone, and LATE_PASS is of a type unknown to it.
     #[test]

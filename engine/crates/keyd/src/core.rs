@@ -32,6 +32,8 @@
 //!   for its verdict, and its bound, as a press read from a keyboard does.
 //! - A late pass puts out only a modifier the user is holding and the client kept, in the place in
 //!   line of a press still waiting, and never once the helper has let go since.
+//! - The light probe's lights never leave the virtual keyboard: none is reported, nor shown on a
+//!   keyboard, and they are put back before anything is grabbed.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::os::fd::BorrowedFd;
@@ -40,7 +42,7 @@ use std::time::{Duration, Instant};
 use crate::device::{Devices, Found, GrabError, InputEvent, Keyboard, ReadError, VirtualKeyboard};
 use crate::keys::{
     Assessment, CHORD, EV_KEY, EV_SYN, KEY_CAPSLOCK, KEY_CNT, KEY_KP0, KEY_LEFTALT, KEY_RIGHTALT,
-    KEY_SYSRQ, KeySet, LED_NUML, MODIFIERS, READER_MODIFIERS, SYN_DROPPED, is_virtual_key,
+    KEY_SYSRQ, KeySet, LED_NUML, LEDS, MODIFIERS, READER_MODIFIERS, SYN_DROPPED, is_virtual_key,
     modifies, typeable,
 };
 use crate::protocol::*;
@@ -101,8 +103,27 @@ enum Virt<V> {
         appeared: Option<Instant>,
         /// When to look again whether it has appeared.
         look: Instant,
+        probe: Option<Probe>,
     },
     Ready(V),
+}
+
+/// The light probe, with FEATURE_VIRTUAL_SEEN, on a virtual keyboard made with every light on: the
+/// desktop that takes it up writes its own lights to it, of which at least one is off.
+struct Probe {
+    /// The client it was made for, whose word VIRTUAL is.
+    conn: ConnId,
+    /// Once a reader has changed the lights, when it first did, and the lights as the last change
+    /// left them, with the session in front then, whose they are.
+    written: Option<(Instant, u16, Option<String>)>,
+    /// The client's session left the front, or the client stopped wanting, while it settled: what
+    /// came meanwhile may be another session's, or the console's.
+    spoiled: bool,
+}
+
+/// Every light the virtual keyboard has, which the probe turns on.
+fn every_light() -> u16 {
+    LEDS.iter().fold(0, |all, l| all | 1 << l)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +205,8 @@ struct Client {
     /// The features it was granted.
     features: u32,
     typing: Bucket,
+    /// It was sent VIRTUAL, which comes once for each client.
+    virtual_told: bool,
 }
 
 /// The bucket of TYPED_PER_SECOND and TYPED_BURST: how many typed keys it holds, and since when it
@@ -565,6 +588,7 @@ impl<D: Devices> Core<D> {
                     last_heard: now,
                     features: features & FEATURES_KNOWN,
                     typing: Bucket::full(now),
+                    virtual_told: false,
                 });
                 // Numbered afresh, so that the first key's number tells nothing of how many keys
                 // another client had. Nothing is in line: no client, no capture.
@@ -790,7 +814,13 @@ impl<D: Devices> Core<D> {
             Virt::Settling { v, .. } | Virt::Ready(v) => v.read_leds(),
             Virt::Absent => return,
         };
+        let by = self.session_in_front().map(str::to_owned);
         match r {
+            // The probe's lights are none of the client's business until the desktop's are whole.
+            Ok(Some(leds)) if let Virt::Settling { probe: Some(p), .. } = &mut self.virt => {
+                let first = p.written.as_ref().map_or(now, |w| w.0);
+                p.written = Some((first, leds, by));
+            }
             Ok(Some(leds)) => self.set_leds(leds),
             Ok(None) => {}
             Err(e) => {
@@ -1366,6 +1396,9 @@ impl<D: Devices> Core<D> {
                 .as_ref()
                 .is_some_and(|c| self.session_in_front() == Some(c.session.as_str()));
         if !in_front {
+            if let Virt::Settling { probe: Some(p), .. } = &mut self.virt {
+                p.spoiled = true;
+            }
             if self.capturing {
                 let why = if !wanted {
                     Released::Stopped
@@ -1383,13 +1416,33 @@ impl<D: Devices> Core<D> {
         match &self.virt {
             Virt::Absent => {
                 match self.devices.create_virtual() {
-                    Ok(v) => {
+                    Ok(mut v) => {
                         log!("made the virtual keyboard");
+                        let mut probe = None;
+                        if let Some(c) = &self.client
+                            && c.features & FEATURE_VIRTUAL_SEEN != 0
+                        {
+                            // At once, before udev has told any reader of it.
+                            match v.set_own_leds(every_light()) {
+                                Ok(()) => {
+                                    probe = Some(Probe {
+                                        conn: c.conn,
+                                        written: None,
+                                        spoiled: false,
+                                    })
+                                }
+                                Err(e) => {
+                                    log!("could not light the virtual keyboard for the probe: {e}");
+                                    self.virtual_broken = true;
+                                }
+                            }
+                        }
                         self.virt = Virt::Settling {
                             v,
                             made: now,
                             appeared: None,
                             look: now,
+                            probe,
                         };
                         self.settle_virtual(now);
                     }
@@ -1406,6 +1459,9 @@ impl<D: Devices> Core<D> {
         if !self.capturing {
             log!("capturing");
             self.capturing = true;
+            // Nothing can be seen of a virtual keyboard made before the client asked, or that settled
+            // while its session was away.
+            self.tell_virtual(VIRTUAL_OLD);
             // What changed while it was in the background was kept from it.
             self.tell_locks();
             if let Err(e) = self.devices.watch(true) {
@@ -1421,6 +1477,7 @@ impl<D: Devices> Core<D> {
             made,
             appeared,
             look,
+            ..
         } = &mut self.virt
         else {
             return;
@@ -1445,10 +1502,64 @@ impl<D: Devices> Core<D> {
             }
         }
         if appeared.is_some_and(|a| now >= a + VIRTUAL_SETTLE)
-            && let Virt::Settling { v, .. } = std::mem::replace(&mut self.virt, Virt::Absent)
+            && let Virt::Settling { v, made, probe, .. } =
+                std::mem::replace(&mut self.virt, Virt::Absent)
         {
             log!("the virtual keyboard is ready");
             self.virt = Virt::Ready(v);
+            if let Some(p) = probe {
+                self.end_probe(p, made);
+            }
+        }
+    }
+
+    /// Ends the light probe as the virtual keyboard is ready, before anything is grabbed: leaves the
+    /// lights as the desktop wrote them, or with no writer puts them back as a new keyboard has them,
+    /// and says which to the client it was made for, if that one still wants to capture, in front. A
+    /// writer's lights are the desktop's word on the locks only when one is on, as they would have
+    /// been with no probe, on a keyboard that starts with none.
+    fn end_probe(&mut self, p: Probe, made: Instant) {
+        let status = match p.written {
+            Some((first, leds, by)) => {
+                log!(
+                    "the virtual keyboard's lights were written {} ms after it was made",
+                    first.saturating_duration_since(made).as_millis()
+                );
+                if leds != 0 {
+                    self.set_leds_by(leds, by);
+                }
+                VIRTUAL_SEEN
+            }
+            None => {
+                log!(
+                    "nothing wrote the virtual keyboard's lights within {} ms of its appearing",
+                    VIRTUAL_SETTLE.as_millis()
+                );
+                if let Virt::Ready(v) = &mut self.virt
+                    && let Err(e) = v.set_own_leds(0)
+                {
+                    log!("could not put the virtual keyboard's lights back: {e}");
+                    self.virtual_broken = true;
+                }
+                VIRTUAL_UNSEEN
+            }
+        };
+        let theirs = self.client.as_ref().is_some_and(|c| {
+            c.conn == p.conn && c.wants && self.session_in_front() == Some(c.session.as_str())
+        });
+        if theirs && !p.spoiled && !self.virtual_broken {
+            self.tell_virtual(status);
+        }
+    }
+
+    /// Sends VIRTUAL, once for each client granted FEATURE_VIRTUAL_SEEN.
+    fn tell_virtual(&mut self, status: u8) {
+        if let Some(c) = self.client.as_mut()
+            && c.features & FEATURE_VIRTUAL_SEEN != 0
+            && !c.virtual_told
+        {
+            c.virtual_told = true;
+            self.send_client(ToClient::Virtual { status });
         }
     }
 
@@ -1658,6 +1769,11 @@ impl<D: Devices> Core<D> {
 
     fn set_leds(&mut self, leds: u16) {
         let by = self.session_in_front().map(str::to_owned);
+        self.set_leds_by(leds, by);
+    }
+
+    /// The lights the session `by` set on the virtual keyboard.
+    fn set_leds_by(&mut self, leds: u16, by: Option<String>) {
         if self.leds == Some(leds) && self.leds_by == by {
             return;
         }
