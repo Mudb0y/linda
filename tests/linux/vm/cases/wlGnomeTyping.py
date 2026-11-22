@@ -117,13 +117,13 @@ REFUSED_AFTER = 5.0
 #: for a loaded guest.
 UNREACHED_SAID_BY = ACTIVATION_BOUND + 2.0
 #: Why the settings dialog brought forward again misses ACTIVATION_BOUND on GNOME, as package MW measured
-#: it in seven boots of the case once the menu and the dialog's first map were mended (results/MW-windows.txt).
-#: Linda maps the dialog again 0.02 to 0.05 s after the key, Mutter configures it 0.23 to 0.27 s after the
-#: key, GTK first paints it only 0.9 to 1.45 s after the key, and Mutter activates it 0.3 to 0.4 s after
-#: that, 1.24 to 1.72 s after the key in all. Between the configure and the paint Linda's Python is idle and
-#: next to nothing reaches it over the accessibility bus, but its main loop runs nothing of lower priority
-#: than its default one; where that time goes inside GTK is not known. The menu and the dialog opened for the
-#: first time are held to the bound.
+#: it in seven boots of the case once Linda's own part of its map was mended (results/MW-windows.txt).
+#: Linda maps the dialog again 0.02 to 0.05 s after the key, Mutter configures it some 0.25 s after the key,
+#: GTK first paints it only 0.91 to 1.45 s after the key, and it is active 0.28 to 0.38 s after that, 1.26
+#: to 1.72 s after the key in all. Between the configure and the paint Linda's Python is idle and next to
+#: nothing reaches it over the accessibility bus, but its main loop runs nothing of lower priority than its
+#: default one; where that time goes inside GTK is not known. The menu and the dialog opened anew are held
+#: to the bound.
 DIALOG_AGAIN_LATE = (
 	"on GNOME Linda's settings dialog brought forward again from behind another window is active only some "
 	"1.2 to 1.7 s after its key: GTK first paints it 0.9 to 1.45 s after it maps it again"

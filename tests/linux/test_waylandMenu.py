@@ -144,7 +144,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		self.timer = wx.Timer()
 		self.timer.Bind(wx.EVT_TIMER, self.poll)
 		self.timer.Start(50)
-		record("ready", pid=globalVars.appPid, displayKind=ownGui.displayKind())
+		record(
+			"ready",
+			pid=globalVars.appPid,
+			displayKind=ownGui.displayKind(),
+			keptGtk=ownGui._keptGtk is not None,
+		)
 
 	def onProfileSwitch(self, **kwargs):
 		record("profileSwitch", profiles=profiles())
@@ -431,6 +436,8 @@ class WaylandSession:
 		self.linda = Linda(directory / "linda", appProcess=self.probe.process.pid)
 		self.lindaID = self.linda.ready["pid"]
 		assert self.linda.ready["displayKind"] == "wayland", self.linda.ready
+		# On a Wayland display the map hook no longer asks gi for Gtk at each map.
+		assert self.linda.ready["keptGtk"], self.linda.ready
 
 	def start(self, child: Lines) -> Lines:
 		self._children.append(child)
@@ -603,6 +610,7 @@ def test_onXTheTrayMenuIsTheGtkPopupAndHandlersSeeTheSame(tmp_path: Path) -> Non
 		linda = Linda(tmp_path / "linda")
 		try:
 			assert linda.ready["displayKind"] == "x11"
+			assert not linda.ready["keptGtk"], linda.ready
 			linda.waitForState(lambda state: (state["focus"] or {}).get("processID") == app.pid)
 			mark = len(linda.spoken())
 			desktop.press("Insert+n")
@@ -635,6 +643,8 @@ def test_displayOfAnotherKindThanTheSessionIsLoggedOnceAndFollowed(tmp_path: Pat
 		linda = Linda(tmp_path / "linda", env={"LINDA_SESSION_TYPE": "wayland"})
 		try:
 			assert linda.ready["displayKind"] == "x11"
+			# What is done for a Wayland display follows the display, not the session.
+			assert not linda.ready["keptGtk"], linda.ready
 			lines = [line for line in linda.launch.text("nvda.log").splitlines() if DISAGREEMENT in line]
 			assert lines == [
 				(

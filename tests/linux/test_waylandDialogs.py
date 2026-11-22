@@ -254,6 +254,7 @@ def test_onXRaiseAndSetFocusDoWhatTheyDid(tmp_path: Path) -> None:
 		linda = Linda(tmp_path / "linda")
 		try:
 			assert linda.ready["displayKind"] == "x11"
+			assert not linda.ready["keptGtk"], linda.ready
 			opened = linda.command("settings")
 			linda.waitForState(lambda state: state["active"], SETTINGS)
 			desktopSession.activate(GTK[1])
