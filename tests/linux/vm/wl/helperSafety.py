@@ -634,30 +634,32 @@ def hotplug(ground: "Ground", client: "KeydClient", figures: dict) -> None:
 
 def continueAtChord(ground: "Ground", pid: int) -> None:
 	"""Start a watch in the guest that sends the stopped client pid SIGCONT as soon as the helper's log
-	shows the emergency chord, and then writes when it had to CONTINUED. The helper drops a client
-	silent for HEARTBEAT_TIMEOUT, and on a loaded host the host's own round trips to see the chord and
-	signal took the client past it (results/VH-plasma-helper.md, run 3). The watch follows the journal
-	from its cursor of now, so that no earlier chord wakes it, and wakes the client after CHORD_WATCH
-	even with no chord, so that a failed subtest does not leave it stopped for the next."""
+	shows the emergency chord, and then makes CONTINUED. The helper drops a client silent for
+	HEARTBEAT_TIMEOUT, and on a loaded host the host's own round trips to see the chord and signal took
+	the client past it (results/VH-plasma-helper.md, run 3). The watch follows the journal from its
+	cursor of now, so that no earlier chord wakes it, and wakes the client after CHORD_WATCH even with
+	no chord, so that a failed subtest does not leave it stopped for the next."""
 	shown = ground.shell(f"journalctl -u {KEYD_UNIT} -n 1 --show-cursor -o cat")
 	cursor = next(line for line in shown.splitlines() if line.startswith("-- cursor: "))[11:]
 	script = (
 		"export PATH=/run/current-system/sw/bin:$PATH; "
 		f"timeout {CHORD_WATCH} journalctl -u {KEYD_UNIT} --after-cursor={shlex.quote(cursor)} -f -o cat "
-		f"| {{ grep -q 'the emergency chord'; kill -CONT {pid}; ground-record now > {CONTINUED}.new; "
-		f"mv {CONTINUED}.new {CONTINUED}; }}"
+		f"| {{ grep -q 'the emergency chord'; kill -CONT {pid}; touch {CONTINUED}; }}"
 	)
 	ground.shell(
 		f"rm -f {CONTINUED}; systemd-run --collect --unit=ground-continue sh -c {shlex.quote(script)}"
 	)
 
 
-def continued(ground: "Ground") -> float:
-	"""When the watch continueAtChord started sent its SIGCONT, once it has."""
-	return float(
-		ground.waitFor(
-			lambda: ground.shell(f"cat {CONTINUED} 2>/dev/null || true").strip(), "the client continued"
-		)
+def continued(ground: "Ground", client: "KeydClient", stoppedAt: float) -> float:
+	"""When the client stopped at stoppedAt went on, once the watch continueAtChord started has woken
+	it: its first record after the stop, of the messages the helper queued meanwhile, which it reads
+	as it wakes. The watch's own stamp would come after a program's start, which takes up to a second
+	on a loaded host."""
+	ground.waitFor(lambda: ground.machine.execute(f"test -e {CONTINUED}")[0] == 0, "the client woken")
+	return ground.waitFor(
+		lambda: min((r["t"] for r in client.records() if r["t"] > stoppedAt), default=None),
+		"the woken client to read",
 	)
 
 
@@ -688,10 +690,10 @@ def emergency(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", 
 		stoppedAt = next(r["t"] for r in keyboard.records(mark) if r.get("signal") == "SIGSTOP")
 		said = ground.waitForHelperLog("the emergency chord", mark)
 		enter = next(r for r in written if r["key"] == "KEY_ENTER")
-		woken = continued(ground)
+		woken = continued(ground, client, stoppedAt)
 		figures["chordClientHung"] = {
 			"stoppedToChord": round(said[0] - stoppedAt, 3),
-			"stoppedToContinued": round(woken - stoppedAt, 3),
+			"stoppedToClientRead": round(woken - stoppedAt, 3),
 		}
 		ground.machine.log(f"the client hung for the chord, seconds: {figures['chordClientHung']}")
 		# Q, typed after the chord, reaches the program from the keyboard itself.
@@ -729,12 +731,12 @@ def emergency(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", 
 		pid = client.pid
 		continueAtChord(ground, pid)
 		hung = ground.mark()
-		stoppedAt = float(ground.shell(f"kill -STOP {pid}; ground-record now"))
+		stoppedAt = float(ground.shell(f"ground-record now; kill -STOP {pid}"))
 		ground.press("backspace-esc-ret")
 		said = ground.waitForHelperLog("the emergency chord", hung)
 		figures["qemuChordClientHung"] = {
 			"stoppedToChord": round(said[0] - stoppedAt, 3),
-			"stoppedToContinued": round(continued(ground) - stoppedAt, 3),
+			"stoppedToClientRead": round(continued(ground, client, stoppedAt) - stoppedAt, 3),
 		}
 		ground.machine.log(f"the client hung for QEMU's chord, seconds: {figures['qemuChordClientHung']}")
 		mark = ground.mark()
