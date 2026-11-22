@@ -3,7 +3,8 @@ program, or with the window switcher on Alt+Tab the window, that each Tab select
 Alt's release activates; Alt+F2 speaks the run dialog; polkit's authentication dialog, raised by
 pkexec, and the keyring's prompt, raised by secret-tool, are read, polkit's says when a password was
 wrong, and neither speaks a password typed into it through the helper, which is in neither Linda's
-log nor the helper's journal. The overview and a notification are logged as heard.
+log nor the helper's journal; the lock screen's prompt is read and silent alike, and the calendar the
+shell builds for it is not taken for a switcher. The overview and a notification are logged as heard.
 
 What the shell sent along the way is written to the log as each step ends, by a recorder that reads
 the accessibility bus and asks nothing of the programs; it records no text event, so nothing typed.
@@ -14,7 +15,17 @@ import shlex
 from typing import TYPE_CHECKING
 
 from ground import GROUND, KERNEL_ROUTE, LOG_HEADER, USER, WINDOW_TITLE
-from wl.lockScreen import MARKER, assertPasswordAbsent, passwordHeldIn, passwordUnspoken, typePassword
+from wl.lockScreen import (
+	LOCK_TIMEOUT,
+	LOCKED,
+	MARKER,
+	UNLOCKED,
+	activeSession,
+	assertPasswordAbsent,
+	passwordHeldIn,
+	passwordUnspoken,
+	typePassword,
+)
 
 if TYPE_CHECKING:
 	from ground import FakeKeyboard, Ground, Mark
@@ -323,6 +334,36 @@ def keyring(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		figures["after the keyring's password"] = said(ground, mark)
 
 
+def lockPrompt(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
+	"""The shell's third prompt, which package LK's case holds to its own rules: here only what is said
+	of it with this package's app module, and that its password is not spoken either."""
+	with ground.subtest("the lock screen's prompt is read, and the password typed there is not spoken"):
+		mark = ground.mark()
+		offset = len(ground.lindaLog())
+		ground.shell(f"loginctl lock-session {activeSession(ground)}")
+		ground.waitForSpeech(LOCKED, mark, LOCK_TIMEOUT)
+		# A key that is no character brings the field up over the clock.
+		keyboard.tap("KEY_LEFTCTRL")
+		try:
+			saidIn(ground, mark, PROTECTED, LOCK_TIMEOUT)
+		finally:
+			ground.settle(1)
+			figures["the lock screen"] = said(ground, mark)
+			logEvents(ground, "for the lock screen", mark)
+			logLinda(ground, "for the lock screen", offset)
+		figures["typing at the lock screen"] = typedUnspoken(ground, keyboard, MARKER)
+		mark = ground.mark()
+		offset = len(ground.lindaLog())
+		keyboard.tap("KEY_ENTER")
+		ground.waitForSpeech(UNLOCKED, mark, LOCK_TIMEOUT)
+		ground.settle(2)
+		figures["unlocking"] = said(ground, mark)
+		logLinda(ground, "for the unlock", offset)
+		# The calendar's day buttons, which the shell selects as it builds the calendar, are no switcher.
+		days = [t for t in figures["the lock screen"] + figures["unlocking"] if t.strip().isdigit()]
+		assert not days, days
+
+
 def run(ground: "Ground") -> None:
 	facts = ground.focus("facts")
 	ground.machine.log(f"the shell: {facts}")
@@ -345,6 +386,7 @@ def run(ground: "Ground") -> None:
 		heardOnly(ground, keyboard, figures)
 		polkit(ground, keyboard, figures)
 		keyring(ground, keyboard, figures)
+		lockPrompt(ground, keyboard, figures)
 		with ground.subtest("neither password is in Linda's log or the helper's journal"):
 			figures["the password's occurrences"] = assertPasswordAbsent(ground)
 			texts = {
