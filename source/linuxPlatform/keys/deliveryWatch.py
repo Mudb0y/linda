@@ -122,10 +122,16 @@ class Record:
 		try:
 			fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600)
 			with open(fd, "w", encoding="utf-8") as file:
+				# A file left behind by an earlier copy keeps its own mode through O_CREAT.
+				os.fchmod(fd, 0o600)
 				file.writelines(" ".join([key, *fields]) + "\n" for key, fields in sorted(entries.items()))
 			os.replace(temporary, self.path)
 		except OSError as e:
 			log.debugWarning(f"Key delivery: the record of proofs could not be written: {type(e).__name__}")
+			try:
+				os.unlink(temporary)
+			except OSError:
+				pass
 
 
 @dataclass

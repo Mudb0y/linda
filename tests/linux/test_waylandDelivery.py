@@ -234,6 +234,29 @@ def test_aCharacterTypedSinceTheLastAnswerKeepsTheKeyboard(tmp_path: Path):
 	assert value["perPress"] == 1
 
 
+RECORD_FILE_CHILD = r"""
+directory = tempfile.mkdtemp()
+path = directory + "/keyDelivery"
+# A temporary file an earlier copy left behind, readable by everyone.
+with open(path + ".new", "w") as file:
+	file.write("")
+os.chmod(path + ".new", 0o644)
+deliveryWatch.Record(path).write("sway", False)
+written = {"mode": os.stat(path).st_mode & 0o777, "text": open(path).read()}
+# A record that cannot be replaced leaves no temporary file behind.
+os.mkdir(directory + "/blocked")
+deliveryWatch.Record(directory + "/blocked").write("sway", False)
+result = {"written": written, "files": sorted(os.listdir(directory))}
+"""
+
+
+@pytest.mark.rigSession("x11")
+def test_theRecordsTemporaryFile(tmp_path: Path):
+	value = runDelivery(tmp_path, RECORD_FILE_CHILD)
+	assert value["written"] == {"mode": 0o600, "text": f"sway {today()}\n"}
+	assert value["files"] == ["blocked", "keyDelivery"]
+
+
 UNANSWERED_LIGHT_CHILD = r"""
 sink = FrozenSink(layout="pl")
 standIn()
