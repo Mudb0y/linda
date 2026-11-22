@@ -12,7 +12,10 @@ compositor from a keyboard itself by the evdev recorder's records of that keyboa
 has while the helper grabs it, and what reaches a program by the native GTK window's records. The
 lock lights are read from the kernel, by ground-poke. A release the kernel makes itself as a device
 goes, the virtual keyboard's at a helper's end among them, is timed by when the recorder read it,
-which is no earlier than it happened, so that a bound it is held to is never met by a stamp.
+which is no earlier than it happened, so that a bound it is held to is never met by a stamp. Where a
+bound is the helper's and the host's scheduling would otherwise count in it, the guest kernel's
+tracer times what the helper and systemd did, on the same clock: the helper's own lines and ungrabs
+on a switch to a text console, and systemd's SIGKILL to a stopped helper.
 
 In the guest, as ground-helper-safety, which a case's module installs (cases/wlGnomeHelper.nix), it
 watches for the moment the compositor opens a keyboard:
@@ -28,6 +31,7 @@ not happen within SECONDS.
 
 import json
 import os
+import re
 import shlex
 import statistics
 import sys
@@ -88,9 +92,28 @@ CONSOLE_GAP = 0.2
 #: in this suite on sway, where the switch back follows a switch away made while typing, a key typed
 #: 1.01 s after the grab was lost (results/VX-guests.txt), so twice that.
 RESETTLE = 2.0
+#: HEARTBEAT_TIMEOUT in protocol.rs: a client silent this long is dropped.
+HEARTBEAT = 2.0
+#: Seconds the helper's own work may take between its line for the kernel's switch and its line for
+#: the let-go, past the time the kernel spent in its ungrabs: reading what each keyboard holds and
+#: putting it out takes a millisecond or two. Each ungrab waits for two RCU grace periods, which a
+#: guest whose virtual processors the host does not run cannot end, so they are left out of it.
+LET_GO_OWN = 0.05
+#: Seconds after systemd's SIGKILL within which the kernel, closing the dead helper's devices, must
+#: release what its virtual keyboard held and give the keyboard back to every reader; the evdev
+#: recorder's reading of it counts in it.
+AFTER_KILL = 0.3
 #: Taps typed while the helper is stopped, one every STREAM_GAP seconds: past systemd's watchdog.
 STREAM_TAPS = 80
 STREAM_GAP = 0.05
+#: The guest kernel's tracer, which times the helper's system calls on CLOCK_MONOTONIC, the clock
+#: everything else here is stamped with.
+TRACING = "/sys/kernel/tracing"
+#: The ioctl that grabs an evdev node, with 1, and lets it go, with 0.
+EVIOCGRAB = 0x40044590
+TRACE_LINE = re.compile(
+	r"-(?P<tid>\d+)\s+(?:\(\s*\S+\)\s+)?\[\d+\]\s+(?:\S+\s+)?(?P<t>\d+\.\d+): (?P<what>.*)$"
+)
 #: Seconds between two looks of the guest half.
 WATCH_INTERVAL = 0.002
 
@@ -178,6 +201,95 @@ def waitForKeyFrom(ground: "Ground", key: str, since: "Mark", device: str) -> li
 
 	ground.waitFor(arrived, f"{key} from {device} at the evdev recorder", 5)
 	return found
+
+
+def startTrace(ground: "Ground", events: dict[str, str], pids: list[str] | None = None) -> None:
+	"""Have the guest kernel's tracer record events, each a tracepoint under events/ with its filter,
+	"" for none, of the threads pids alone if given, until readTrace."""
+	ground.shell(
+		f"set -e; [ -e {TRACING}/trace ] || mount -t tracefs nodev {TRACING}; "
+		f"echo 0 > {TRACING}/tracing_on; echo mono > {TRACING}/trace_clock; "
+		+ (f"echo {' '.join(pids)} > {TRACING}/set_event_pid; " if pids else "")
+		+ "".join(
+			(f"echo {shlex.quote(where)} > {TRACING}/events/{event}/filter; " if where else "")
+			+ f"echo 1 > {TRACING}/events/{event}/enable; "
+			for event, where in events.items()
+		)
+		+ f"echo > {TRACING}/trace; echo 1 > {TRACING}/tracing_on"
+	)
+
+
+def traceHelper(ground: "Ground", pid: int) -> dict[str, str]:
+	"""Trace, for every thread of the helper's, each EVIOCGRAB it asks and the end of each ioctl, and
+	each line it sends the journal; answers what readTrace is to be given."""
+	events = {
+		"syscalls/sys_enter_ioctl": f"cmd == {EVIOCGRAB}",
+		"syscalls/sys_exit_ioctl": "",
+		"syscalls/sys_enter_sendto": "fd == 2",
+	}
+	startTrace(ground, events, ground.shell(f"ls /proc/{pid}/task").split())
+	return events
+
+
+def traceKill(ground: "Ground", pid: int) -> dict[str, str]:
+	"""Trace the SIGKILL anyone sends pid; answers what readTrace is to be given."""
+	events = {"signal/signal_generate": f"sig == 9 && pid == {pid}"}
+	startTrace(ground, events)
+	return events
+
+
+def readTrace(ground: "Ground", events: dict[str, str]) -> list[dict]:
+	"""What the tracer recorded of events since startTrace, each a dict with "tid", "t", and "call":
+	"grab" with "arg", "ended", "send" with "len", or "kill"; the tracer is then put back as it was."""
+	text = ground.shell(
+		f"echo 0 > {TRACING}/tracing_on; cat {TRACING}/trace; "
+		+ "".join(
+			f"echo 0 > {TRACING}/events/{event}/enable; echo 0 > {TRACING}/events/{event}/filter; "
+			for event in events
+		)
+		+ f"echo > {TRACING}/set_event_pid; echo > {TRACING}/trace; echo local > {TRACING}/trace_clock"
+	)
+	found = []
+	for line in text.splitlines():
+		match = TRACE_LINE.search(line)
+		if not match or line.startswith("#"):
+			continue
+		what = match["what"]
+		args = {name: int(value, 16) for name, value in re.findall(r"(\w+): (?:0x)?([0-9a-f]+)\b", what)}
+		record = {"tid": int(match["tid"]), "t": float(match["t"])}
+		if what.startswith("sys_ioctl("):
+			found.append({**record, "call": "grab", "arg": args.get("arg")})
+		elif what.startswith("sys_ioctl ->"):
+			found.append({**record, "call": "ended"})
+		elif what.startswith("sys_sendto("):
+			found.append({**record, "call": "send", "len": args.get("len")})
+		elif what.startswith("signal_generate:"):
+			found.append({**record, "call": "kill"})
+	return found
+
+
+def ungrabs(traced: list[dict], start: float, end: float) -> list[tuple[float, float]]:
+	"""Each EVIOCGRAB that let a keyboard go, begun between start and end, as (begun, ended): a
+	thread makes one call at a time, so its next ioctl's end is that call's."""
+	spans = []
+	for index, record in enumerate(traced):
+		if record["call"] != "grab" or record["arg"] != 0 or not start <= record["t"] <= end:
+			continue
+		ended = next(
+			(r["t"] for r in traced[index + 1 :] if r["tid"] == record["tid"] and r["call"] == "ended"), None
+		)
+		assert ended is not None, f"an ungrab of the helper's at {record['t']} never ended: {traced}"
+		spans.append((record["t"], ended))
+	return spans
+
+
+def sent(traced: list[dict], line: str, after: float = 0.0) -> float:
+	"""When the helper sent the journal line, its text as the journal has it, at or after after: each
+	log line is one send of the text and its newline."""
+	size = len(line.encode()) + 1
+	found = [r["t"] for r in traced if r["call"] == "send" and r["len"] == size and r["t"] >= after]
+	assert found, f"no send of {size} bytes, for {line!r}, was traced: {traced}"
+	return found[0]
 
 
 # The grab, and the virtual keyboard's settle.
@@ -669,12 +781,27 @@ def continued(ground: "Ground", client: "KeydClient", stoppedAt: float) -> float
 	)
 
 
+def assertNotDropped(ground: "Ground", client: "KeydClient", since: "Mark", hung: dict) -> None:
+	"""The client stopped for a chord is still connected; if the helper dropped it, the failure says
+	why from the helper's own lines and how long the client was stopped, which past HEARTBEAT is the
+	test's or the host's doing and not the helper's."""
+	if client.call("state")["connected"]:
+		return
+	said = [f"{t - since.t:+.3f} s: {line}" for t, line in ground.helperLog(since)]
+	silent = [line for line in said if "no message for" in line]
+	raise AssertionError(
+		f"the chord dropped the client; stopped for the chord, seconds: {hung}, against the helper's "
+		f"{HEARTBEAT} s for silence; the helper said why: {silent or 'nothing of silence'}\n"
+		+ "\n".join(said)
+	)
+
+
 def emergency(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", figures: dict) -> None:
 	"""With the client capturing, as hotplug leaves it."""
 	with ground.subtest("the chord on a held keyboard lets go while the client is hung"):
 		pid = client.pid
 		continueAtChord(ground, pid)
-		mark = ground.mark()
+		mark = chordAt = ground.mark()
 		# Stopped by the keyboard's own server, between keys, so that the client is hung for the chord
 		# alone: stopped from a shell before the call, it once lost 1.2 s to the call's start on a
 		# loaded host, and the helper dropped it.
@@ -729,7 +856,7 @@ def emergency(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", 
 		app = ground.waitForKeys("app", typedKeys("KEY_W", "KEY_E"), mark)
 		assert appKeyvals(app) == ["w", "e"], app
 		assert not client.keys(mark), client.keys(mark)
-		assert client.call("state")["connected"], "the chord dropped the client"
+		assertNotDropped(ground, client, chordAt, figures["chordClientHung"])
 
 	with ground.subtest("the chord on QEMU's own keyboard"):
 		mark = ground.mark()
@@ -751,6 +878,7 @@ def emergency(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", 
 		app = ground.waitForKeys("app", typedKeys("KEY_R"), mark)
 		assert appKeyvals(app) == ["r"], app
 		client.waitFor("RELEASED", hung, lambda r: r["reason"] == "EMERGENCY")
+		assertNotDropped(ground, client, hung, figures["qemuChordClientHung"])
 
 
 # A switch to a text console and back, as keydBackground proves it.
@@ -771,6 +899,7 @@ def console(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 	figures["console"] = switch
 
 	with ground.subtest("a switch to a text console lets go as the kernel makes it"):
+		tracing = traceHelper(ground, ground.helperPid())
 		mark = ground.mark()
 		steps = json.dumps(
 			[
@@ -789,6 +918,7 @@ def console(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 		released = client.waitFor("RELEASED", mark)
 		assert released["reason"] == "BACKGROUND", released
 		ground.settle(1)
+		traced = readTrace(ground, tracing)
 		heard = {r["key"] for r in client.keys(mark) if r["value"] == 1}
 		reached = ground.shell(f"cat {CONSOLE_TEXT}")
 		presses = [r for r in written if r["value"] == 1]
@@ -800,14 +930,25 @@ def console(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 			]
 			lines.append(f"{letter} {r['t'] - switched:+.3f} s: {', '.join(where) or 'nowhere'}")
 		ground.machine.log("each key, by when it was typed from the switch:\n" + "\n".join(lines))
-		kernel = ground.waitForHelperLog(f"console {text} is in front", mark)[0]
+		kernel, kernelLine = ground.waitForHelperLog(f"console {text} is in front", mark)
 		logind = ground.waitForHelperLog("in front on seat0", mark)[0]
-		letGo = ground.waitForHelperLog("let go of every keyboard: Background", mark)[0]
+		letGo, letGoLine = ground.waitForHelperLog("let go of every keyboard: Background", mark)
+		# The helper's own moments, from the tracer: the journal stamps each line when it reads it.
+		sawSwitch = sent(traced, kernelLine)
+		hadLetGo = sent(traced, letGoLine, sawSwitch)
+		spans = ungrabs(traced, sawSwitch, hadLetGo)
+		inKernel = sum(end - begun for begun, end in spans)
+		own = hadLetGo - sawSwitch - inKernel
 		switch.update(
 			releasedAfterSwitch=round(released["t"] - switched, 3),
 			kernelToldAfterSwitch=round(kernel - switched, 3),
 			letGoAfterSwitch=round(letGo - switched, 3),
 			logindToldAfterSwitch=round(logind - switched, 3),
+			letGoLinesApart=round(letGo - kernel, 4),
+			letGoSentAfterSwitchSeen=round(hadLetGo - sawSwitch, 4),
+			ungrabsMs=[round((end - begun) * 1000, 2) for begun, end in spans],
+			firstUngrabAfterSwitchSeenMs=round((spans[0][0] - sawSwitch) * 1000, 2) if spans else None,
+			letGoOwnMs=round(own * 1000, 2),
 		)
 		ground.machine.log(f"the switch away, seconds from chvt: {switch}")
 		# Let go as the kernel switched, not when logind said so. Judged by the helper's own line, which
@@ -817,8 +958,14 @@ def console(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 		said = [line for _t, line in ground.helperLog(mark)]
 		letGoAt = next(i for i, line in enumerate(said) if "let go of every keyboard: Background" in line)
 		logindAt = next(i for i, line in enumerate(said) if "in front on seat0" in line)
-		assert letGoAt < logindAt, said
-		assert letGo - kernel < 0.1, (letGo, kernel)
+		kernelAt = said.index(kernelLine)
+		assert kernelAt < letGoAt < logindAt, said
+		# What the helper did itself from seeing the switch to having let go is its own few
+		# milliseconds. The ungrabs' waits are the kernel's, and on a loaded host they took the two
+		# lines past 0.1 s apart (results/VX-guests.txt), so they are taken out, and they can be only
+		# because the tracer saw them: the uhid keyboard and QEMU's at the least were held.
+		assert len(spans) >= 2, (spans, traced)
+		assert own < LET_GO_OWN, switch
 		# Every key typed once the helper had let go went to the console, and none to the client.
 		after = [r["key"][4:].lower() for r in presses if r["t"] > released["t"]]
 		assert after and all(letter in reached for letter in after), (after, reached)
@@ -930,6 +1077,7 @@ def stopped(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 		mark = ground.mark()
 		keyboard.run({"press": "KEY_LEFTSHIFT"})
 		ground.waitForKeys("evdev", [("KEY_LEFTSHIFT", 1)], mark, device=VIRTUAL_KEYBOARD)
+		tracing = traceKill(ground, pid)
 		steps = json.dumps([{"tap": "KEY_Q", "hold": 0.01}, {"sleep": STREAM_GAP - 0.01}] * STREAM_TAPS)
 		# Stopped first and typed on at once, from the same shell, so that every tap comes after the
 		# stop and the first one the keyboard gives a reader again says when the kernel let go.
@@ -939,9 +1087,12 @@ def stopped(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 		)
 		stoppedAt = float(output.split("\n", 1)[0])
 		written = json.loads(output.split("\n", 1)[1])["written"]
-		ground.waitForHelperLog("Watchdog timeout", mark)
+		timedOut = ground.waitForHelperLog("Watchdog timeout", mark)[0]
 		ground.waitForHelperLog("with signal SIGKILL", mark)
 		ground.waitForHelperLog("status=9/KILL", mark)
+		kills = [r["t"] for r in readTrace(ground, tracing) if r["call"] == "kill"]
+		assert kills, "the tracer saw no SIGKILL sent to the helper"
+		killed = kills[0]
 		release = ground.waitForKeys(
 			"evdev", [("KEY_LEFTSHIFT", 1), ("KEY_LEFTSHIFT", 0)], mark, device=VIRTUAL_KEYBOARD
 		)
@@ -959,6 +1110,10 @@ def stopped(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 		assert not [r for r in shifted if r["t"] > released(release)["received"] + SHIFT_CLEARS], shifted
 		typedAfterBack = [r for r in written if r["value"] == 1 and r["t"] >= back - STREAM_GAP]
 		figures["stopped"] = {
+			"watchdogLineAfterStop": round(timedOut - stoppedAt, 3),
+			"killAfterStop": round(killed - stoppedAt, 3),
+			"shiftReleasedAfterKill": round(released(release)["received"] - killed, 3),
+			"keyboardBackAfterKill": round(back - killed, 3),
 			"shiftReleasedAfterStop": round(released(release)["received"] - stoppedAt, 3),
 			"keyboardBackAfterStop": round(back - stoppedAt, 3),
 			"firstKeyAtProgramAfterStop": round(app[0]["t"] - stoppedAt, 3),
@@ -974,9 +1129,18 @@ def stopped(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 		# Keys typed while the helper was stopped were in its hands, and died with it: none is typed
 		# late.
 		assert len(appKeyvals(app)) <= len(typedAfterBack), (figures["stopped"], app)
-		# The watchdog's two seconds count from the loop's last feed, before the stop.
-		assert released(release)["received"] - stoppedAt < WATCHDOG + SLACK, release
-		assert back - stoppedAt < WATCHDOG + SLACK, back - stoppedAt
+		# systemd's watchdog, as the helper's unit sets it, counts its two seconds from the loop's last
+		# feed, before the stop, and the kill is timed by the kernel as systemd sends it; SLACK is
+		# systemd's own lateness in sending it.
+		assert killed - stoppedAt < WATCHDOG + SLACK, figures["stopped"]
+		# Then the kernel lets go as the killed helper's devices close, which is all the helper's end
+		# may take. The release, which the kernel stamps with the virtual keyboard's last repeat,
+		# counts from when the recorder read it, so later rather than earlier; the key from the
+		# keyboard by its own stamp, so a tap's gap later at most. Each is measured from the kill, so
+		# that a host slow to run systemd at its limit, as on GNOME 51 with four guests running, counts
+		# against systemd's bound alone, and not twice.
+		assert released(release)["received"] - killed < AFTER_KILL, figures["stopped"]
+		assert back - killed < AFTER_KILL + STREAM_GAP, figures["stopped"]
 
 	with ground.subtest("systemd starts it again, and it serves a client"):
 		ground.waitFor(lambda: ground.helperPid() not in (0, pid), "the helper to start again", 10)
