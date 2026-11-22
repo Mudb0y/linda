@@ -58,7 +58,12 @@ def lindaAcceptance(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 	gnome.lindaStopped(ground, keyboard)
 	gnome.console(ground, keyboard)
 	gnome.pointer(ground, keyboard)
-	timings = acceptance.windowTimings(ground, keyboard)
+	try:
+		timings = acceptance.windowTimings(ground, keyboard)
+	except AssertionError:
+		# The release's own Firefox is the one E4 starts here; what it showed instead is worth having.
+		ground.machine.log(f"the windows when E4 failed: {ground.focus('windows')}")
+		raise
 	ground.machine.log("E4 figures " + json.dumps(timings, sort_keys=True))
 	ground.activate(WINDOW_TITLE)
 	pid = gnome.emergency(ground, keyboard)
