@@ -1028,18 +1028,42 @@ def _presentNow(window) -> bool:
 
 def initialize(app: wx.App) -> None:
 	"""Make the changes that need the application, once it exists."""
-	global _logTarget
+	global _logTarget, _keptGtk
 	from gi.repository import GObject
 
 	app.Bind(wx.EVT_CHAR_HOOK, _onCharHook)
 	_compareDisplayWithSession()
 	GObject.add_emission_hook(_gtkModule().Window, "map", _presentDialogOnMap)
+	if isWaylandDisplay():
+		from gi.repository import GLib
+
+		# gi.require_version lists the typelib directories each time it is asked, which the hook did at
+		# every map: on the GNOME guest, whose store is shared with the host, 0.1 to 0.3 s inside each map
+		# of one of NVDA's windows, and nearly all of the 0.4 s a dialog brought forward again took to map.
+		_keptGtk = _gtkModule()
+		GLib.idle_add(_loadIconTheme, priority=GLib.PRIORITY_LOW)
 	# Tree events travel up to the application unless a handler keeps them, which none of NVDA's does.
 	for binder in (wx.EVT_TREE_SEL_CHANGED, wx.EVT_TREE_ITEM_EXPANDED, wx.EVT_TREE_ITEM_COLLAPSED):
 		app.Bind(binder, _onTreeEvent)
 	# wx.App sets its own target as it starts.
 	_logTarget = _NvdaLogTarget()
 	wx.Log.SetActiveTarget(_logTarget)
+
+
+#: An icon every title bar GTK draws itself has, looked up to load the icon theme.
+_TITLE_BAR_ICON = "window-close-symbolic"
+
+
+def _loadIconTheme() -> bool:
+	"""Load GTK's icon theme while NVDA waits for nothing, rather than as its first window maps.
+
+	Where the compositor draws no title bars, as Mutter does not, GTK draws one on each of NVDA's windows,
+	and the first to need its close button reads every icon theme on the system: on the GNOME guest that
+	held NVDA's menu 0.6 s before it mapped. GNOME then gave the keyboard to the menu more than a second
+	after NVDA+n.
+	"""
+	_gtkModule().IconTheme.get_default().has_icon(_TITLE_BAR_ICON)
+	return False
 
 
 def _compareDisplayWithSession() -> None:
@@ -1087,7 +1111,13 @@ def selectFirstMenuItemWhenShown() -> None:
 	wx.CallAfter(_selectFirstMenuItem, _MENU_ATTEMPTS)
 
 
+#: Gtk, once it is kept: on a Wayland display only, so that nothing changes on an X one.
+_keptGtk = None
+
+
 def _gtkModule():
+	if _keptGtk is not None:
+		return _keptGtk
 	# Imported only once wx is running GTK: importing it initialises GTK, which gui must not do as it
 	# is imported, before wx.App exists.
 	import gi
