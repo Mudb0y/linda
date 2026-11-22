@@ -5101,6 +5101,18 @@ fn a_late_pass_that_cannot_apply_changes_nothing() {
     t.verdict(tab, false);
     assert_eq!(t.w.emitted(), vec![(KEY_TAB, 1)]);
 
+    // Let go of before the second was read, and pressed and kept again: the press named is not
+    // the one down.
+    let (mut t, k) = T::late_passing();
+    let first = t.kept(k, KEY_LEFTALT);
+    t.release(k, KEY_LEFTALT);
+    t.kept(k, KEY_LEFTALT);
+    let tab = t.pressed(k, KEY_TAB);
+    t.late_pass(first, tab);
+    t.verdict(tab, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_TAB, 1)]);
+    assert!(!t.closed(CLIENT));
+
     // Pressed after the second was read, and kept while the second waited.
     let (mut t, k) = T::late_passing();
     let tab = t.pressed(k, KEY_TAB);
