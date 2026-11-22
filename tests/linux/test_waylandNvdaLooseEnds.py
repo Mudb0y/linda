@@ -499,7 +499,10 @@ def test_eachPlaceSaysItCopiedWhenItDidUnderTheCompositor(
 			assert pasted == probe.records("versionText")[-1]["text"]
 		else:
 			assert pasted == {"browseable": BROWSEABLE, "link": LINK}[name]
-	assert say(desktop, probe, "report") == [LINK]
+	# What NVDA+c reads back is in words, which a link's punctuation is not.
+	assert say(desktop, probe, "browseable") == [COPIED]
+	waitForTheFixture()
+	assert say(desktop, probe, "report") == [BROWSEABLE]
 	desktop.close()
 	assert nvda.process.returncode == 0, nvda.describe()
 	nvda.assertClean(logNames=("nvda.log",))
