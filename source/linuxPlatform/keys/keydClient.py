@@ -35,8 +35,8 @@ _VIRTUAL = struct.Struct("<BB")
 
 KEY_RELEASE, KEY_PRESS, KEY_REPEAT = 0, 1, 2
 #: HELLO's and WELCOME's features: TYPE and TYPED; VERDICT may hold a press for longer, up to
-#: VERDICT_WAIT_TIMEOUT; LATE_PASS; VIRTUAL. The helper grants FEATURE_WAIT, FEATURE_TYPING and
-#: FEATURE_LATE_PASS so far, and VIRTUAL's messages are malformed until WELCOME grants them.
+#: VERDICT_WAIT_TIMEOUT; LATE_PASS; VIRTUAL. The helper grants all four, and each one's messages are
+#: malformed until WELCOME grants it.
 FEATURE_TYPING, FEATURE_WAIT, FEATURE_LATE_PASS, FEATURE_VIRTUAL_SEEN = 1, 2, 4, 8
 #: The value of VERDICT that holds a press longer, with FEATURE_WAIT.
 VERDICT_WAIT = 2
@@ -61,7 +61,8 @@ TYPE_DECIDE, TYPE_INJECT = 0, 1
 	TYPED_LOST,
 ) = range(1, 8)
 #: VIRTUAL's statuses: the desktop wrote the new virtual keyboard's lights; it had not by
-#: VIRTUAL_SETTLE; the virtual keyboard was older than this client's START.
+#: VIRTUAL_SETTLE; the virtual keyboard was older than this client's START, or settled while the session
+#: was away or the client stopped.
 VIRTUAL_SEEN, VIRTUAL_UNSEEN, VIRTUAL_OLD = 1, 2, 3
 
 #: RELEASED's reasons.

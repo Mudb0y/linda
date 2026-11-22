@@ -151,7 +151,9 @@ def noHelper(ground: "Ground", keyboard: "FakeKeyboard") -> int:
 		_took, record = ground.waitForLindaLog(KERNEL_ROUTE, timeout=30)
 		ground.machine.log(f"Linda took the keyboard: {record.splitlines()[-1]}")
 		saidOnce(ground, mark, HAS_KEYBOARD)
-		assert saidCount(ground, mark, HINT) == 1, said(ground, mark)
+		# sway writes the new keyboard's lights, which proves it reads it: no rescue hint.
+		ground.settle(2)
+		assert saidCount(ground, mark, HINT) == 0, said(ground, mark)
 		assert saidCount(ground, Mark(0, 0.0), NO_HELPER) == 1
 		lindaKeyWorks(ground, keyboard)
 		acceptance.assertNoXConnection(ground, pid, "with the helper holding the keyboard")

@@ -179,9 +179,9 @@ def test_bothClientsNumberThingsAsTheHelperDoes(client: types.ModuleType, guest:
 	statuses = {name: value for name, value in rust.items() if name.startswith("VIRTUAL_") and value < 4}
 	assert {f"VIRTUAL_{name}": value for value, name in guest.VIRTUAL_STATUSES.items()} == statuses
 	assert set(client.TYPED_NAMES) == set(outcomes.values())
-	# The helper grants FEATURE_WAIT, FEATURE_TYPING and FEATURE_LATE_PASS.
+	# The helper grants FEATURE_WAIT, FEATURE_TYPING, FEATURE_LATE_PASS and FEATURE_VIRTUAL_SEEN.
 	assert re.search(
-		r"^pub const FEATURES_KNOWN: u32 = FEATURE_WAIT \| FEATURE_TYPING \| FEATURE_LATE_PASS;$",
+		r"^pub const FEATURES_KNOWN: u32 =\s+FEATURE_WAIT \| FEATURE_TYPING \| FEATURE_LATE_PASS \| FEATURE_VIRTUAL_SEEN;$",
 		PROTOCOL.read_text(),
 		re.MULTILINE,
 	)

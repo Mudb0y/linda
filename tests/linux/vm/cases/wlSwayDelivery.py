@@ -118,13 +118,14 @@ def helperSince(ground: "Ground", mark: Mark, text: str) -> list[float]:
 
 
 def firstStart(ground: "Ground", keyboard: "FakeKeyboard") -> None:
-	with ground.subtest("the first start says the hint, and sway's listing is a proof, remembered"):
+	with ground.subtest("the first start says no hint: the helper's light probe is a proof, remembered"):
 		start = startLinda(ground)
-		saidOnce(ground, start, HINT)
 		ground.waitForLindaLog(PRESENT)
+		ground.settle(2)
+		assert saidCount(ground, start, HINT) == 0, said(ground, start)
 		record = ground.shell(f"cat {RECORD}")
 		ground.machine.log(f"the record of proofs: {record!r}")
-		assert re.fullmatch(r"sway \d{4}-\d\d-\d\d\n", record), record
+		assert re.fullmatch(r"sway \d{4}-\d\d-\d\d( probed)?\n", record), record
 		lindaKeyWorks(ground, keyboard)
 		typedThrough(ground, keyboard, "KEY_B", "b", echo="b")
 		acceptance.typedMarker(ground, keyboard, NVDA_LOG)

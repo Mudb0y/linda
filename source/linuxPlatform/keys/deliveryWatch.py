@@ -184,7 +184,7 @@ class SwayListing:
 		from . import swayLayout
 
 		try:
-			connection = swayLayout._Connection(self._path, swayLayout.STATE_TIMEOUT)
+			connection = swayLayout.Connection(self._path, swayLayout.STATE_TIMEOUT)
 			try:
 				inputs = connection.ask(swayLayout.GET_INPUTS)
 			finally:
@@ -208,7 +208,7 @@ class SwayListing:
 		from . import swayLayout
 
 		try:
-			connection = swayLayout._Connection(self._path, swayLayout.START_TIMEOUT)
+			connection = swayLayout.Connection(self._path, swayLayout.START_TIMEOUT)
 			try:
 				reply = connection.ask(swayLayout.SUBSCRIBE, json.dumps(["input"]))
 				if not (isinstance(reply, dict) and reply.get("success")):

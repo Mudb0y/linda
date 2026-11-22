@@ -150,7 +150,7 @@ def plasmaRun(ground: "Ground", version: str) -> None:
 	ground.machine.log(f"the desktop: {facts}")
 	assert version in facts["kwin"], facts
 	keyboard = older.helperFirst(ground)
-	gnome.noHelper(ground, keyboard)
+	gnome.noHelper(ground, keyboard, hints=1)
 	gnome.keptKeys(ground, keyboard)
 	gnome.polish(ground, keyboard)
 	twoLayouts(ground, keyboard)
