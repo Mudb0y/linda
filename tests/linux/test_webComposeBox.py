@@ -82,7 +82,7 @@ def composeTexts() -> tuple[str, str]:
 
 
 def test_theBoxIsBuiltAsWhatsAppsIs(session: Session):
-	session.desktop.expect("heading level 1 Chat with Ala", since=0, timeout=STARTUP_BOUND)
+	session.desktop.expect("main landmark heading level 1 Chat with Ala", since=0, timeout=STARTUP_BOUND)
 	assert composeTexts() == (EMBEDDED_OBJECT, "\n")
 
 
