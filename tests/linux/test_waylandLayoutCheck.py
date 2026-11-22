@@ -232,6 +232,106 @@ result["said"] = said
 	assert value["said"] == []
 
 
+#: A layout snapshot that says whether an input method makes the characters.
+SNAPSHOT_CHILD = r"""
+from linuxPlatform.keys import desktopLayout
+
+
+def snapshot(inputMethod):
+	return desktopLayout.LayoutSnapshot(("evdev", "pc105", "us", "", ""), inputMethod=inputMethod)
+
+
+"""
+
+
+def test_theInputMethodGuardReadsTheRoutesPublicLayout(tmp_path: Path):
+	"""By default the check asks the key source's public layout whether an input method makes the
+	characters: a WaylandRoute's follows its environment, and with none, or a layout that says no, the
+	check compares; and a source whose public layout says yes is believed over whatever it keeps
+	inside."""
+	value = runCheck(
+		tmp_path,
+		SNAPSHOT_CHILD
+		+ r"""
+from linuxPlatform.keys import waylandRoute
+
+environment = types.SimpleNamespace(layout=snapshot(True))
+inputHook._source = waylandRoute.WaylandRoute("auto", "/nonexistent", environment=environment)
+check = typedChars.LayoutCheck()
+cases = {}
+key("x")
+insert("y")
+cases["input method"] = [counts(), len(check._pending)]
+environment.layout = snapshot(False)
+key("m")
+insert("m")
+cases["no input method"] = counts()
+environment.layout = None
+key("n")
+insert("n")
+cases["no layout yet"] = counts()
+
+
+class Public:
+	_environment = types.SimpleNamespace(layout=snapshot(False))
+
+	@property
+	def layout(self):
+		return snapshot(True)
+
+
+inputHook._source = Public()
+key("x")
+insert("y")
+cases["public"] = [counts(), len(check._pending)]
+inputHook._source = None
+result["cases"] = cases
+result["said"] = said
+""",
+	)
+	assert value["cases"] == {
+		"input method": [[0, 0], 0],
+		"no input method": [1, 0],
+		"no layout yet": [2, 0],
+		"public": [[2, 0], 0],
+	}
+	assert value["said"] == []
+
+
+def test_aSourceWithoutALayoutIsNeverGuarded(tmp_path: Path):
+	"""A key source that has no layout property, the X route's or none at all, says no input method
+	makes the characters, without an error, whatever it keeps inside: each differing character is
+	counted."""
+	value = runCheck(
+		tmp_path,
+		SNAPSHOT_CHILD
+		+ r"""
+from linuxPlatform.keys import route
+
+xRoute = route.RoutedKeySource("auto", "/nonexistent")
+xRoute._environment = types.SimpleNamespace(layout=snapshot(True))
+check = typedChars.LayoutCheck()
+cases = {}
+for name, source in (("X route", xRoute), ("no source", None), ("bare", object())):
+	inputHook._source = source
+	cases[name + " has layout"] = hasattr(source, "layout")
+	key("x")
+	insert("y")
+	cases[name] = counts()
+inputHook._source = None
+result["cases"] = cases
+""",
+	)
+	assert value["cases"] == {
+		"X route has layout": False,
+		"X route": [0, 1],
+		"no source has layout": False,
+		"no source": [0, 2],
+		"bare has layout": False,
+		"bare": [0, 3],
+	}
+
+
 def test_lateInsertsArePairedWithTheirOwnKeys(tmp_path: Path):
 	"""With the same layout on both sides, inserts NVDA gets to well after their keys went down, as when
 	it or the application is busy, still match: each insert handled 0.6 s after its key while keys go

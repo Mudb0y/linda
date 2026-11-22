@@ -557,11 +557,11 @@ class LayoutCheck:
 
 
 def _layoutUsesInputMethod() -> bool:
-	"""Whether the layout the key source follows says an input method makes the characters."""
+	"""Whether the layout the key source follows says an input method makes the characters; False for a
+	source that follows none."""
 	from linuxPlatform import inputHook
 
-	environment = getattr(inputHook._source, "_environment", None)
-	return bool(getattr(getattr(environment, "layout", None), "inputMethod", False))
+	return bool(getattr(getattr(inputHook._source, "layout", None), "inputMethod", False))
 
 
 def _startLayoutCheck() -> LayoutCheck | None:
