@@ -229,7 +229,13 @@ def search(top):
 
 
 # Firefox has a second frame of the same name with nothing in it, GTK's own.
-windows = [top for app in c.applications() for top in c.children(app) if c.name(top).startswith(TITLE)]
+windows = []
+for app in c.applications():
+	try:
+		windows.extend(top for top in c.children(app) if c.name(top).startswith(TITLE))
+	except atspiClient.NodeGone:
+		# Another program too busy to answer on a loaded machine is none of this test's.
+		continue
 for top in windows:
 	radios, text = search(top)
 	if radios:
