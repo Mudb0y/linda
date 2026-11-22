@@ -308,7 +308,9 @@ polkit.addRule(function(action, subject) {
 A Wayland desktop gives the keys to the program you are typing into and to no one else, so Linda takes them through linda-keyd.
 The helper holds the keyboards in the kernel while Linda runs in the session in front, gives Linda each key first, and passes on through a virtual keyboard every key Linda does not keep.
 Without it Linda starts, speaks and reads the screen, and says once: "Linda cannot take keys in this Wayland session until linda-keyd runs."
-When it has the keyboard it says "Linda has the keyboard", and, until it has seen what you type reach a program on that desktop, "If typing stops reaching programs, hold Backspace, Escape and Enter together."
+If it had no keys at first, as when linda-keyd starts after Linda, it says "Linda has the keyboard" once it takes them.
+The first time it takes the keyboard after each start, until it has seen what you type reach a program on that desktop, it says "If typing stops reaching programs, hold Backspace, Escape and Enter together."
+Once it has seen that, a start with linda-keyd running says nothing about the keyboard at all.
 
 Everything below was tested in virtual machines running NixOS, by tests that type on a virtual keyboard and read what Linda said.
 No one has yet listened to Linda on a real Wayland desktop, so reports of how it goes are very welcome.
@@ -367,7 +369,8 @@ linda --session-report
 
 Listen for the line beginning "Session kind", which should say wayland, the line beginning "Desktop", which names gnome, kde, sway or another, and the last line, which should say that linda-keyd's socket is there.
 
-Then start Linda. Within a few seconds you should hear "Linda has the keyboard". If you hear instead that Linda cannot take keys until linda-keyd runs, check the helper with `systemctl is-active linda-keyd`.
+Then start Linda. The first time on a desktop, within a few seconds, you should hear "If typing stops reaching programs, hold Backspace, Escape and Enter together."; once Linda has seen your typing reach a program there, a start says nothing about the keyboard. Either way, Linda+T should read the window's title.
+If you hear instead that Linda cannot take keys until linda-keyd runs, that is the sign of trouble: check the helper with `systemctl is-active linda-keyd`.
 
 Then try what you use every day, and the things in the lists above for your desktop: Linda+T for the window's title, typing into a text field, Linda+N for the menu, H in a web page in Firefox. Try the emergency chord once too, once you know the way back for your desktop.
 
