@@ -3,8 +3,9 @@ typed fast and at a person's pace reach the program once each and in order and a
 cases/lindaTyping.py holds the X session to; a key held down repeats, passed on and kept; keys Linda's
 caret scripts send on reach the field once and in order with the letters around them; a Remote Access
 leader types through Linda as its follower, and its Linda key chords are Linda's; the menu opens with
-the Linda key and N, the settings dialog with Linda's command, and comes forward again from behind
-another window; and nothing typed is in Linda's log or the helper's journal.
+the Linda key and N, five times, the settings dialog from the menu and with Linda's command, and comes
+forward again from behind another window, each timed from its key to its activation and through Linda's
+own steps between; and nothing typed is in Linda's log or the helper's journal.
 
 Where Linda's window is not given the keyboard, the case asserts that Linda says how to reach it and
 writes the limitation down after "AT limitation".
@@ -106,26 +107,111 @@ SETTINGS_SPOKEN = "Linda Settings: General (normal configuration) dialog"
 NOT_REACHED = "Linda's window opened but did not get the keyboard. Press Alt plus Tab to reach it."
 #: Seconds from the key to the window's activation, as the package asks of the menu window.
 ACTIVATION_BOUND = 1.0
+#: How many times the menu is opened, each held to ACTIVATION_BOUND: the first is the first window Linda
+#: shows, which loads what GTK has not loaded before.
+MENU_RUNS = 5
 #: Seconds a window of Linda's is given to be activated at all before the case takes it as refused.
 REFUSED_AFTER = 5.0
 #: Seconds after a window of Linda's is activated by which Linda has said NOT_REACHED of it if it is going
 #: to: its check runs a second after the window maps, which is before the activation, and the rest is room
 #: for a loaded guest.
 UNREACHED_SAID_BY = ACTIVATION_BOUND + 2.0
-#: Why Linda's windows miss ACTIVATION_BOUND on GNOME. In runs 3 to 6 of the case the menu window was
-#: activated 1.09 to 1.25 s after the key, created 0.88 to 1.01 s after it; in runs 6 and 7 the settings
-#: dialog was created 0.49 and 0.57 s after its key and activated 0.76 and 0.80 s after that, and in run
-#: 7, brought forward again, created 0.40 s after the key and activated 1.61 s after that, once Linda had
-#: said how to reach it. Under sway the same windows were activated 0.32 to 0.43 s after their keys, and
-#: under Plasma 0.62 to 0.93 s. It is held over the three windows at once: the menu misses by as little as
-#: 0.09 s and may come in under the bound on a quiet host, where the dialog brought forward misses by 0.5
-#: to 1 s, and the mark is to come off when none is late.
-WINDOWS_LATE = (
-	"on GNOME Linda's menu window and settings dialog are active only some 1.1 to 2 s after their keys: "
-	"Linda maps them 0.4 to 1 s after the key, and GNOME activates them 0.25 to 1.6 s after that"
+#: Why the settings dialog brought forward again misses ACTIVATION_BOUND on GNOME, as package MW measured
+#: it in seven boots of the case once the menu and the dialog's first map were mended (results/MW-windows.txt).
+#: Linda maps the dialog again 0.02 to 0.05 s after the key, Mutter configures it 0.23 to 0.27 s after the
+#: key, GTK first paints it only 0.9 to 1.45 s after the key, and Mutter activates it 0.3 to 0.4 s after
+#: that, 1.24 to 1.72 s after the key in all. Between the configure and the paint Linda's Python is idle and
+#: next to nothing reaches it over the accessibility bus, but its main loop runs nothing of lower priority
+#: than its default one; where that time goes inside GTK is not known. The menu and the dialog opened for the
+#: first time are held to the bound.
+DIALOG_AGAIN_LATE = (
+	"on GNOME Linda's settings dialog brought forward again from behind another window is active only some "
+	"1.2 to 1.7 s after its key: GTK first paints it 0.9 to 1.45 s after it maps it again"
 )
 #: Where the guest half's watch writes each window created and activated, with the process it is of.
 OWN_WINDOWS = "/tmp/ground/ownWindows.jsonl"
+#: Where the phases plugin writes when each step from a window's key to its activation ran in Linda.
+PHASES = f"{LINDA_DIRECTORY}/phases.jsonl" if __name__ != "__main__" else ""
+#: A global plugin of the case's own beside the package's test hooks, which writes to PHASES, on the
+#: guest's CLOCK_MONOTONIC, when Linda took the chord of the menu or the settings dialog, ran its handler,
+#: built the window and showed it, and when GTK mapped it, first painted it and made it active. It writes
+#: no key: only which of the two windows a chord was for.
+PHASES_PLUGIN = """\
+import json
+import time
+
+import gi
+import globalPluginHandler
+import gui
+import inputCore
+from gui import settingsDialogs
+from linuxPlatform import menuWindow, ownGui
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import GObject, Gtk
+
+OUT = {out!r}
+CHORDS = {{"n": "menu", "g": "settings"}}
+
+
+def record(kind, **fields):
+	with open(OUT, "a", encoding="utf-8") as stream:
+		stream.write(json.dumps({{"kind": kind, "t": time.monotonic(), **fields}}) + "\\n")
+
+
+def recorded(owner, name, kind):
+	original = getattr(owner, name)
+
+	def recording(*args, **kwargs):
+		record(kind)
+		try:
+			return original(*args, **kwargs)
+		finally:
+			record(kind + "Returned")
+
+	setattr(owner, name, recording)
+
+
+def onGesture(gesture):
+	if "NVDA" in getattr(gesture, "modifierNames", ()):
+		window = CHORDS.get(getattr(gesture, "mainKeyName", ""))
+		if window is not None:
+			record("chord", window=window)
+	return True
+
+
+def onMap(widget, *args):
+	if isinstance(widget, Gtk.Window) and widget.get_window_type() == Gtk.WindowType.TOPLEVEL:
+		title = widget.get_title() or ""
+		record("map", title=title)
+		widget.connect("notify::is-active", lambda w, _p: w.is_active() and record("active", title=title))
+		clock = widget.get_frame_clock()
+		if clock is not None:
+			painted = []
+
+			def afterPaint(_clock):
+				if not painted:
+					painted.append(True)
+					record("painted", title=title)
+
+			clock.connect("after-paint", afterPaint)
+	return True
+
+
+class GlobalPlugin(globalPluginHandler.GlobalPlugin):
+	def __init__(self):
+		super().__init__()
+		inputCore.decide_executeGesture.register(onGesture)
+		recorded(gui.mainFrame, "showGui", "showGui")
+		recorded(gui.mainFrame.sysTrayIcon, "onActivate", "keysReleased")
+		recorded(menuWindow.MenuWindow, "__init__", "menuBuild")
+		recorded(menuWindow.MenuWindow, "ShowModal", "showModal")
+		recorded(gui.mainFrame, "popupSettingsDialog", "settingsHandler")
+		recorded(settingsDialogs.SettingsDialog, "__init__", "dialogBuild")
+		recorded(settingsDialogs.SettingsDialog, "Show", "dialogShow")
+		recorded(ownGui, "presentAgain", "presentAgain")
+		GObject.add_emission_hook(Gtk.Window, "map", onMap)
+"""
 
 
 def startLinda(ground: "Ground", settings: dict[str, dict[str, str]], extra: str = "") -> None:
@@ -138,16 +224,23 @@ def startLinda(ground: "Ground", settings: dict[str, dict[str, str]], extra: str
 		lines.append(f"[{section}]")
 		lines += [f"\t{key} = {value}" for key, value in values.items()]
 	config = f"{LINDA_DIRECTORY}/config"
+	# The package's test hooks, with the phases plugin beside its plugins.
+	packageHooks = f"{ground.linda}/share/linda/tests/linux/testHooks"
+	hooks = f"{LINDA_DIRECTORY}/hooks"
 	ground.machine.succeed(
-		f"install -d -o {USER} {LINDA_DIRECTORY} {config}",
+		f"install -d -o {USER} {LINDA_DIRECTORY} {config} {hooks}/globalPlugins",
 		f"echo {shlex.quote(chr(10).join(lines) + chr(10) + extra)} > {config}/nvda.ini",
 		f"chown {USER} {config}/nvda.ini",
+		f"ln -sfn {packageHooks}/synthDrivers {hooks}/synthDrivers",
+		f"ln -sf {packageHooks}/globalPlugins/*.py {hooks}/globalPlugins/",
+		f"echo {shlex.quote(PHASES_PLUGIN.format(out=PHASES))} > {hooks}/globalPlugins/lindaPhases.py",
+		f"rm -f {PHASES}",
 	)
 	ground.start(
 		"linda",
 		[f"{ground.linda}/bin/linda", "-c", config, "-f", NVDA_LOG, "--debug-logging"],
 		env={
-			"LINDA_TEST_HOOKS_DIR": f"{ground.linda}/share/linda/tests/linux/testHooks",
+			"LINDA_TEST_HOOKS_DIR": hooks,
 			"LINDA_TRANSCRIPT_FILE": TRANSCRIPT,
 			"LINDA_TRANSCRIPT_MODE": "immediate",
 		},
@@ -519,14 +612,18 @@ def ownWindow(
 		created = next((e["t"] for e in creates if titled(e, title, exact=exact)), None)
 		if created is None:
 			ground.machine.log(f"{what}: no window:create of its title; the creates: {creates}")
+		phases = lindaPhases(ground, pressed, event["t"])
 		figures[what] = {
 			"activated": delay,
 			"created": None if created is None else round(created - pressed, 3),
+			"phases": phases,
 		}
 		ground.machine.log(f"{what}: {figures[what]} s after the key")
-		# Linda's own check comes a second after the window maps, and says how to reach it if it is not
-		# active by then; GNOME may give it the keyboard later all the same.
-		lateFromMap = created is not None and event["t"] - created >= ACTIVATION_BOUND
+		# Linda's own check comes a second after GTK maps the window, and says how to reach it if it is not
+		# active by then; GNOME may give it the keyboard later all the same. The window:create can come
+		# well after the map, while Linda's main loop is busy.
+		mapped = pressed + phases["map"] if "map" in phases else created
+		lateFromMap = mapped is not None and event["t"] - mapped >= ACTIVATION_BOUND
 		allowed = 1 if lateFromMap else 0
 		assert unreachedSaid(ground, mark) <= allowed, said(ground, mark)
 		return event["t"], allowed
@@ -553,6 +650,15 @@ def unreachedAtMost(ground: "Ground", since: "Mark", window: tuple[float, int], 
 		f"Linda said {NOT_REACHED!r} {figure['saidNotReached']} times where {allowed} is allowed: "
 		f"{figure}, {said(ground, since)}"
 	)
+
+
+def lindaPhases(ground: "Ground", pressed: float, activated: float) -> dict[str, float]:
+	"""Seconds from the key to the first of each step the phases plugin wrote by the activation."""
+	phases: dict[str, float] = {}
+	for r in ground.readJsonLines(PHASES):
+		if pressed <= r["t"] <= activated + 0.05:
+			phases.setdefault(r["kind"], round(r["t"] - pressed, 3))
+	return phases
 
 
 def ownWindowEvents(ground: "Ground", since: float) -> list[dict]:
@@ -615,6 +721,60 @@ def menu(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		)
 		assert not reached, f"the test window had {reached}"
 		unreachedAtMost(ground, mark, window, figures["the menu"])
+
+	for run in range(2, MENU_RUNS + 1):
+		what = f"the menu, run {run}"
+		with ground.subtest(f"the Linda key with N opens the menu again, run {run} of {MENU_RUNS}"):
+			ground.activate(WINDOW_TITLE)
+			ground.settle(APART)
+			mark = ground.mark()
+			pressed = acceptance.written(keyboard.chord("KEY_INSERT", "KEY_N"), "KEY_N", 1)
+			window = ownWindow(ground, mark, pressed, MENU_TITLE, exact=True, what=what, figures=figures)
+			if window is None:
+				reachRefused(ground, keyboard, MENU_TITLE)
+				return
+			waitHeard(ground, mark, "Preferences collapsed 1 of 9")
+			escaped = ground.now()
+			keyboard.tap("KEY_ESC")
+			backToTheWindow(ground, escaped)
+			ground.settle(0.5)
+			reached = appKeys(ground, mark, ("KEY_INSERT", "KEY_N", "KEY_ESC"))
+			assert not reached, f"the test window had {reached}"
+			unreachedAtMost(ground, mark, window, figures[what])
+
+
+def settingsFromTheMenu(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
+	what = "the settings dialog from the menu"
+	with ground.subtest(
+		"the menu's Settings item opens the settings dialog, active within a second of Enter"
+	):
+		ground.activate(WINDOW_TITLE)
+		ground.settle(APART)
+		mark = ground.mark()
+		keyboard.chord("KEY_INSERT", "KEY_N")
+		waitHeard(ground, mark, "Preferences collapsed 1 of 9")
+		step = ground.mark()
+		keyboard.tap("KEY_ENTER")
+		waitHeard(ground, step, "Settings...")
+		chosen = ground.mark()
+		pressed = acceptance.written(keyboard.tap("KEY_ENTER"), "KEY_ENTER", 1)
+		window = ownWindow(ground, chosen, pressed, SETTINGS_TITLE, exact=False, what=what, figures=figures)
+		if window is None:
+			reachRefused(ground, keyboard, SETTINGS_TITLE)
+			return
+		waitHeard(ground, chosen, SETTINGS_SPOKEN)
+		escaped = ground.now()
+		keyboard.tap("KEY_ESC")
+		backToTheWindow(ground, escaped)
+		ground.settle(0.5)
+		# The release of the Enter that chose goes where the keyboard is as it is let go.
+		reached = [
+			key
+			for key in appKeys(ground, mark, ("KEY_INSERT", "KEY_N", "KEY_ENTER", "KEY_ESC"))
+			if key[1] or key[0] != "KEY_ENTER"
+		]
+		assert not reached, f"the test window had {reached}"
+		unreachedAtMost(ground, chosen, window, figures[what])
 
 
 def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
@@ -679,6 +839,7 @@ def windows(ground: "Ground", keyboard: "FakeKeyboard") -> dict:
 	)
 	try:
 		menu(ground, keyboard, figures)
+		settingsFromTheMenu(ground, keyboard, figures)
 		dialogs(ground, keyboard, figures)
 	finally:
 		for job in ("windowEvents", "ownWindows"):
@@ -686,11 +847,14 @@ def windows(ground: "Ground", keyboard: "FakeKeyboard") -> dict:
 	with ground.subtest("Linda's menu window and settings dialog are each active within a second of the key"):
 		# A refused window is held to its spoken line, not to the bound.
 		activated = {what: f["activated"] for what, f in figures.items() if f.get("activated") is not None}
+		again = {what: activated.pop(what) for what in ["the settings dialog again"] if what in activated}
 		if activated:
-			with ground.expectedFailure(WINDOWS_LATE):
-				withinBound(activated)
+			withinBound(activated)
 		else:
 			ground.machine.log(f"no window of Linda's was activated to time: {figures}")
+		if again:
+			with ground.expectedFailure(DIALOG_AGAIN_LATE):
+				withinBound(again)
 	return figures
 
 
