@@ -8,7 +8,7 @@ Under the rig's compositors Linda runs natively; in the X rig it is told the ses
 the stand-in puts the keys out on the X display:
 
 	nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_waylandEcho.py
-	nix develop . -c tests/linux/wayland-gate SCRATCH tests/linux/test_waylandEcho.py
+	nix develop . -c tests/linux/wayland-gate SCRATCH -k waylandEcho
 """
 
 import json
