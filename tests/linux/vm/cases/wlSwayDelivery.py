@@ -249,9 +249,10 @@ def remaps(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 		capsPresses(ground, keyboard, "Escape")
 		declined = [record for _t, record in ground.lindaLogRecords(DECLINED)]
 		ground.machine.log(f"Linda's layout without caps:escape: {declined}")
-		# Once for the hold, and for the layout, which on sway cannot hold sway's own options.
-		assert len(declined) == 1, declined
-		assert "NVDA's layout comes from " in declined[0], declined
+		# Once for the hold at most, and then for the layout, which on sway cannot hold sway's own
+		# options; not at all where the helper's light probe has already proved the keyboard.
+		assert len(declined) <= 1, declined
+		assert all("NVDA's layout comes from " in record for record in declined), declined
 
 	with ground.subtest("Linda's layout with caps:escape: twenty Caps Locks are no lock keys"):
 		# Caps Lock's key stays a Linda key by where it is whatever it types, and would be kept.
@@ -281,7 +282,7 @@ def nothingLogged(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 		journal = ground.shell("journalctl -b -o cat --no-pager -u linda-keyd.service || true")
 		assert not acceptance.holdingMarker({"journal": journal}), "the helper's journal holds what was typed"
 		record = ground.shell(f"cat {RECORD}")
-		assert re.fullmatch(r"sway \d{4}-\d\d-\d\d\n", record), record
+		assert re.fullmatch(r"sway \d{4}-\d\d-\d\d( probed)?\n", record), record
 
 
 def run(ground: "Ground") -> None:
