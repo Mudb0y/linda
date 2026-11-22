@@ -1111,6 +1111,27 @@ def test_aSourceCancelledAsLindaReplacesItIsDestroyedOnce(
 	assert len(destroyed) == 3, destroyed
 
 
+def test_aDeviceTheCompositorFinishesIsMadeAgainAtTheNextUse(
+	clipboardAlone: types.ModuleType,
+	fakeCompositor: Callable[..., FakeCompositor],
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	clipboard = clipboardAlone
+	first = fakeCompositor()
+	route = dataControlRoute(clipboard, first)
+	assert route.copy("Before") is True
+	first.finishDevices()
+	route.wire.waitFor(lambda: False, 2.0)
+	assert not route.wire.alive
+	second = fakeCompositor()
+	displayServer = types.SimpleNamespace(waylandSocket=lambda: second.path)
+	monkeypatch.setitem(sys.modules, "linuxPlatform", types.SimpleNamespace(displayServer=displayServer))
+	assert clipboard.copyToClip("After") is True
+	assert clipboard._route is not route
+	assert clipboard._route.read(1.0) == "After"
+	assert first.errors == second.errors == []
+
+
 def test_textNoProgramCouldPasteIsTheRefusalAndFalse(
 	clipboardAlone: types.ModuleType, fakeCompositor: Callable[..., FakeCompositor]
 ) -> None:

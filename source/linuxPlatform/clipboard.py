@@ -655,8 +655,15 @@ class _Selection:
 		#: Every source NVDA has made and not yet destroyed.
 		self._liveSources: set[int] = set()
 
-	def _onDeviceEvent(self, opcode: int, arguments: list, primary: int | None = None) -> None:
-		if opcode == self._DEVICE_DATA_OFFER:
+	def _onDeviceEvent(
+		self, opcode: int, arguments: list, primary: int | None = None, finished: int | None = None
+	) -> None:
+		if opcode == finished:
+			# The device works no more, as when the seat goes; a connection of NVDA's that has ended is made
+			# again at the next use.
+			log.debugWarning("The compositor finished NVDA's clipboard device")
+			self.wire.close()
+		elif opcode == self._DEVICE_DATA_OFFER:
 			(offer,) = arguments
 			self._offers[offer] = []
 			self.wire.adopt(offer, self._offerInterface, lambda _opcode, args: self._noteType(offer, args[0]))
@@ -780,6 +787,7 @@ class _DataControlRoute(_Selection):
 	_SOURCE_SEND = 0
 	_SOURCE_CANCELLED = 1
 	_DEVICE_SELECTION = 1
+	_DEVICE_FINISHED = 2
 	_DEVICE_PRIMARY_SELECTION = 3
 	_DEVICE_SET_SELECTION = 0
 
@@ -790,7 +798,9 @@ class _DataControlRoute(_Selection):
 		self._manager = wire.bind(managerName, 1)
 		self._device = wire.new(
 			f"{prefix}_device_v1",
-			lambda opcode, arguments: self._onDeviceEvent(opcode, arguments, self._DEVICE_PRIMARY_SELECTION),
+			lambda opcode, arguments: self._onDeviceEvent(
+				opcode, arguments, self._DEVICE_PRIMARY_SELECTION, self._DEVICE_FINISHED
+			),
 		)
 		wire.send(self._manager, 1, _uint(self._device) + _uint(seat))
 		if not wire.roundTrip():
