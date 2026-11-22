@@ -103,15 +103,21 @@ class _Listener:
 
 	def _onConnection(self, fd: int, condition: int) -> bool:
 		from gi.repository import GLib
+
+		self.acceptOne()
+		return GLib.SOURCE_CONTINUE
+
+	def acceptOne(self) -> bool:
+		"""Take the next connection waiting, if there is one; whether there was."""
 		from logHandler import log
 
 		try:
 			connection, _address = self._socket.accept()
 		except BlockingIOError:
-			return GLib.SOURCE_CONTINUE
+			return False
 		except OSError:
 			log.debugWarning("Accepting a connection to the control socket", exc_info=True)
-			return GLib.SOURCE_CONTINUE
+			return False
 		try:
 			connection.setblocking(False)
 			isAllowed = len(_connections) < _MAX_CONNECTIONS and _isOwnUser(connection)
@@ -121,7 +127,7 @@ class _Listener:
 			_connections.add(_Connection(connection))
 		else:
 			connection.close()
-		return GLib.SOURCE_CONTINUE
+		return True
 
 	def close(self) -> None:
 		from gi.repository import GLib
@@ -173,12 +179,32 @@ class _Connection:
 		self.close()
 		return GLib.SOURCE_REMOVE
 
+	def hasRequest(self) -> bool:
+		"""Whether the whole request has come, reading what is there without waiting for more."""
+		try:
+			self._received += self._socket.recv(len(REQUEST) - len(self._received))
+		except OSError:
+			pass
+		return self._received == REQUEST
+
 	def _answer(self) -> None:
 		from logHandler import log
 
 		from . import inputHook
 
+		# Requests that queued up behind this one while this copy could not answer, as a caller run again
+		# and again against a stopped copy leaves them: one taking back answers them all, and is said once.
+		for listener in _listeners:
+			while listener.acceptOne():
+				pass
+		queued = [
+			connection
+			for connection in list(_connections)
+			if connection is not self and connection.hasRequest()
+		]
 		log.info("Asked from outside NVDA, through the control socket, to take the keyboard back")
+		if queued:
+			log.debug(f"{len(queued)} more requests that queued up are answered by the same")
 		try:
 			inputHook.takeKeyboardBack()
 		except Exception:
@@ -186,11 +212,14 @@ class _Connection:
 			reply = FAILED_REPLY
 		else:
 			reply = REPLY
-		try:
-			self._socket.send(reply)
-		# The caller stopped waiting, as it does after ANSWER_TIMEOUT.
-		except OSError:
-			log.debug("The caller asking to take the keyboard back had gone before the answer")
+		for connection in (self, *queued):
+			try:
+				connection._socket.send(reply)
+			# The caller stopped waiting, as it does after ANSWER_TIMEOUT.
+			except OSError:
+				log.debug("The caller asking to take the keyboard back had gone before the answer")
+		for connection in queued:
+			connection.close()
 
 	def close(self) -> None:
 		from gi.repository import GLib

@@ -169,6 +169,33 @@ def test_copyWhoseMainLoopIsStoppedDoesNotAnswer(launches, tmp_path: Path, wayla
 	_quit(nvda)
 
 
+def test_requestsQueuedWhileStoppedAreActedOnOnce(launches, tmp_path: Path, wayland: dict[str, str]):
+	nvda = _startCopy(launches, tmp_path, "queued", wayland)
+	spokenBefore = len(nvda.spokenTexts())
+	os.kill(nvda.process.pid, signal.SIGSTOP)
+	# As many as the socket's queue holds, each given up on, as a user tries again while nothing answers.
+	outcomes = []
+	try:
+		for _try in range(controlSocket._BACKLOG + 1):
+			outcomes.append(_takeKeyboard(env={**wayland, "DISPLAY": None}))
+	finally:
+		os.kill(nvda.process.pid, signal.SIGCONT)
+	assert [outcome[:2] for outcome in outcomes] == [
+		(1, controlSocket._SAID[controlSocket.NO_ANSWER] + "\n")
+	] * len(outcomes), outcomes
+	nvda.waitForLog("through the control socket, to take the keyboard back", SHUTDOWN_BOUND)
+	time.sleep(2.0)
+	log = nvda.text("nvda.log")
+	assert log.count("through the control socket, to take the keyboard back") == 1, nvda.describe()
+	assert f"{len(outcomes) - 1} more requests that queued up are answered by the same" in log, (
+		nvda.describe()
+	)
+	said = nvda.spokenTexts()[spokenBefore:]
+	assert len(said) == 1, said
+	print(f"said once: {said[0]!r}")
+	_quit(nvda)
+
+
 @pytest.mark.parametrize("callerDisplays", ["both", "x11Only"])
 def test_copyInAnXSessionHasNoSocket(launches, tmp_path: Path, wayland: dict[str, str], callerDisplays: str):
 	nvda = _startCopy(launches, tmp_path, "x11", {"WAYLAND_DISPLAY": None})
