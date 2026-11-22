@@ -134,8 +134,10 @@ OWN_WINDOWS = "/tmp/ground/ownWindows.jsonl"
 PHASES = f"{LINDA_DIRECTORY}/phases.jsonl" if __name__ != "__main__" else ""
 #: A global plugin of the case's own beside the package's test hooks, which writes to PHASES, on the
 #: guest's CLOCK_MONOTONIC, when Linda took the chord of the menu or the settings dialog, ran its handler,
-#: built the window and showed it, and when GTK mapped it, first painted it and made it active. It writes
-#: no key: only which of the two windows a chord was for.
+#: built the window and showed it, and when GTK mapped it, first painted it, had the compositor's focus-in
+#: for it and made it active. GTK's accessibility sends window:activate from that focus-in, before the
+#: window is made active, so whatever comes after it is the listener's. It writes no key: only which of
+#: the two windows a chord was for.
 PHASES_PLUGIN = """\
 import json
 import time
@@ -185,6 +187,7 @@ def onMap(widget, *args):
 		title = widget.get_title() or ""
 		record("map", title=title)
 		widget.connect("notify::is-active", lambda w, _p: w.is_active() and record("active", title=title))
+		widget.connect("focus-in-event", lambda _w, _e: record("focusIn", title=title) or False)
 		clock = widget.get_frame_clock()
 		if clock is not None:
 			painted = []
