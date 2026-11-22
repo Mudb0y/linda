@@ -371,6 +371,42 @@ def test_orca51IsGivenItsNameAndTheOldOneStillSpeaks(desktop: DesktopSession, tm
 	nvda.assertClean(logNames=("nvda.log",))
 
 
+def test_orca51StartsWithAnotherOwnerQueuedOnTheOldName(desktop: DesktopSession, tmp_path: Path):
+	nvda = start(desktop)
+	waitForLogCount(nvda, ANSWERING, 1)
+	waitForLogCount(nvda, ANSWERING1, 1)
+	queued = startOwner(tmp_path, "owner", 0)
+	assert ownerReply(queued) == "reply 2"
+
+	# NVDA gives both names up for Orca, and the queued program takes the old one; that is not Orca's
+	# take, so NVDA leaves the new name for Orca, which quits when it is only queued.
+	orca = startOwner(tmp_path, "orca", 0.5, ORCA1_BUS_NAME, ORCA1_OBJECT_PATH)
+	assert ownerReply(orca) == "reply 1", nvda.describe()
+	mark = desktop.mark()
+	present1("second")
+	assert ownerReply(orca) == "heard second"
+	present("third")
+	assert ownerReply(queued) == "heard third"
+	time.sleep(SETTLE)
+	spoken = desktop.spokenSince(mark)
+	assert "second" not in spoken and "third" not in spoken, spoken
+
+	stopOwner(orca)
+	waitForLogCount(nvda, ANSWERING1, 2)
+	mark = desktop.mark()
+	present1(POLISH)
+	desktop.expect(POLISH, since=mark)
+	stopOwner(queued)
+	waitForLogCount(nvda, ANSWERING, 2)
+	mark = desktop.mark()
+	present("fourth")
+	desktop.expect("fourth", since=mark)
+
+	desktop.close()
+	assert nvda.process.returncode == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+
+
 def test_oldOrcaLeavesTheNewNameToNVDA(desktop: DesktopSession, tmp_path: Path):
 	nvda = start(desktop)
 	waitForLogCount(nvda, ANSWERING, 1)

@@ -440,16 +440,27 @@ class _Service:
 		self._owned.discard(name)
 		log.debug(f"Speak service: NVDA no longer answers {name}")
 
-	def _onNameOwnerChanged(self, connection, sender, path, interface, signal, parameters) -> None:
+	def _isOrcaConnection(self, uniqueName: str) -> bool:
 		from gi.repository import GLib
 
+		try:
+			(pid,) = self._callBus("GetConnectionUnixProcessID", GLib.Variant("(s)", (uniqueName,)), "(u)")
+		except GLib.Error:
+			# Gone already.
+			return False
+		return _isOrca(pid)
+
+	def _onNameOwnerChanged(self, connection, sender, path, interface, signal, parameters) -> None:
 		name, oldOwner, newOwner = parameters.unpack()
 		if name in BUS_NAMES:
 			if not newOwner or newOwner == connection.get_unique_name():
 				return
 			if name == ORCA1_BUS_NAME:
 				self._noteOrcaWithName(name, newOwner)
-			if self._yieldingTo:
+			# A program queued behind NVDA is handed the name NVDA gave up, and asking again then would
+			# take Orca's name before Orca asks; Orca may ask on a connection other than the one
+			# yielded to, so the new owner's process is what tells.
+			if self._yieldingTo and self._isOrcaConnection(newOwner):
 				# Orca has one: wait behind it for that one, and answer the other, which it leaves alone.
 				self._yieldingTo.clear()
 				self._requestNames()
@@ -464,12 +475,7 @@ class _Service:
 			return
 		if oldOwner or not newOwner or not (self._owned or self._yieldingTo):
 			return
-		try:
-			(pid,) = self._callBus("GetConnectionUnixProcessID", GLib.Variant("(s)", (name,)), "(u)")
-		except GLib.Error:
-			# Gone already.
-			return
-		if not _isOrca(pid):
+		if not self._isOrcaConnection(name):
 			return
 		self._yieldingTo.add(name)
 		if self._owned:
