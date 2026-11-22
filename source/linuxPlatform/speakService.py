@@ -23,7 +23,10 @@ doing; what is spoken is queued to the main thread.
 
 Programs that stop speech through it, such as FastSM and the Prism library behind TeamTalk, look for
 the InterruptSpeech command of Orca's speech module first, so that module answers too, with that
-command alone.
+command alone. Programs written for Orca 51, such as those built on tts-rs, call InterruptSpeech on
+its speech manager before speaking and fail when it is not there, so that answers too, with that
+method alone. Its Rate property is left out on purpose: Prism takes that property for Orca 51 being
+there, and while it is missing Prism keeps to the old name, whose calls are tested.
 
 LINDA_SPEAK_SERVICE=off in the environment leaves the service out.
 """
@@ -46,6 +49,8 @@ ORCA1_OBJECT_PATH = "/org/gnome/Orca1/Service"
 ORCA1_INTERFACE = "org.gnome.Orca1.Service"
 #: Every name NVDA answers.
 BUS_NAMES = (BUS_NAME, ORCA1_BUS_NAME)
+ORCA1_SPEECH_PATH = f"{ORCA1_OBJECT_PATH}/SpeechManager"
+ORCA1_SPEECH_INTERFACE = "org.gnome.Orca1.SpeechManager"
 MODULE_INTERFACE = "org.gnome.Orca.Module"
 #: The speech module, under the name Orca gives it.
 SPEECH_MODULE = "SpeechAndVerbosityManager"
@@ -117,6 +122,12 @@ _INTROSPECTION = f"""
 			<arg direction="out" name="return" type="s"/>
 		</method>
 		<method name="Quit">
+			<arg direction="out" name="return" type="b"/>
+		</method>
+	</interface>
+	<interface name="{ORCA1_SPEECH_INTERFACE}">
+		<method name="{INTERRUPT_COMMAND}">
+			<arg direction="in" name="notify_user" type="b"/>
 			<arg direction="out" name="return" type="b"/>
 		</method>
 	</interface>
@@ -303,6 +314,7 @@ class _Service:
 		for path, interface in (
 			(OBJECT_PATH, INTERFACE),
 			(ORCA1_OBJECT_PATH, ORCA1_INTERFACE),
+			(ORCA1_SPEECH_PATH, ORCA1_SPEECH_INTERFACE),
 			(f"{OBJECT_PATH}/{SPEECH_MODULE}", MODULE_INTERFACE),
 		):
 			self._registrations.append(
@@ -473,6 +485,11 @@ class _Service:
 		try:
 			if interface == MODULE_INTERFACE:
 				invocation.return_value(self._onModuleCall(method, parameters))
+			elif interface == ORCA1_SPEECH_INTERFACE:
+				import queueHandler
+
+				queueHandler.queueFunction(queueHandler.eventQueue, _interrupt)
+				invocation.return_value(GLib.Variant("(b)", (True,)))
 			elif method in ("PresentMessage", "SpeakMessage"):
 				(text,) = parameters.unpack()
 				_queueMessage(text)

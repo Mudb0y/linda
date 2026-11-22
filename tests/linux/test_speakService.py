@@ -34,6 +34,8 @@ INTERFACE = "org.gnome.Orca.Service"
 ORCA1_BUS_NAME = "org.gnome.Orca1.Service"
 ORCA1_OBJECT_PATH = "/org/gnome/Orca1/Service"
 ORCA1_INTERFACE = "org.gnome.Orca1.Service"
+ORCA1_SPEECH_PATH = "/org/gnome/Orca1/Service/SpeechManager"
+ORCA1_SPEECH_INTERFACE = "org.gnome.Orca1.SpeechManager"
 GTK = ("gtkFixture", "Fixture window")
 AT_START = ("Fixture window", "Press me button Does nothing Alt plus P")
 POLISH = "Zażółć gęślą jaźń"
@@ -297,6 +299,40 @@ def test_bothNamesAreAnsweredAlone(desktop: DesktopSession):
 	mark = desktop.mark()
 	desktop.press("Insert+t")
 	desktop.expect("Fixture window", since=mark)
+
+	desktop.close()
+	assert nvda.process.returncode == 0, nvda.describe()
+	nvda.assertClean(logNames=("nvda.log",))
+
+
+def test_orca51ClientsCanInterrupt(desktop: DesktopSession):
+	nvda = start(desktop)
+	waitForLogCount(nvda, ANSWERING1, 1)
+
+	# tts-rs calls this before every message it speaks with interruption, and fails when it is not there.
+	interrupt = busSend(
+		"InterruptSpeech",
+		"boolean:false",
+		busName=ORCA1_BUS_NAME,
+		objectPath=ORCA1_SPEECH_PATH,
+		interface=ORCA1_SPEECH_INTERFACE,
+	)
+	assert interrupt.returncode == 0 and interrupt.stdout.splitlines()[-1].strip() == "boolean true", (
+		interrupt
+	)
+	# Prism takes the Rate property for Orca 51 being there; without it, it keeps to the old name.
+	rate = busSend(
+		"Get",
+		f"string:{ORCA1_SPEECH_INTERFACE}",
+		"string:Rate",
+		busName=ORCA1_BUS_NAME,
+		objectPath=ORCA1_SPEECH_PATH,
+		interface="org.freedesktop.DBus.Properties",
+	)
+	assert rate.returncode != 0, rate
+	mark = desktop.mark()
+	assert present1(POLISH, "SpeakMessage") < REPLY_BOUND
+	desktop.expect(POLISH, since=mark)
 
 	desktop.close()
 	assert nvda.process.returncode == 0, nvda.describe()
