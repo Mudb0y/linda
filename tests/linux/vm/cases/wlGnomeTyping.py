@@ -119,7 +119,7 @@ UNREACHED_SAID_BY = ACTIVATION_BOUND + 2.0
 #: Why the settings dialog brought forward again misses ACTIVATION_BOUND on GNOME, as package MW measured
 #: it in seven boots of the case once Linda's own part of its map was mended (results/MW-windows.txt).
 #: Linda maps the dialog again 0.02 to 0.05 s after the key, Mutter configures it some 0.25 s after the key,
-#: GTK first paints it only 0.91 to 1.45 s after the key, and it is active 0.28 to 0.38 s after that, 1.26
+#: GTK first paints it only 0.91 to 1.45 s after the key, and it is active 0.28 to 0.38 s after that, 1.25
 #: to 1.72 s after the key in all. Between the configure and the paint Linda's Python is idle and next to
 #: nothing reaches it over the accessibility bus, but its main loop runs nothing of lower priority than its
 #: default one; where that time goes inside GTK is not known. The menu and the dialog opened anew are held
