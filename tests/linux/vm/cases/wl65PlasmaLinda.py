@@ -5,10 +5,10 @@ E25. The helper's figures go to the log after "E25 helper figures", as JSON.
 
 wlGnomeLinda's subtests are run as they are but two. GNOME's two input sources and Super+Space become
 KWin's two layouts, pl and us, written to the user's kxkbrc and switched with Meta+Alt+K, KWin's own
-shortcut; and since KWin compiles both layouts into one keymap, in which the right Alt key of the us
-group is Alt_R, the gesture name and the echo after the switch are held to that keymap rather than to
-GNOME's, which keeps AltGr. Experiment E4, whose timings are of GNOME's overview and run dialog, is
-not run. Alt+F2 opens KRunner, which Linda names as the way back on KDE as on GNOME.
+shortcut; and since Linda compiles the layouts KWin names into the same one keymap KWin does, the
+gesture name and the echo of AltGr with A in us are held to what the program gets, with no expected
+failure. Experiment E4, whose timings are of GNOME's overview and run dialog, is not run. Alt+F2
+opens KRunner, which Linda names as the way back on KDE as on GNOME.
 
 wl66PlasmaLinda runs what is here on Plasma 6.6.
 """
@@ -89,11 +89,13 @@ def layoutAfterSwitch(ground: "Ground", keyboard: "FakeKeyboard", layout: str) -
 		assert app[1]["keyval"] == "aogonek", app
 		ground.waitForSpeech(gnome.OGONEK, mark)
 	else:
-		# In the us group of KWin's keymap the right Alt key is Alt_R, so the program has Alt with a,
-		# and Linda names it so and echoes nothing.
+		# KWin compiles pl,us into one keymap whose us group has no right Alt of its own, so the key
+		# stays AltGr there, and A's third level is a. Linda compiles the same names, and should name
+		# and echo it so; on GNOME it does not (wlGnomeLinda's US_RIGHT_ALT).
 		assert not any(gnome.OGONEK in text for text in name), name
-		assert any("alt plus a" in text for text in name), name
-		assert app[0]["keyval"] == "Alt_R" and app[1]["keyval"] == "a", app
+		assert "ctrl plus alt plus a" in name, name
+		assert app[0]["keyval"] == "ISO_Level3_Shift" and app[1]["keyval"] == "a", app
+		ground.waitForSpeech("a", mark, timeout=3)
 		ground.settle(0.5)
 		assert not any(gnome.OGONEK in text for text in said(ground, mark)), said(ground, mark)
 	ground.machine.log(
