@@ -29,10 +29,7 @@ JAVA_START_BOUND = 60.0
 #: Seconds with nothing new spoken after which NVDA is taken to have finished speaking.
 QUIET = 0.8
 
-pytestmark = pytest.mark.skipif(
-	not (os.environ.get("LINDA_JAVA") and os.environ.get("LINDA_JAVA_ATK_WRAPPER")),
-	reason="LINDA_JAVA and LINDA_JAVA_ATK_WRAPPER name no JDK and Java ATK wrapper",
-)
+pytestmark = [pytest.mark.needsVariable("LINDA_JAVA"), pytest.mark.needsVariable("LINDA_JAVA_ATK_WRAPPER")]
 
 
 @pytest.fixture

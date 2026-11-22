@@ -362,6 +362,12 @@
         # rig env to give Qt its X platform plugin. PyQt6's own Qt.
         LINDA_QT6_PLUGIN_PATH = "${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}";
 
+        # A JDK and the Java ATK wrapper, which nixpkgs does not have, for the Swing
+        # fixture of tests/linux/test_javaMenus.py: Java programs reach AT-SPI
+        # through the wrapper alone.
+        LINDA_JAVA = "${pkgs.jdk}/bin/java";
+        LINDA_JAVA_ATK_WRAPPER = "${pkgs.callPackage ./nix/java-atk-wrapper.nix { }}";
+
         # The X servers tests/linux/test_screenCurtain.py starts inside the rig,
         # off PATH: Xorg with the dummy driver, which has a CRTC's gamma ramps
         # as a graphics card's driver does, and Xephyr, which has none.

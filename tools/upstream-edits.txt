@@ -295,6 +295,9 @@ source/appModules/chromium.py
 source/appModules/discord.py
   Linux runtime: added. Discord's app module is Chromium's; on Windows,
   where Discord.exe would load it, it is the default
+source/appModules/chrome.py
+  Linux runtime: added. Google Chrome, whose program is named chrome, gets
+  Chromium's app module; no bundled Windows module has this name
 source/appModules/electron.py
   Linux runtime: added. A program on a shared Electron that cannot be named
   goes by Electron's name and gets Chromium's app module; on Windows, where

@@ -30,7 +30,7 @@ def _unwrap(name: str) -> str:
 #: marco's and caja's were written for MATE's programs, not for Windows programs of those names.
 #: chromium's, electron's and discord's serve those programs on Linux only.
 portedAppModules: frozenset[str] = frozenset(
-	{"nvda", "marco", "caja", "chromium", "electron", "discord", "mate_screensaver_dialog"},
+	{"nvda", "marco", "caja", "chromium", "chrome", "electron", "discord", "mate_screensaver_dialog"},
 )
 #: The app modules for the desktops' own shells, written for Wayland sessions and proven only there: in
 #: an X session those shells are read as any other program, as they were before the modules existed.

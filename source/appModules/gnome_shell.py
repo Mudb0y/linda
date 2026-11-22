@@ -28,7 +28,7 @@ import controlTypes
 import speech
 import ui
 from NVDAObjects import NVDAObject
-from NVDAObjects.AtSpi import _descendantText
+from NVDAObjects.AtSpi import DesktopNotification, _descendantText
 
 from .mate_screensaver_dialog import LABEL_ROLES, _hasPasswordFieldWithin
 
@@ -125,6 +125,9 @@ class AppModule(appModuleHandler.AppModule):
 			clsList.insert(0, UnnamedPanel)
 		elif role in ITEM_ROLES and not obj.atspiName:
 			clsList.insert(0, NamedByContent)
+		elif role == controlTypes.Role.ALERT:
+			# The shell's notification is an unnamed object inside the stage, whose text is in its labels.
+			clsList.insert(0, DesktopNotification)
 		else:
 			clsList.insert(0, ShellObject)
 
