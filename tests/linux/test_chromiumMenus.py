@@ -44,10 +44,10 @@ def recoverAfterAFailure(request: pytest.FixtureRequest, session: Session) -> It
 
 def test_contextMenu(session: Session):
 	step(session, "Menu", "frame")
-	step(session, "Down", "Back Alt+Left Arrow…")
-	step(session, "Down", "Forward Alt+Right Arrow…")
-	step(session, "Down", "Reload Ctrl+R…")
-	step(session, "Up", "Forward Alt+Right Arrow…")
+	step(session, "Down", "Back Alt plus Left Arrow…")
+	step(session, "Down", "Forward Alt plus Right Arrow…")
+	step(session, "Down", "Reload Ctrl plus R…")
+	step(session, "Up", "Forward Alt plus Right Arrow…")
 	step(session, "Escape", "Usable page document")
 	step(session, "ctrl+Home", "heading level 1 Welcome")
 	step(session, "h", "News heading level 2")
@@ -55,13 +55,15 @@ def test_contextMenu(session: Session):
 
 def test_threeDotMenuAndASubmenu(session: Session):
 	step(session, "alt+f", "frame")
-	step(session, "Down", "New tab Ctrl+T…")
-	step(session, "Down", "New window Ctrl+N…")
-	step(session, "Down", "New Incognito window Ctrl+Shift+N…")
+	step(session, "Down", "New tab Ctrl plus T…")
+	step(session, "Down", "New window Ctrl plus N…")
+	step(session, "Down", "New Incognito window Ctrl plus Shift plus N…")
 	step(session, "Down", "Your Chromium…")
 	step(session, "Right", "Customize your Chromium…")
 	step(session, "Down", "Close this profile…")
 	step(session, "Up", "Customize your Chromium…")
 	step(session, "Escape", "Your Chromium…")
 	step(session, "Down", "Passwords and autofill…")
-	step(session, "Escape", "Chromium button…")
+	# The item the menu is taken down from was said as unavailable.
+	mark = step(session, "Escape", "Usable page document")
+	assert "unavailable" not in session.desktop.spokenSince(mark)

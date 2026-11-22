@@ -1300,6 +1300,40 @@ def _asWindowEvent(event) -> tuple | None:
 	return ("window:activate" if detail1 else "window:deactivate", source, detail1, detail2, anyData)
 
 
+#: The toolkits, by their ToolkitName in lower case, whose menus mark the item the arrows reach both
+#: selected and focused and send only the selection: Chromium's own, which Electron programs share.
+SELECTION_FOCUS_TOOLKITS = frozenset({"chromium"})
+#: The menu item _asMenuItemFocus last made a focus event of, by key.
+_selectionFocusKey: tuple[str, str] | None = None
+
+
+def _asMenuItemFocus(event) -> tuple:
+	"""event, or for a menu item of a toolkit in SELECTION_FOCUS_TOOLKITS becoming selected the focus event
+	it stands for, which _focusCandidate checks against the item's focused state as for any other; and for
+	that item losing its selection, its loss of focus. Chromium takes the selection from the item as it
+	takes its menu down, when the item no longer says it is a menu item or available, which as a state
+	change of the focus was said as "unavailable"."""
+	global _selectionFocusKey
+	eventType, source, detail1, detail2, anyData = event
+	if eventType != "object:state-changed:selected":
+		return event
+	if not detail1:
+		if source.key != _selectionFocusKey:
+			return event
+		_selectionFocusKey = None
+		return ("object:state-changed:focused", source, 0, detail2, anyData)
+	toolkit = _clientModule.knownToolkit(source.busName)
+	if toolkit is None or toolkit.lower() not in SELECTION_FOCUS_TOOLKITS:
+		return event
+	try:
+		if client().role(source) not in _SELECTED_NOT_A_STATE_ROLES:
+			return event
+	except NodeGone:
+		return event
+	_selectionFocusKey = source.key
+	return ("object:state-changed:focused", source, 1, detail2, anyData)
+
+
 #: Seconds after an application last answered slowly during which it counts as busy: a container of it
 #: moved through quickly is not asked about at every step, and it is looked in last for the active window.
 BUSY_SECONDS = 2.0
@@ -1552,6 +1586,7 @@ def pumpAll() -> None:
 				_noteTopLevel(event[4].key, False)
 	released = _releasedDescendantChanges(now)
 	events = [converted for event in events if (converted := _asWindowEvent(event)) is not None]
+	events = [_asMenuItemFocus(event) for event in events]
 	found = _probeShown(events, now) if _probesShown else []
 	resumed = []
 	for busName, (event, since) in list(_focusWhileHung.items()):
