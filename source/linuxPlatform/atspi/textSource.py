@@ -116,6 +116,7 @@ class TextSource:
 			kind = atspiClient.client.coordinateType(self.node)
 			r = atspiClient.firstPosition(
 				self.node,
+				atspiClient.TEXT_POSITIONS,
 				lambda: _call(self.node, Atspi.Text.get_character_extents, self.node.ref, offset, kind),
 				lambda r: r.width > 0 or r.height > 0,
 			)
@@ -135,6 +136,7 @@ class TextSource:
 			kind = atspiClient.client.coordinateType(self.node)
 			return atspiClient.firstPosition(
 				self.node,
+				atspiClient.TEXT_POSITIONS,
 				lambda: _call(self.node, Atspi.Text.get_offset_at_point, self.node.ref, x, y, kind),
 				lambda offset: offset >= 0,
 			)

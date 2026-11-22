@@ -50,7 +50,8 @@ BUFFER_BOUND = 60.0
 ANSWER_BOUND = 10.0
 #: Seconds a program's tree is given to settle after it is shown.
 SETTLE = 2.0
-#: Seconds Firefox takes to have every position once the first is asked of it, measured at 6 to 11 ms.
+#: Seconds Firefox takes on these pages to have every position of a kind, an object's or a character's,
+#: once the first of that kind is asked of it.
 FIRST_POSITION_SECONDS = 0.2
 
 #: Three radio buttons of one group, each in a row of its own, so that their parents differ and Linda
@@ -226,7 +227,8 @@ for top in windows:
 		break
 assert sorted(radios) == sorted(RADIOS), (len(windows), sorted(radios))
 assert text is not None, len(windows)
-# Firefox answers nothing for the first position any client asks of it, and every one a moment later.
+# Firefox answers nothing for the first object's and the first character's position any client asks of
+# it, and every one a moment later.
 for node in [*radios.values(), text]:
 	Atspi.Component.get_extents(node.ref, Atspi.CoordType.WINDOW)
 Atspi.Text.get_character_extents(text.ref, 0, Atspi.CoordType.WINDOW)
@@ -283,7 +285,8 @@ result["text"] = entry
 #: "ready" answers only; "gesture NAME" runs a key gesture as if Linda had captured the keys; "browse
 #: NAME" runs browse mode's script_NAME in the focus's document; "radios TITLE" gives the place in its
 #: group, the location and the location's window of each radio button in the window TITLE starts;
-#: "position" gives the focus's location.
+#: "position" gives the focus's location; "location TEXT" the location of the object in the focus's
+#: document whose text starts with TEXT, and "character TEXT" that of its first character, or None.
 DRIVER_PLUGIN = '''\
 """The driver of test_waylandCoordinates.py."""
 
@@ -298,8 +301,10 @@ import inputCore
 import keyboardHandler
 import queueHandler
 import scriptHandler
+import textInfos
 from linuxPlatform.atspi import client as atspiClient
 from logHandler import log
+from NVDAObjects.AtSpi.textInfo import AtspiTextInfo
 
 FIFO = os.environ.get("LINDA_COORDINATES_FIFO")
 ANSWERS = os.environ.get("LINDA_COORDINATES_ANSWERS")
@@ -331,6 +336,26 @@ def _radios(title):
 	return found
 
 
+def _withText(start):
+	stack = [api.getFocusObject().treeInterceptor.rootNVDAObject]
+	seen = 0
+	while stack and seen < 3000:
+		obj = stack.pop()
+		seen += 1
+		if obj.role == controlTypes.Role.PARAGRAPH and atspiClient.client.text(obj.node, 0, len(start)) == start:
+			return obj
+		stack.extend(reversed(obj.children))
+	raise LookupError(start)
+
+
+def _character(start):
+	info = AtspiTextInfo(_withText(start), textInfos.POSITION_FIRST)
+	try:
+		return list(info._getBoundingRectFromOffset(0))
+	except LookupError:
+		return None
+
+
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	def __init__(self):
 		super().__init__()
@@ -357,6 +382,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				answer["radios"] = _radios(argument)
 			elif command == "position":
 				answer["location"] = list(api.getFocusObject().location or ())
+			elif command == "location":
+				location = _withText(argument).location
+				answer["location"] = list(location) if location else None
+			elif command == "character":
+				answer["character"] = _character(argument)
 		except Exception as e:
 			log.debugWarning("coordinates driver", exc_info=True)
 			answer["error"] = repr(e)
@@ -595,9 +625,9 @@ def startReader(desktop: DesktopSession, tmp_path: Path, socketDir: Path, progra
 		reader.launch.waitForLog("Buffer rendered", BUFFER_BOUND)
 		time.sleep(SETTLE)
 	if not isWayland():
-		# On X, Firefox's answer to the first position Linda asks of it is lost, and with it the first
-		# vertical paragraph navigation; the X route is left as it was. In a Wayland session Linda waits
-		# the moment Firefox takes, which these tests show by asking nothing first.
+		# On X, Firefox's answer to the first object's position Linda asks of it is lost, and with it the
+		# first vertical paragraph navigation; the X route is left as it was. In a Wayland session Linda
+		# waits the moment Firefox takes, which these tests show by asking nothing first.
 		reader.command("position")
 		time.sleep(FIRST_POSITION_SECONDS)
 	return reader
@@ -640,4 +670,18 @@ def test_verticalParagraphNavigation(
 	reader.said("gesture downArrow", "Delta indented paragraph.")
 	reader.said("browse previousVerticalParagraph", "Bravo indented paragraph.")
 	reader.said("browse previousVerticalParagraph", "no previous vertically aligned paragraph")
+	reader.quit()
+
+
+def test_aCharactersPositionAfterAnObjects(desktop: DesktopSession, tmp_path: Path, socketDir: Path) -> None:
+	"""Firefox begins to keep its characters' positions only when it is asked for one, after it has been
+	asked for an object's."""
+	if not isWayland():
+		pytest.skip("the X route is left as it was, with Firefox's first answer of each kind lost")
+	reader = startReader(desktop, tmp_path, socketDir, "firefox")
+	location = reader.command("location Bravo")["location"]
+	character = reader.command("character Delta")["character"]
+	print(f"{sessionName()}: Bravo at {location}, Delta's first character at {character}")
+	assert location is not None and location[2] > 0, location
+	assert character is not None and character[2] > 0, character
 	reader.quit()

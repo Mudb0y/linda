@@ -57,11 +57,16 @@ REGISTRY_BUS_NAME = "org.a11y.atspi.Registry"
 #: its text's WINDOW is the page's, not the window's, and it answers -1 for the offset at any WINDOW
 #: point (tests/linux/test_waylandCoordinates.py).
 SCREEN_TOOLKITS = frozenset({"Chromium"})
-#: Firefox answers nothing for the first position any client asks of it, as it only then begins to keep
-#: positions, and has every position 6 to 11 ms later. Only a Wayland session waits for it, so that the
+#: Firefox keeps no positions of its pages' objects until a client asks for one, and none of their
+#: characters until a client asks for a character's: it answers that first question of each kind with
+#: nothing, and every one of that kind a moment later. Only a Wayland session waits for it, so that the
 #: X route stays as it was.
 GECKO_FIRST_POSITION_SECONDS = 0.05
 GECKO_FIRST_POSITION_GAP = 0.005
+#: The kinds of position Firefox begins to keep separately: an object's, and a character's, which
+#: offsetAtPoint needs as well.
+OBJECT_POSITIONS = "object"
+TEXT_POSITIONS = "text"
 
 
 class NodeGone(LookupError):
@@ -105,22 +110,19 @@ def windowCoordinates() -> bool:
 	return displayServer.isWayland()
 
 
-#: Applications asked for a position in a Wayland session, by bus name.
-_positionsAsked: set[str] = set()
+#: When each Firefox first left a position unanswered, by bus name and kind, in a Wayland session.
+_positionsStarted: dict[tuple[str, str], float] = {}
 
 
-def firstPosition[T](node: Node, ask: Callable[[], T], answered: Callable[[T], bool]) -> T:
-	"""ask(), which asks node's application for a position in a Wayland session; asked again for
-	GECKO_FIRST_POSITION_SECONDS at most when it is the first such question to a Firefox and was not
-	answered."""
+def firstPosition[T](node: Node, kind: str, ask: Callable[[], T], answered: Callable[[T], bool]) -> T:
+	"""ask(), which asks node's application for a position of kind in a Wayland session. When a Firefox
+	does not answer it, it is asked again until GECKO_FIRST_POSITION_SECONDS after that Firefox first
+	left a position of kind unanswered, so that it is waited on that long at most once for each kind."""
 	result = ask()
-	busName = node.busName
-	if busName in _positionsAsked:
+	if answered(result) or _toolkits.get(node.busName) != "Gecko":
 		return result
-	_positionsAsked.add(busName)
-	if answered(result) or _toolkits.get(busName) != "Gecko":
-		return result
-	deadline = time.monotonic() + GECKO_FIRST_POSITION_SECONDS
+	since = _positionsStarted.setdefault((node.busName, kind), time.monotonic())
+	deadline = since + GECKO_FIRST_POSITION_SECONDS
 	while not answered(result) and time.monotonic() < deadline:
 		time.sleep(GECKO_FIRST_POSITION_GAP)
 		result = ask()
@@ -271,6 +273,7 @@ def forgetApplications() -> None:
 	_slowAnswers.clear()
 	_lastSlowAnswerAt.clear()
 	_toolkits.clear()
+	_positionsStarted.clear()
 
 
 _toolkits: dict[str, str] = {}
@@ -422,6 +425,7 @@ class Client:
 		kind = self.coordinateType(node)
 		rect = firstPosition(
 			node,
+			OBJECT_POSITIONS,
 			lambda: call(node, Atspi.Component.get_extents, kind),
 			lambda rect: rect.width > 0 or rect.height > 0,
 		)
