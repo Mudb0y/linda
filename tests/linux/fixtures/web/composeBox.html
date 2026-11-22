@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Compose box fixture</title></head>
+<body>
+<main>
+<h1>Chat with Ala</h1>
+<!-- A message box built as WhatsApp Web's is by Lexical: an editable element with the textbox role,
+a label and no aria-multiline, whose text is in the one paragraph inside it. -->
+<div id="compose" contenteditable="true" role="textbox" spellcheck="false" aria-autocomplete="list" aria-label="Type a message to Ala" data-lexical-editor="true"><p><br></p></div>
+<!-- The plain fields it must not change: a text area, and an editable element holding its text itself. -->
+<textarea id="area" spellcheck="false" aria-label="Notes" rows="4" cols="40"></textarea>
+<div id="plain" contenteditable="true" role="textbox" spellcheck="false" aria-label="Plain box"></div>
+</main>
+</body></html>
