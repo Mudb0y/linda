@@ -478,7 +478,9 @@ pub const FEATURES_KNOWN: u32 = FEATURE_WAIT | FEATURE_TYPING | FEATURE_LATE_PAS
 /// LATE_PASS by. A client names a press it has just been sent as the second, one still waiting
 /// for its verdict, and as the first a modifier the user is still holding; a thousand KEYs is some
 /// five hundred keys typed with that modifier held, far beyond a chord, while the memory stays a
-/// few dozen kilobytes however long the client is served.
+/// few dozen kilobytes however long the client is served. Repeats are KEYs too, the held
+/// modifier's own among them: at the kernel's default rate a modifier held alone for half a
+/// minute is forgotten, and a LATE_PASS naming it then changes nothing.
 pub const LATE_PASS_RECALL: usize = 1024;
 /// The device number of keys the client types with [`TYPE_DECIDE`]. Real keyboards are numbered as
 /// the kernel numbers input devices, which never comes near this.
