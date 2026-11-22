@@ -10,6 +10,7 @@ See L{gui} for the graphical user interface.
 """
 
 import os  # noqa: I001
+import sys
 from collections.abc import Callable
 from html import escape
 from typing import Final
@@ -91,7 +92,14 @@ def _warnBrowsableMessageNotAvailableOnSecureScreens(title: str | None = None) -
 def _copyBrowseableMessageToClipboard(text: str) -> None:
 	import api  # Late import to avoid a circular dependency (api imports ui).
 
-	api.copyToClip(text)
+	if sys.platform != "win32":
+		from linuxPlatform import ownGui
+
+		# On a Wayland display a copy that was not made has already been said to be refused.
+		if not api.copyToClip(text) and ownGui.isWaylandDisplay():
+			return
+	else:
+		api.copyToClip(text)
 	# Translators: Reported when the content of a browseable message is copied to the clipboard.
 	message(_("Copied to clipboard"))
 

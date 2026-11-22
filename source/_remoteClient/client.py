@@ -197,7 +197,14 @@ class RemoteClient:
 			ui.delayedMessage(pgettext("remote", "Not connected"))
 			return
 		url = session.getConnectionInfo().getURLToConnect()
-		api.copyToClip(str(url))
+		if sys.platform != "win32":
+			from linuxPlatform import ownGui
+
+			# On a Wayland display a copy that was not made has already been said to be refused.
+			if not api.copyToClip(str(url)) and ownGui.isWaylandDisplay():
+				return
+		else:
+			api.copyToClip(str(url))
 		# Translators: A message indicating that a link has been copied to the clipboard.
 		ui.delayedMessage(_("Copied link"))
 

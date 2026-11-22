@@ -446,7 +446,12 @@ class MainFrame(wx.Frame):
 	@staticmethod
 	def _copyVersionToClipboard(p: Payload):
 		versionStr = f"{versionInfo.version} ({versionInfo.version_detailed})"
-		api.copyToClip(versionStr)
+		if sys.platform != "win32":
+			# On a Wayland display a copy that was not made has already been said to be refused.
+			if not api.copyToClip(versionStr) and ownGui.isWaylandDisplay():
+				return
+		else:
+			api.copyToClip(versionStr)
 		# Translators: A message when the version number is copied to clipboard
 		# from the about dialog
 		ui.message(_("Copied to clipboard"))

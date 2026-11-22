@@ -3321,6 +3321,12 @@ class GlobalCommands(ScriptableObject):
 			# copied to clipboard
 			ui.message(_("Log fragment copied to clipboard"))
 		else:
+			if sys.platform != "win32":
+				from linuxPlatform import ownGui
+
+				# On a Wayland display the clipboard has already said why nothing was copied.
+				if ownGui.isWaylandDisplay():
+					return
 			# Translators: Presented when unable to copy to the clipboard because of an error.
 			ui.message(_("Unable to copy"))
 
@@ -4121,6 +4127,13 @@ class GlobalCommands(ScriptableObject):
 		try:
 			text = api.getClipData()
 		except:  # noqa: E722
+			if sys.platform != "win32":
+				from linuxPlatform import clipboard
+
+				# The clipboard has already said that NVDA cannot read it here, which is the truth, and
+				# "no text" on top of it would not be.
+				if isinstance(sys.exc_info()[1], clipboard.ClipboardRefused):
+					return
 			text = None
 		if not text or not isinstance(text, str) or text.isspace():
 			# Translators: Presented when there is no text on the clipboard.

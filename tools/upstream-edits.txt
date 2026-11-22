@@ -170,6 +170,9 @@ source/_remoteClient/client.py
   are sent to the follower, the keyboard is held through
   linuxPlatform.inputHook.keyboardTakers, as only a held key reaches no
   application on X, where Windows' hook blocks it
+  Linux runtime: copyLink says "Copied link" only when the copy was made or
+  the display is X. On a Wayland display linuxPlatform.clipboard has
+  already said that NVDA cannot copy there
 source/_remoteClient/input.py
   Linux runtime: sendKey presses or releases the leader's key on the X
   display through linuxPlatform.inputHook.typeKey instead of SendInput, so
@@ -509,6 +512,10 @@ source/globalCommands.py
   Linux runtime: a command with no gesture, takeKeyboardBack, has NVDA
   take the keyboard through linda-keyd again after its emergency chord let
   it go, through linuxPlatform.inputHook
+  Linux runtime: where linuxPlatform.clipboard has said it cannot read or
+  copy, as on a Wayland display that lets NVDA do neither, report clipboard
+  text does not go on to say there is no text, and the log fragment copy
+  does not add "Unable to copy". On X neither branch is taken
 source/gui/__init__.py
   Linux runtime: MainFrame.prePopup and postPopup skip their foreground
   window steps. Windows' foreground window has no counterpart for NVDA to
@@ -554,6 +561,9 @@ source/gui/__init__.py
   every platform: IndeterminateProgressDialog.done hides and destroys the
   dialog even when deciding on or playing its beep fails, since the dialog
   is application modal and would otherwise disable every other window
+  Linux runtime: the About dialog's Copy version number says it copied
+  only when the copy was made or the display is X. On a Wayland display
+  linuxPlatform.clipboard has already said that NVDA cannot copy there
 source/gui/addonStoreGui/controls/details.py
   every platform: the details say whether an add-on supports the platform
   NVDA runs on, or which it was made for
@@ -866,6 +876,12 @@ source/updateCheck.py
   raises RuntimeError, as for a build without an update version type, where
   platformFeatures says the platform does not support update checks, as on
   Linux; Windows supports them, so it imports as before
+source/ui.py
+  Linux runtime: the browseable message's copy button says it copied only
+  when the copy was made or the display is X. On a Wayland display
+  linuxPlatform.clipboard has already said that NVDA cannot copy there, and
+  "Copied to clipboard" after it would be untrue. On X the copy and the
+  line are as before
 source/utils/_deprecate.py
   every platform: _getCallerModule takes the caller's
   frame from sys._getframe instead of inspect.stack(), which read the source
