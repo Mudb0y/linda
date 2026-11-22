@@ -82,22 +82,16 @@ CAPTURE_LOOK = 0.1
 #: monotonic clock ran on, and linda-keyd, stopped as well, was not silent.
 #: The helper's WATCHDOG_FROZEN, beyond any ordinary lateness of a thread that sleeps.
 FROZEN = 0.5
-#: Key code: its lock's light.
-LOCK_KEYCODES = {
-	x11.CAPS_LOCK_KEY + 8: LOCK_CAPS,
-	69 + 8: LOCK_NUM,
-	70 + 8: LOCK_SCROLL,
-}
 #: Virtual-key code of each lock: its light.
 LOCK_LIGHTS = {
 	keyMap.VK["CAPITAL"]: LOCK_CAPS,
 	keyMap.VK["NUMLOCK"]: LOCK_NUM,
 	keyMap.VK["SCROLL"]: LOCK_SCROLL,
 }
-#: XKB's name of each lock's light: its bit. With an environment a key is a lock by the light the
-#: layout has it change, not by where it is nor by its keysym: under caps:escape the Caps Lock key
-#: changes no light, under caps:ctrl_modifier it keeps the Caps_Lock keysym and is Control all the
-#: same, and nothing would put a light wrongly flipped back.
+#: XKB's name of each lock's light: its bit. A key is a lock by the light the layout has it change,
+#: not by where it is nor by its keysym: under caps:escape the Caps Lock key changes no light, under
+#: caps:ctrl_modifier it keeps the Caps_Lock keysym and is Control all the same, and nothing would put
+#: a light wrongly flipped back.
 LOCK_LEDS = {"Caps Lock": LOCK_CAPS, "Num Lock": LOCK_NUM, "Scroll Lock": LOCK_SCROLL}
 #: The longest an environment's look at the focus may take and still leave NVDA CAPTURE_TIMEOUT for the
 #: key before DOCUMENT_WAIT from its coming, the last moment this source answers a press it waits on;
@@ -137,6 +131,7 @@ FOCUS_MOVING_MODS = X.Mod1Mask | X.Mod4Mask
 #: would end the connection, and with it the keyboard.
 LATE_PASSABLE = frozenset(evdev + 8 for evdev in (29, 42, 54, 56, 97, 100, 125, 126))
 _DEPRESSED = xkb.StateComponent.XKB_STATE_MODS_DEPRESSED
+_LOCKED = xkb.StateComponent.XKB_STATE_MODS_LOCKED
 #: The evdev codes TYPE may name, as protocol.rs's TYPEABLE has them: the keys keyMap knows, without
 #: KEY_SLEEP and the power keys. A code the virtual keyboard cannot send ends the connection, and with
 #: it the keyboard, so none other is ever sent.
@@ -259,14 +254,21 @@ class _Tables:
 	keyMods: dict[int, int]
 	#: Key codes of the keys that pick a level rather than being Alt: AltGr.
 	levelShift: frozenset[int]
+	#: Key code: the lights the layout has it change, pressed and released by itself.
+	lockLights: dict[int, int]
 
 
 def _tables(keymap: xkb.Keymap, names: tuple[str, ...], group: tuple[int, int, int]) -> _Tables:
 	keyMods: dict[int, int] = {}
 	levelShift = set()
-	for keycode in range(keymap.min_keycode(), keymap.max_keycode() + 1):
-		if keycode in LOCK_KEYCODES:
+	lockLights: dict[int, int] = {}
+	leds = []
+	for ledName, bit in LOCK_LEDS.items():
+		try:
+			leds.append((keymap.led_get_index(ledName), bit))
+		except xkb.XKBError:
 			continue
+	for keycode in range(keymap.min_keycode(), keymap.max_keycode() + 1):
 		state = keymap.state_new()
 		state.update_mask(0, 0, 0, *group)
 		try:
@@ -276,12 +278,23 @@ def _tables(keymap: xkb.Keymap, names: tuple[str, ...], group: tuple[int, int, i
 		syms = keymap.key_get_syms_by_level(keycode, layout, 0)
 		if syms and syms[0] in keyMap.LEVEL_SHIFT_KEYSYMS:
 			levelShift.add(keycode)
+		before = [state.led_index_is_active(index) for index, _bit in leds]
 		# What a modifier key does is the group's: right Alt is AltGr in a Polish group, Alt in a US one.
 		state.update_key(keycode, xkb.KeyDirection.XKB_KEY_DOWN)
 		mods = state.serialize_mods(_DEPRESSED) & 0xFF
+		state.update_key(keycode, xkb.KeyDirection.XKB_KEY_UP)
+		# A lock has what it locks down while it is held, which is no modifier held; the Caps Lock key
+		# that an option makes Control or Super is that modifier.
+		mods &= ~state.serialize_mods(_LOCKED)
+		light = 0
+		for (index, bit), was in zip(leds, before):
+			if state.led_index_is_active(index) != was:
+				light |= bit
+		if light:
+			lockLights[keycode] = light
 		if mods:
 			keyMods[keycode] = mods
-	return _Tables(keymap, names, group, keyMods, frozenset(levelShift))
+	return _Tables(keymap, names, group, keyMods, frozenset(levelShift), lockLights)
 
 
 def _lockedMods(locks: int) -> int:
@@ -461,7 +474,7 @@ class KernelKeySource:
 		self._looksAsked = 0
 		self._looksDone = 0
 		self._layoutWakeRead, self._layoutWakeWrite = os.pipe()
-		#: Key codes down, the locks left out: what holds the modifiers down.
+		#: Key codes down: what holds the modifiers down.
 		self._down: set[int] = set()
 		#: Key code: the press of each key down on the keyboards; of a key held on
 		#: more than one keyboard, the first, which NVDA was told of.
@@ -1742,7 +1755,9 @@ class KernelKeySource:
 		if self._environment is not None:
 			self._passedOn(press)
 			return
-		light = LOCK_KEYCODES.get(press.keycode)
+		# By what the layout makes the key, not where it is: under caps:escape the Caps Lock key locks
+		# nothing, and no light the helper reports would put a lock wrongly flipped back.
+		light = self._tables.lockLights.get(press.keycode)
 		if light is not None:
 			# The X server locks or unlocks as the key reaches it, and the light the helper reports
 			# follows a moment later; a key typed in between has it already.
@@ -1996,8 +2011,7 @@ class KernelKeySource:
 		locked = _lockedMods(self._locks)
 		effective = depressed | locked
 		levelShift = keycode in tables.levelShift
-		if keycode not in LOCK_KEYCODES:
-			self._down.add(keycode)
+		self._down.add(keycode)
 		capture = self._captureNow(now)
 		own = self._ownKind(keycode, effective, capture)
 		under: tuple[_Press, ...] = ()
