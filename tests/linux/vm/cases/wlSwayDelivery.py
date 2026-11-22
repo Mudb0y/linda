@@ -1,12 +1,13 @@
 """The delivery watch in the sway guest, with the real helper and a uhid keyboard it holds: sway listing
 linda-keyd's keyboard with its events on proves that the keys Linda passes on reach the desktop, which
-is remembered, so that a second start says no rescue hint. With swaymsg switching that keyboard's events
-off, Linda lets go within a second, says so, and typing reaches the program through the real keyboard;
-nothing asks the helper again for ten seconds, linda --take-keyboard taken while the events are still
-off lets go again, and taken once they are on gives Linda its keys back. Under caps:escape, Linda's
-layout knowing it or not, and under ctrl:nocaps, twenty Caps Locks passed on prove nothing. A layout
-sway gives linda-keyd's keyboard alone is said once. Nothing typed is in Linda's log, the helper's
-journal or the record.
+is remembered, so that a second start says no rescue hint. A switch to a text console and back, through
+which sway takes every device away, is no word on the keys' delivery. With swaymsg switching that
+keyboard's events off, Linda lets go within a second, says so, and typing reaches the program through
+the real keyboard; nothing asks the helper again for ten seconds, linda --take-keyboard taken while the
+events are still off lets go again, and taken once they are on gives Linda its keys back. Under
+caps:escape, Linda's layout knowing it or not, and under ctrl:nocaps, twenty Caps Locks passed on prove
+nothing. A layout sway gives linda-keyd's keyboard alone is said once. Nothing typed is in Linda's log,
+the helper's journal or the record.
 """
 
 import re
@@ -46,6 +47,7 @@ SWAY_SAYS = "sway says it takes linda-keyd's keyboard's events, so that proves n
 #: The helper's journal as a client is admitted, and as it lets go when its client goes.
 ADMITTED = "admitted process "
 HELPER_LET_GO = "let go of every keyboard: the client went"
+HELPER_BACKGROUND = "let go of every keyboard: Background"
 #: Linda's state directory in the guest, and the record of proofs in it.
 RECORD = f"/home/{USER}/.local/state/linda/keyDelivery"
 NVDA_LOG = f"{LINDA_DIRECTORY}/nvda.log"
@@ -126,6 +128,32 @@ def firstStart(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 		typedThrough(ground, keyboard, "KEY_B", "b", echo="b")
 		acceptance.typedMarker(ground, keyboard, NVDA_LOG)
 		assert not acceptance.holdingMarker({"the record": ground.shell(f"cat {RECORD}")})
+
+
+def consoleSwitch(ground: "Ground", keyboard: "FakeKeyboard") -> None:
+	with ground.subtest(
+		"to a text console and back: the helper lets go and holds again, Linda keeps it, says nothing of "
+		"the keys' delivery, and its keys work"
+	):
+		desktop = int(ground.shell("fgconsole").strip())
+		text = next(n for n in (3, 4, 5) if n != desktop)
+		proofs = len(ground.lindaLogRecords(PRESENT))
+		mark = ground.mark()
+		ground.shell(f"chvt {text}")
+		ground.waitForHelperLog(HELPER_BACKGROUND, mark)
+		ground.settle(3)
+		back = ground.mark()
+		ground.shell(f"chvt {desktop}")
+		held = ground.waitForHelperLog(f"({UHID}): Held", back, timeout=15)[0]
+		ground.machine.log(f"the helper held the keyboard again {held - back.t:.3f} s after the switch back")
+		ground.waitFor(
+			lambda: len(ground.lindaLogRecords(PRESENT)) > proofs, "the listing's proof after the return", 10
+		)
+		lindaKeyWorks(ground, keyboard)
+		typedThrough(ground, keyboard, "KEY_B", "b", echo="b")
+		assert saidCount(ground, mark, ABSENT) == 0, said(ground, mark)
+		assert not ground.lindaLogRecords("do not reach the desktop")
+		assert not helperSince(ground, mark, HELPER_LET_GO), ground.helperLog(mark)
 
 
 def eventsOff(ground: "Ground", keyboard: "FakeKeyboard") -> None:
@@ -254,6 +282,7 @@ def run(ground: "Ground") -> None:
 	keyboard = ground.uhidKeyboard(UHID)
 	ground.settle(APART)
 	firstStart(ground, keyboard)
+	consoleSwitch(ground, keyboard)
 	eventsOff(ground, keyboard)
 	remaps(ground, keyboard)
 	otherLayout(ground, keyboard)

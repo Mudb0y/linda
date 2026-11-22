@@ -11,7 +11,8 @@ the virtual keyboard's lights, by the desktop having written them. A proof is re
 state directory by the desktop's name and the day, after which the rescue hint is not said at start.
 
 Absence is proved by sway's listing, one second after the helper holds the keyboard or at any change
-after that, saying the virtual keyboard is not there or takes no events; and by the lock echo. The
+after that while it holds, saying the virtual keyboard is not there or takes no events, a removal
+being asked about again a second later; and by the lock echo. The
 echo is hedged against a keyboard remapped under NVDA's feet, since what it costs when wrong is every
 command of NVDA's until the user takes the keyboard back: a lock key is noted only by the light the
 layout has it change, so that under caps:escape no Caps Lock is a lock; a press counts only for a light
@@ -73,6 +74,10 @@ def layoutMatches() -> int:
 	imports it with its objects, and a route used without them has no typing to match."""
 	typedChars = sys.modules.get("linuxPlatform.atspi.typedChars")
 	return typedChars.layoutMatches() if typedChars is not None else 0
+
+
+def _isHolding(source: object) -> bool:
+	return getattr(source, "isHolding", True)
 
 
 class Record:
@@ -253,6 +258,9 @@ class DeliveryWatch:
 		#: The kernel source the helper holds the keyboard for, and since when, while it does.
 		self._source: object | None = None
 		self._heldAt = 0.0
+		#: When sway is to be asked next, if it is; and whether it has been in this hold, before which
+		#: what it reports is not taken.
+		self._askAt: float | None = None
 		self._listingAsked = False
 		#: sway's last word on the virtual keyboard during this hold.
 		self._listed: Listing | None = None
@@ -269,7 +277,7 @@ class DeliveryWatch:
 
 	def start(self) -> None:
 		if self._listing is not None:
-			self._listing.follow(lambda listed: self._post("listed", listed))
+			self._listing.follow(lambda listed: self._post("listed", listed, time.monotonic()))
 		self._thread = threading.Thread(target=self._run, name="lindaDeliveryWatch", daemon=True)
 		self._thread.start()
 
@@ -329,9 +337,10 @@ class DeliveryWatch:
 
 	def _wait(self, now: float) -> float | None:
 		deadlines = [press.at + ECHO_WAIT for press in self._pending]
-		if self._source is not None:
-			if not self._listingAsked and self._listing is not None:
-				deadlines.append(self._heldAt + LISTING_WAIT)
+		# While the helper does not hold, nothing is asked, and its next hold wakes the watch.
+		if self._source is not None and _isHolding(self._source):
+			if self._askAt is not None:
+				deadlines.append(self._askAt)
 			if self.state != PRESENT:
 				deadlines.append(now + MATCHES_INTERVAL)
 		return max(0.0, min(deadlines) - now) if deadlines else None
@@ -343,12 +352,14 @@ class DeliveryWatch:
 		now = time.monotonic()
 		self._expire(now)
 		source = self._source
-		if source is None or not getattr(source, "isHolding", True):
+		if source is None or not _isHolding(source):
 			return
-		if self._listing is not None and not self._listingAsked and now >= self._heldAt + LISTING_WAIT:
+		if self._listing is not None and self._askAt is not None and now >= self._askAt:
+			self._askAt = None
 			self._listingAsked = True
 			listed = self._listing.ask()
-			if listed is not None:
+			# The helper may have let go while sway was asked, and sway takes its keyboard away then.
+			if listed is not None and self._source is source and _isHolding(source):
 				self._takeListing(listed)
 		if self._source is not None and self.state != PRESENT and self._matches() > self._matchesAtHold:
 			self._present("a character typed matched NVDA's layout")
@@ -357,14 +368,17 @@ class DeliveryWatch:
 			self._takeVirtual(status)
 
 	def _on_held(self, source: object, at: float) -> None:
-		if source is self._source:
-			return
+		# A kernel source says it holds only as it turns from not holding, so the same source again is a
+		# hold after a let-go, as for a console switch, through which sway took its devices away and gave
+		# them back: everything is asked afresh.
 		self._source, self._heldAt = source, at
+		self._askAt = at + LISTING_WAIT if self._listing is not None else None
 		self._listingAsked = False
 		self._listed = None
 		self._matchesAtHold = self._matches()
 		self._pending.clear()
 		self._unanswered = 0
+		self._virtual = None
 		self.state = UNKNOWN
 
 	def _on_released(self, source: object) -> None:
@@ -375,10 +389,20 @@ class DeliveryWatch:
 		self._unanswered = 0
 		self.state = UNKNOWN
 
-	def _on_listed(self, listed: Listing) -> None:
-		# Before the listing is first asked, the helper's keyboard may be settling still.
-		if self._source is not None and self._listingAsked:
-			self._takeListing(listed)
+	def _on_listed(self, listed: Listing, at: float) -> None:
+		source = self._source
+		# Before the listing is first asked, the helper's keyboard may be settling still; and while the
+		# helper does not hold, sway's devices are no word on the keys passed on.
+		if source is None or not self._listingAsked or not _isHolding(source):
+			return
+		if not listed.listed:
+			# sway takes every device away as its session goes to the background, and the virtual keyboard
+			# as the helper breaks it, either of which may come before the helper's word that it let go: so
+			# sway is asked again once that word would have come.
+			again = at + LISTING_WAIT
+			self._askAt = again if self._askAt is None else min(self._askAt, again)
+			return
+		self._takeListing(listed)
 
 	def _on_virtual(self, status: int) -> None:
 		self._virtual = status
@@ -403,13 +427,15 @@ class DeliveryWatch:
 				self._matchesAtAnswer = self._matches()
 
 	def _expire(self, now: float) -> None:
+		holding = self._source is not None and _isHolding(self._source)
 		for press in [p for p in self._pending if now >= p.at + ECHO_WAIT]:
 			self._pending.remove(press)
-			if press.followed or not press.light & self._answered:
+			# Not holding, the helper may have let go before its LOCKS could answer.
+			if press.followed or not press.light & self._answered or not holding:
 				continue
 			self._unanswered += 1
 			log.debug(f"Key delivery: {self._unanswered} lock keys passed on running were not answered")
-			if self._unanswered < ECHO_RUN or self._source is None:
+			if self._unanswered < ECHO_RUN:
 				continue
 			if self._matches() != self._matchesAtAnswer:
 				log.debug("Key delivery: a character typed has matched since, so that proves nothing")

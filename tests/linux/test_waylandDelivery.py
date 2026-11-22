@@ -530,6 +530,88 @@ def test_swaysListing(tmp_path: Path, start: str):
 		assert not record.exists()
 
 
+BACKGROUND_CHILD = r"""
+from keydStandIn import RELEASED_BACKGROUND
+
+PRESENT_LINE = "reach the desktop: sway lists linda-keyd's keyboard with its events on"
+
+
+def proofs():
+	return sum(PRESENT_LINE in line for line in logged.lines)
+
+
+def holdAgain():
+	# The helper captures again by itself once the session is in front again.
+	with keyboard._lock:
+		keyboard._capture()
+	keyboard._wake()
+	wait(lambda: source._kernel is kernel and kernel.isHolding, 3, "the helper did not hold again")
+	return time.monotonic()
+
+
+def background(removedFirst):
+	# sway, its session paused, takes its devices away, before the helper's word that it let go or after.
+	if removedFirst:
+		fake.change(None, "removed")
+		time.sleep(0.05)
+	keyboard.letGo(RELEASED_BACKGROUND)
+	wait(lambda: not kernel.isHolding, 3, "the helper's let-go did not come")
+	if not removedFirst:
+		fake.change(None, "removed")
+	time.sleep(1.5)
+	return {"kernel": source._kernel is kernel, "blocked": source._blocked is not None}
+
+
+standIn()
+source = startRoute(waitForKernel=False)
+wait(lambda: source.isKernel, 10, "the route did not take the helper's keys")
+wait(lambda: proofs() == 1, 3, "no proof of presence")
+kernel = source._kernel
+steps = {}
+for removedFirst in (False, True):
+	away = background(removedFirst)
+	fake.change(virtualEntry("enabled"), "added")
+	time.sleep(0.2)
+	before = proofs()
+	holdAgain()
+	wait(lambda: proofs() > before, 3, "no proof of presence after the return")
+	steps["removed first" if removedFirst else "let go first"] = {
+		"away": away,
+		"back": {"kernel": source._kernel is kernel, "isKernel": source.isKernel},
+	}
+steps["said"] = list(said)
+# Back in front while sway lists no keyboard of the helper's yet, nor a second later.
+background(False)
+steps["stillMissing"] = letGo(holdAgain())
+steps["saidThen"] = said[len(steps["said"]):]
+steps["admissions"] = len(admissions())
+result = steps
+source.stop()
+"""
+
+
+@pytest.mark.rigSession("x11")
+def test_aConsoleSwitchIsNoWordOnDelivery(tmp_path: Path):
+	"""The helper lets go as the session goes to the background, and sway takes every device away:
+	whichever comes first, Linda keeps the helper, says nothing, and once the helper holds again sway
+	is asked afresh, which proves presence; back in front with sway listing no keyboard of the
+	helper's a second later, Linda lets go."""
+	value = runDelivery(
+		tmp_path,
+		"START = 'enabled'\n" + FAKE_SWAY + BACKGROUND_CHILD,
+		env={"LINDA_TEST_DELIVERY_RECORD": str(tmp_path / "keyDelivery")},
+	)
+	for order in ("let go first", "removed first"):
+		assert value[order] == {
+			"away": {"kernel": True, "blocked": False},
+			"back": {"kernel": True, "isKernel": True},
+		}, value
+	assert value["said"] == [HINT]
+	assert 0.7 <= value["stillMissing"] <= 1.6, value
+	assert value["saidThen"] == [ABSENT]
+	assert value["admissions"] == 1
+
+
 # An X session.
 
 X11_CHILD = r"""
