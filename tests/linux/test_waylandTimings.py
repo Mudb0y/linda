@@ -66,6 +66,11 @@ READING_BEFORE = 0.3
 TIMED_READING = {"LINDA_TRANSCRIPT_MODE": "timed", "LINDA_TRANSCRIPT_MS_PER_CHAR": "10"}
 #: Switches between two windows of one program.
 SAME_PROGRAM_TRIALS = 20
+#: Where a letter of the race belongs, by the window Alt+Tab went to, and where each one bound for
+#: Firefox goes while the race's known fault stands.
+TO_PROBE = ["probe"]
+TO_FIREFOX = ["linda in Keys page"]
+BOTH_PLACES = ["page", "linda in Keys page"]
 
 #: A global plugin that records, as JSON lines in the file LINDA_FEED_PROBE names, with the clock every
 #: process shares: every window event the Wayland route's capture feed follows, when it follows it, and
@@ -316,7 +321,7 @@ class Race:
 		for number in range(trials):
 			toProbe = number % 2 == 0
 			result = self.trial(delay, toProbe, places)
-			result["right"] = ["probe"] if toProbe else ["linda in Keys page"]
+			result["right"] = TO_PROBE if toProbe else TO_FIREFOX
 			results.append(result)
 		return results
 
@@ -356,14 +361,54 @@ def finish(found: Race) -> None:
 	session.quit()
 
 
+class Misplaced(AssertionError):
+	"""The races' known fault and nothing else: letters bound for Firefox that went to the page and to
+	Linda both."""
+
+
+def misplaced(results: list[dict]) -> list[dict]:
+	return [r for r in results if r["got"] != r["right"]]
+
+
+def blame(results: list[dict], wrong: list[dict]) -> None:
+	"""Raise Misplaced when every wrong trial has the known fault's shape; fail plainly when any has
+	another, which RACE_FAULT must not swallow."""
+	if not wrong:
+		return
+	other = [r for r in wrong if r["right"] != TO_FIREFOX or r["got"] != BOTH_PLACES]
+	assert not other, f"{len(other)} of {len(results)} letters misplaced, not by the known fault: {other}"
+	raise Misplaced(
+		f"{len(wrong)} of {len(results)} letters bound for Firefox went to the page and Linda both"
+	)
+
+
+def landedRight(results: list[dict]) -> None:
+	blame(results, misplaced(results))
+
+
+def waitedForActivation(results: list[dict]) -> None:
+	blame(results, misplaced(results))
+	# The letter came before the feed heard of the switch, and waited for it.
+	assert all(r["pressedAfterHeard"] is not None and r["pressedAfterHeard"] < 0 for r in results)
+	assert all(r["answers"] and r["answers"][0]["given"][:1] == [VERDICT_WAIT] for r in results)
+
+
+def wentToOnePlace(results: list[dict]) -> None:
+	wrong = misplaced(results)
+	if any(len(r["got"]) != 1 for r in results) or len(wrong) > MISPLACED_AT_30_MS:
+		blame(results, wrong)
+
+
 #: Why the races fail on main as wave 3 builds them, in results/AR-altTab-race.txt of the Wayland work:
 #: sway moves the keyboard as Tab goes down, and the window events come before Alt is let go, whose
 #: release opens a wait for window events that never come, so that every look ends unknown at the
 #: grace and the letter is passed, while NVDA acts on it too; and with the feed's events held back,
-#: NVDA's setCapture, ahead of the feed, leaves it with no anchor to look for. strict, so that the
-#: fix turns these into failures until the marks go.
+#: NVDA's setCapture, ahead of the feed, leaves it with no anchor to look for. Only Misplaced, raised
+#: once Linda's quit checks have passed, is the known fault: a failure anywhere else must fail. strict,
+#: so that the fix turns these into failures until the marks go.
 RACE_FAULT = pytest.mark.xfail(
 	reason="the Wayland route sends letters typed just after Alt+Tab under sway to the page and NVDA both",
+	raises=Misplaced,
 	strict=True,
 )
 
@@ -373,8 +418,8 @@ def test_aLetterAHundredMillisecondsAfterAltTabLandsRight(tmp_path: Path, socket
 	with race(tmp_path, socketDir) as found:
 		results = found.run(0.1)
 		report("100 ms", results)
-		assert [r for r in results if r["got"] != r["right"]] == []
 		finish(found)
+	landedRight(results)
 
 
 @RACE_FAULT
@@ -382,11 +427,8 @@ def test_aLetterWaitsForActivationHeldBack(tmp_path: Path, socketDir: Path):  # 
 	with race(tmp_path, socketDir, holdMs=HELD_BACK_MS) as found:
 		results = found.run(0.1)
 		report(f"100 ms, window events held back {HELD_BACK_MS} ms", results)
-		assert [r for r in results if r["got"] != r["right"]] == []
-		# The letter came before the feed heard of the switch, and waited for it.
-		assert all(r["pressedAfterHeard"] is not None and r["pressedAfterHeard"] < 0 for r in results)
-		assert all(r["answers"] and r["answers"][0]["given"][:1] == [VERDICT_WAIT] for r in results)
 		finish(found)
+	waitedForActivation(results)
 
 
 @RACE_FAULT
@@ -394,9 +436,48 @@ def test_aLetterThirtyMillisecondsAfterAltTabGoesToOnePlace(tmp_path: Path, sock
 	with race(tmp_path, socketDir) as found:
 		results = found.run(0.03)
 		report("30 ms", results)
-		assert [r for r in results if len(r["got"]) != 1] == []
-		assert len([r for r in results if r["got"] != r["right"]]) <= MISPLACED_AT_30_MS
 		finish(found)
+	wentToOnePlace(results)
+
+
+def trialOf(right: list[str], got: list[str], given: list[int], pressedAfterHeard: float = -0.04) -> dict:
+	"""A trial as Race.run gives it, for the checks' own tests."""
+	return {
+		"got": got,
+		"right": right,
+		"sway": 0.005,
+		"heard": 0.14,
+		"pressedAfterHeard": pressedAfterHeard,
+		"answers": [{"seq": 1, "t": 0.0, "given": given, "expired": False, "waited": []}],
+	}
+
+
+def raised(check: Callable[[list[dict]], None], results: list[dict]) -> type[BaseException] | None:
+	try:
+		check(results)
+	except AssertionError as error:
+		return type(error)
+	return None
+
+
+def test_theRaceChecksCallOnlyTheKnownFaultMisplaced():
+	assert RACE_FAULT.mark.kwargs["raises"] is Misplaced
+	toProbe = trialOf(TO_PROBE, TO_PROBE, [VERDICT_WAIT, 0])
+	toFirefox = trialOf(TO_FIREFOX, TO_FIREFOX, [VERDICT_WAIT, 1])
+	both = trialOf(TO_FIREFOX, BOTH_PLACES, [VERDICT_WAIT, 0])
+	pageAlone = trialOf(TO_FIREFOX, ["page"], [VERDICT_WAIT, 0])
+	probeInFirefox = trialOf(TO_PROBE, TO_FIREFOX, [VERDICT_WAIT, 1])
+	for check in (landedRight, waitedForActivation, wentToOnePlace):
+		assert raised(check, [toProbe, toFirefox] * 50) is None, check
+		assert raised(check, [toProbe, both] * 50) is Misplaced, check
+		assert raised(check, [toProbe, both] * 49 + [toProbe, pageAlone]) is AssertionError, check
+		assert raised(check, [probeInFirefox, both] * 50) is AssertionError, check
+	# At 30 ms a letter bound for the wrong window may slip through, so long as it goes to one place.
+	assert (
+		raised(wentToOnePlace, [toProbe, toFirefox] * 49 + [toProbe, trialOf(TO_FIREFOX, TO_PROBE, [0])])
+		is None
+	)
+	assert raised(wentToOnePlace, [toProbe, toFirefox] * 49 + [toProbe, both]) is Misplaced
 
 
 def test_aSecondWindowOfTheSameProgramIsCounted(tmp_path: Path, socketDir: Path):  # noqa: F811
