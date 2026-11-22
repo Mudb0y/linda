@@ -752,6 +752,7 @@ def terminate() -> None:
 	_focusWhileHung.clear()
 	_activationWhileHung.clear()
 	_switcherEventsWhileHung.clear()
+	_switcherHandedBack.clear()
 	_rescansExtended = False
 	_setForeground(None)
 	_settleStartedAt = None
@@ -1028,26 +1029,32 @@ def _deferWhileHung(event) -> None:
 _switcherEventsWhileHung: dict[str, tuple[float, list]] = {}
 #: How many such events are kept for each switcher, the newest.
 MAX_SWITCHER_EVENTS_WHILE_HUNG = 20
+#: Since when each switcher whose held events were handed back in this pump had been held: one that
+#: answers the probe but not the next call is held again from then, or it would never be given up.
+_switcherHandedBack: dict[str, float] = {}
 
 
 def _holdWhileHung(event, now: float) -> None:
 	import core
 
-	since, held = _switcherEventsWhileHung.get(event[1].busName, (now, []))
+	busName = event[1].busName
+	since, held = _switcherEventsWhileHung.get(busName, (_switcherHandedBack.get(busName, now), []))
 	held.append(event)
-	_switcherEventsWhileHung[event[1].busName] = (since, held[-MAX_SWITCHER_EVENTS_WHILE_HUNG:])
+	_switcherEventsWhileHung[busName] = (since, held[-MAX_SWITCHER_EVENTS_WHILE_HUNG:])
 	core.requestPump()
 
 
 def _switcherEventsAnswered(now: float) -> list:
 	"""The held events of each switcher that answers again, in the order they came; those of one that
 	has not answered for HUNG_FOCUS_SECONDS are given up."""
+	_switcherHandedBack.clear()
 	answered = []
 	for busName, (since, held) in list(_switcherEventsWhileHung.items()):
 		if now - since > HUNG_FOCUS_SECONDS:
 			del _switcherEventsWhileHung[busName]
 		elif not client().isHung(busName):
 			del _switcherEventsWhileHung[busName]
+			_switcherHandedBack[busName] = since
 			answered += held
 	return answered
 
@@ -1542,7 +1549,7 @@ def pumpAll() -> None:
 	with _queueLock:
 		events = list(_queue)
 		_queue.clear()
-	if _switcherEventsWhileHung:
+	if _switcherEventsWhileHung or _switcherHandedBack:
 		events = _switcherEventsAnswered(now) + events
 	for event in events:
 		if event[0] == "object:active-descendant-changed":
