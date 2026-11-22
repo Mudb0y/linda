@@ -524,6 +524,9 @@ class KernelKeySource:
 		self._refusedOut: dict[int, int] = {}
 		#: The key codes of presses injected and refused whose release NVDA has not yet sent.
 		self._injectedRefused: set[int] = set()
+		#: Sequence number: the press of each key typed to be decided whose TYPED has not come, which may
+		#: yet say the helper lost it, by then often released and forgotten by its number.
+		self._typedPresses: dict[int, _Press] = {}
 		#: Whether Num Lock was on before a numpad key was typed under the other state, until it is put
 		#: back as the last such key is released.
 		self._numLockBefore: bool | None = None
@@ -960,6 +963,7 @@ class KernelKeySource:
 
 	def _onTyped(self, message: keydClient.Typed, now: float) -> None:
 		sent = self._typing.pop(message.tag, None)
+		typedPress = self._typedPresses.pop(message.seq, None) if message.seq else None
 		if sent is None:
 			return
 		if not sent.down and sent.mode == keydClient.TYPE_DECIDE:
@@ -984,24 +988,25 @@ class KernelKeySource:
 			if mode == keydClient.TYPE_INJECT and message.outcome != keydClient.TYPED_LOST:
 				# No KEY numbers an injected key, so whether it was refused as it went out is not told.
 				self._injectedRefused.add(sent.keycode)
-		if sent.mode == keydClient.TYPE_DECIDE and message.seq and message.outcome == keydClient.TYPED_LOST:
-			self._typedPressLost(message.seq)
+		if sent.mode == keydClient.TYPE_DECIDE and message.outcome == keydClient.TYPED_LOST:
+			self._typedPressLost(typedPress)
 		if sent.light:
 			self._locks ^= sent.light
 
-	def _typedPressLost(self, seq: int) -> None:
+	def _typedPressLost(self, press: _Press | None) -> None:
 		"""A typed press passed and still in the helper's line behind a press it held, dropped as it let go:
-		the application never had it, so its release, which comes as the helper lets go, has not reached it
-		either. The environment heard it passed and hears of its release, so that its account of what is
+		the application never had it, nor its release, read already or to come as the helper lets go.
+		The environment heard it passed, and hears of its release once, so that its account of what is
 		down comes even."""
-		press = self._bySeq.get(seq)
-		if press is None or not press.typed or not press.passed or press.expired:
+		if press is None or not press.passed or press.expired:
 			return
 		with press.lock:
 			press.passed = False
 		# Not given to NVDA now if the decider has yet to come to it, as the application never had it.
 		press.dropped = True
-		self._tell(self._environment.notePassed, press.keycode, True)
+		if self._presses.get(press.keycode) is press:
+			# Its release comes as the helper lets go, by then no passed key's, and so told of by nothing else.
+			self._tell(self._environment.notePassed, press.keycode, True)
 
 	def _releaseRefusedOut(self, keycode: int, now: float) -> None:
 		"""End NVDA's press of a key typed and refused as it went out, once its release is answered, if no
@@ -1018,6 +1023,7 @@ class KernelKeySource:
 		self._typedDown = {}
 		self._refusedOut.clear()
 		self._injectedRefused.clear()
+		self._typedPresses.clear()
 		self._numLockBefore = None
 
 	def _post(self, command: Callable[[], None]) -> None:
@@ -1927,7 +1933,7 @@ class KernelKeySource:
 			if holders and keycode in self._presses:
 				holders[key.device] = self._follow(keycode, now, key.seq, key.device, decided)
 			elif self._environment is not None and key.flags & keydClient.KEY_TYPED:
-				holders[key.device] = self._press(
+				holders[key.device] = self._typedPresses[key.seq] = self._press(
 					keycode, now, key.seq, decided=decided, device=key.device, typed=True
 				)
 			else:

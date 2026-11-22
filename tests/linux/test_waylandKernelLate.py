@@ -27,7 +27,8 @@ ALT, SUPER, TAB, INSERT, X_KEY, F12 = (code(name) for name in ("alt", "super", "
 #: The Menu key, which altwin:menu_win makes Super, and which LATE_PASS may not name.
 MENU = 127
 VK_TAB, VK_MENU, VK_LWIN, VK_F12, VK_X = 0x09, 0x12, 0x5B, 0x7B, 0x58
-RELEASED_BACKGROUND, TYPED_LOST = 3, 7
+RELEASED_BACKGROUND = 3
+TYPED_OUT, TYPED_KEPT, TYPED_LOST = 1, 2, 7
 #: The process NVDA names as the document's.
 DOCUMENT_PROCESS = 4321
 
@@ -543,6 +544,40 @@ def test_aTypedPressLostAsTheHelperLetsGoNeverReachedTheApplication(tmp_path: Pa
 	value = runLateChild(tmp_path, LOST_CHILD).value
 	[seq] = value["seq"]
 	assert value["typed"] == [[1, seq, TYPED_LOST]]
+	assert value["emitted"] == []
+	assert value["f12"] == []
+	assert value["passed"] == [[F12 + 8, False], [F12 + 8, True]]
+
+
+LOST_RELEASED_CHILD = r"""
+away = x11.CaptureState(1, None, False, "browse", None, None, None)
+environment = Environment(state=away)
+source = startSource(environment)
+step("down", "x", 0.03)
+source.typeKey(VK_F12, False, False)
+source.typeKey(VK_F12, False, True)
+keyboard.waitFor(lambda: sum(1 for e in keyboard.events if e[1] == "key" and e[3] == F12) >= 2)
+time.sleep(0.05)
+keyboard.letGo(RELEASED_BACKGROUND)
+time.sleep(0.3)
+step("up", "x", 0.1)
+result = {
+	"opened": opened,
+	"typed": [[tag, outcome] for tag, _seq, outcome in keyboard.typed],
+	"f12": [[e["up"], e["injected"], e["reached"]] for e in delivered if e["vk"] == VK_F12],
+	"passed": [note for note in passedNotes(environment) if note[0] == F12 + 8],
+	"emitted": [entry for entry in emitted() if entry[0] == F12],
+}
+source.stop()
+"""
+
+
+def test_aTypedPressLostWithItsReleaseTypedAlreadyNeverReachedTheApplication(tmp_path: Path):
+	"""Remote Access sends a key's press and release together, and the helper sends the release's KEY as
+	its TYPE comes, so the source has read the release before the helper lets go and answers both LOST.
+	NVDA is given neither, and the environment hears of the release once."""
+	value = runLateChild(tmp_path, LOST_RELEASED_CHILD).value
+	assert value["typed"] == [[1, TYPED_LOST], [2, TYPED_LOST]]
 	assert value["emitted"] == []
 	assert value["f12"] == []
 	assert value["passed"] == [[F12 + 8, False], [F12 + 8, True]]
