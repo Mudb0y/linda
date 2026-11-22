@@ -154,6 +154,12 @@ TYPED_UNDONE = frozenset(
 		keydClient.TYPED_LOST,
 	)
 )
+#: What VIRTUAL says of the helper's virtual keyboard, for the log.
+VIRTUAL_NAMES = {
+	keydClient.VIRTUAL_SEEN: "the desktop wrote them",
+	keydClient.VIRTUAL_UNSEEN: "nothing wrote them",
+	keydClient.VIRTUAL_OLD: "nothing can be seen, the keyboard being older",
+}
 
 
 @dataclass(frozen=True)
@@ -524,6 +530,8 @@ class KernelKeySource:
 		self._refusedOut: dict[int, int] = {}
 		#: The key codes of presses injected and refused whose release NVDA has not yet sent.
 		self._injectedRefused: set[int] = set()
+		#: The key codes of keys injected that the environment heard go out down, and not yet up.
+		self._injectedOut: set[int] = set()
 		#: Sequence number: the press of each key typed to be decided whose TYPED has not come, which may
 		#: yet say the helper lost it, by then often released and forgotten by its number.
 		self._typedPresses: dict[int, _Press] = {}
@@ -898,6 +906,10 @@ class KernelKeySource:
 		if sent.light:
 			self._tell(self._environment.notePassedLock, sent.light, now)
 		self._tell(self._environment.notePassed, keycode, isUp)
+		if isUp:
+			self._injectedOut.discard(keycode)
+		else:
+			self._injectedOut.add(keycode)
 		tables = self._tables
 		own = tables.keyMods.get(keycode, 0) if tables is not None else 0
 		if (isUp and own & FOCUS_MOVING_MODS) or (
@@ -1020,6 +1032,15 @@ class KernelKeySource:
 
 	def _forgetTyping(self) -> None:
 		"""The helper let go, which lets go of every key typed down and drops those not yet out."""
+		now = time.monotonic()
+		tables = self._tables
+		for keycode in sorted(self._injectedOut):
+			# No KEY tells of the release the helper puts out for a key injected, and an injected Shift or Alt
+			# would stay down in what the environment follows of the desktop's state.
+			self._tell(self._environment.notePassed, keycode, True)
+			if tables is not None and tables.keyMods.get(keycode, 0) & FOCUS_MOVING_MODS:
+				self._tell(self._environment.noteFocusMayMove, now)
+		self._injectedOut.clear()
 		self._typing.clear()
 		self._typedDown = {}
 		self._refusedOut.clear()
@@ -1517,6 +1538,11 @@ class KernelKeySource:
 				self._loseHelper(f"it said goodbye: {message.describe()}")
 			case keydClient.Typed() if self._environment is not None:
 				self._onTyped(message, now)
+			case keydClient.Virtual(status=status) if self._environment is not None:
+				log.debug(
+					f"linda-keyd's probe of its virtual keyboard's lights: {VIRTUAL_NAMES.get(status, status)}"
+				)
+				self._tell(self._environment.noteVirtual, status)
 			case _:
 				# A message of a later version or feature, which this client did not ask for.
 				pass

@@ -6,13 +6,16 @@ helper both answering as they should. So the route has this watch say, for each 
 the keyboard, one of three things: proved present, proved absent, or not known.
 
 Presence is proved by a character typed that matched NVDA's layout, which only a key that reached the
-program can make; by sway listing the virtual keyboard with its events on; and, once the helper probes
-the virtual keyboard's lights, by the desktop having written them. A proof is remembered in Linda's
-state directory by the desktop's name and the day, after which the rescue hint is not said at start.
+program can make; by sway listing the virtual keyboard with its events on; and by the helper's light
+probe, the desktop having written the lights of a virtual keyboard made for this connection. A proof
+is remembered in Linda's state directory by the desktop's name and the day, after which the rescue
+hint is not said at start; the probe's is said before the first hold, and the hint is not said then
+either.
 
 Absence is proved by sway's listing, one second after the helper holds the keyboard or at any change
 after that while it holds, saying the virtual keyboard is not there or takes no events, a removal
-being asked about again a second later; and by the lock echo. The
+being asked about again a second later; by the probe seeing no write, only on a desktop that writes a
+new keyboard's lights whatever the locks and that the probe saw write before; and by the lock echo. The
 echo is hedged against a keyboard remapped under NVDA's feet, since what it costs when wrong is every
 command of NVDA's until the user takes the keyboard back: it is taken only where NVDA's layout comes
 from the desktop's own settings, options and all; a lock key is noted only by the light the
@@ -54,6 +57,11 @@ ECHO_RUN = 2
 ECHO_LAYOUTS = ("gnome", "kde")
 #: Seconds between readings of the typed characters matched, while presence is not proved.
 MATCHES_INTERVAL = 1.0
+#: The desktops, by compositorName, that write a keyboard's lights as they take it up whatever the locks
+#: are, as experiment E6 found GNOME's mutter and sway do: where the light probe saw a write before,
+#: none means the virtual keyboard is not read. KWin and the X server write nothing while every lock is
+#: off, so there a probe that saw nothing proves nothing, whatever it saw before.
+UNSEEN_MEANS_ABSENT = ("gnome", "sway")
 #: The file, in Linda's state directory, of the desktops a proof of presence was had on.
 RECORD_NAME = "keyDelivery"
 #: A record's mark of a proof by the helper's probe of the virtual keyboard's lights.
@@ -307,7 +315,13 @@ class DeliveryWatch:
 		self._matchesAtAnswer = 0
 		self._pending: list[_LockPress] = []
 		self._unanswered = 0
+		#: The light probe's word for this hold, and one that came before the hold: the helper says it as
+		#: its virtual keyboard settles, before it grabs anything.
 		self._virtual: int | None = None
+		self._virtualEarly: int | None = None
+		#: The probe said SEEN in this run; set on the caller's thread, so that the route has it before the
+		#: hold it says the rescue hint at.
+		self._seen = False
 		self._remembered = False
 		#: Whether this hold has logged that the echo proved nothing, and that sway listed no keyboard.
 		self._echoDeclined = False
@@ -329,9 +343,9 @@ class DeliveryWatch:
 			self._thread = None
 
 	def remembered(self) -> bool:
-		"""Whether a proof of presence was had on this desktop before, so that the rescue hint need not
-		be said."""
-		return self._record.has(self._compositor)
+		"""Whether a proof of presence was had on this desktop before, or the light probe has just given
+		one, so that the rescue hint need not be said."""
+		return self._seen or self._record.has(self._compositor)
 
 	# What the route and the kernel source say, from their threads.
 
@@ -357,7 +371,9 @@ class DeliveryWatch:
 
 	def virtual(self, status: int) -> None:
 		"""environment.onVirtual: the helper's probe of the virtual keyboard's lights, one of keydClient's
-		VIRTUAL_ statuses."""
+		VIRTUAL_ statuses, said once a connection before the helper first holds the keyboard for it."""
+		if status == keydClient.VIRTUAL_SEEN:
+			self._seen = True
 		self._post("virtual", status)
 
 	# The watch's own thread.
@@ -416,12 +432,15 @@ class DeliveryWatch:
 		self._matchesAtHold = self._matches()
 		self._pending.clear()
 		self._unanswered = 0
-		self._virtual = None
+		# The helper says it once a connection, so a later hold of the same one has none.
+		self._virtual, self._virtualEarly = self._virtualEarly, None
 		self._echoDeclined = False
 		self._swayEmptySaid = False
 		self.state = UNKNOWN
 
 	def _on_released(self, source: object) -> None:
+		# Said for a connection that never held, whose word is nothing to the next.
+		self._virtualEarly = None
 		if source is not self._source:
 			return
 		self._source = None
@@ -445,7 +464,10 @@ class DeliveryWatch:
 		self._takeListing(listed)
 
 	def _on_virtual(self, status: int) -> None:
-		self._virtual = status
+		if self._source is None:
+			self._virtualEarly = status
+		else:
+			self._virtual = status
 
 	def _on_lock(self, light: int, at: float) -> None:
 		if self._source is None:
@@ -516,8 +538,15 @@ class DeliveryWatch:
 	def _takeVirtual(self, status: int) -> None:
 		if status == keydClient.VIRTUAL_SEEN:
 			self._present("the desktop wrote the lights of linda-keyd's keyboard", probed=True)
-		elif status == keydClient.VIRTUAL_UNSEEN and self._record.has(self._compositor, probed=True):
+		elif status != keydClient.VIRTUAL_UNSEEN:
+			return
+		elif self._compositor in UNSEEN_MEANS_ABSENT and self._record.has(self._compositor, probed=True):
 			self._absent("the desktop did not write the lights of linda-keyd's keyboard, as it did before")
+		else:
+			log.debug(
+				f"Key delivery: nothing wrote the lights of linda-keyd's keyboard, which proves nothing on "
+				f"{self._compositor or 'this desktop'}"
+			)
 
 	def _present(self, why: str, probed: bool = False) -> None:
 		if self._compositor is not None and (not self._remembered or probed):
