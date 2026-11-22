@@ -129,6 +129,11 @@ def plasmaRun(ground: "Ground", version: str) -> None:
 	gnome.lindaStopped(ground, keyboard)
 	gnome.console(ground, keyboard)
 	gnome.pointer(ground, keyboard)
+	# The first Alt+F2 of a session starts KRunner by D-Bus activation, which took 1.4 s on Plasma
+	# 6.5, and the letters wlGnomeLinda types 1.5 s after it then come before KRunner's window has the
+	# keyboard. Someone typing waits for the window; the case starts KRunner first instead.
+	answer = ground.run(["systemctl", "--user", "start", "plasma-krunner.service"])
+	assert answer.returncode == 0, answer
 	ground.activate(WINDOW_TITLE)
 	pid = gnome.emergency(ground, keyboard)
 	gnome.nothingLogged(ground, keyboard, pid)
