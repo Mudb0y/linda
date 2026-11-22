@@ -103,9 +103,13 @@ def waitHeard(ground: "Ground", since: "Mark", *texts: str, timeout: float = 10)
 
 
 def appKeys(ground: "Ground", since: "Mark", keys: tuple[str, ...]) -> list[tuple[str, int]]:
-	"""The presses of keys the test window had. A release may come to it alone: the press of Escape
-	closes Linda's window, and its release goes where the keyboard is then."""
-	return [(r["key"], r["value"]) for r in ground.keys("app", since) if r["key"] in keys and r["value"]]
+	"""The events of keys the test window had, but for Escape's release: the press of Escape closes
+	Linda's window, and its release goes where the keyboard is then."""
+	return [
+		(r["key"], r["value"])
+		for r in ground.keys("app", since)
+		if r["key"] in keys and (r["value"] or r["key"] != "KEY_ESC")
+	]
 
 
 # AG's subtests, as wlGnomeLinda runs them.
