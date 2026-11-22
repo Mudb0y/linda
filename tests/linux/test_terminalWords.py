@@ -52,6 +52,99 @@ ENTRY_WORDS = (
 )
 
 
+#: Terminal lines whose words the review cursor walks: the path and the separators above, a variation
+#: selector, a keycap, a combining accent, a joiner, a NUL, which NVDA's words take for a space, and a
+#: zero-width space after punctuation, punctuation after an accented letter and after a variation
+#: selector, and code.
+PARTITIONED_LINES = (
+	"/usr/bin/bash\n",
+	"foo-bar-baz\n",
+	"wow\u203c\ufe0f great news\n",
+	"x#\ufe0f\u20e3y z\n",
+	"a/\u0301b c\n",
+	"a/\u200db c\n",
+	"a/\x00b c\n",
+	"a/\u200bb c\n",
+	"e\u0301/x y\n",
+	"wow\u203c\ufe0f\u203c\ufe0f x\n",
+	"f(x, y[0]);\n",
+)
+#: The words of a path, which the shell's word movement stops between.
+PATH_WORDS = ["/", "usr/", "bin/", "bash\n"]
+
+#: Run under harness.runChild with LINES set: for each line, the word VteTextInfo gives each offset,
+#: and where moving by word from the start stops.
+WORDS_CHILD = r"""
+# Enters NVDA's import cycle where core.main does.
+import NVDAHelper  # noqa: F401
+import textInfos
+from textInfos.offsets import Offsets
+from NVDAObjects.AtSpi.terminal import VteTextInfo
+
+
+class LineSource:
+	unit = "codepoints"
+
+	def __init__(self, text):
+		self.line = text
+
+	def characterCount(self):
+		return len(self.line)
+
+	def text(self, start, end):
+		return self.line[start : len(self.line) if end < 0 else end]
+
+	def stringAtOffset(self, offset, granularity):
+		assert granularity == "line", granularity
+		return (0, len(self.line), self.line)
+
+
+class Terminal:
+	isProtected = False
+
+	def _drawnCaretOffset(self):
+		return None
+
+
+result = []
+for line in LINES:
+
+	class LineInfo(VteTextInfo):
+		def _get_textSource(self):
+			return LineSource(line)
+
+	words = [list(LineInfo(Terminal(), Offsets(offset, offset))._getWordOffsets(offset)) for offset in range(len(line))]
+	info = LineInfo(Terminal(), Offsets(0, 0))
+	stops = []
+	while info.move(textInfos.UNIT_WORD, 1) and len(stops) < len(line):
+		stops.append(info._startOffset)
+	result.append({"words": words, "stops": stops})
+"""
+
+
+def test_terminalWordsPartitionEachLine(tmp_path: Path):
+	"""Every offset of a line lies in the word it is given, every offset of that word is given the same
+	word, and moving by word from the start stops at each word, as the review cursor needs."""
+	done = harness.runChild(tmp_path, f"LINES = {PARTITIONED_LINES!r}\n" + WORDS_CHILD, timeout=120)
+	assert done.error is None, f"{done.error}\n{done.stderr[-6000:]}"
+	faults = []
+	for line, found in zip(PARTITIONED_LINES, done.value, strict=True):
+		words = [tuple(word) for word in found["words"]]
+		for offset, (start, end) in enumerate(words):
+			if not start <= offset < end:
+				faults.append(f"{line!r}: offset {offset} is given ({start}, {end})")
+			elif any(words[inside] != (start, end) for inside in range(start, end)):
+				faults.append(f"{line!r}: the offsets of ({start}, {end}) are given other words")
+		# NVDA lets a move by word go one past the end of the text.
+		starts = sorted({start for start, _end in words} - {0}) + [len(line)]
+		if found["stops"] != starts:
+			faults.append(f"{line!r}: moving by word stops at {found['stops']}, not {starts}")
+	assert not faults, "\n".join(faults)
+	pathWords = done.value[0]["words"]
+	starts = sorted({start for start, _end in pathWords})
+	assert [PARTITIONED_LINES[0][start : pathWords[start][1]] for start in starts] == PATH_WORDS
+
+
 @pytest.fixture
 def desktop(tmp_path: Path) -> Iterator[DesktopSession]:
 	with DesktopSession(tmp_path / "desktop") as session:
