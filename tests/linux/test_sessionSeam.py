@@ -25,13 +25,6 @@ PERMANENT = {
 	"linuxPlatform/singleInstance.py": "it names its locks after the variables' raw values",
 	"linuxPlatform/keys/kernel.py": "the X mode's own check that it has a display to follow",
 }
-#: Files that still name them until the package that owns each asks displayServer instead. Their
-#: literals are allowed and not expected, so each entry goes when its file no longer needs it.
-TOLERATED = {
-	"linuxPlatform/keys/__init__.py": "createSource tests DISPLAY until package WR asks for the kind",
-	"linuxPlatform/pointer.py": "isAvailable tests DISPLAY until package SW asks for the kind",
-	"linuxPlatform/visualHighlight.py": "canStart tests XDG_SESSION_TYPE until package SW asks saysWayland",
-}
 
 
 def namings(code: bytes | str, filename: str = "<code>") -> list[tuple[int, str]]:
@@ -67,7 +60,7 @@ def test_onlyTheListedFilesNameTheSessionVariables():
 	assert len(files) > 500, len(files)
 	unlisted = {}
 	for relative in files:
-		if relative in PERMANENT or relative in TOLERATED:
+		if relative in PERMANENT:
 			continue
 		found = namingsIn(relative)
 		if found:
@@ -79,7 +72,7 @@ def test_onlyTheListedFilesNameTheSessionVariables():
 
 
 def test_everyListedFileIsThereAndEachPermanentOneStillNamesThem():
-	for relative in (*PERMANENT, *TOLERATED):
+	for relative in PERMANENT:
 		assert (harness.SOURCE / relative).is_file(), relative
 	assert {relative: bool(namingsIn(relative)) for relative in PERMANENT} == dict.fromkeys(PERMANENT, True)
 
