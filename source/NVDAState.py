@@ -285,6 +285,13 @@ class _ReadPaths:
 		"""
 		Base directory for MathCAT assets (rules etc.).
 		"""
+		if sys.platform != "win32":
+			from importlib.util import find_spec
+
+			if (binding := find_spec("libmathcat_py")) and binding.origin:
+				assets = os.path.join(os.path.dirname(os.path.realpath(binding.origin)), "mathcatAssets")
+				if os.path.isdir(assets):
+					return assets
 		if isRunningAsSource():
 			base = os.path.dirname(globalVars.appDir)
 		else:

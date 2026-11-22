@@ -4,6 +4,7 @@
 # For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
 import re  # noqa: I001
+import sys
 from collections.abc import Generator
 from ctypes import (
 	Array,
@@ -25,7 +26,7 @@ import ui
 import vision
 import winKernel
 import winUser
-from api import getClipData
+from api import copyToClip, getClipData
 from keyboardHandler import KeyboardInputGesture
 from globalCommands import SCRCAT_MATH_NAV
 from logHandler import log
@@ -84,10 +85,11 @@ class MathCATInteraction(mathPres.MathInteractionNVDAObject):
 	# MathML is put on the clipboard using the two formats below (defined by MathML spec)
 	# We use both formats because some apps may only use one or the other
 	# Note: filed https://github.com/nvaccess/nvda/issues/13240 to make this usable outside of MathCAT
-	CF_MathML: int = windll.user32.RegisterClipboardFormatW("MathML")
-	CF_MathML_Presentation: int = windll.user32.RegisterClipboardFormatW(
-		"MathML Presentation",
-	)
+	if sys.platform == "win32":
+		CF_MathML: int = windll.user32.RegisterClipboardFormatW("MathML")
+		CF_MathML_Presentation: int = windll.user32.RegisterClipboardFormatW(
+			"MathML Presentation",
+		)
 
 	def __init__(
 		self,
@@ -136,7 +138,7 @@ class MathCATInteraction(mathPres.MathInteractionNVDAObject):
 	def _getHighlightRect(self) -> "RectLTRB | None":
 		"""Get the navigation rectangle for a supported web math source object."""
 		sourceObj = self.sourceObj
-		if not sourceObj:
+		if sys.platform != "win32" or not sourceObj:
 			return None
 		# Avoid importing ia2Web at startup.
 		from NVDAObjects.IAccessible.ia2Web import Math as Ia2WebMath
@@ -320,12 +322,15 @@ class MathCATInteraction(mathPres.MathInteractionNVDAObject):
 		isMathML: bool,
 		notify: bool | None = False,
 	) -> bool:
-		"""Copies the given text to the windows clipboard.
+		"""Copies the given text to the clipboard.
 
 		:param text: the text which will be copied to the clipboard.
 		:param notify: whether to emit a confirmation message.
 		:returns: True if it succeeds, False otherwise.
 		"""
+		if sys.platform != "win32":
+			return copyToClip(text, notify)
+
 		# copied from api.py and modified to use CF_MathML_Presentation
 		if not isinstance(text, str) or len(text) == 0:
 			return False

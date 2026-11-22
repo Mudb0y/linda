@@ -169,15 +169,13 @@ def getSpeechStyleFromDirectory(dir: str, lang: str) -> list[str]:
 	:return: A list of speech styles sorted alphabetically.
 	"""
 	# start with the regional dialect, then add on any (unique) styles in the main dir
-	mainLang: str = lang.split("\\")[0]  # does the right thing even if there is no regional directory
-	allStyleFiles: list[str] = []
-	if lang.find("\\") >= 0:
-		allStyleFiles: list[str] = [
-			os.path.basename(name) for name in glob.glob(dir + lang + "\\*_Rules.yaml")
-		]
-	allStyleFiles.extend(
-		[os.path.basename(name) for name in glob.glob(dir + mainLang + "\\*_Rules.yaml")],
-	)
+	parts = lang.replace("\\", "/").split("/")
+	mainLang = parts[0]
+	allStyleFiles = [os.path.basename(name) for name in glob.glob(os.path.join(dir, *parts, "*_Rules.yaml"))]
+	if len(parts) > 1:
+		allStyleFiles.extend(
+			os.path.basename(name) for name in glob.glob(os.path.join(dir, mainLang, "*_Rules.yaml"))
+		)
 	allStyleFiles = list(set(allStyleFiles))  # make them unique
 	if len(allStyleFiles) == 0:
 		# look in the .zip file for the style files -- this will have regional variants, but also have that dir
@@ -209,7 +207,7 @@ def getSpeechStyles(languageCode: str) -> list[str]:
 		languageCode = "en"
 	languageCode = languageCode.replace("-", "\\")
 
-	languagePath = pathToLanguagesFolder() + "\\"
+	languagePath = pathToLanguagesFolder()
 	# populate the m_choiceSpeechStyle choices
 	allStyleFiles = [
 		# remove "_Rules.yaml" from the list

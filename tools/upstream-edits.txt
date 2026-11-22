@@ -747,12 +747,14 @@ source/louisHelper.py
   import safety: os.add_dll_directory around the louis import only on
   Windows
 source/mathPres/__init__.py
-  every platform: initialize() imports MathCAT inside the try
-  that already turns a MathCAT that cannot start into the warning "MathCAT
-  not available.". On Linux that import fails, as libmathcat_py is not
-  packaged, and core.main calls initialize() at every start. On Windows a
-  MathCAT that fails to import now gives the same warning instead of
-  stopping NVDA's start-up
+  every platform: initialize() imports MathCAT inside the try that reports
+  a MathCAT that cannot start as a warning instead of stopping startup
+source/mathPres/MathCAT/MathCAT.py
+  Linux runtime: the MathML clipboard format registration is Windows-only,
+  and Linux writes MathCAT output through the normal text clipboard
+source/mathPres/MathCAT/localization.py
+  every platform: find rules with native path separators, even when MathCAT
+  supplies Windows-style regional language codes
 source/monkeyPatches/wxMonkeyPatches.py
   Linux runtime: apply() patches nothing, as wxGTK runs CallAfter callbacks
   inside popup menus and message boxes by itself, and the patch would post a

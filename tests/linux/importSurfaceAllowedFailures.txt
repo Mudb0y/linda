@@ -189,25 +189,6 @@ appModules.soffice
   imports IA2 and splitIA2Attribs from IAccessibleHandler, which on Linux
   is a replacement without IAccessible2
 
-mathPres.MathCAT
-mathPres.MathCAT.MathCAT
-mathPres.MathCAT._navNodeMapping
-mathPres.MathCAT.localization
-mathPres.MathCAT.navCommands
-mathPres.MathCAT.preferences
-mathPres.MathCAT.rulesUtils
-mathPres.MathCAT.speech
-  needs libmathcat_py, MathCAT's native extension, which the dev shell does
-  not provide
-  reached from mathPres: safe, because initialize() imports MathCAT inside
-  the try that reports a MathCAT that cannot start as the warning "MathCAT
-  not available."
-  reached from gui.settingsDialogs: not safe: the settings dialog offers the
-  Math category on Linux, and opening it imports MathCAT's preferences and
-  localization, which raise ModuleNotFoundError; either the dev shell
-  packages libmathcat_py, or the settings dialog stops offering the
-  category on Linux while it lacks MathCAT
-
 l10nUtil
   translators' tool: needs crowdin_api, which is not a run-time dependency
 oleTypes
