@@ -157,6 +157,59 @@ def runWithStore(tmp_path: Path, store: StoreServer, enabled: bool, body: str) -
 	return runStarted(tmp_path, body, prelude)
 
 
+def test_catalogRefreshUpdatesTheListOnTheMainThread(tmp_path: Path):
+	done = runStarted(
+		tmp_path,
+		"""
+		import threading
+		from types import SimpleNamespace
+		from unittest.mock import patch
+
+		from gui.addonStoreGui.viewModels import store
+
+		vm = store.AddonStoreVM.__new__(store.AddonStoreVM)
+		vm._filteredStatusKey = store._StatusFilterKey.AVAILABLE
+		vm._filterIncludeIncompatible = False
+		main = threading.current_thread()
+		updates = []
+		callbacks = []
+		vm.listVM = SimpleNamespace(
+			resetListItems=lambda items: updates.append((threading.current_thread() is main, items)),
+			getSelection=lambda: None,
+		)
+		vm.detailsVM = SimpleNamespace(updated=SimpleNamespace(notify=lambda **kw: None))
+		vm._createListItemVMs = lambda: ["loaded"]
+
+		def fetch(onError):
+			assert threading.current_thread() is not main
+			return {}
+
+		def schedule(delay, callable, *args, **kwargs):
+			callbacks.append((callable, args, kwargs))
+
+		with (
+			patch.object(store, "addonDataManager", SimpleNamespace(getLatestCompatibleAddons=fetch)),
+			patch.object(store.core, "callLater", schedule),
+		):
+			for _ in range(2):
+				vm.refresh()
+				vm._refreshAddonsThread.join(5)
+				assert not vm._refreshAddonsThread.is_alive()
+			before = updates.copy()
+			while callbacks:
+				callback, args, kwargs = callbacks.pop(0)
+				callback(*args, **kwargs)
+		result = {"before": before, "after": updates, "loading": vm.listVM._isLoading}
+		""",
+	)
+	done.assertClean()
+	assert done.value == {
+		"before": [[True, []], [True, []]],
+		"after": [[True, []], [True, []], [True, ["loaded"]]],
+		"loading": False,
+	}
+
+
 def test_offNothingAsksTheStore(tmp_path: Path, store: StoreServer):
 	done = runWithStore(
 		tmp_path,

@@ -9,6 +9,7 @@ from os import (  # noqa: I001
 from linuxPlatform.windowsOnly import startfile
 import os
 from typing import (
+	TYPE_CHECKING,
 	cast,
 )
 from collections.abc import Iterable
@@ -57,6 +58,10 @@ from .addonList import (
 )
 
 
+if TYPE_CHECKING:
+	from addonStore.models.addon import AddonGUICollectionT
+
+
 class AddonStoreVM:
 	onDisplayableError = DisplayableError.OnDisplayableErrorT()
 	"""
@@ -75,6 +80,7 @@ class AddonStoreVM:
 		assert addonDataManager
 		self._installedAddons = addonDataManager._installedAddonsCache.installedAddonGUICollection
 		self._availableAddons = _createAddonGUICollection()
+		self._refreshAddonsThread: threading.Thread | None = None
 		self.hasError = extensionPoints.Action()
 		self._filteredStatusKey: _StatusFilterKey = _StatusFilterKey.INSTALLED
 		"""
@@ -660,12 +666,16 @@ class AddonStoreVM:
 				name="getAddonData",
 				daemon=True,
 			)
+			self.listVM._isLoading = True
+			self.listVM.resetListItems([])
 			self._refreshAddonsThread.start()
 
 		elif self._filteredStatusKey in {
 			_StatusFilterKey.INSTALLED,
 			_StatusFilterKey.INCOMPATIBLE,
 		}:
+			self._refreshAddonsThread = None
+			self.listVM._isLoading = False
 			self._installedAddons = addonDataManager._installedAddonsCache.installedAddonGUICollection
 			self.listVM.resetListItems(self._createListItemVMs())
 			self.detailsVM.listItem = self.listVM.getSelection()
@@ -673,8 +683,6 @@ class AddonStoreVM:
 			raise NotImplementedError(f"Unhandled status filter key {self._filteredStatusKey}")
 
 	def _getAvailableAddonsInBG(self):
-		self.listVM._isLoading = True
-		self.listVM.resetListItems([])
 		log.debug("getting available addons in the background")
 		assert addonDataManager
 		availableAddons = addonDataManager.getLatestCompatibleAddons(self.onDisplayableError)
@@ -692,6 +700,17 @@ class AddonStoreVM:
 					):
 						availableAddons[channel][addonId] = incompatibleAddons[channel][addonId]
 		log.debug("completed getting addons in the background")
+		core.callLater(0, self._applyAvailableAddons, threading.current_thread(), availableAddons)
+
+	def _applyAvailableAddons(
+		self,
+		refreshThread: threading.Thread,
+		availableAddons: "AddonGUICollectionT",
+	):
+		# A newer refresh or tab change may have superseded this result.
+		if refreshThread is not self._refreshAddonsThread:
+			return
+		self._refreshAddonsThread = None
 		self._availableAddons = availableAddons
 		self.listVM.resetListItems(self._createListItemVMs())
 		self.detailsVM.listItem = self.listVM.getSelection()
