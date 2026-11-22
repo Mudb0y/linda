@@ -1,4 +1,5 @@
-# eSpeak NG built the way NVDA builds espeak.dll (nvdaHelper/espeak/sconscript):
+# eSpeak NG built the way NVDA builds espeak.dll (nvdaHelper/espeak/sconscript
+# on the upstream branch):
 # the commit NVDA pins as its include/espeak submodule, sonic from the commit
 # it pins as include/sonic, Klatt and speechPlayer on, and no MBROLA, no
 # asynchronous mode and no audio output of its own, so that the library has no

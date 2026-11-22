@@ -10,6 +10,12 @@
 #   every platform: a change in the code Windows runs, beyond its tests of
 #     sys.platform, even where Windows ends up doing the same
 #   repository: a file that is not NVDA's code
+# A directory that this tree deletes whole is listed once, as its path with a
+# slash at the end. It stands for every file of upstream's beneath it, the ones
+# upstream adds later too, and only a deletion can be listed so. The paths
+# beneath it that this tree keeps follow the word except on the same line.
+# tools/keep-upstream-deletions removes again, during a merge, what such an entry
+# or any entry of the kind repository: deleted lists and the merge brings back.
 # For a Python file, the check works out from the code whether Windows runs
 # a change, and fails unless every platform is said exactly when it does.
 
@@ -992,3 +998,116 @@ source/versionInfo.py
   linuxPlatform.branding, says Linda is based on NVDA by NV Access and is
   not affiliated with or endorsed by it, in place of upstream's, which says
   NV Access develops it
+appx/
+  repository: deleted. It packages NVDA for the Windows Store, which
+  Linda is not in
+ci/
+  repository: deleted. NV Access's build, signing, translation and release
+  scripts for Windows, which Linda's build and tests do not run
+extras/
+  repository: deleted. The controller client is a Windows library and its
+  examples; Linda answers the same calls through its own replacement of
+  NVDAHelper
+launcher/
+  repository: deleted. The Windows installer's launcher script
+runtime-builders/
+  repository: deleted. It builds the 32 bit Windows Python that hosts
+  synthesisers
+site_scons/
+  repository: deleted. SCons tools of NVDA's Windows build, which Linda
+  does not use
+typings/
+  repository: deleted. A type stub for a module only NVDA's Windows build
+  generates
+uninstaller/
+  repository: deleted. The Windows uninstaller's script
+sconstruct
+  repository: deleted. NVDA's Windows build, which Linda replaces with
+  Meson
+scons.bat
+  repository: deleted. It starts NVDA's Windows build
+cldrDict_sconscript
+  repository: deleted. A step of NVDA's Windows build
+ensureuv.ps1
+  repository: deleted. It installs the tool NVDA's Windows build starts
+  from
+runcheckpot.bat
+  repository: deleted. A Windows batch file that runs one of NV Access's
+  checks
+runlicensecheck.bat
+  repository: deleted. A Windows batch file that runs one of NV Access's
+  checks
+runlint.bat
+  repository: deleted. A Windows batch file that runs one of NV Access's
+  checks
+runnvda.bat
+  repository: deleted. A Windows batch file that starts NVDA from source
+runsettingsdiff.bat
+  repository: deleted. A Windows batch file that runs one of NV Access's
+  checks
+runsystemtests.bat
+  repository: deleted. A Windows batch file that runs NV Access's system
+  tests
+rununittests.bat
+  repository: deleted. A Windows batch file that runs the unit tests;
+  tests/linux/rununittests.py runs them on Linux
+.vsconfig
+  repository: deleted. The Visual Studio components NVDA's Windows build
+  needs
+.python-versions
+  repository: deleted. It pins a Windows Python for uv
+nvdaHelper/client/
+  repository: deleted. Windows C++ that Linda does not build
+nvdaHelper/cppjieba/
+  repository: deleted. Windows build script for a library Linda takes
+  from Nix
+nvdaHelper/detours/
+  repository: deleted. Windows C++ that Linda does not build
+nvdaHelper/espeak/
+  repository: deleted. Windows build of eSpeak NG, which nix/espeak-ng.nix
+  builds its own way
+nvdaHelper/interfaces/
+  repository: deleted. Windows COM interface definitions
+nvdaHelper/javaAccessBridge/
+  repository: deleted. Windows C++ that Linda does not build
+nvdaHelper/liblouis/
+  repository: deleted. Windows build script for a library Linda takes
+  from Nix
+nvdaHelper/localWin10/
+  repository: deleted. Windows C++ that Linda does not build
+nvdaHelper/remoteLoader/
+  repository: deleted. Windows C++ that Linda does not build
+nvdaHelper/sonic/
+  repository: deleted. Windows build script for a library Linda builds
+  from nix/espeak-ng.nix
+nvdaHelper/UIARemote/
+  repository: deleted. Windows C++ that Linda does not build
+nvdaHelper/uwp/
+  repository: deleted. Windows C++ that Linda does not build
+nvdaHelper/local/ except beeps.cpp beeps.h wasapi.cpp
+  repository: deleted. Windows C++ that Linda does not build; kept are
+  beeps.cpp, which test_nativeHelper compiles to compare Linda's beep with
+  upstream's, with its header, and wasapi.cpp, which the replacement of
+  wasapi says it follows
+nvdaHelper/remote/ except vbufRemote.cpp ia2LiveRegions.cpp ia2LiveRegions.h textFromIAccessible.cpp textFromIAccessible.h
+  repository: deleted. Windows C++ that Linda does not build; kept are
+  what the Linux engine and live region code say they follow
+nvdaHelper/vbufBackends/ except gecko_ia2/gecko_ia2.cpp gecko_ia2/gecko_ia2.h
+  repository: deleted. Windows C++ that Linda does not build; kept is
+  what the Linux engine's renderer says it follows
+nvdaHelper/acrobatAccess_sconscript
+  repository: deleted. A step of NVDA's Windows build
+nvdaHelper/archBuild_sconscript
+  repository: deleted. A step of NVDA's Windows build
+nvdaHelper/COMProxy.manifest.subst
+  repository: deleted. A step of NVDA's Windows build
+nvdaHelper/Doxyfile
+  repository: deleted. Settings for documenting the Windows C++
+nvdaHelper/ia2_sconscript
+  repository: deleted. A step of NVDA's Windows build
+nvdaHelper/ISimpleDOM_sconscript
+  repository: deleted. A step of NVDA's Windows build
+nvdaHelper/nvda.rc.subst
+  repository: deleted. A step of NVDA's Windows build
+nvdaHelper/vbufBase/sconscript
+  repository: deleted. A step of NVDA's Windows build

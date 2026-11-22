@@ -2,7 +2,8 @@
 """Fails when the record of how this tree departs from NVDA's and the tree disagree.
 
 Every change to a file that came from NVDA costs something at each upstream merge, so each one is
-listed in tools/upstream-edits.txt with its reason. A file added beside upstream's in source/ or
+listed in tools/upstream-edits.txt with its reason; a directory deleted whole is listed once, by its
+path with a slash at the end. A file added beside upstream's in source/ or
 tests/unit is listed there too: it can shadow a module, and an upstream release that adds the same
 path turns it into a conflict. Each reason says which kinds of edit it explains. For a Python file
 the kind that says Windows runs the change too is checked against the code: it must be given
@@ -59,6 +60,8 @@ MIRRORED = {"source/nvda.pyw": "source/linda.py"}
 EDIT_KINDS = ("import safety:", "Linux runtime:", "every platform:", "repository:")
 #: The kind that says Windows runs the change too.
 WINDOWS_TOO = "every platform:"
+#: How the reason of a deletion starts.
+DELETED = "repository: deleted"
 KIND = re.compile("|".join(re.escape(kind) for kind in EDIT_KINDS))
 
 
@@ -117,6 +120,32 @@ def readLedger(path: str) -> dict[str, Entry]:
 	if unexplained := [p for p, e in entries.items() if not e.reason]:
 		raise Failure(f"{path}: no reason given for {', '.join(unexplained)}")
 	return entries
+
+
+def deletedDirectories(base: str, ledger: dict[str, Entry]) -> dict[str, Entry]:
+	"""The ledger with each entry for a directory given as an entry for every file of upstream's in it.
+
+	A directory is listed as its path with a slash at the end, and after it, once the word except,
+	the paths beneath it that this tree keeps. Only a deletion can be listed that way.
+	"""
+	expanded: dict[str, Entry] = {}
+	for path, entry in ledger.items():
+		if not path.endswith("/"):
+			expanded[path] = entry
+			continue
+		if not entry.reason[0].startswith(DELETED):
+			raise Failure(f"{EDITS}: {path} is a directory, and only a deletion can be listed as one")
+		kept = entry.words[2:] if entry.words[1:2] == ["except"] else []
+		if entry.words[1:] and not kept:
+			raise Failure(f"{EDITS}: {path} may be followed only by except and the paths it keeps")
+		inside = paths("ls-tree", "-r", "--name-only", base, "--", path)
+		if missing := [k for k in kept if path + k not in inside]:
+			raise Failure(f"{EDITS}: {path} keeps {', '.join(missing)}, which upstream does not have there")
+		for file in sorted(inside - {path + k for k in kept}):
+			if file in ledger:
+				raise Failure(f"{EDITS}: {file} is listed twice, on its own and under {path}")
+			expanded[file] = entry
+	return expanded
 
 
 def replacedModules() -> tuple[str, ...]:
@@ -265,7 +294,7 @@ def checkEdits(base: str) -> tuple[list[str], int]:
 	added = paths("diff", "--no-renames", "--name-only", "--diff-filter=A", base, "--", *UPSTREAM_DIRS)
 	added |= paths("ls-files", "--others", "--exclude-standard", "--", *UPSTREAM_DIRS)
 	added = {p for p in added if not p.startswith(OUR_DIR) and p not in OUR_FILES}
-	ledger = readLedger(EDITS)
+	ledger = deletedDirectories(base, readLedger(EDITS))
 	listed = set(ledger)
 	errors = checkKinds(base, ledger)
 	if unlisted := sorted(changed - listed):

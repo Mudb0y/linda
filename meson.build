@@ -1,5 +1,5 @@
-# Linda's build on Linux. NVDA's own build, for Windows, is the SCons files beside this, which it
-# leaves alone. The program goes to DATADIR/linda/source as NVDA's Python tree, kept whole and private:
+# Linda's build on Linux. NVDA's own build, for Windows, was SCons, whose files this tree has
+# deleted. The program goes to DATADIR/linda/source as NVDA's Python tree, kept whole and private:
 # its locale folders hold dictionaries and gestures beside the catalogues, and its top-level modules
 # are called config, api and speech. Where the native pieces are is written into that tree, in
 # linuxPlatform/installPaths.py.
