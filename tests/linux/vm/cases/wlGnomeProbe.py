@@ -23,7 +23,8 @@ if TYPE_CHECKING:
 
 KEYD = "linda-keyd"
 RECORD = "/home/alice/.local/state/linda/keyDelivery"
-OLD_LOG = "/tmp/ground/linda/nvda-old.log"
+#: Where the second Linda moves the first one's log as it starts.
+FIRST_LOG = "/tmp/ground/linda/nvda-old.log"
 #: The file the case's udev rule looks for, which hides the helper's virtual keyboard from libinput.
 IGNORE = "/run/ground-ignore-virtual"
 WRITTEN = re.compile(r"the virtual keyboard's lights were written (\d+) ms after it was made")
@@ -127,7 +128,7 @@ def secondLinda(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 		probed = [m for _t, m in ground.helperLog(mark) if "lights were written" in m or UNWRITTEN in m]
 		assert not probed, probed
 		lindaKeyWorks(ground, keyboard)
-		errors = acceptance.logErrors(ground.shell(f"cat {OLD_LOG}"))
+		errors = acceptance.logErrors(ground.shell(f"cat {FIRST_LOG}"))
 		assert not errors, f"the first copy's log holds {len(errors)} records at ERROR or above: {errors}"
 
 
