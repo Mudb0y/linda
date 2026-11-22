@@ -998,7 +998,8 @@ class KernelKeySource:
 		the application never had it, nor its release, read already or to come as the helper lets go.
 		The environment heard it passed, and hears of its release once, so that its account of what is
 		down comes even."""
-		if press is None or not press.passed or press.expired:
+		if press is None or not press.settled or not press.passed or press.expired:
+			# Not yet told of as passed, it is dropped untold with the presses undecided as the helper lets go.
 			return
 		with press.lock:
 			press.passed = False
