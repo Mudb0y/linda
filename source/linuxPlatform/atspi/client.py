@@ -148,12 +148,19 @@ class WindowExtents(tuple):
 		self.node = node
 		return self
 
-	@functools.cached_property
+	@property
 	def window(self) -> Node | None:
-		try:
-			return _instance().topLevel(self.node)
-		except NodeGone:
-			return None
+		"""None when the window is gone, or when it is asked for off the main thread, where AT-SPI is not
+		read; it is then found the next time it is asked for on the main thread."""
+		if "_window" not in self.__dict__:
+			if threading.get_ident() != _mainThreadId:
+				return None
+			try:
+				window = _instance().topLevel(self.node)
+			except NodeGone:
+				window = None
+			self.__dict__["_window"] = window
+		return self.__dict__["_window"]
 
 
 #: Round trips made through call, and the seconds spent in them, for measurement.

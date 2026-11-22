@@ -182,6 +182,7 @@ RADIOS = ("North", "Middle", "South")
 #: Run under harness.runChild with PROGRAMS, RADIOS, PROGRAM and TITLE set: what Linda's client answers
 #: for the radio buttons and the text, beside what the toolkit answers when asked for each space itself.
 CLIENT_CHILD = r"""
+import threading
 import time
 
 import gi
@@ -275,6 +276,14 @@ for name, node in radios.items():
 			hit = deeper
 		entry["hit"] = [c.role(hit), c.name(hit)]
 	result["radios"][name] = entry
+# A window looked for off the main thread, where AT-SPI is not read, is not taken for none for good.
+fresh = c.extents(next(iter(radios.values())))
+offTheMainThread = []
+if isinstance(fresh, atspiClient.WindowExtents):
+	reader = threading.Thread(target=lambda: offTheMainThread.append(fresh.window is None))
+	reader.start()
+	reader.join()
+result["windowOffTheMainThread"] = {"none": offTheMainThread, "then": described(fresh)}
 source = textSource.TextSource(text, textSource.unitFor(c.toolkit(text)))
 entry = {"client": described(c.extents(text)), "raw": raw(text)}
 try:
@@ -551,6 +560,9 @@ def test_theClientAsksInTheSessionsSpace(desktop: DesktopSession, tmp_path: Path
 		assert text["character"]["type"] == "WindowExtents", text
 		assert text["character"]["box"] == text["rawCharacter" + space], text
 		assert text["character"]["window"].startswith(PROGRAMS[program][0]), text
+		offTheMainThread = found["windowOffTheMainThread"]
+		assert offTheMainThread["none"] == [True], offTheMainThread
+		assert offTheMainThread["then"]["window"].startswith(PROGRAMS[program][0]), offTheMainThread
 	assertInOrder({name: entry["client"]["box"] for name, entry in radios.items()})
 	for name, entry in radios.items():
 		assert entry["hit"][0] == "radio button" or name in entry["hit"][1], (name, entry)
