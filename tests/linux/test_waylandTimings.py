@@ -1,18 +1,18 @@
-"""The Alt+Tab race on the Wayland route, timed against sway's window subscription, and experiment E4's
-window event timings.
+"""The Alt+Tab race on the Wayland route under sway and Mutter, and experiment E4's window event timings.
 
 A letter typed just after Alt+Tab must go to exactly one place, the right one: to Linda, as a browse
 mode key of the page, when the keyboard went to Firefox, and to the GTK 4 key probe when it went
 there. Linda's capture feed hears the switch from AT-SPI only some milliseconds after sway made it, and
 the kernel source holds such a letter until the feed has heard, or for capture's grace at the most.
-Here Alt+Tab is sway's focus next, bound for the test, pressed on the stand-in for linda-keyd as a
-person presses it on a keyboard the helper holds, and the letter follows Alt's release by 100 ms, by
-100 ms with every window event the feed hears held back 200 ms through the test hook, and by 30 ms. A
-second window of the same program is a case of its own, counted rather than held to: the capture
-follows it as on X. Experiment E4 times the window events of GTK 3, GTK 4, Qt 6, Firefox and Chromium
-against the key on a private connection, with Linda idle and with it reading.
+Here Alt+Tab is sway's focus next, bound for the test and timed against sway's window subscription, or
+Mutter's own switch-applications; it is pressed on the stand-in for linda-keyd as a person presses it
+on a keyboard the helper holds, and the letter follows Alt's release by 100 ms, by 100 ms with every
+window event the feed hears held back 200 ms through the test hook, and by 30 ms. A second window of
+the same program is a case of its own, under sway, counted rather than held to: the capture follows it
+as on X. Experiment E4 times the window events of GTK 3, GTK 4, Qt 6, Firefox and Chromium against the
+key on a private connection, under sway, with Linda idle and with it reading.
 
-Under rig sway, with and without Xwayland, through tests/linux/wayland-gate SCRATCH, or:
+Under rig sway and rig Mutter, with and without Xwayland, through tests/linux/wayland-gate SCRATCH, or:
 
 	LINDA_RIG_COMPOSITOR=sway nix develop . -c tests/linux/rig python3 -m pytest -q -s tests/linux/test_waylandTimings.py
 """
@@ -39,7 +39,9 @@ from keydStandIn import VERDICT_WAIT, code
 from test_waylandKeys import MARKER, WaylandLinda, socketDir, waylandLinda  # noqa: F401
 from test_waylandMenu import KEY_PROBE, Listener
 
-pytestmark = pytest.mark.rigSession("sway")
+#: The races run under either compositor; what is timed against sway's own focus events, under sway.
+RACES = pytest.mark.rigSession("sway", "mutter")
+SWAY = pytest.mark.rigSession("sway")
 
 #: Seconds each key of Alt+Tab and the letter is held, and between them.
 HOLD = 0.03
@@ -209,7 +211,11 @@ class SwayFocus:
 
 @contextlib.contextmanager
 def altTabBound() -> Iterator[None]:
-	"""Alt+Tab as sway's focus next, for as long as the test needs it: the rig's sway outlives the test."""
+	"""Alt+Tab as sway's focus next, for as long as the test needs it: the rig's sway outlives the test.
+	Mutter's own switch-applications is Alt+Tab already."""
+	if harness.rigSession() != "sway":
+		yield
+		return
 	subprocess.run(["swaymsg", "bindsym Mod1+Tab focus next"], check=True, capture_output=True, timeout=5)
 	try:
 		yield
@@ -241,7 +247,7 @@ class FeedProbe:
 
 
 class Race:
-	"""Linda reading the keys page in Firefox beside the key probe, under sway, with Alt+Tab bound."""
+	"""Linda reading the keys page in Firefox beside the key probe, with Alt+Tab switching between them."""
 
 	def __init__(self, session: WaylandLinda, directory: Path, *, holdMs: int = 0) -> None:
 		self.session = session
@@ -260,7 +266,7 @@ class Race:
 		browseKeys.waitForCapture(self.nvda, "browse", timeout=browseKeys.BUFFER_BOUND)
 		time.sleep(browseKeys.SETTLE)
 		self.page = browseKeys.KeysPage()
-		self.sway = SwayFocus(directory)
+		self.sway = SwayFocus(directory) if harness.rigSession() == "sway" else None
 
 	def altTab(self) -> tuple[float, float]:
 		"""Alt+Tab on the stand-in; when Tab went down and when Alt came up."""
@@ -296,14 +302,18 @@ class Race:
 		quick = self.feed.records("quickNav", since=pressed)
 		if quick:
 			got.append(f"linda in {quick[0]['document']}")
-		swayed = self.sway.after(tab)
+		swayed = self.sway.after(tab) if self.sway is not None else None
 		heard = self.feed.windowEvents(tab)
+		answers = session.answers(code(LETTER), pressed)
+		seqs = {answer["seq"] for answer in answers[:1]}
 		return {
 			"got": got,
 			"sway": swayed[0] - tab if swayed else None,
 			"heard": heard[0]["now"] - released if heard else None,
 			"pressedAfterHeard": pressed - heard[0]["now"] if heard else None,
-			"answers": session.answers(code(LETTER), pressed),
+			"answers": answers,
+			# How long the letter waited in the stand-in for Linda's verdict: what waiting costs.
+			"held": next((held for seq, _kept, held in session.keyboard.verdicts if seq in seqs), None),
 		}
 
 	def run(self, delay: float, trials: int = TRIALS) -> list[dict]:
@@ -326,7 +336,8 @@ class Race:
 		return results
 
 	def close(self) -> None:
-		self.sway.stop()
+		if self.sway is not None:
+			self.sway.stop()
 
 
 @contextlib.contextmanager
@@ -342,10 +353,14 @@ def race(tmp_path: Path, socketDir: Path, *, holdMs: int = 0) -> Iterator[Race]:
 
 def report(name: str, results: list[dict]) -> None:
 	misplaced = [r for r in results if r["got"] != r["right"]]
+	swayed = [r["sway"] for r in results if r["sway"] is not None]
+	held = [r["held"] for r in results if r["right"] == TO_FIREFOX and r.get("held") is not None]
 	print(
-		f"{sessionName()}: {name}: {len(misplaced)} of {len(results)} misplaced; sway's focus after Tab "
-		f"{summary([r['sway'] for r in results if r['sway'] is not None])}; the feed's first window event "
-		f"after Alt's release {summary([r['heard'] for r in results if r['heard'] is not None])}"
+		f"{sessionName()}: {name}: {len(misplaced)} of {len(results)} misplaced; "
+		+ (f"sway's focus after Tab {summary(swayed)}; " if swayed else "")
+		+ "the feed's first window event after Alt's release "
+		+ summary([r["heard"] for r in results if r["heard"] is not None])
+		+ f"; letters to Firefox held {summary(held)}"
 	)
 	for result in misplaced:
 		print(f"{sessionName()}: {name}: misplaced {result}")
@@ -372,7 +387,7 @@ def misplaced(results: list[dict]) -> list[dict]:
 
 def blame(results: list[dict], wrong: list[dict]) -> None:
 	"""Raise Misplaced when every wrong trial has the known fault's shape; fail plainly when any has
-	another, which RACE_FAULT must not swallow."""
+	another, which AWAITS_KL_LOOK must not swallow."""
 	if not wrong:
 		return
 	other = [r for r in wrong if r["right"] != TO_FIREFOX or r["got"] != BOTH_PLACES]
@@ -402,21 +417,22 @@ def wentToOnePlace(results: list[dict]) -> None:
 		blame(results, wrong)
 
 
-#: Why the races fail on main as wave 3 builds them, in results/AR-altTab-race.txt of the Wayland work:
-#: sway moves the keyboard as Tab goes down, and the window events come before Alt is let go, whose
-#: release opens a wait for window events that never come, so that every look ends unknown at the
-#: grace and the letter is passed, while NVDA acts on it too; and with the feed's events held back,
-#: NVDA's setCapture, ahead of the feed, leaves it with no anchor to look for. Only Misplaced, raised
-#: once Linda's quit checks have passed, is the known fault: a failure anywhere else must fail. strict,
-#: so that the fix turns these into failures until the marks go.
-RACE_FAULT = pytest.mark.xfail(
-	reason="the Wayland route sends letters typed just after Alt+Tab under sway to the page and NVDA both",
+#: Why the race with the feed's events held back still fails, in results/AR-altTab-race.txt of the
+#: Wayland work: NVDA's own focus reaches the page before the feed hears of the switch, and the feed
+#: rightly anchors nothing until it does, but the kernel source's look condition asks for a look only
+#: with an anchor, so the letter is passed at once while NVDA acts on it too. Package KL's change to
+#: that condition in kernel.py, a look while environment.settled(now) is False and NVDA names a
+#: document, is what it waits for; the person who merges removes the mark once both have landed. Only
+#: Misplaced, raised once Linda's quit checks have passed, is the known fault: a failure anywhere else
+#: must fail. strict, so that KL's change turns it into a failure until the mark goes.
+AWAITS_KL_LOOK = pytest.mark.xfail(
+	reason="the kernel source asks no look for a letter while NVDA's document has no anchor yet",
 	raises=Misplaced,
 	strict=True,
 )
 
 
-@RACE_FAULT
+@RACES
 def test_aLetterAHundredMillisecondsAfterAltTabLandsRight(tmp_path: Path, socketDir: Path):  # noqa: F811
 	with race(tmp_path, socketDir) as found:
 		results = found.run(0.1)
@@ -425,7 +441,8 @@ def test_aLetterAHundredMillisecondsAfterAltTabLandsRight(tmp_path: Path, socket
 	landedRight(results)
 
 
-@RACE_FAULT
+@RACES
+@AWAITS_KL_LOOK
 def test_aLetterWaitsForActivationHeldBack(tmp_path: Path, socketDir: Path):  # noqa: F811
 	with race(tmp_path, socketDir, holdMs=HELD_BACK_MS) as found:
 		results = found.run(0.1)
@@ -434,7 +451,7 @@ def test_aLetterWaitsForActivationHeldBack(tmp_path: Path, socketDir: Path):  # 
 	waitedForActivation(results)
 
 
-@RACE_FAULT
+@RACES
 def test_aLetterThirtyMillisecondsAfterAltTabGoesToOnePlace(tmp_path: Path, socketDir: Path):  # noqa: F811
 	with race(tmp_path, socketDir) as found:
 		results = found.run(0.03)
@@ -463,8 +480,9 @@ def raised(check: Callable[[list[dict]], None], results: list[dict]) -> type[Bas
 	return None
 
 
+@SWAY
 def test_theRaceChecksCallOnlyTheKnownFaultMisplaced():
-	assert RACE_FAULT.mark.kwargs["raises"] is Misplaced
+	assert AWAITS_KL_LOOK.mark.kwargs["raises"] is Misplaced
 	toProbe = trialOf(TO_PROBE, TO_PROBE, [VERDICT_WAIT, 0])
 	toFirefox = trialOf(TO_FIREFOX, TO_FIREFOX, [VERDICT_WAIT, 1])
 	both = trialOf(TO_FIREFOX, BOTH_PLACES, [VERDICT_WAIT, 0])
@@ -483,6 +501,7 @@ def test_theRaceChecksCallOnlyTheKnownFaultMisplaced():
 	assert raised(wentToOnePlace, [toProbe, toFirefox] * 49 + [toProbe, both]) is Misplaced
 
 
+@SWAY
 def test_theHeldBackCheckAsksAWaitOnlyOfLettersBoundForFirefox():
 	passedToProbe = trialOf(TO_PROBE, TO_PROBE, [0], pressedAfterHeard=0.01)
 	waitedInFirefox = trialOf(TO_FIREFOX, TO_FIREFOX, [VERDICT_WAIT, 1])
@@ -494,6 +513,7 @@ def test_theHeldBackCheckAsksAWaitOnlyOfLettersBoundForFirefox():
 		assert raised(waitedForActivation, results) is AssertionError, wrong
 
 
+@SWAY
 def test_aSecondWindowOfTheSameProgramIsCounted(tmp_path: Path, socketDir: Path):  # noqa: F811
 	"""Two Firefox windows of one process, the keys page and the usable page, and Alt+Tab between them
 	with the letter 100 ms after: the capture follows the window as on X, so NVDA's focus decides in
@@ -570,6 +590,7 @@ class Window:
 		self.process = process
 
 
+@SWAY
 def test_windowEventTimingsOnAPrivateConnection(tmp_path: Path, socketDir: Path):  # noqa: F811
 	"""Experiment E4: how long after the key that switches windows each toolkit says, on a connection of
 	the test's own, that its window lost and gained the keyboard, with Linda idle and with it reading.
