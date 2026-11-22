@@ -5282,6 +5282,28 @@ fn a_late_pass_does_not_outlive_a_let_go() {
     assert!(!t.closed(CLIENT));
 }
 
+/// A client that connects again, as Linda does after a loss, numbers its keys from one again, and
+/// is judged by the keys sent to it and not by those its first connection was sent.
+#[test]
+fn a_client_admitted_again_is_judged_by_its_own_keys() {
+    let (mut t, k) = T::late_passing();
+    t.kept(k, KEY_A);
+    t.release(k, KEY_A);
+    t.core.disconnected(CLIENT, t.now);
+    t.take();
+    t.out.clear();
+    t.admit_asking(CLIENT, FEATURE_LATE_PASS | FEATURE_WAIT);
+    t.send(FromClient::Start);
+    t.pass(VIRTUAL_SETTLE);
+    t.sent();
+    let alt = t.kept(k, KEY_LEFTALT);
+    let tab = t.pressed(k, KEY_TAB);
+    t.late_pass(alt, tab);
+    t.verdict(tab, false);
+    assert!(!t.closed(CLIENT), "{:?}", t.sent());
+    assert_eq!(t.w.emitted(), vec![(KEY_LEFTALT, 1), (KEY_TAB, 1)]);
+}
+
 /// A key typed to be decided is a press asking for a verdict like any other, and a kept Alt goes
 /// out before it; a typed SysRq after it is refused, Alt being down.
 #[test]
