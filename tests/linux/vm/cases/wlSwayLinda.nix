@@ -6,4 +6,7 @@
 {
   imports = [ ./wlGnomeLinda.nix ];
   environment.systemPackages = [ pkgs.foot ];
+  # wlroots logs at debug alone when it adds and removes libinput's devices, which the switch back from
+  # a text console is timed by.
+  programs.sway.extraOptions = [ "--debug" ];
 }

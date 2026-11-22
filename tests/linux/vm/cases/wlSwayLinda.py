@@ -4,7 +4,8 @@ windows reached from the keyboard. Linda is started with no helper and then give
 and kept keys work on a uhid keyboard the helper holds; the Polish layout's AltGr letters are typed,
 echoed and named; two layouts are switched with Super+Space, bound for the case to sway's own switch;
 the helper is killed while a chord is held; Linda is stopped while letters are typed; a text console
-is switched to and back; a keyboard that is also a pointer is left alone; the menu opens with the
+is switched to and back, with sway's layout kept through it; sway's socket is shown to say nothing of
+a keyboard's XKB options; a keyboard that is also a pointer is left alone; the menu opens with the
 Linda key and N, a dialog opens with Linda's command and is brought forward again from behind another
 window; the emergency chord lets go, and linda --take-keyboard typed in a terminal, which is sway's
 way back as Linda says it, gives Linda the keyboard again; and nothing typed is in any log.
@@ -14,6 +15,7 @@ writes the limitation down after "AT limitation".
 """
 
 import json
+import shlex
 from typing import TYPE_CHECKING
 
 from ground import KERNEL_ROUTE, VIRTUAL_KEYBOARD, WINDOW_TITLE, Mark, keyEvents
@@ -59,11 +61,23 @@ STOPPED_LETTERS = "abcdefghijklmnop"
 #: loses keys from the virtual keyboard for up to some 0.9 s after the grab (E15-sway.md), which
 #: package HL's hold is to end.
 RESETTLE = 1.0
-#: The two faults the switch back from a text console meets on sway, held so that their going is seen.
-LAYOUT_AFTER_CONSOLE = (
-	"sway lists no keyboard while a text console is in front, so Linda's sway feed takes localed's "
-	"layout, and it does not take sway's layout again when the session is back in front"
-)
+#: What Linda's sway feed logs as sway lists none of the session's keyboards while a console is in front,
+#: and as it lists them again.
+KEPT_LOG = "so the layout it gave last is kept"
+AGAIN_LOG = "Keyboard layout from sway again: pl"
+LOCALED_LOG = "Keyboard layout from localed"
+#: How sway names linda-keyd's keyboard, as swayLayout.VIRTUAL_IDENTIFIER has it.
+VIRTUAL_IDENTIFIER = "19561:28260:Linda_virtual_keyboard"
+#: sway's lines at --debug as wlroots pauses and resumes the session (backend/drm/backend.c) and adds or
+#: removes libinput's devices (backend/libinput/events.c).
+SWAY_INPUT_LOG = ("DRM FD", "backend/libinput/events.c")
+#: The fault the switch back from a text console meets on sway, held so that its going is seen. It is
+#: wlroots' own, not the guest's: as the session comes back session_signal in backend/libinput/backend.c
+#: (wlroots 0.20.2) calls libinput_resume and does not dispatch, so the devices libinput adds again wait
+#: in its queue until its descriptor is next readable, at the first input event of any device; sway's
+#: log has them added 15 s after the switch back and 3 ms after the first key. Until then the seat has
+#: no keyboard and no window is given one, and that first key is spent giving it back. The guest's
+#: pointers are idle and linda-keyd holds its keyboards, so nothing else wakes it.
 FOCUS_AFTER_CONSOLE = (
 	"under sway the focused window says it is deactivated as a text console comes in front, and no "
 	"window says it is activated when the session is in front again, a new one included, so Linda's "
@@ -316,11 +330,17 @@ def console(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 	)
 	without = len(ground.lindaLogRecords(WITHOUT_KEYS))
 	letGo = len(ground.lindaLogRecords(KEYD_LET_GO))
+	kept = len(ground.lindaLogRecords(KEPT_LOG))
+	again = len(ground.lindaLogRecords(AGAIN_LOG))
+	localed = len(ground.lindaLogRecords(LOCALED_LOG))
 
 	with ground.subtest("Control, Alt and a function key, passed by Linda, switch to a text console"):
+		switched = ground.now()
 		keyboard.chord("KEY_LEFTCTRL", "KEY_LEFTALT", f"KEY_F{text}")
 		ground.waitFor(lambda: ground.shell("fgconsole").strip() == str(text), "the switch to the console")
 		ground.waitForLindaLog(KEYD_LET_GO, count=letGo + 1)
+		ground.waitForLindaLog(KEPT_LOG, count=kept + 1)
+		assert len(ground.lindaLogRecords(LOCALED_LOG)) == localed, layoutRecords(ground)
 		# Under load the kernel has taken a second to put the console in front (V2-gnome-helper.md).
 		ground.settle(1.5)
 		mark = ground.mark()
@@ -330,16 +350,13 @@ def console(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 		assert not [t for t in said(ground, mark) if t in ("h", "i")], said(ground, mark)
 
 	with ground.subtest("back on the desktop, the helper holds the keyboard again and Linda's keys work"):
-		layouts = layoutChanges(ground, "pl")
 		mark = ground.mark()
 		ground.shell(f"chvt {desktop}")
 		held = ground.waitForHelperLog(f"({UHID}): Held", mark)[0]
 		ground.machine.log(f"the helper held the keyboard again {held - mark.t:.3f} s after the switch back")
 		ground.settle(RESETTLE)
-		with ground.expectedFailure(LAYOUT_AFTER_CONSOLE):
-			ground.waitFor(
-				lambda: layoutChanges(ground, "pl") > layouts, "Linda to follow sway's layout again", 5
-			)
+		ground.machine.log(f"before any key after the switch back sway lists {libinputKeyboards(ground)}")
+		assert len(ground.lindaLogRecords(LOCALED_LOG)) == localed, layoutRecords(ground)
 		# lindaKeyWorks, with only the title held to the fault: the chord is still to be kept.
 		ground.settle(APART)
 		chord = ground.mark()
@@ -355,18 +372,124 @@ def console(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 			f"{[r.splitlines()[-1] for _t, r in ground.lindaLogRecords('Keyboard layout from')][-3:]}"
 		)
 		ground.machine.log(f"after the switch back sway's windows: {ground.focus('windows')}")
-		# Nothing the case tried brought a window's activation back: neither a new window (run 3) nor
-		# another workspace and back (run 4). So this subtest is the case's last, and what still works is
-		# written down: whether a letter reaches the program, and whether Linda still has the route.
+		# Neither a new window nor another workspace and back gave a window the keyboard (package AT's
+		# runs 3 and 4): only an input event does, and the first key is it. Linda must have read that key,
+		# and those after it, in sway's layout.
 		typed = ground.mark()
-		keyboard.tap("KEY_J")
+		written = keyboard.tap("KEY_J")
 		ground.settle(1)
 		ground.machine.log(
 			f"after the switch back J reached the program as {keyEvents(ground.keys('app', typed))}, the "
 			f"virtual keyboard as {keyEvents(ground.keys('evdev', typed, device=VIRTUAL_KEYBOARD))}; Linda "
 			f"said {said(ground, typed)}"
 		)
+		ground.waitForLindaLog(AGAIN_LOG, count=again + 1)
+		ground.machine.log(f"after J sway lists {libinputKeyboards(ground)}; {layoutRecords(ground)}")
+		for t, message in swayLog(ground, switched):
+			ground.machine.log(
+				f"sway, {t - mark.t:.3f} s after the switch back and {t - written[0]['t']:.3f} s after J: {message}"
+			)
+		assert len(ground.lindaLogRecords(LOCALED_LOG)) == localed, layoutRecords(ground)
+		polishAgain(ground, keyboard)
 		assert len(ground.lindaLogRecords(WITHOUT_KEYS)) == without, "Linda lost the route"
+
+
+def pointerWakes(ground: "Ground", keyboard: "FakeKeyboard") -> None:
+	"""The same switch made again, and then the pointer moved rather than a key typed: any event of a
+	device of libinput's gives sway its keyboards back, and the window its keyboard."""
+	desktop = int(ground.shell("fgconsole").strip())
+	text = next(n for n in (3, 4, 5) if n != desktop)
+	again = len(ground.lindaLogRecords(AGAIN_LOG))
+	letGo = len(ground.lindaLogRecords(KEYD_LET_GO))
+	with ground.subtest("after the switch back, moving the pointer gives sway its keyboards back"):
+		ground.shell(f"chvt {text}")
+		ground.waitForLindaLog(KEYD_LET_GO, count=letGo + 1)
+		ground.settle(1)
+		mark = ground.mark()
+		ground.shell(f"chvt {desktop}")
+		ground.waitForHelperLog(f"({UHID}): Held", mark)
+		ground.settle(RESETTLE)
+		assert libinputKeyboards(ground) == [], libinputKeyboards(ground)
+		moved = ground.now()
+		events = [{"type": "abs", "data": {"axis": axis, "value": 12000}} for axis in ("x", "y")]
+		result = ground.machine.qmp_client.send("input-send-event", {"events": events})
+		assert "error" not in result, result
+		ground.waitFor(lambda: libinputKeyboards(ground), "sway to list its keyboards after the move", 5)
+		ground.waitForLindaLog(AGAIN_LOG, count=again + 1)
+		for t, message in swayLog(ground, mark.t):
+			ground.machine.log(f"sway, {t - moved:.3f} s after the pointer moved: {message}")
+		ground.settle(APART)
+		chord = ground.mark()
+		keyboard.chord("KEY_INSERT", "KEY_T")
+		ground.waitForSpeech(WINDOW_TITLE, chord)
+		acceptance.assertKept(ground, chord, ("KEY_INSERT", "KEY_T"), keyboard.name)
+		typedThrough(ground, keyboard, "KEY_Y", "y", echo="y")
+
+
+def polishAgain(ground: "Ground", keyboard: "FakeKeyboard") -> None:
+	ground.settle(APART)
+	mark = ground.mark()
+	keyboard.chord("KEY_RIGHTALT", "KEY_A")
+	app = ground.waitForKeys(
+		"app", [("KEY_RIGHTALT", 1), ("KEY_A", 1), ("KEY_A", 0), ("KEY_RIGHTALT", 0)], mark
+	)
+	assert app[1]["keyval"] == "aogonek", app
+	ground.waitForSpeech(OGONEK, mark)
+	ground.machine.log(
+		f"after the switch back AltGr with A reached the program as aogonek; Linda said {said(ground, mark)}"
+	)
+
+
+def libinputKeyboards(ground: "Ground") -> list[str]:
+	"""The keyboards of libinput's that sway lists, by identifier."""
+	answer = ground.run(["swaymsg", "-r", "-t", "get_inputs"])
+	assert answer.returncode == 0, answer
+	return [
+		e["identifier"] for e in json.loads(answer.stdout) if e.get("type") == "keyboard" and "libinput" in e
+	]
+
+
+def layoutRecords(ground: "Ground") -> list[str]:
+	return [r.splitlines()[-1] for _t, r in ground.lindaLogRecords("Keyboard layout")][-6:]
+
+
+def swayLog(ground: "Ground", since: float) -> list[tuple[float, str]]:
+	"""What sway logged at --debug since since of wlroots' session and libinput's devices, each line
+	with its time on the guest's clock."""
+	text = ground.shell(
+		"journalctl -o json --no-pager -t xsession 2>/dev/null | grep -F "
+		+ " ".join(f"-e {shlex.quote(m)}" for m in SWAY_INPUT_LOG)
+		+ " || true"
+	)
+	lines = []
+	for line in text.splitlines():
+		entry = json.loads(line)
+		t = int(entry["__MONOTONIC_TIMESTAMP"]) / 1e6
+		message = entry.get("MESSAGE")
+		if isinstance(message, str) and t >= since:
+			lines.append((t, message))
+	return lines
+
+
+def options(ground: "Ground") -> None:
+	with ground.subtest("sway's socket does not say which XKB options a keyboard is given"):
+		swaymsg(ground, "input type:keyboard xkb_options caps:escape")
+		ground.settle(1)
+		answers = {
+			kind: ground.run(["swaymsg", "-r", "-t", kind])
+			for kind in ("get_inputs", "get_seats", "get_config")
+		}
+		assert all(a.returncode == 0 for a in answers.values()), answers
+		inputs = json.loads(answers["get_inputs"].stdout)
+		virtual = next((e for e in inputs if e.get("identifier") == VIRTUAL_IDENTIFIER), None)
+		assert virtual is not None, inputs
+		ground.machine.log(
+			f"under xkb_options caps:escape sway describes linda-keyd's keyboard by {sorted(virtual)}, its "
+			f"libinput entry by {sorted(virtual.get('libinput', {}))}"
+		)
+		for kind, answer in answers.items():
+			assert "caps:escape" not in answer.stdout, (kind, answer.stdout[:2000])
+		assert not [k for k in virtual if "option" in k], sorted(virtual)
 
 
 def pointer(ground: "Ground", keyboard: "FakeKeyboard") -> None:
@@ -652,5 +775,8 @@ def run(ground: "Ground") -> None:
 	ground.machine.log("AT windows figures " + json.dumps({DESKTOP: figures}, sort_keys=True))
 	emergency(ground, keyboard)
 	nothingLogged(ground, keyboard)
-	# Last, as no window is activated again after it under sway.
+	# Late, as sway gives the session its keyboards back only at the first key after it.
 	console(ground, keyboard)
+	pointerWakes(ground, keyboard)
+	# Last, as the options it sets are not the session's.
+	options(ground)
