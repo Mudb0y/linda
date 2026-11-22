@@ -44,7 +44,9 @@ TOGGLE = "grp:alt_shift_toggle"
 CHANGE_BOUND = 0.1
 SWITCHES = 6
 #: Every record the shadow may make: layout names and where they came from.
-ALLOWED_RECORDS = re.compile(r"Keyboard layout from (localed|environment): [\w-]+( [\w-]+)?")
+ALLOWED_RECORDS = re.compile(
+	r"Keyboard layout from (localed|environment): [\w-]+( [\w-]+)?|Keyboard layout: following the group failed"
+)
 
 #: The feeds in a child, with xkb key codes of the keys the tests pass on.
 PRELUDE = r"""
@@ -100,9 +102,11 @@ def names(layout, options=""):
 """
 
 
-def runFeeds(tmp_path: Path, code: str, env: dict[str, str | None] | None = None) -> harness.ChildResult:
+def runFeeds(
+	tmp_path: Path, code: str, env: dict[str, str | None] | None = None, ignoring: tuple[str, ...] = ()
+) -> harness.ChildResult:
 	result = harness.runChild(tmp_path, PRELUDE + code, env=env, recordLevel=DEBUG, timeout=120)
-	result.assertClean()
+	result.assertClean(ignoring=ignoring)
 	assertNothingTypedLogged(result)
 	return result
 
@@ -309,6 +313,48 @@ result = {"changes": [[c[1], c[2], c[3][2]] for c in changes], "same": same}
 		],
 		"same": 3,
 	}
+
+
+def test_aLayoutAfterTheThreadDiedStartsAnother(tmp_path: Path):
+	"""The shadow's thread dies of a fault at its first layout: a later layout from the desktop is not
+	left queued for a thread that is gone, but starts another, which passes it on and follows its
+	group."""
+	result = runFeeds(
+		tmp_path,
+		r"""
+shadow = shadowGroup.ShadowGroup(onChange)
+use = shadow._use
+
+
+def failOnce(snapshot, keymap):
+	shadow._use = use
+	raise RuntimeError("a fault in the shadow's thread")
+
+
+shadow._use = failOnce
+shadow.start(names("pl,us", OPTIONS))
+deadline = time.monotonic() + 2
+while feedThreads() and time.monotonic() < deadline:
+	time.sleep(0.01)
+died = feedThreads()
+shadow.change(names("us,de", OPTIONS))
+settle(1)
+toggle(shadow)
+settle(2)
+shadow.stop()
+result = {"died": died, "changes": [[c[1], c[2], c[3][2]] for c in changes], "left": feedThreads()}
+""".replace("OPTIONS", repr(TOGGLE)),
+		env=twoLayouts(),
+		ignoring=("logErrors",),
+	)
+	assert result.value == {
+		"died": [],
+		"changes": [["lindaKeyboardLayout", 0, "us,de"], ["lindaKeyboardLayout", 1, "us,de"]],
+		"left": [],
+	}
+	assert any("following the group failed" in e["message"] for e in result.events if e["kind"] == "log"), (
+		shadowRecords(result)
+	)
 
 
 #: A module's feed that cannot start, for desktopLayout's fallback to take the place of.

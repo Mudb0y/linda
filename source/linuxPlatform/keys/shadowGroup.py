@@ -142,7 +142,11 @@ class ShadowGroup:
 		except Exception:
 			log.exception("Keyboard layout: following the group failed")
 		finally:
-			self._listening = False
+			with self._lock:
+				self._listening = False
+				# A later layout then starts another thread, rather than waiting on the queue for this one.
+				if self._thread is threading.current_thread():
+					self._thread = None
 
 	def _use(self, snapshot: LayoutSnapshot, keymap) -> None:
 		before = self._base
