@@ -110,6 +110,16 @@ class TextSource:
 		return _call(self.node, *second)
 
 	def characterExtents(self, offset: int) -> tuple[int, int, int, int]:
+		"""The character's x, y, width and height, in the space the client gives the accessible's own in:
+		the screen on X, and in a Wayland session its window's, as a WindowExtents."""
+		if atspiClient.windowCoordinates():
+			kind = atspiClient.client.coordinateType(self.node)
+			r = atspiClient.firstPosition(
+				self.node,
+				lambda: _call(self.node, Atspi.Text.get_character_extents, self.node.ref, offset, kind),
+				lambda r: r.width > 0 or r.height > 0,
+			)
+			return atspiClient.WindowExtents((r.x, r.y, r.width, r.height), self.node)
 		r = _call(
 			self.node,
 			Atspi.Text.get_character_extents,
@@ -120,6 +130,14 @@ class TextSource:
 		return (r.x, r.y, r.width, r.height)
 
 	def offsetAtPoint(self, x: int, y: int) -> int:
+		"""The offset of the character at x, y, taken in the space characterExtents answers in."""
+		if atspiClient.windowCoordinates():
+			kind = atspiClient.client.coordinateType(self.node)
+			return atspiClient.firstPosition(
+				self.node,
+				lambda: _call(self.node, Atspi.Text.get_offset_at_point, self.node.ref, x, y, kind),
+				lambda offset: offset >= 0,
+			)
 		return _call(
 			self.node,
 			Atspi.Text.get_offset_at_point,

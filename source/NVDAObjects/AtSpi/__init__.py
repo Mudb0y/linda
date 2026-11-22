@@ -112,6 +112,21 @@ def _client() -> atspiClient.Client:
 	return atspiClient.client
 
 
+class WindowRect(RectLTWH):
+	"""An object's location in a Wayland session, in the space of window, the top-level window it is in:
+	locations in two windows cannot be compared."""
+
+	@classmethod
+	def fromExtents(cls, extents: atspiClient.WindowExtents) -> "WindowRect":
+		rect = cls(*extents)
+		rect._extents = extents
+		return rect
+
+	@property
+	def window(self) -> Node | None:
+		return self._extents.window
+
+
 def desktopNode() -> Node:
 	return handler.desktopNode()
 
@@ -786,6 +801,8 @@ class AtSpi(NVDAObject):
 			extents = _client().extents(self.node)
 		except NodeGone:
 			return None
+		if isinstance(extents, atspiClient.WindowExtents):
+			return WindowRect.fromExtents(extents)
 		return RectLTWH(*extents) if extents else None
 
 	def _get_parent(self):

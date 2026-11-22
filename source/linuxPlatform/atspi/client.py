@@ -12,11 +12,13 @@ returns 0 instead of failing.
 
 import collections
 import dataclasses
+import functools
 import inspect
 import threading
 import time
 import warnings
 from collections.abc import Callable
+from typing import Self
 
 import gi
 
@@ -50,6 +52,16 @@ WALK_LIMIT = 500
 _INIT_NO_BUS = 2
 #: The desktop's bus name, which libatspi gives the desktop it returns.
 REGISTRY_BUS_NAME = "org.a11y.atspi.Registry"
+#: Toolkits still asked for SCREEN positions in a Wayland session. Chromium's SCREEN is measured from
+#: its window's corner there, and is the one space its objects, its text and its hit tests agree in:
+#: its text's WINDOW is the page's, not the window's, and it answers -1 for the offset at any WINDOW
+#: point (tests/linux/test_waylandCoordinates.py).
+SCREEN_TOOLKITS = frozenset({"Chromium"})
+#: Firefox answers nothing for the first position any client asks of it, as it only then begins to keep
+#: positions, and has every position 6 to 11 ms later. Only a Wayland session waits for it, so that the
+#: X route stays as it was.
+GECKO_FIRST_POSITION_SECONDS = 0.05
+GECKO_FIRST_POSITION_GAP = 0.005
 
 
 class NodeGone(LookupError):
@@ -82,6 +94,55 @@ class Node:
 class Relation:
 	type: str
 	targets: list[Node]
+
+
+@functools.cache
+def windowCoordinates() -> bool:
+	"""Whether positions are each top-level window's own, as in a Wayland session, where no program knows
+	where its windows are and GTK 4 answers 0, 0 for every SCREEN position; on X they are the screen's."""
+	from linuxPlatform import displayServer
+
+	return displayServer.isWayland()
+
+
+#: Applications asked for a position in a Wayland session, by bus name.
+_positionsAsked: set[str] = set()
+
+
+def firstPosition[T](node: Node, ask: Callable[[], T], answered: Callable[[T], bool]) -> T:
+	"""ask(), which asks node's application for a position in a Wayland session; asked again for
+	GECKO_FIRST_POSITION_SECONDS at most when it is the first such question to a Firefox and was not
+	answered."""
+	result = ask()
+	busName = node.busName
+	if busName in _positionsAsked:
+		return result
+	_positionsAsked.add(busName)
+	if answered(result) or _toolkits.get(busName) != "Gecko":
+		return result
+	deadline = time.monotonic() + GECKO_FIRST_POSITION_SECONDS
+	while not answered(result) and time.monotonic() < deadline:
+		time.sleep(GECKO_FIRST_POSITION_GAP)
+		result = ask()
+	return result
+
+
+class WindowExtents(tuple):
+	"""x, y, width and height measured in the space of window, the top-level the accessible is in, as
+	every position is in a Wayland session: positions in two windows cannot be compared. window is
+	found when first asked for, since most positions are compared only with others in one window."""
+
+	def __new__(cls, box: tuple[int, int, int, int], node: Node) -> Self:
+		self = super().__new__(cls, box)
+		self.node = node
+		return self
+
+	@functools.cached_property
+	def window(self) -> Node | None:
+		try:
+			return _instance().topLevel(self.node)
+		except NodeGone:
+			return None
 
 
 #: Round trips made through call, and the seconds spent in them, for measurement.
@@ -331,13 +392,48 @@ class Client:
 			result.append(Relation(rel.get_relation_type().value_nick, [t for t in targets if t]))
 		return result
 
+	def topLevel(self, node: Node) -> Node | None:
+		"""The top-level window node is in, node itself for one, or None for an application or a node
+		with no window above it."""
+		current = node
+		for _ in range(64):
+			parent = self.parent(current)
+			if parent is None:
+				return None
+			if parent.path == ROOT_PATH:
+				return None if current.path == ROOT_PATH else current
+			current = parent
+		return None
+
 	def extents(self, node: Node) -> tuple[int, int, int, int] | None:
+		"""node's x, y, width and height: on the screen on X, and in a Wayland session a WindowExtents."""
+		if windowCoordinates():
+			return self._windowExtents(node)
 		rect = call(node, Atspi.Component.get_extents, Atspi.CoordType.SCREEN)
 		if rect.width <= 0 and rect.height <= 0:
 			return None
 		return (rect.x, rect.y, rect.width, rect.height)
 
+	def coordinateType(self, node: Node) -> Atspi.CoordType:
+		"""The space node's positions are asked in, in a Wayland session."""
+		return Atspi.CoordType.SCREEN if self.toolkit(node) in SCREEN_TOOLKITS else Atspi.CoordType.WINDOW
+
+	def _windowExtents(self, node: Node) -> WindowExtents | None:
+		kind = self.coordinateType(node)
+		rect = firstPosition(
+			node,
+			lambda: call(node, Atspi.Component.get_extents, kind),
+			lambda rect: rect.width > 0 or rect.height > 0,
+		)
+		if rect.width <= 0 and rect.height <= 0:
+			return None
+		return WindowExtents((rect.x, rect.y, rect.width, rect.height), node)
+
 	def accessibleAtPoint(self, node: Node, x: int, y: int) -> Node | None:
+		"""The child of node at x, y, taken in the space extents gives node's positions in."""
+		if windowCoordinates():
+			kind = self.coordinateType(node)
+			return self.node(call(node, Atspi.Component.get_accessible_at_point, x, y, kind))
 		return self.node(
 			call(node, Atspi.Component.get_accessible_at_point, x, y, Atspi.CoordType.SCREEN),
 		)
