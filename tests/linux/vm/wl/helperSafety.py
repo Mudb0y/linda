@@ -72,10 +72,10 @@ SLACK = 0.3
 SHIFT_CLEARS = 1.0
 #: The emergency chord's promise: keys reach the program from the keyboard itself within this.
 CHORD_BACK = 1.0
-#: Where continueAtChord's watch writes when it woke the client, and how many times it looks for
-#: the chord first, some ten seconds' worth.
+#: Where continueAtChord's watch writes when it woke the client, and the seconds it waits for the
+#: chord at most.
 CONTINUED = "/tmp/ground/continued"
-CHORD_WATCH_LOOKS = 500
+CHORD_WATCH = 10
 OPENED = "/tmp/ground/virtualOpened.jsonl"
 CONSOLE_TEXT = "/tmp/ground/console.txt"
 CONSOLE_LETTERS = "abcdefghijklmnopqrstuvwxyz"
@@ -634,19 +634,18 @@ def hotplug(ground: "Ground", client: "KeydClient", figures: dict) -> None:
 
 def continueAtChord(ground: "Ground", pid: int) -> None:
 	"""Start a watch in the guest that sends the stopped client pid SIGCONT as soon as the helper's log
-	shows the emergency chord, and writes when to CONTINUED. The helper drops a client silent for
-	HEARTBEAT_TIMEOUT, and on a loaded host the host's own round trips to see the chord and signal
-	took the client past it (results/VH-plasma-helper.md, run 3). The watch reads the journal after
-	its cursor of now, so that no earlier chord wakes it, and wakes the client in the end even with no
-	chord, so that a failed subtest does not leave it stopped for the next."""
+	shows the emergency chord, and then writes when it had to CONTINUED. The helper drops a client
+	silent for HEARTBEAT_TIMEOUT, and on a loaded host the host's own round trips to see the chord and
+	signal took the client past it (results/VH-plasma-helper.md, run 3). The watch follows the journal
+	from its cursor of now, so that no earlier chord wakes it, and wakes the client after CHORD_WATCH
+	even with no chord, so that a failed subtest does not leave it stopped for the next."""
 	shown = ground.shell(f"journalctl -u {KEYD_UNIT} -n 1 --show-cursor -o cat")
 	cursor = next(line for line in shown.splitlines() if line.startswith("-- cursor: "))[11:]
-	look = f"journalctl -u {KEYD_UNIT} --after-cursor={shlex.quote(cursor)} -o cat"
 	script = (
 		"export PATH=/run/current-system/sw/bin:$PATH; "
-		f"for i in $(seq {CHORD_WATCH_LOOKS}); do {look} | grep -q 'the emergency chord' && break; "
-		f"sleep 0.01; done; ground-record now > {CONTINUED}.new; kill -CONT {pid}; "
-		f"mv {CONTINUED}.new {CONTINUED}"
+		f"timeout {CHORD_WATCH} journalctl -u {KEYD_UNIT} --after-cursor={shlex.quote(cursor)} -f -o cat "
+		f"| {{ grep -q 'the emergency chord'; kill -CONT {pid}; ground-record now > {CONTINUED}.new; "
+		f"mv {CONTINUED}.new {CONTINUED}; }}"
 	)
 	ground.shell(
 		f"rm -f {CONTINUED}; systemd-run --collect --unit=ground-continue sh -c {shlex.quote(script)}"
@@ -668,7 +667,11 @@ def emergency(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", 
 		pid = client.pid
 		continueAtChord(ground, pid)
 		mark = ground.mark()
+		# Stopped by the keyboard's own server, between keys, so that the client is hung for the chord
+		# alone: stopped from a shell before the call, it once lost 1.2 s to the call's start on a
+		# loaded host, and the helper dropped it.
 		steps = [
+			{"signal": [pid, "SIGSTOP"]},
 			{"press": "KEY_BACKSPACE"},
 			{"sleep": 0.02},
 			{"press": "KEY_ESC"},
@@ -681,13 +684,8 @@ def emergency(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", 
 			{"sleep": 0.05},
 			{"tap": "KEY_Q"},
 		]
-		# Stopped and typed on from the same shell, so that the client is hung for the chord alone.
-		output = ground.shell(
-			f"ground-record now; kill -STOP {pid}; "
-			f"ground-keyboard call {shlex.quote(UHID)} {shlex.quote(json.dumps(steps))}"
-		)
-		stoppedAt = float(output.split("\n", 1)[0])
-		written = json.loads(output.split("\n", 1)[1])["written"]
+		written = keyboard.run(*steps)
+		stoppedAt = next(r["t"] for r in keyboard.records(mark) if r.get("signal") == "SIGSTOP")
 		said = ground.waitForHelperLog("the emergency chord", mark)
 		enter = next(r for r in written if r["key"] == "KEY_ENTER")
 		woken = continued(ground)
@@ -731,10 +729,14 @@ def emergency(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", 
 		pid = client.pid
 		continueAtChord(ground, pid)
 		hung = ground.mark()
-		ground.shell(f"kill -STOP {pid}")
+		stoppedAt = float(ground.shell(f"kill -STOP {pid}; ground-record now"))
 		ground.press("backspace-esc-ret")
-		ground.waitForHelperLog("the emergency chord", hung)
-		continued(ground)
+		said = ground.waitForHelperLog("the emergency chord", hung)
+		figures["qemuChordClientHung"] = {
+			"stoppedToChord": round(said[0] - stoppedAt, 3),
+			"stoppedToContinued": round(continued(ground) - stoppedAt, 3),
+		}
+		ground.machine.log(f"the client hung for QEMU's chord, seconds: {figures['qemuChordClientHung']}")
 		mark = ground.mark()
 		ground.press("r")
 		waitForKeyFrom(ground, "KEY_R", mark, VIRTIO_KEYBOARD)
