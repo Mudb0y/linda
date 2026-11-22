@@ -80,6 +80,14 @@ def answered():
 	wait(lambda: source._watch._answered & keydClient.LOCK_CAPS, 3, "the first Caps Lock was not answered")
 	time.sleep(0.6)
 	sink.frozen = sink.lights()
+
+
+def startTrusted(**kwargs):
+	# As though NVDA's layout came from the desktop's own settings, as GNOME's and KDE's does, under which
+	# alone the lock echo is taken.
+	source = startRoute(**kwargs)
+	deliveryWatch.ECHO_LAYOUTS = (*deliveryWatch.ECHO_LAYOUTS, source.layout.source)
+	return source
 """
 
 
@@ -92,7 +100,7 @@ def runDelivery(tmp_path: Path, code: str, *, env: dict | None = None, timeout: 
 LOCK_ECHO_CHILD = r"""
 sink = FrozenSink(layout="pl")
 standIn()
-source = startRoute(consumed=x11.EXTENDED_INSERT)
+source = startTrusted(consumed=x11.EXTENDED_INSERT)
 answered()
 keyboard.press("Caps_Lock")
 time.sleep(0.7)
@@ -149,10 +157,46 @@ def test_twoUnansweredLockKeysLetGoAndStayLetGo(tmp_path: Path):
 	]
 
 
-TYPED_MATCH_CHILD = r"""
+UNREAD_OPTIONS_CHILD = r"""
 sink = FrozenSink(layout="pl")
 standIn()
 source = startRoute(consumed=x11.EXTENDED_INSERT)
+layout = source.layout.source
+answered()
+for _ in range(4):
+	keyboard.press("Caps_Lock")
+	time.sleep(0.7)
+result = {
+	"layout": layout,
+	"trusted": layout in getattr(deliveryWatch, "ECHO_LAYOUTS", ()),
+	"kernel": source.isKernel,
+	"said": said,
+	"unanswered": source._watch._unanswered,
+	"lines": [line for line in logged.lines if "proves nothing" in line or "do not reach" in line],
+}
+source.stop()
+"""
+
+
+@pytest.mark.rigSession("x11")
+def test_aLayoutWithoutTheDesktopsOptionsTakesNoEcho(tmp_path: Path):
+	"""NVDA's layout from the XKB_DEFAULT variables, which cannot hold an option set in the compositor's
+	own configuration: Caps Lock answered once, then four that change no light, and Linda keeps the
+	keyboard, as it must where such an option makes Caps Lock an Escape."""
+	value = runDelivery(tmp_path, UNREAD_OPTIONS_CHILD)
+	assert value["layout"] in ("environment", "localed"), value
+	assert not value["trusted"]
+	assert value["kernel"]
+	assert value["said"] == [HINT]
+	assert value["unanswered"] == 4
+	assert not [line for line in value["lines"] if "do not reach" in line], value["lines"]
+	assert value["lines"][0].startswith(f"Key delivery: NVDA's layout comes from {value['layout']},")
+
+
+TYPED_MATCH_CHILD = r"""
+sink = FrozenSink(layout="pl")
+standIn()
+source = startTrusted(consumed=x11.EXTENDED_INSERT)
 answered()
 keyboard.press("Caps_Lock")
 time.sleep(0.7)
@@ -185,7 +229,7 @@ def test_aCharacterTypedSinceTheLastAnswerKeepsTheKeyboard(tmp_path: Path):
 UNANSWERED_LIGHT_CHILD = r"""
 sink = FrozenSink(layout="pl")
 standIn()
-source = startRoute(consumed=x11.EXTENDED_INSERT)
+source = startTrusted(consumed=x11.EXTENDED_INSERT)
 answered()
 # Num Lock's light never answered: twenty of them prove nothing.
 for _ in range(20):
@@ -218,7 +262,7 @@ REMAPPED_CHILD = r"""
 sink = FrozenSink(layout="pl", options=OPTIONS)
 sink.frozen = 0
 standIn()
-source = startRoute(consumed=x11.EXTENDED_INSERT)
+source = startTrusted(consumed=x11.EXTENDED_INSERT)
 environment = source._environment
 noted = []
 passedLock = environment.onPassedLock

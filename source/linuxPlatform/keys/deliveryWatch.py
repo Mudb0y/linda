@@ -14,7 +14,8 @@ Absence is proved by sway's listing, one second after the helper holds the keybo
 after that while it holds, saying the virtual keyboard is not there or takes no events, a removal
 being asked about again a second later; and by the lock echo. The
 echo is hedged against a keyboard remapped under NVDA's feet, since what it costs when wrong is every
-command of NVDA's until the user takes the keyboard back: a lock key is noted only by the light the
+command of NVDA's until the user takes the keyboard back: it is taken only where NVDA's layout comes
+from the desktop's own settings, options and all; a lock key is noted only by the light the
 layout has it change, so that under caps:escape no Caps Lock is a lock; a press counts only for a light
 this desktop has answered with the helper's LOCKS before in this run; two presses running must go
 unanswered for 0.5 seconds each, with no typed character matched since the last that was answered; a
@@ -45,6 +46,12 @@ LISTING_WAIT = 1.0
 ECHO_WAIT = 0.5
 #: Lock key presses unanswered in a row that prove absence.
 ECHO_RUN = 2
+#: The layout feeds, by LayoutSnapshot.source, whose layout holds the options the compositor itself
+#: maps keys by, under which alone the lock echo is taken. Under sway's, localed's or the XKB_DEFAULT
+#: variables' an option set in the compositor's own configuration is unseen: Hyprland's
+#: caps:escape_shifted_capslock would leave Shift+Caps Lock answered and every plain one an Escape that
+#: goes unanswered. gamescope's options are its own environment's, which NVDA's need not be.
+ECHO_LAYOUTS = ("gnome", "kde")
 #: Seconds between readings of the typed characters matched, while presence is not proved.
 MATCHES_INTERVAL = 1.0
 #: The file, in Linda's state directory, of the desktops a proof of presence was had on.
@@ -235,6 +242,7 @@ class DeliveryWatch:
 		record: Record | None = None,
 		listing: SwayListing | None = None,
 		matches: Callable[[], int] | None = None,
+		layoutSource: Callable[[], str | None] | None = None,
 	) -> None:
 		"""
 		:param compositor: The desktop's name a proof is remembered by; None remembers nothing.
@@ -243,12 +251,15 @@ class DeliveryWatch:
 		:param listing: sway's listing of the virtual keyboard, where there is one to ask.
 		:param matches: The count of typed characters matched so far, which only grows; layoutMatches by
 			default.
+		:param layoutSource: Where NVDA's layout comes from now, as LayoutSnapshot.source; without it the
+			lock echo proves nothing.
 		"""
 		self._compositor = compositor
 		self._onAbsent = onAbsent
 		self._record = record or Record(None)
 		self._listing = listing
 		self._matches = matches or (lambda: layoutMatches())
+		self._layoutSource = layoutSource or (lambda: None)
 		self._events: collections.deque[tuple] = collections.deque()
 		self._wake = threading.Event()
 		self._stopping = False
@@ -437,7 +448,12 @@ class DeliveryWatch:
 			log.debug(f"Key delivery: {self._unanswered} lock keys passed on running were not answered")
 			if self._unanswered < ECHO_RUN:
 				continue
-			if self._matches() != self._matchesAtAnswer:
+			if (layout := self._layoutSource()) not in ECHO_LAYOUTS:
+				log.debug(
+					f"Key delivery: NVDA's layout comes from {layout or 'nowhere known'}, which may not hold "
+					"the desktop's own options, so that proves nothing"
+				)
+			elif self._matches() != self._matchesAtAnswer:
 				log.debug("Key delivery: a character typed has matched since, so that proves nothing")
 			elif self._listed is not None and self._listed.listed and self._listed.eventsEnabled:
 				log.debug(

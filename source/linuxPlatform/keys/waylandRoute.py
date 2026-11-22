@@ -162,6 +162,7 @@ class WaylandRoute(RoutedKeySource):
 			self._onAbsent,
 			record=deliveryWatch.Record(recordPath),
 			listing=listing,
+			layoutSource=lambda: getattr(self.layout, "source", None),
 		)
 
 	def _sayNoHelper(self) -> None:
