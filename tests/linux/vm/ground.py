@@ -7,8 +7,10 @@ machine. Everything that happens in the guest is stamped with the guest's CLOCK_
 Ground.mark reads, so a test asks for what happened after a mark.
 
 A case whose name begins wlGnome, wlSway or wlPlasma boots that desktop's guest instead of the X one
-(default.nix). Such a guest says how to wait for it in /etc/ground/guest.json, as GUEST describes, and
-the X guest has no such file: without it everything here is as the X session needs it.
+(default.nix). A version may come before the desktop's name, as wl49, wl50, wl65 or wl66, and choose
+the release the guest is built from: wl49GnomeLinda boots GNOME 49 from nixpkgs 25.11, in the guest
+a wlGnome case boots. Such a guest says how to wait for it in /etc/ground/guest.json, as GUEST
+describes, and the X guest has no such file: without it everything here is as the X session needs it.
 
 Keys come two ways. Ground.press sends QEMU's own key events, which reach the guest kernel as the
 emulated keyboard's; names are QEMU's sendkey names, as "insert-t", "f10", "ret". Ground.keyboard
