@@ -955,3 +955,60 @@ def test_focusTriedBeforeItsWindowsActivation(tmp_path: Path, session: str) -> N
 	done.assertClean()
 	expected = {"x11": [["gainFocus", "/frame"]], "wayland": [["gainFocus", "/frame/field"]]}
 	assert done.value == expected[session], done.value
+
+
+#: A notification of GNOME Shell's showing, as package SH saw one come from notify-send: its showing event
+#: first, then those of some twenty panels and labels in it and around it, in one batch.
+SHELL_NOTIFICATION = (
+	SHELL_COMMON
+	+ """
+	shell = app(":1.10", "gnome-shell")
+	stage = node(":1.10", "/stage", shell, "active")
+	notification = node(":1.10", "/notification", stage)
+	roles = {notification.key: "notification"}
+	parts = [node(":1.10", f"/part{index}", notification) for index in range(20)]
+	for index, part in enumerate(parts):
+		roles[part.key] = "label" if index % 2 else "panel"
+
+
+	class Client:
+		def applications(self):
+			return [shell]
+
+		def desktop(self):
+			return DESKTOP
+
+		def name(self, n):
+			return names.get(n.key, "")
+
+		def role(self, n):
+			return roles[n.key]
+
+		def toolkit(self, n):
+			return "GAIL"
+
+		def isHung(self, busName):
+			return False
+
+
+	atspiClient._client = Client()
+	handler._waylandRules = WAYLAND
+	with handler._queueLock:
+		for shown in (notification, *parts):
+			handler._queue.append(("object:state-changed:showing", shown, 1, 0, None))
+	handler.pumpAll()
+	result = queued
+"""
+)
+
+
+@pytest.mark.parametrize("session", ["x11", "wayland"])
+def test_shellNotificationIsAlerted(tmp_path: Path, session: str) -> None:
+	"""In a Wayland session a notification GNOME Shell shows is alerted, though more than
+	handler.MAX_EVENTS_PER_APPLICATION of the shell's events come after it; in an X session it is left
+	out with the rest past the limit, as on main. The GNOME guest case wlGnomeShell is where it is heard."""
+	code = SHELL_NOTIFICATION.replace("WAYLAND", str(session == "wayland"))
+	done = harness.runChild(tmp_path, code, prepare="config", timeout=120)
+	done.assertClean()
+	expected = {"x11": [], "wayland": [["alert", "/notification"]]}
+	assert done.value == expected[session], done.value

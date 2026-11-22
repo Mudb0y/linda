@@ -337,6 +337,25 @@ def _isSwitcherChoice(event) -> bool:
 	)
 
 
+#: Applications that show their notifications inside a window of their own, among some twenty other
+#: showing events of theirs that would leave a notification's past the per-application limit.
+_NOTIFYING_SHELLS = frozenset({"gnome-shell"})
+
+
+def _isShellNotificationShown(event) -> bool:
+	"""Whether event is a notification of an application in _NOTIFYING_SHELLS showing."""
+	if (
+		event[0] != "object:state-changed:showing"
+		or not event[2]
+		or _applicationName(event[1].busName) not in _NOTIFYING_SHELLS
+	):
+		return False
+	try:
+		return client().role(event[1]) in ("alert", "notification")
+	except (AppHung, NodeGone):
+		return False
+
+
 def _anyApplicationBusy() -> bool:
 	"""Whether an application has answered slowly within BUSY_SECONDS, which a window it is about to
 	activate waits for."""
@@ -1733,7 +1752,10 @@ def pumpAll() -> None:
 		node = event[1]
 		if node.key not in alwaysAllowed:
 			perApplication[node.busName] += 1
-			if perApplication[node.busName] > MAX_EVENTS_PER_APPLICATION:
+			# Asked only past the limit, as it costs a round trip for each of the shell's showing events.
+			if perApplication[node.busName] > MAX_EVENTS_PER_APPLICATION and not (
+				_waylandRules and _isShellNotificationShown(event)
+			):
 				overLimit.add(index)
 
 	def flushFocus() -> None:
