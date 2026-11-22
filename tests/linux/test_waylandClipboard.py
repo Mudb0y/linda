@@ -701,9 +701,9 @@ class FakeCompositor:
 		#: What a set_selection does: "take" makes the source the clipboard, "ignore" drops it, and "other"
 		#: gives the clipboard to another program instead.
 		self.policy = "take"
-		#: Whether a new source of Linda's at once cancels the one that is the clipboard, as a clipboard
-		#: manager taking that one over would.
-		self.cancelOnNewSource = False
+		#: Whether a clipboard manager takes Linda's copy over just before Linda destroys that source, so
+		#: that the compositor's cancel of it reaches Linda after Linda has destroyed it.
+		self.takeOverAsDestroyed = False
 		#: Whether the next sync while a window of Linda's has the keyboard takes the keyboard away first.
 		self.leaveOnSync = False
 		self.errors: list[str] = []
@@ -840,6 +840,13 @@ class FakeCompositor:
 				if value in self._objects:
 					return self._fail(f"invalid new id {value}")
 				self._objects[value] = arguments[1] if interface == "wl_registry" else made
+		if (
+			self.takeOverAsDestroyed
+			and destructor
+			and interface == self._family["source"]
+			and self._selection == ("linda", objectId)
+		):
+			self._setSelection(("other", ANOTHER_PROGRAMS_TEXT))
 		if destructor:
 			del self._objects[objectId]
 			self._event(1, 1, _wireUint(objectId))
@@ -866,8 +873,6 @@ class FakeCompositor:
 				)
 		elif interface in managers and opcode == 0:
 			self._sourceTypes[arguments[0]] = []
-			if self.cancelOnNewSource and self._selection is not None and self._selection[0] == "linda":
-				self._setSelection(("other", ANOTHER_PROGRAMS_TEXT))
 		elif interface in managers and opcode == 1:
 			self._devices.append(arguments[0])
 			self._announce(arguments[0])
@@ -1062,6 +1067,48 @@ def test_theClipboardChangingAsLindaReadsItsCopyBackEndsNothing(
 	assert route.wire.alive
 	assert copied
 	assert route.read(1.0) == "Taken over"
+
+
+@pytest.mark.parametrize("route", ["dataControl", "window"])
+def test_aCopyCountsOnlyOnceTheCompositorHoldsIt(
+	clipboardAlone: types.ModuleType, fakeCompositor: Callable[..., FakeCompositor], route: str
+) -> None:
+	clipboard = clipboardAlone
+	if route == "dataControl":
+		fake = fakeCompositor()
+		chosen = dataControlRoute(clipboard, fake)
+	else:
+		fake = fakeCompositor(dataControl=False, windows=True)
+		chosen = clipboard._WindowRoute(clipboard._Wire(fake.path))
+		clipboard._route = chosen
+	assert chosen.copy("Held") is True
+	# A compositor that drops the copy, as one does for a stale serial or by its own policy.
+	fake.policy = "ignore"
+	assert chosen.copy("Dropped") is False
+	# One that hands the clipboard to another program instead.
+	fake.policy = "other"
+	assert chosen.copy("Given away") is False
+	assert chosen.read(1.0) == ANOTHER_PROGRAMS_TEXT
+	fake.policy = "take"
+	assert chosen.copy("Held again") is True
+	assert chosen.read(1.0) == "Held again"
+	assert fake.errors == []
+
+
+def test_aSourceCancelledAsLindaReplacesItIsDestroyedOnce(
+	clipboardAlone: types.ModuleType, fakeCompositor: Callable[..., FakeCompositor]
+) -> None:
+	fake = fakeCompositor()
+	route = dataControlRoute(clipboardAlone, fake)
+	# As under Plasma, whose clipboard manager takes each copy over at once: the cancel of the source
+	# Linda is replacing is on its way as Linda destroys that source.
+	fake.takeOverAsDestroyed = True
+	for text in ("First", "Second", "Third", "Fourth"):
+		assert route.copy(text) is True, (text, fake.errors)
+	assert fake.errors == []
+	assert route.wire.alive
+	destroyed = [r for r in fake.requests if r[:2] == ("ext_data_control_source_v1", 1)]
+	assert len(destroyed) == 3, destroyed
 
 
 def test_textNoProgramCouldPasteIsTheRefusalAndFalse(
