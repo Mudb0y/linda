@@ -129,7 +129,7 @@ inputs.linda.url = "github:Mudb0y/linda";
 environment.systemPackages = [ inputs.linda.packages.x86_64-linux.default ];
 ```
 
-For a Wayland session, add linda-keyd from the same flake: import its module and turn the service on. In an X11 session it is optional, and Linda takes its keys through it while it runs.
+For a Wayland session, add linda-keyd from the same flake: import its module and turn the service on. In an X11 session it is optional, and Linda takes its keys through it while it runs, unless "Take keys from" in the Advanced settings is set to the X display alone.
 
 ```nix
 imports = [ inputs.linda.nixosModules.linda-keyd ];

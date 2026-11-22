@@ -14,7 +14,8 @@ It reads programs through AT-SPI and speaks through PipeWire.
 It takes its keys through
 .BR linda-keyd ,
 a system service that holds the keyboards in the kernel, wherever that service runs, and otherwise
-from the X server in an X11 session.
+from the X server in an X11 session, or always from the X server there when the Advanced settings
+say so.
 Without the service, Linda in a Wayland session reads the screen but has no keys, and says so.
 Started without options, it starts the screen reader, or, when a copy is already running for this
 display, stops that copy and takes its place.
