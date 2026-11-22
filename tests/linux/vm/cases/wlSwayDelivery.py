@@ -13,7 +13,16 @@ import re
 import shlex
 from typing import TYPE_CHECKING
 
-from ground import BASE_SETTINGS, KERNEL_ROUTE, LINDA_DIRECTORY, TRANSCRIPT, USER, VIRTUAL_KEYBOARD, Mark
+from ground import (
+	BASE_SETTINGS,
+	KERNEL_ROUTE,
+	LINDA_DIRECTORY,
+	TRANSCRIPT,
+	USER,
+	VIRTUAL_KEYBOARD,
+	WINDOW_TITLE,
+	Mark,
+)
 from wl import lindaAcceptance as acceptance
 from wl.lindaAcceptance import APART, HINT, UHID, lindaKeyWorks, said, saidCount, saidOnce, typedThrough
 
@@ -91,7 +100,8 @@ def startLinda(ground: "Ground", settings: dict | None = None, env: dict[str, st
 		},
 	)
 	ground.lindaStarted = True
-	ground.waitForLindaLog(KERNEL_ROUTE, timeout=120)
+	ground.waitForSpeech(WINDOW_TITLE, mark, timeout=120)
+	ground.waitForLindaLog(KERNEL_ROUTE, timeout=60)
 	return mark
 
 
@@ -208,13 +218,14 @@ def remaps(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 		)
 
 	with ground.subtest("Linda's layout with caps:escape: twenty Caps Locks are no lock keys"):
-		restart(ground, env={"XKB_DEFAULT_OPTIONS": "caps:escape"})
+		# Caps Lock's key stays a Linda key by where it is whatever it types, and would be kept.
+		restart(ground, WITHOUT_CAPS, {"XKB_DEFAULT_OPTIONS": "caps:escape"})
 		capsPresses(ground, keyboard, "Escape")
 		assert not UNANSWERED.search(ground.lindaLog())
 
 	with ground.subtest("under ctrl:nocaps, twenty Caps Locks are no lock keys"):
 		swaymsg(ground, "input", "type:keyboard", "xkb_options", "ctrl:nocaps")
-		restart(ground, env={"XKB_DEFAULT_OPTIONS": "ctrl:nocaps"})
+		restart(ground, WITHOUT_CAPS, {"XKB_DEFAULT_OPTIONS": "ctrl:nocaps"})
 		capsPresses(ground, keyboard, "Control_L")
 		assert not UNANSWERED.search(ground.lindaLog())
 
