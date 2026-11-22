@@ -108,6 +108,10 @@ NOT_REACHED = "Linda's window opened but did not get the keyboard. Press Alt plu
 ACTIVATION_BOUND = 1.0
 #: Seconds a window of Linda's is given to be activated at all before the case takes it as refused.
 REFUSED_AFTER = 5.0
+#: Seconds after a window of Linda's is activated by which Linda has said NOT_REACHED of it if it is going
+#: to: its check runs a second after the window maps, which is before the activation, and the rest is room
+#: for a loaded guest.
+UNREACHED_SAID_BY = ACTIVATION_BOUND + 2.0
 #: Why Linda's windows miss ACTIVATION_BOUND on GNOME. In runs 3 to 6 of the case the menu window was
 #: activated 1.09 to 1.25 s after the key, created 0.88 to 1.01 s after it; in runs 6 and 7 the settings
 #: dialog was created 0.49 and 0.57 s after its key and activated 0.76 and 0.80 s after that, and in run
@@ -490,9 +494,9 @@ def ownWindow(
 	exact: bool,
 	what: str,
 	figures: dict,
-) -> bool:
-	"""Whether Linda's window titled title was activated, within ACTIVATION_BOUND of the key pressed at
-	pressed. A window not activated within REFUSED_AFTER is the compositor's refusal: Linda must then
+) -> tuple[float, int] | None:
+	"""When Linda's window titled title was activated, and how many times Linda may say NOT_REACHED of
+	it, or None. A window not activated within REFUSED_AFTER is the compositor's refusal: Linda must then
 	have said once how to reach it, and the limitation is written down."""
 	try:
 		event = ground.waitFor(
@@ -513,17 +517,32 @@ def ownWindow(
 		# Linda's own check comes a second after the window maps, and says how to reach it if it is not
 		# active by then; GNOME may give it the keyboard later all the same.
 		lateFromMap = created is not None and event["t"] - created >= ACTIVATION_BOUND
-		saidCount = said(ground, mark).count(NOT_REACHED)
-		figures[what]["saidNotReached"] = saidCount
-		assert saidCount <= (1 if lateFromMap else 0), said(ground, mark)
-		return True
+		allowed = 1 if lateFromMap else 0
+		assert unreachedSaid(ground, mark) <= allowed, said(ground, mark)
+		return event["t"], allowed
 	saidOnce(ground, mark, NOT_REACHED)
 	figures[what] = {"activated": None, "said": NOT_REACHED}
 	ground.machine.log(
 		f"AT limitation on {DESKTOP}: {what} was not given the keyboard within {REFUSED_AFTER} s, and Linda "
 		f"said {NOT_REACHED!r} once; the windows: {acceptance.windowEvents(ground, pressed)}"
 	)
-	return False
+	return None
+
+
+def unreachedSaid(ground: "Ground", since: "Mark") -> int:
+	return sum(NOT_REACHED in text for text in said(ground, since))
+
+
+def unreachedAtMost(ground: "Ground", since: "Mark", window: tuple[float, int], figure: dict) -> None:
+	"""Linda said NOT_REACHED of a window of its own, activated as ownWindow answered, no more often than
+	ownWindow allows, asked once the line would have come."""
+	activated, allowed = window
+	ground.settle(max(0.0, activated + UNREACHED_SAID_BY - ground.now()))
+	figure["saidNotReached"] = unreachedSaid(ground, since)
+	assert figure["saidNotReached"] <= allowed, (
+		f"Linda said {NOT_REACHED!r} {figure['saidNotReached']} times where {allowed} is allowed: "
+		f"{figure}, {said(ground, since)}"
+	)
 
 
 def ownWindowEvents(ground: "Ground", since: float) -> list[dict]:
@@ -562,7 +581,8 @@ def menu(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		ground.settle(APART)
 		mark = ground.mark()
 		pressed = acceptance.written(keyboard.chord("KEY_INSERT", "KEY_N"), "KEY_N", 1)
-		if not ownWindow(ground, mark, pressed, MENU_TITLE, exact=True, what="the menu", figures=figures):
+		window = ownWindow(ground, mark, pressed, MENU_TITLE, exact=True, what="the menu", figures=figures)
+		if window is None:
 			reachRefused(ground, keyboard, MENU_TITLE)
 			return
 		waitHeard(ground, mark, f"{MENU_TITLE} dialog", "Preferences collapsed 1 of 9")
@@ -584,6 +604,7 @@ def menu(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 			ground, mark, ("KEY_INSERT", "KEY_N", "KEY_DOWN", "KEY_RIGHT", "KEY_LEFT", "KEY_UP", "KEY_ESC")
 		)
 		assert not reached, f"the test window had {reached}"
+		unreachedAtMost(ground, mark, window, figures["the menu"])
 		with ground.expectedFailure(WINDOWS_LATE):
 			withinBound(figures["the menu"])
 
@@ -594,10 +615,10 @@ def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		ground.settle(APART)
 		mark = ground.mark()
 		pressed = acceptance.written(keyboard.chord("KEY_INSERT", "KEY_LEFTCTRL", "KEY_G"), "KEY_G", 1)
-		opened = ownWindow(
+		window = ownWindow(
 			ground, mark, pressed, SETTINGS_TITLE, exact=False, what="the settings dialog", figures=figures
 		)
-		if not opened:
+		if window is None:
 			reachRefused(ground, keyboard, SETTINGS_TITLE)
 			return
 		waitHeard(ground, mark, SETTINGS_SPOKEN)
@@ -607,6 +628,7 @@ def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		ground.machine.log(f"Tab in the settings dialog: Linda said {said(ground, step)}")
 		reached = appKeys(ground, mark, ("KEY_INSERT", "KEY_G", "KEY_TAB"))
 		assert not reached, f"the test window had {reached}"
+		unreachedAtMost(ground, mark, window, figures["the settings dialog"])
 		with ground.expectedFailure(WINDOWS_LATE):
 			withinBound(figures["the settings dialog"])
 
@@ -616,7 +638,7 @@ def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		assert acceptance.activeTitle(ground) == WINDOW_TITLE, acceptance.activeTitle(ground)
 		mark = ground.mark()
 		pressed = acceptance.written(keyboard.chord("KEY_INSERT", "KEY_LEFTCTRL", "KEY_G"), "KEY_G", 1)
-		if ownWindow(
+		window = ownWindow(
 			ground,
 			mark,
 			pressed,
@@ -624,7 +646,8 @@ def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 			exact=False,
 			what="the settings dialog again",
 			figures=figures,
-		):
+		)
+		if window is not None:
 			waitHeard(ground, mark, SETTINGS_SPOKEN)
 			escaped = ground.now()
 			keyboard.tap("KEY_ESC")
@@ -634,6 +657,8 @@ def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		ground.settle(0.5)
 		reached = appKeys(ground, mark, ("KEY_INSERT", "KEY_G", "KEY_ESC"))
 		assert not reached, f"the test window had {reached}"
+		if window is not None:
+			unreachedAtMost(ground, mark, window, figures["the settings dialog again"])
 		with ground.expectedFailure(WINDOWS_LATE):
 			withinBound(figures["the settings dialog again"])
 

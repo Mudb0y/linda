@@ -79,6 +79,10 @@ NOT_REACHED = "Linda's window opened but did not get the keyboard. Press Alt plu
 ACTIVATION_BOUND = 1.0
 #: Seconds a window of Linda's is given to be activated at all before the case takes it as refused.
 REFUSED_AFTER = 5.0
+#: Seconds after a window of Linda's is activated by which Linda has said NOT_REACHED of it if it is going
+#: to: its check runs a second after the window maps, which is before the activation, and the rest is room
+#: for a loaded guest.
+UNREACHED_SAID_BY = ACTIVATION_BOUND + 2.0
 #: The way back sway's line gives, typed in a terminal, and the terminal, by its application ID.
 TAKE_KEYBOARD = "linda --take-keyboard"
 TERMINAL = "foot"
@@ -396,10 +400,10 @@ def ownWindow(
 	exact: bool,
 	what: str,
 	figures: dict,
-) -> bool:
-	"""Whether Linda's window titled title was activated, within ACTIVATION_BOUND of the key pressed at
-	pressed. A window not activated within REFUSED_AFTER is the compositor's refusal: Linda must then
-	have said once how to reach it, and the limitation is written down."""
+) -> float | None:
+	"""When Linda's window titled title was activated, within ACTIVATION_BOUND of the key pressed at
+	pressed, or None. A window not activated within REFUSED_AFTER is the compositor's refusal: Linda must
+	then have said once how to reach it, and the limitation is written down."""
 	try:
 		event = ground.waitFor(
 			lambda: activations(ground, pressed, title, exact=exact), f"{what} to be activated", REFUSED_AFTER
@@ -411,15 +415,28 @@ def ownWindow(
 		figures[what] = {"activated": delay}
 		ground.machine.log(f"{what}: activated {delay} s after the key")
 		assert delay < ACTIVATION_BOUND, f"{what} was activated {delay} s after the key"
-		assert NOT_REACHED not in said(ground, mark), said(ground, mark)
-		return True
+		assert not unreachedSaid(ground, mark), said(ground, mark)
+		return event["t"]
 	saidOnce(ground, mark, NOT_REACHED)
 	figures[what] = {"activated": None, "said": NOT_REACHED}
 	ground.machine.log(
 		f"AT limitation on {DESKTOP}: {what} was not given the keyboard within {REFUSED_AFTER} s, and Linda "
 		f"said {NOT_REACHED!r} once; the windows: {acceptance.windowEvents(ground, pressed)}"
 	)
-	return False
+	return None
+
+
+def unreachedSaid(ground: "Ground", since: "Mark") -> int:
+	return sum(NOT_REACHED in text for text in said(ground, since))
+
+
+def neverSaidUnreached(ground: "Ground", since: "Mark", activated: float) -> None:
+	"""Linda did not say NOT_REACHED of a window of its own that was activated at activated, asked once
+	the line would have come."""
+	ground.settle(max(0.0, activated + UNREACHED_SAID_BY - ground.now()))
+	assert not unreachedSaid(ground, since), (
+		f"Linda said {NOT_REACHED!r} of an active window: {said(ground, since)}"
+	)
 
 
 def reachRefused(ground: "Ground", keyboard: "FakeKeyboard", title: str) -> None:
@@ -447,7 +464,8 @@ def menu(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		ground.settle(APART)
 		mark = ground.mark()
 		pressed = acceptance.written(keyboard.chord("KEY_INSERT", "KEY_N"), "KEY_N", 1)
-		if not ownWindow(ground, mark, pressed, MENU_TITLE, exact=True, what="the menu", figures=figures):
+		activated = ownWindow(ground, mark, pressed, MENU_TITLE, exact=True, what="the menu", figures=figures)
+		if activated is None:
 			reachRefused(ground, keyboard, MENU_TITLE)
 			return
 		waitHeard(ground, mark, f"{MENU_TITLE} dialog", "Preferences collapsed 1 of 9")
@@ -468,6 +486,7 @@ def menu(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 			ground, mark, ("KEY_INSERT", "KEY_N", "KEY_DOWN", "KEY_RIGHT", "KEY_LEFT", "KEY_UP", "KEY_ESC")
 		)
 		assert not reached, f"the test window had {reached}"
+		neverSaidUnreached(ground, mark, activated)
 
 
 def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
@@ -476,10 +495,10 @@ def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		ground.settle(APART)
 		mark = ground.mark()
 		pressed = acceptance.written(keyboard.chord("KEY_INSERT", "KEY_LEFTCTRL", "KEY_G"), "KEY_G", 1)
-		opened = ownWindow(
+		activated = ownWindow(
 			ground, mark, pressed, SETTINGS_TITLE, exact=False, what="the settings dialog", figures=figures
 		)
-		if not opened:
+		if activated is None:
 			reachRefused(ground, keyboard, SETTINGS_TITLE)
 			return
 		waitHeard(ground, mark, SETTINGS_SPOKEN)
@@ -489,6 +508,7 @@ def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		ground.machine.log(f"Tab in the settings dialog: Linda said {said(ground, step)}")
 		reached = appKeys(ground, mark, ("KEY_INSERT", "KEY_G", "KEY_TAB"))
 		assert not reached, f"the test window had {reached}"
+		neverSaidUnreached(ground, mark, activated)
 
 	with ground.subtest("the settings dialog, behind another window, comes forward at the command again"):
 		ground.activate(WINDOW_TITLE)
@@ -496,7 +516,7 @@ def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		assert acceptance.activeTitle(ground) == WINDOW_TITLE, acceptance.activeTitle(ground)
 		mark = ground.mark()
 		pressed = acceptance.written(keyboard.chord("KEY_INSERT", "KEY_LEFTCTRL", "KEY_G"), "KEY_G", 1)
-		if ownWindow(
+		activated = ownWindow(
 			ground,
 			mark,
 			pressed,
@@ -504,7 +524,8 @@ def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 			exact=False,
 			what="the settings dialog again",
 			figures=figures,
-		):
+		)
+		if activated is not None:
 			waitHeard(ground, mark, SETTINGS_SPOKEN)
 			escaped = ground.now()
 			keyboard.tap("KEY_ESC")
@@ -515,6 +536,8 @@ def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		assert not appKeys(ground, mark, ("KEY_INSERT", "KEY_G", "KEY_ESC")), appKeys(
 			ground, mark, ("KEY_INSERT", "KEY_G", "KEY_ESC")
 		)
+		if activated is not None:
+			neverSaidUnreached(ground, mark, activated)
 
 
 def windows(ground: "Ground", keyboard: "FakeKeyboard") -> dict:
