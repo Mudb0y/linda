@@ -8,7 +8,7 @@ heard of: an XKB state of NVDA's own, fed those keys as the compositor feeds its
 group. A key that reaches the compositor from a keyboard linda-keyd leaves alone is not heard, and
 then the two can differ; the layout cross-check in typedChars notices that.
 
-The keys are held in memory only, never logged, and forgotten as they are read.
+Keys are held in memory only, and only while they are down, and never logged.
 """
 
 import queue
@@ -60,9 +60,10 @@ class ShadowGroup:
 		self._stopping = False
 		#: Whether a layout has come, at start or since.
 		self._started = False
-		# The thread's own.
-		self._base: LayoutSnapshot | None = None
+		#: The last snapshot passed on, or given by the feed's start.
 		self._passedOn: LayoutSnapshot | None = None
+		# The thread's own: the desktop's last layout, and the state its keys go to.
+		self._base: LayoutSnapshot | None = None
 		self._state = None
 		self._down: set[int] = set()
 
