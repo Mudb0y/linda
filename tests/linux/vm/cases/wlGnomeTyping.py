@@ -478,12 +478,15 @@ def remoteAccess(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 # Linda's own windows.
 
 
+def titled(event: dict, title: str, *, exact: bool) -> bool:
+	return event.get("title") == title if exact else event.get("title", "").startswith(title)
+
+
 def activations(ground: "Ground", since: float, title: str, *, exact: bool) -> list[dict]:
 	return [
 		e
 		for e in acceptance.windowEvents(ground, since)
-		if e.get("type") == "window:activate"
-		and (e.get("title") == title if exact else e.get("title", "").startswith(title))
+		if e.get("type") == "window:activate" and titled(e, title, exact=exact)
 	]
 
 
@@ -508,9 +511,10 @@ def ownWindow(
 		event = None
 	if event is not None:
 		delay = round(event["t"] - pressed, 3)
-		created = next(
-			(e["t"] for e in ownWindowEvents(ground, pressed) if e["type"] == "window:create"), None
-		)
+		creates = [e for e in ownWindowEvents(ground, pressed) if e["type"] == "window:create"]
+		created = next((e["t"] for e in creates if titled(e, title, exact=exact)), None)
+		if created is None:
+			ground.machine.log(f"{what}: no window:create of its title; the creates: {creates}")
 		figures[what] = {
 			"activated": delay,
 			"created": None if created is None else round(created - pressed, 3),
