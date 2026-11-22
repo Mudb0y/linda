@@ -38,9 +38,12 @@ def helperFirst(ground: "Ground") -> "FakeKeyboard":
 		ground.session({"op": "signal", "name": HELPER_CLIENT, "signal": "SIGTERM"})
 		ground.waitFor(lambda: not ground.running(HELPER_CLIENT), "the helper's test client to end", 30)
 		# helperSafety's console subtest leaves a reader on the text console, and openvt will not
-		# start wlGnomeLinda's on a console still in use.
+		# start wlGnomeLinda's on a console still in use. find fails whenever a process the glob named
+		# has gone by the time it gets there, as the one just killed has, and the driver's pipefail
+		# would make that the subtest's failure.
 		holders = (
-			f"find /proc/[0-9]*/fd -lname {helperSafety.CONSOLE_TEXT} 2>/dev/null | cut -d/ -f3 | sort -u"
+			f"{{ find /proc/[0-9]*/fd -lname {helperSafety.CONSOLE_TEXT} 2>/dev/null || true; }}"
+			" | cut -d/ -f3 | sort -u"
 		)
 		ground.shell(f"{holders} | xargs -r kill")
 		ground.waitFor(lambda: not ground.shell(holders).strip(), "the text console's reader to end")
