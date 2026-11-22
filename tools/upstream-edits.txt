@@ -289,6 +289,20 @@ source/appModules/electron.py
   Linux runtime: added. A program on a shared Electron that cannot be named
   goes by Electron's name and gets Chromium's app module; on Windows, where
   electron.exe would load it, it is the default
+source/appModules/gnome_shell.py
+  Linux runtime: added. The app module for GNOME Shell, which speaks the
+  program or window its Alt+Tab switcher selects, as NVDA speaks the Windows
+  task switcher, keeps the stage it draws everything in and the unnamed
+  panels it gives the keyboard to from being said, does not take a panel or
+  label that never says whether it is sensitive for unavailable, so that its
+  prompts' text is read as they open, and speaks the label beside a prompt's
+  password field that says how the check went, as for MATE's unlock prompt;
+  no Windows program is named gnome-shell
+source/appModules/kwin_wayland.py
+  Linux runtime: added. The app module for KWin, Plasma's compositor, which
+  keeps the unnamed window its Alt+Tab switcher is drawn in from being said,
+  so that the item chosen is what is heard; no Windows program is named
+  kwin_wayland
 source/appModules/mate_screensaver_dialog.py
   Linux runtime: added. The app module for MATE's unlock prompt, which names
   its password field with the label beside it and speaks the label that
@@ -330,6 +344,11 @@ source/appModules/nvda.py
   Once NVDA's exit has begun, focus and state changes in its own windows
   are dropped, as asking GTK about a window being torn down, through NVDA's
   own accessibility bridge, can hang the exit
+source/appModules/plasmashell.py
+  Linux runtime: added. The app module for Plasma's desktop shell, which
+  keeps the unnamed window of its launcher and popups from being said, as
+  KWin's module does for its switcher; no Windows program is named
+  plasmashell
 source/argsParsing.py
   Linux runtime: help goes to standard output and a command-line error to standard
   error with exit status 2, as argparse does, instead of a Windows message
