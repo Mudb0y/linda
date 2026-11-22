@@ -52,6 +52,9 @@ CONSOLE_TEXT = "/tmp/ground/console.txt"
 NVDA_LOG = "/tmp/ground/linda/nvda.log"
 OLD_LOG = "/tmp/ground/linda/nvda-old.log"
 STOPPED_LETTERS = "abcdefghijklmnop"
+#: Set by a case for a GNOME whose keymap Linda cannot name, to why the US English check fails there;
+#: None where Linda reads the compositor's own keymap, as on GNOME 51.
+US_RIGHT_ALT: str | None = None
 
 
 def noHelper(ground: "Ground", keyboard: "FakeKeyboard") -> int:
@@ -160,8 +163,13 @@ def layoutAfterSwitch(ground: "Ground", keyboard: "FakeKeyboard", layout: str) -
 		assert app[1]["keyval"] == "a", app
 		ground.settle(0.5)
 		assert not any(OGONEK in text for text in said(ground, mark)), said(ground, mark)
-		assert "ctrl plus alt plus a" in name, name
-		ground.waitForSpeech("a", mark, timeout=3)
+		if US_RIGHT_ALT is None:
+			assert "ctrl plus alt plus a" in name, name
+			ground.waitForSpeech("a", mark, timeout=3)
+		else:
+			with ground.expectedFailure(US_RIGHT_ALT):
+				assert "ctrl plus alt plus a" in name, name
+				ground.waitForSpeech("a", mark, timeout=3)
 	ground.machine.log(
 		f"in {layout} AltGr with A reached the program as {app[1]['keyval']}; Linda said {said(ground, mark)}"
 	)

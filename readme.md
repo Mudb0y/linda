@@ -386,7 +386,7 @@ What does not work yet in a Wayland session:
 * The mouse commands and mouse tracking, the Screen Curtain and Visual Highlight. Each of their commands says "Not available in this Wayland session". A Screen Curtain switched on in the settings is not turned on, and Linda says once that the screen can be seen.
 * On GNOME, a dialog of Linda's that is brought forward from behind another window takes one to two seconds to come up, and may first be announced as not having the keyboard, with the advice to press Alt+Tab, before GNOME gives it the keyboard.
 * On GNOME, a letter typed within about a tenth of a second after Alt+Tab goes wrong. Switching to Firefox in browse mode, it reaches the page as typing instead of moving by Linda's single letter navigation; switching away from Firefox, it reaches the other window, and Linda moves in the page it left as well.
-* On GNOME, notifications are not spoken.
+* On GNOME 49 and 50, with Polish and US English set up as two input sources and US English in use, Linda takes the right Alt key for Alt where GNOME keeps it as AltGr, so input help names chords with it wrongly and what is typed with it is not echoed. Polish alone, or Polish in use, is right, and GNOME 51 is right either way.
 * On GNOME, the number of stars spoken while a password is typed does not match the letters typed. None of the password is spoken.
 * On Plasma, the message and the failure notice of the prompt for administrator rights are not read.
 * On Plasma 6.5 and 6.6, KRunner takes a second or more to open the first time after sign-in, and letters typed before it is there are lost.

@@ -98,8 +98,18 @@ def windowTimings(ground: "Ground", keyboard: "FakeKeyboard", firefoxFault: str 
 	return {"summary": acceptance._kinds(figures), "samples": figures}
 
 
+#: GNOME 49 and 50 send a keymap of three layouts for two input sources, which no names make, so Linda
+#: falls back to the layout names and compiles the right Alt key as Alt_R where GNOME has
+#: ISO_Level3_Shift: with US English in use it names AltGr with A as Alt with A and echoes nothing.
+OLDER_KEYMAP_UNNAMED = (
+	"on GNOME 49 and 50 no names make the compositor's keymap, so with US English in use beside Polish "
+	"Linda takes the right Alt key for Alt"
+)
+
+
 def lindaAcceptance(ground: "Ground", keyboard: "FakeKeyboard", firefoxFault: str | None = None) -> None:
 	"""wlGnomeLinda's run, from its first subtest on."""
+	gnome.US_RIGHT_ALT = OLDER_KEYMAP_UNNAMED
 	gnome.noHelper(ground, keyboard)
 	gnome.keptKeys(ground, keyboard)
 	gnome.polish(ground, keyboard)
