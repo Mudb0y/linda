@@ -250,7 +250,8 @@ def test_nothingIsSaidInAnXSession(desktop: DesktopSession, owners, tmp_path: Pa
 	stopOwner(orca51)
 	waitForLogCount(nvda, ANSWERING, 1)
 	startOwner(owners, tmp_path, "orca", 0.5)
-	startOwner(owners, tmp_path, "orca", 0, ORCA1_BUS_NAME, ORCA1_OBJECT_PATH)
+	# NVDA has the new name again by now, and gives it up only to an Orca that waits before asking.
+	startOwner(owners, tmp_path, "orca", 0.5, ORCA1_BUS_NAME, ORCA1_OBJECT_PATH)
 	waitForLogCount(nvda, WAITING, 2)
 	time.sleep(SETTLE)
 	assert noticesSpoken(desktop) == [], nvda.describe()
