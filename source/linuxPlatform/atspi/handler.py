@@ -1122,8 +1122,8 @@ def _nvdaEvents(event) -> list[str]:
 		try:
 			role = client().role(source)
 		except AppHung:
-			if _waylandRules:
-				# Not gone: asked again once its application answers, where that is kept for.
+			if _waylandRules and _applicationName(source.busName) in _SELECTING_SWITCHERS:
+				# Not gone: asked again once the switcher answers.
 				raise
 			role = roleOfVanished(source)
 			if role is None:
