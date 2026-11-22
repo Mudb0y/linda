@@ -916,6 +916,13 @@ source/visionEnhancementProviders/NVDAHighlighter.py
   layered Windows window, and can start only where an X display with
   input shapes answers. The settings, the events followed and the
   rectangles of each context stay upstream's
+source/vision/visionHandler.py
+  Linux runtime: handleConfigProfileSwitch does not start Visual Highlight,
+  and logs that at debug level, where platformFeatures says the session
+  lacks it, as a Wayland session does. Upstream tried it, the provider
+  refused to start, and the refusal was logged as an error at every start
+  and profile switch. The setting is left on, so that the highlight comes
+  back in an X session
 source/winAPI/dpiAwareness.py
   Linux runtime: setDPIAwareness() returns at once, as GTK scales for the
   display by itself and a process has no DPI awareness to declare; core.main

@@ -17,6 +17,7 @@ from .providerBase import VisionEnhancementProvider
 from .visionHandlerExtensionPoints import EventExtensionPoints
 import importlib
 import pkgutil
+import sys
 from baseObject import AutoPropertyObject
 import api
 import config
@@ -350,6 +351,19 @@ class VisionHandler(AutoPropertyObject):
 					exc_info=True,
 				)
 		for providerId in providersToInitialize:
+			if sys.platform != "win32":
+				import platformFeatures
+				from visionEnhancementProviders.NVDAHighlighter import NVDAHighlighterSettings
+
+				# As in a Wayland session, which has no way to draw it. That is expected there, not an error,
+				# and the setting is kept for a session that can.
+				if providerId == NVDAHighlighterSettings.getId() and not platformFeatures.isSupported(
+					platformFeatures.Feature.VISUAL_HIGHLIGHT,
+				):
+					log.debug(
+						f"The {providerId} vision enhancement provider is not started: this session lacks it"
+					)
+					continue
 			try:
 				info = self.getProviderInfo(providerId)
 				self.initializeProvider(info)
