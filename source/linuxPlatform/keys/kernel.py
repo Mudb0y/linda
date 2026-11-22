@@ -529,7 +529,7 @@ class KernelKeySource:
 		self._lockKeys: dict[int, int] = {}
 		#: Whether the helper has said which lights are on, after which the layout's guess is not taken.
 		self._locksHeard = False
-		#: With an environment, the GOODBYE_ reason the helper gave as it ended the connection, if it did.
+		#: The GOODBYE_ reason the helper gave as it ended the connection, if it did.
 		self.lostReason: int | None = None
 		#: Typing, with an environment and FEATURE_TYPING, all on the thread that answers keys: the last
 		#: TYPE's tag, and each TYPE not yet answered by its tag.
@@ -1546,8 +1546,7 @@ class KernelKeySource:
 			case keydClient.Released(reason=reason):
 				self._onReleased(reason)
 			case keydClient.Goodbye():
-				if self._environment is not None:
-					self.lostReason = message.reason
+				self.lostReason = message.reason
 				self._loseHelper(f"it said goodbye: {message.describe()}")
 			case keydClient.Typed() if self._environment is not None:
 				self._onTyped(message, now)

@@ -127,6 +127,11 @@ class RoutedKeySource:
 		self._nextTry = 0.0
 		#: The last reason the helper was not used that went to the log, so that each goes there once.
 		self._logged: str | None = None
+		#: That another program has the helper was said, until NVDA is admitted again: it turns NVDA away
+		#: at every look while that program has it.
+		self._saidBusy = False
+		#: The kernel source given up last was lost as another program took NVDA's place with the helper.
+		self._lostReplaced = False
 		#: Source: (scan code, extended): the press NVDA had from it of each key whose release it has not.
 		self._keysDown: dict[KeySource, dict[tuple[int, bool], KeyEvent]] = {}
 
@@ -368,6 +373,7 @@ class RoutedKeySource:
 		except keydClient.Refused as e:
 			self._refused(e)
 			return None, f"linda-keyd did not admit NVDA: {e}"
+		self._saidBusy = False
 		return self._newKernel(connection, welcome), "linda-keyd admitted NVDA"
 
 	def _connect(self, wait: float):
@@ -378,8 +384,20 @@ class RoutedKeySource:
 		return keydClient.connect(self._socketPath, wait)
 
 	def _refused(self, error: keydClient.Refused) -> None:
-		"""The helper did not admit NVDA. The X display has the keys meanwhile and the log says why, so
-		nothing more is said here."""
+		"""The helper did not admit NVDA. The X display has the keys meanwhile and the log says why; only
+		another program having the helper is said, as that program can read every key."""
+		goodbye = error.goodbye
+		if goodbye is None or goodbye.reason != keydClient.GOODBYE_BUSY or self._saidBusy:
+			return
+		self._saidBusy = True
+		self._say(
+			# Translators: Said on Linux in an X11 session when linda-keyd, the program that takes the
+			# keyboard in the kernel, turns NVDA away because another program of this session has it.
+			_(
+				"Another program holds linda-keyd for this session, so NVDA takes its keys from the X display. "
+				"If you started no other screen reader, something may be reading your keys.",
+			),
+		)
 
 	def _newKernel(self, connection, welcome) -> KeySource:
 		"""A kernel source on a connection the helper admitted, reporting to this route."""
@@ -529,6 +547,19 @@ class RoutedKeySource:
 		return self._route != "x11" and not self._letGo and self._kernel is None and not self._isBlocked()
 
 	def _sayFellBack(self) -> None:
+		replaced, self._lostReplaced = self._lostReplaced, False
+		if replaced:
+			# That program has the helper now, which turns NVDA away at every look until it lets go.
+			self._saidBusy = True
+			self._say(
+				# Translators: Said on Linux in an X11 session when another program took NVDA's place with
+				# linda-keyd, the program that takes the keyboard in the kernel.
+				_(
+					"Another program took NVDA's place with linda-keyd and reads every key now. "
+					"NVDA takes its keys from the X display.",
+				),
+			)
+			return
 		# Translators: Said on Linux when NVDA stops taking keys from linda-keyd, the program that takes
 		# the keyboard in the kernel, because that program went away or failed, and reads them from the X
 		# display instead.
@@ -593,6 +624,7 @@ class RoutedKeySource:
 				continue
 			self._nextTry = time.monotonic() + RETRY_INTERVAL
 			log.info(f"{self._withoutKernel}: linda-keyd was given up: {why}")
+			self._lostReplaced = getattr(kernel, "lostReason", None) == keydClient.GOODBYE_REPLACED
 			self._sayFellBack()
 		# After what the lost sources said, so that an emergency chord is the last word on them.
 		self._watchVirtual()
