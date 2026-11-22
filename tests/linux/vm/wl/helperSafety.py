@@ -95,10 +95,11 @@ RESETTLE = 2.0
 #: HEARTBEAT_TIMEOUT in protocol.rs: a client silent this long is dropped.
 HEARTBEAT = 2.0
 #: Seconds the helper's own work may take between its line for the kernel's switch and its line for
-#: the let-go, past the time the kernel spent in its ungrabs: reading what each keyboard holds,
-#: putting it out and ending the watch for keyboards, some 15 ms on sway. Each ungrab waits for two
-#: RCU grace periods, which a guest whose virtual processors the host does not run cannot end, so
-#: they are left out of it.
+#: the let-go, past the time the kernel spent in its ungrabs and in closing the keyboards: reading
+#: what each keyboard holds and putting it out, a fraction of a millisecond on sway. An ungrab waits
+#: for two RCU grace periods and a close of an evdev node for one, which a guest whose virtual
+#: processors the host does not run cannot end, so they are left out of it; the bound leaves the
+#: helper's own thread room to be put off the processor by a loaded host.
 LET_GO_OWN = 0.05
 #: Seconds after systemd's SIGKILL within which the kernel, closing the dead helper's devices, must
 #: release what its virtual keyboard held and give the keyboard back to every reader; the evdev
@@ -221,11 +222,13 @@ def startTrace(ground: "Ground", events: dict[str, str], pids: list[str] | None 
 
 
 def traceHelper(ground: "Ground", pid: int) -> dict[str, str]:
-	"""Trace, for every thread of the helper's, each EVIOCGRAB it asks and the end of each ioctl, and
-	each line it sends the journal; answers what readTrace is to be given."""
+	"""Trace, for every thread of the helper's, each EVIOCGRAB it asks and each close, the end of
+	each ioctl and close, and each line it sends the journal; answers what readTrace is to be given."""
 	events = {
 		"syscalls/sys_enter_ioctl": f"cmd == {EVIOCGRAB}",
 		"syscalls/sys_exit_ioctl": "",
+		"syscalls/sys_enter_close": "",
+		"syscalls/sys_exit_close": "",
 		"syscalls/sys_enter_sendto": "fd == 2",
 	}
 	startTrace(ground, events, ground.shell(f"ls /proc/{pid}/task").split())
@@ -241,7 +244,8 @@ def traceKill(ground: "Ground", pid: int) -> dict[str, str]:
 
 def readTrace(ground: "Ground", events: dict[str, str]) -> list[dict]:
 	"""What the tracer recorded of events since startTrace, each a dict with "tid", "t", and "call":
-	"grab" with "arg", "ended", "send" with "len", or "kill"; the tracer is then put back as it was."""
+	"grab" with "arg", "close", "ended" with "of", the call that ended, "send" with "len", or "kill";
+	the tracer is then put back as it was."""
 	text = ground.shell(
 		f"echo 0 > {TRACING}/tracing_on; cat {TRACING}/trace; "
 		+ "".join(
@@ -261,7 +265,11 @@ def readTrace(ground: "Ground", events: dict[str, str]) -> list[dict]:
 		if what.startswith("sys_ioctl("):
 			found.append({**record, "call": "grab", "arg": args.get("arg")})
 		elif what.startswith("sys_ioctl ->"):
-			found.append({**record, "call": "ended"})
+			found.append({**record, "call": "ended", "of": "grab"})
+		elif what.startswith("sys_close("):
+			found.append({**record, "call": "close"})
+		elif what.startswith("sys_close ->"):
+			found.append({**record, "call": "ended", "of": "close"})
 		elif what.startswith("sys_sendto("):
 			found.append({**record, "call": "send", "len": args.get("len")})
 		elif what.startswith("signal_generate:"):
@@ -269,17 +277,23 @@ def readTrace(ground: "Ground", events: dict[str, str]) -> list[dict]:
 	return found
 
 
-def ungrabs(traced: list[dict], start: float, end: float) -> list[tuple[float, float]]:
-	"""Each EVIOCGRAB that let a keyboard go, begun between start and end, as (begun, ended): a
-	thread makes one call at a time, so its next ioctl's end is that call's."""
+def calls(traced: list[dict], call: str, start: float, end: float) -> list[tuple[float, float]]:
+	"""Each call of the kind traced as call, "ungrab" or "close", begun between start and end, as
+	(begun, ended): a thread makes one call at a time, so its next end of that kind is that call's."""
+	of = "grab" if call == "ungrab" else call
 	spans = []
 	for index, record in enumerate(traced):
-		if record["call"] != "grab" or record["arg"] != 0 or not start <= record["t"] <= end:
+		if record["call"] != of or (of == "grab" and record["arg"] != 0) or not start <= record["t"] <= end:
 			continue
 		ended = next(
-			(r["t"] for r in traced[index + 1 :] if r["tid"] == record["tid"] and r["call"] == "ended"), None
+			(
+				r["t"]
+				for r in traced[index + 1 :]
+				if r["tid"] == record["tid"] and r["call"] == "ended" and r["of"] == of
+			),
+			None,
 		)
-		assert ended is not None, f"an ungrab of the helper's at {record['t']} never ended: {traced}"
+		assert ended is not None, f"a {call} of the helper's at {record['t']} never ended: {traced}"
 		spans.append((record["t"], ended))
 	return spans
 
@@ -937,9 +951,10 @@ def console(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 		# The helper's own moments, from the tracer: the journal stamps each line when it reads it.
 		sawSwitch = sent(traced, kernelLine)
 		hadLetGo = sent(traced, letGoLine, sawSwitch)
-		spans = ungrabs(traced, sawSwitch, hadLetGo)
-		inKernel = sum(end - begun for begun, end in spans)
-		own = hadLetGo - sawSwitch - inKernel
+		spans = calls(traced, "ungrab", sawSwitch, hadLetGo)
+		closes = calls(traced, "close", sawSwitch, hadLetGo)
+		waits = sorted(spans + closes)
+		own = hadLetGo - sawSwitch - sum(end - begun for begun, end in waits)
 		switch.update(
 			releasedAfterSwitch=round(released["t"] - switched, 3),
 			kernelToldAfterSwitch=round(kernel - switched, 3),
@@ -948,12 +963,13 @@ def console(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 			letGoLinesApart=round(letGo - kernel, 4),
 			letGoSentAfterSwitchSeen=round(hadLetGo - sawSwitch, 4),
 			ungrabsMs=[round((end - begun) * 1000, 2) for begun, end in spans],
-			# The helper's own stretches: to the first ungrab, between each two, and to its line.
+			closesMs=[round((end - begun) * 1000, 2) for begun, end in closes],
+			# The helper's own stretches: to the first ungrab, between each two calls, and to its line.
 			ownGapsMs=[
 				round((later - earlier) * 1000, 2)
 				for earlier, later in zip(
-					[sawSwitch, *(end for _begun, end in spans)],
-					[*(begun for begun, _end in spans), hadLetGo],
+					[sawSwitch, *(end for _begun, end in waits)],
+					[*(begun for begun, _end in waits), hadLetGo],
 					strict=True,
 				)
 			],
@@ -969,10 +985,11 @@ def console(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 		logindAt = next(i for i, line in enumerate(said) if "in front on seat0" in line)
 		kernelAt = said.index(kernelLine)
 		assert kernelAt < letGoAt < logindAt, said
-		# What the helper did itself from seeing the switch to having let go is its own few
-		# milliseconds. The ungrabs' waits are the kernel's, and on a loaded host they took the two
-		# lines past 0.1 s apart (results/VX-guests.txt), so they are taken out, and they can be only
-		# because the tracer saw them: the uhid keyboard and QEMU's at the least were held.
+		# What the helper did itself from seeing the switch to having let go is its own fraction of a
+		# millisecond. The ungrabs' waits and the keyboards' closes are the kernel's, and on a loaded
+		# host they took the two lines past 0.1 s apart (results/VX-guests.txt), so they are taken
+		# out, and they can be only because the tracer saw them: the uhid keyboard and QEMU's at the
+		# least were held.
 		assert len(spans) >= 2, (spans, traced)
 		assert own < LET_GO_OWN, switch
 		# Every key typed once the helper had let go went to the console, and none to the client.
