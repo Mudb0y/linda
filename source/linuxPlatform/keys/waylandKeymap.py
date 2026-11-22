@@ -269,6 +269,15 @@ def optionsIn(text: str, rules: str = desktopLayout.DEFAULT_RULES) -> str:
 	return ",".join(found)
 
 
+def layoutName(keymap, index: int) -> str | None:
+	"""The description a layout's symbols give it, None for none. Descriptions are UTF-8, and some are
+	not ASCII, as fr(ergol)'s and tr(us)'s are; python-xkbcommon's own layout_get_name raises on those."""
+	name = xkb.lib.xkb_keymap_layout_get_name(keymap._keymap, index)
+	if name == xkb.ffi.NULL:
+		return None
+	return xkb.ffi.string(name).decode("utf-8", errors="replace")
+
+
 def _pairs(names: tuple[str, ...], count: int) -> list[tuple[str, str]]:
 	layouts = names[2].split(",") if names[2] else [desktopLayout.DEFAULT_LAYOUT]
 	variants = names[3].split(",")
@@ -286,7 +295,7 @@ def _described(names: tuple[str, ...]) -> dict[str, tuple[str, str]]:
 		return {}
 	described: dict[str, tuple[str, str]] = {}
 	for i, pair in enumerate(_pairs(names, keymap.num_layouts())):
-		described.setdefault(keymap.layout_get_name(i), pair)
+		described.setdefault(layoutName(keymap, i), pair)
 	return described
 
 
@@ -311,7 +320,7 @@ def nameKeymap(keymap, text: str, base: LayoutSnapshot, *, digest: str | None = 
 	registry = None
 	layouts = []
 	for i in range(count):
-		description = keymap.layout_get_name(i)
+		description = layoutName(keymap, i)
 		pair = described.get(description)
 		if pair is None:
 			if registry is None:
@@ -350,9 +359,9 @@ def mapGroup(naming: Naming, base: LayoutSnapshot, keymap) -> int | None:
 	if pair in naming.layouts:
 		return naming.layouts.index(pair)
 	if baseKeymap is not None:
-		description = baseKeymap.layout_get_name(group)
+		description = layoutName(baseKeymap, group)
 		for i in range(count):
-			if keymap.layout_get_name(i) == description:
+			if layoutName(keymap, i) == description:
 				return i
 	return 0 if count == 1 else None
 
@@ -456,10 +465,12 @@ class WaylandKeymapFeed:
 				self._passOn()
 
 	def _keymapChanged(self, data: bytes) -> None:
+		# Only section names and the layouts' descriptions are read from the text, and a description may
+		# be any UTF-8.
+		text = data.decode("utf-8", errors="replace")
 		try:
-			text = data.decode("ascii")
 			keymap = _quietContext().keymap_new_from_buffer(data, length=len(data))
-		except (UnicodeDecodeError, xkb.XKBError):
+		except xkb.XKBError:
 			log.debugWarning("Keyboard layout: the compositor sent a keymap xkbcommon cannot read")
 			return
 		digest = hashlib.sha256(data).hexdigest()
@@ -481,11 +492,7 @@ class WaylandKeymapFeed:
 		"""Pass on the layout now, on the thread that saw the change, with the feed's lock held."""
 		if self._stopping:
 			return
-		try:
-			snapshot = self._snapshot()
-		except Exception:
-			log.exception("Keyboard layout: naming the compositor's keymap failed")
-			return
+		snapshot = self._snapshot()
 		if self._shadows(snapshot):
 			self._shadowFor().change(snapshot)
 		else:
@@ -512,10 +519,18 @@ class WaylandKeymapFeed:
 				log.exception("Keyboard layout: passing a change on failed")
 
 	def _snapshot(self) -> LayoutSnapshot:
-		"""The desktop's layout as the compositor's keymap names it, with the feed's lock held."""
+		"""The desktop's layout as the compositor's keymap names it, with the feed's lock held; the
+		desktop's own should naming fail, as it was before the compositor's keymap was read."""
 		base = self._base
 		if base.repeat is None and self._repeat is not None:
 			base = base._replace(repeat=self._repeat)
+		try:
+			return self._named(base)
+		except Exception:
+			log.exception("Keyboard layout: naming the compositor's keymap failed")
+			return base
+
+	def _named(self, base: LayoutSnapshot) -> LayoutSnapshot:
 		keymap = self._keymap
 		if keymap is None:
 			self._say(

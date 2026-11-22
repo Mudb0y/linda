@@ -59,6 +59,7 @@ ALLOWED_RECORDS = [
 		r"Keyboard layout: pywayland is not installed, so the compositor's keymap is not read",
 		r"Keyboard layout: no connection to the compositor for its keymap: \w+",
 		r"Keyboard layout: the compositor offers no seat",
+		r"Keyboard layout: naming the compositor's keymap failed",
 	)
 ]
 #: What the tests set that is not a layout's name, none of which may be logged.
@@ -70,7 +71,7 @@ import os, threading, time
 from logHandler import log
 log.setLevel(log.DEBUG)
 from xkbcommon import xkb
-from linuxPlatform.keys import kernel, waylandKeymap
+from linuxPlatform.keys import desktopLayout, kernel, waylandKeymap
 from linuxPlatform.keys.desktopLayout import LayoutSnapshot
 import waylandKeymapDump
 
@@ -88,9 +89,17 @@ def quiet():
 	return context
 
 
+# As bytes: python-xkbcommon's get_as_string and keymap_new_from_string take ASCII alone, and some
+# layouts' descriptions are not.
 def compositorKeymap(names):
-	text = quiet().keymap_new_from_names(*names).get_as_string()
-	return xkb.Context().keymap_new_from_string(text), text
+	data = quiet().keymap_new_from_names(*names).get_as_bytes()
+	return xkb.Context().keymap_new_from_buffer(data), data.decode()
+
+
+def asciiOnly(text):
+	# waylandKeymapDump reads keymaps as ASCII; only layouts' descriptions are not, and no key is read
+	# from them.
+	return text.encode("ascii", "replace").decode()
 
 
 def tables(keymap, group):
@@ -101,11 +110,11 @@ def tables(keymap, group):
 def follows(text, snapshot):
 	# Whether the kernel source's tables of snapshot are those of the keymap text, in every layout,
 	# and in the snapshot's group.
-	compositor = xkb.Context().keymap_new_from_string(text)
+	compositor = xkb.Context().keymap_new_from_buffer(text.encode())
 	fed = xkb.Context().keymap_new_from_names(*snapshot.names)
 	return {
-		"described": waylandKeymapDump.describe(fed.get_as_string(), CODES)
-		== waylandKeymapDump.describe(text, CODES),
+		"described": waylandKeymapDump.describe(asciiOnly(fed.get_as_bytes().decode()), CODES)
+		== waylandKeymapDump.describe(asciiOnly(text), CODES),
 		"tables": tables(fed, snapshot.group) == tables(compositor, snapshot.group),
 	}
 
@@ -120,6 +129,22 @@ def plain(snapshot):
 
 def feedThreads():
 	return [t.name for t in threading.enumerate() if t.name == "lindaKeyboardLayout"]
+
+
+def stubFeed(kind, snapshot):
+	# One of the desktop's feeds, which gives snapshot at start and later what the test hands onChange.
+	class Stub(kind):
+		def __init__(self):
+			self.onChange = None
+
+		def start(self, onChange):
+			self.onChange = onChange
+			return snapshot
+
+		def stop(self):
+			pass
+
+	return Stub()
 """
 
 
@@ -335,6 +360,100 @@ result = {
 	assert result.value["known"] == ["evdev", "pc105", "pl,hr", ",glagyz", ""]
 	# hr(glag) does not make hr(glagyz)'s keys, so nothing is named, and the desktop's layout stands.
 	assert result.value["fromRegistry"] is None
+
+
+#: The variants of xkeyboard-config 2.49 whose descriptions are not ASCII, as (layout, variant).
+NON_ASCII = [("fr", "ergol"), ("tr", "us"), ("lv", "ergonomic"), ("vn", "aderty")]
+
+
+@pytest.mark.rigSession("x11")
+def test_layoutsDescribedOutsideASCIIAreNamed(tmp_path: Path):
+	"""Polish beside a layout whose description is not ASCII, that layout in use: the keymap is taken
+	and named, rather than refused as one xkbcommon cannot read."""
+	result = runModule(
+		tmp_path,
+		rf"""
+result = {{}}
+for layout, variant in {NON_ASCII!r}:
+	names = ("evdev", "pc105", "pl," + layout, "," + variant, "")
+	keymap, text = compositorKeymap(names)
+	base = LayoutSnapshot(("evdev", "pc105", layout, variant, ""), source="gnome")
+	feed = waylandKeymap.WaylandKeymapFeed(stubFeed(desktopLayout.GnomeLayoutFeed, base), None)
+	feed._keymapChanged(text.encode())
+	first = feed.start(onChange)
+	feed.stop()
+	result[layout] = {{
+		"nonAscii": not text.isascii(),
+		"names": list(first.names),
+		"group": first.group,
+		"follows": follows(text, first),
+	}}
+""",
+	)
+	for layout, variant in NON_ASCII:
+		assert result.value[layout] == {
+			"nonAscii": True,
+			"names": ["evdev", "pc105", f"pl,{layout}", f",{variant}", ""],
+			"group": 1,
+			"follows": {"described": True, "tables": True},
+		}, layout
+	assert "Keyboard layout: the compositor sent a keymap xkbcommon cannot read" not in moduleRecords(result)
+
+
+@pytest.mark.rigSession("x11")
+def test_aDesktopLayoutDescribedOutsideASCIIBesideAnotherKeymap(tmp_path: Path):
+	"""The desktop names fr(ergol) and the compositor's keymap is US English, as when sway's seat last
+	typed on another keyboard: the feed starts, and gives the compositor's layout."""
+	result = runModule(
+		tmp_path,
+		r"""
+keymap, text = compositorKeymap(("evdev", "pc105", "us", "", ""))
+base = LayoutSnapshot(("evdev", "pc105", "fr", "ergol", ""), source="gnome")
+feed = waylandKeymap.WaylandKeymapFeed(stubFeed(desktopLayout.GnomeLayoutFeed, base), None)
+feed._keymapChanged(text.encode())
+first = feed.start(onChange)
+feed.stop()
+result = {"names": list(first.names), "group": first.group, "follows": follows(text, first)}
+""",
+	)
+	assert result.value == {
+		"names": ["evdev", "pc105", "us", "", ""],
+		"group": 0,
+		"follows": {"described": True, "tables": True},
+	}
+
+
+@pytest.mark.rigSession("x11")
+def test_aNamingThatFailsGivesTheDesktopsLayout(tmp_path: Path):
+	"""Naming that raises, at start or on a later change, gives the desktop's own layout, as it was
+	before the compositor's keymap was read, and the feed goes on."""
+	result = runModule(
+		tmp_path,
+		r"""
+keymap, text = compositorKeymap(("evdev", "pc105", "pl,us", ",", ""))
+base = LayoutSnapshot(("evdev", "pc105", "us", "", ""), source="gnome")
+desktop = stubFeed(desktopLayout.GnomeLayoutFeed, base)
+feed = waylandKeymap.WaylandKeymapFeed(desktop, None)
+feed._keymapChanged(text.encode())
+
+
+def fail(*args, **kwargs):
+	raise RuntimeError("naming failed")
+
+
+waylandKeymap.nameKeymap = fail
+first = feed.start(onChange)
+desktop.onChange(base._replace(names=("evdev", "pc105", "pl", "", "")))
+feed.stop()
+result = {"first": list(first.names), "changes": [list(s.names) for _at, _thread, s in changes]}
+""",
+		ignoring=("logErrors",),
+	)
+	assert result.value == {
+		"first": ["evdev", "pc105", "us", "", ""],
+		"changes": [["evdev", "pc105", "pl", "", ""]],
+	}
+	assert moduleRecords(result).count("Keyboard layout: naming the compositor's keymap failed") == 2
 
 
 @pytest.mark.rigSession("x11")
