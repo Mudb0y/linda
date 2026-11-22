@@ -794,15 +794,23 @@ def console(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", fi
 		ground.machine.log("each key, by when it was typed from the switch:\n" + "\n".join(lines))
 		kernel = ground.waitForHelperLog(f"console {text} is in front", mark)[0]
 		logind = ground.waitForHelperLog("in front on seat0", mark)[0]
+		letGo = ground.waitForHelperLog("let go of every keyboard: Background", mark)[0]
 		switch.update(
 			releasedAfterSwitch=round(released["t"] - switched, 3),
 			kernelToldAfterSwitch=round(kernel - switched, 3),
+			letGoAfterSwitch=round(letGo - switched, 3),
 			logindToldAfterSwitch=round(logind - switched, 3),
 		)
 		ground.machine.log(f"the switch away, seconds from chvt: {switch}")
-		# Let go as the kernel switched, not when logind said so.
-		assert released["t"] < logind, (released, logind)
-		assert released["t"] - kernel < 0.1, (released, kernel)
+		# Let go as the kernel switched, not when logind said so. Judged by the helper's own line, which
+		# it writes once every keyboard is let go of: the client reads RELEASED after it, and once, with
+		# logind quick, after logind's line too, the helper having let go first. Lines of one stream
+		# can share a stamp, so the order is the journal's.
+		said = [line for _t, line in ground.helperLog(mark)]
+		letGoAt = next(i for i, line in enumerate(said) if "let go of every keyboard: Background" in line)
+		logindAt = next(i for i, line in enumerate(said) if "in front on seat0" in line)
+		assert letGoAt < logindAt, said
+		assert letGo - kernel < 0.1, (letGo, kernel)
 		# Every key typed once the helper had let go went to the console, and none to the client.
 		after = [r["key"][4:].lower() for r in presses if r["t"] > released["t"]]
 		assert after and all(letter in reached for letter in after), (after, reached)
