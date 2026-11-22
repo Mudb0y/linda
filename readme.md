@@ -15,7 +15,7 @@ Please report problems with Linda [here](https://github.com/Mudb0y/linda/issues)
 
 Linda is young and changes every day.
 Its author uses it as their only screen reader, in an X11 session with the MATE desktop, so the daily paths there work, and plenty of corners are still rough.
-Wayland sessions are newer: they have been tested in virtual machines, and the section "Wayland sessions" below says what was tested on which desktop.
+Wayland sessions are newer: they have been tested in virtual machines, with a first report from a real machine, and the section "Wayland sessions" below says what was tested on which desktop.
 
 What works today in an X11 session:
 
@@ -311,15 +311,15 @@ A Wayland desktop gives the keys to the program you are typing into and to no on
 The helper holds the keyboards in the kernel while Linda runs in the session in front, gives Linda each key first, and passes on through a virtual keyboard every key Linda does not keep.
 Without it Linda starts, speaks and reads the screen, and says once: "Linda cannot take keys in this Wayland session until linda-keyd runs."
 If it had no keys at first, as when linda-keyd starts after Linda, it says "Linda has the keyboard" once it takes them.
-The first time it takes the keyboard after each start, until it has seen what you type reach a program on that desktop, it says "If typing stops reaching programs, hold Backspace, Escape and Enter together."
-Once it has seen that, a start with linda-keyd running says nothing about the keyboard at all.
+As it takes the keyboard, linda-keyd checks whether the desktop reads the keyboard it passes keys on through. GNOME and sway showed that at once in the tests, and there a start with linda-keyd running says nothing about the keyboard at all.
+Where the desktop gives no such sign, Linda says at each start "If typing stops reaching programs, hold Backspace, Escape and Enter together.", until it has seen what you type reach a program on that desktop.
 
 Everything below was tested in virtual machines running NixOS, by tests that type on a virtual keyboard and read what Linda said.
-No one has yet listened to Linda on a real Wayland desktop, so reports of how it goes are very welcome.
+The first report from a real machine, GNOME on Arch Linux, says it works there. More reports of how it goes are very welcome.
 
 What was tested, by desktop:
 
-* GNOME 51: Linda starts and speaks; its commands with Insert and with Caps Lock as the Linda key; typing echo, fast and at a person's pace; the Polish layout with its AltGr letters; browse mode in Firefox, tested with H for the next heading; Remote Access, with the controlling computer typing through Linda; Linda's menu and its settings dialog; the lock screen, with its prompt read and nothing of the password spoken; GNOME's Alt+Tab switcher, its run dialog, and its password prompts for administrator rights and for the keyring; copying and reading the clipboard; a switch to a text console and back.
+* GNOME 51: Linda starts and speaks; its commands with Insert and with Caps Lock as the Linda key; typing echo, fast and at a person's pace; the Polish layout with its AltGr letters; browse mode in Firefox, tested with H for the next heading; Polish and US English as two input sources, switched; Remote Access, with the controlling computer typing through Linda; Linda's menu and its settings dialog, each ready within about a second; the lock screen, with its prompt read and nothing of the password spoken; GNOME's Alt+Tab switcher, its run dialog, and its password prompts for administrator rights and for the keyring; copying and reading the clipboard; a switch to a text console and back.
 * GNOME 49 and 50: Linda starts and speaks; its commands with Insert and with Caps Lock; letters echoed; the Polish layout with its AltGr letters; a switch to a text console and back. These were tested with GTK's own Wayland input method, not with IBus, which NixOS turns on by default on those releases.
 * KDE Plasma 6.8: Linda starts and speaks; its commands with Insert and with Caps Lock; letters echoed; the Polish layout with its AltGr letters, and two layouts switched with Meta+Alt+K; browse mode in Firefox, tested with H; Linda's menu and its settings dialog, each ready within a second; the lock screen, with its prompt read and nothing of the password spoken; KWin's Alt+Tab, KRunner, and the title and password field of Plasma's prompt for administrator rights; copying and reading the clipboard; a switch to a text console and back.
 * KDE Plasma 6.5 and 6.6: Linda starts and speaks; its commands with Insert and with Caps Lock; letters echoed; the Polish layout with its AltGr letters, and two layouts switched with Meta+Alt+K; a switch to a text console and back.
@@ -333,14 +333,13 @@ Other Wayland desktops, such as COSMIC, Hyprland, niri, river and labwc, have no
 What does not work yet in a Wayland session:
 
 * The mouse commands and mouse tracking, the Screen Curtain and Visual Highlight. Each of their commands says "Not available in this Wayland session". A Screen Curtain switched on in the settings is not turned on, and Linda says once that the screen can be seen.
-* On GNOME, Linda's menu and dialogs take one to two seconds to come up after their key, and a dialog brought forward from behind another window may first be announced as not having the keyboard, with the advice to press Alt+Tab, before GNOME gives it the keyboard.
+* On GNOME, a dialog of Linda's that is brought forward from behind another window takes one to two seconds to come up, and may first be announced as not having the keyboard, with the advice to press Alt+Tab, before GNOME gives it the keyboard.
 * On GNOME, a letter typed within about a tenth of a second after Alt+Tab goes wrong. Switching to Firefox in browse mode, it reaches the page as typing instead of moving by Linda's single letter navigation; switching away from Firefox, it reaches the other window, and Linda moves in the page it left as well.
-* On GNOME, with Polish and US English set up as two input sources and US English in use, Linda takes the right Alt key for Alt where GNOME keeps it as AltGr, so input help names chords with it wrongly and what is typed with it is not echoed. Polish alone, or Polish in use, is right; on Plasma and sway the same pair is right.
 * On GNOME, notifications are not spoken.
 * On GNOME, the number of stars spoken while a password is typed does not match the letters typed. None of the password is spoken.
 * On Plasma, the message and the failure notice of the prompt for administrator rights are not read.
 * On Plasma 6.5 and 6.6, KRunner takes a second or more to open the first time after sign-in, and letters typed before it is there are lost.
-* On sway, after a switch to a text console and back, the first key you type is spent giving the window the keyboard back, and Linda's focus stays on the desktop until then; keys typed in the first second or so after coming back can be lost; and from then on Linda takes the keyboard layout from the system's settings instead of from sway.
+* On sway, after a switch to a text console and back, the first key you type is spent giving the window the keyboard back, and Linda's focus stays on the desktop until then; and keys typed in the first second or so after coming back can be lost.
 * On sway, the keyboards' lock lights go out when linda-keyd takes them, Linda can be told that Num Lock is off while it is on, and Caps Lock pressed while linda-keyd holds the keyboard turns Num Lock off.
 * On sway, keyboard options set in sway's own configuration, such as `xkb_options`, are not seen by Linda.
 * A keyboard that is also a pointing device, as some wireless keyboards with a touchpad are, is left alone by linda-keyd: its keys reach programs without Linda, which says so once.
@@ -372,7 +371,7 @@ linda --session-report
 
 Listen for the line beginning "Session kind", which should say wayland, the line beginning "Desktop", which names gnome, kde, sway or another, and the last line, which should say that linda-keyd's socket is there.
 
-Then start Linda. The first time on a desktop, within a few seconds, you should hear "If typing stops reaching programs, hold Backspace, Escape and Enter together."; once Linda has seen your typing reach a program there, a start says nothing about the keyboard. Either way, Linda+T should read the window's title.
+Then start Linda. On GNOME and sway a start says nothing about the keyboard. On other desktops you may hear, within a few seconds, "If typing stops reaching programs, hold Backspace, Escape and Enter together.", until Linda has seen your typing reach a program there. Either way, Linda+T should read the window's title.
 If you hear instead that Linda cannot take keys until linda-keyd runs, that is the sign of trouble: check the helper with `systemctl is-active linda-keyd`.
 
 Then try what you use every day, and the things in the lists above for your desktop: Linda+T for the window's title, typing into a text field, Linda+N for the menu, H in a web page in Firefox. Try the emergency chord once too, once you know the way back for your desktop.
