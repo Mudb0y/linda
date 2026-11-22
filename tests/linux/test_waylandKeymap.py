@@ -456,6 +456,96 @@ result = {"first": list(first.names), "changes": [list(s.names) for _at, _thread
 	assert moduleRecords(result).count("Keyboard layout: naming the compositor's keymap failed") == 2
 
 
+#: Left Alt and Left Shift pressed and released, as NVDA passes them on: grp:alt_shift_toggle's switch.
+ALT_SHIFT = [(64, False), (50, False), (50, True), (64, True)]
+
+
+@pytest.mark.rigSession("x11")
+def test_swaysGroupIsPassedOnWhereItsFeedGivesLocaledsNames(tmp_path: Path):
+	"""sway's feed falls back to localed's names, with sway's own group, where the registry knows no
+	layout sway lists: a group sway reports is passed on, as the feed says it, and not held to the
+	keys."""
+	result = runModule(
+		tmp_path,
+		rf"""
+from linuxPlatform.keys import swayLayout
+
+names = ("evdev", "pc105", "pl,us", ",", "")
+keymap, text = compositorKeymap(names)
+base = LayoutSnapshot(names, group=0, source="localed")
+sway = stubFeed(swayLayout.SwayLayoutFeed, base)
+feed = waylandKeymap.WaylandKeymapFeed(desktopLayout._WithFallback("swayLayout", sway, None), None)
+feed._keymapChanged(text.encode())
+first = feed.start(onChange)
+sway.onChange(base._replace(group=1))
+for keycode, isUp in {ALT_SHIFT!r}:
+	feed.notePassed(keycode, isUp)
+time.sleep(0.5)
+feed.stop()
+result = {{
+	"first": first.group,
+	"changes": [[s.group, s.source] for _at, _thread, s in changes],
+	"threads": feedThreads(),
+}}
+""",
+	)
+	assert result.value == {"first": 0, "changes": [[1, "localed"]], "threads": []}
+
+
+@pytest.mark.rigSession("x11")
+def test_gnomesLayoutStandsAfterItsFallbackToLocaled(tmp_path: Path):
+	"""GNOME's feed gives localed's names while the input sources are empty, then GNOME's once they are
+	filled in: a key passed on that switched the group in localed's keymap does not bring localed's
+	names back."""
+	result = runModule(
+		tmp_path,
+		rf"""
+localed = LayoutSnapshot(("evdev", "pc105", "pl,us", ",", "grp:alt_shift_toggle"), source="localed")
+gnome = stubFeed(desktopLayout.GnomeLayoutFeed, localed)
+feed = waylandKeymap.WaylandKeymapFeed(gnome, None)
+first = feed.start(onChange)
+gnome.onChange(LayoutSnapshot(("evdev", "pc105", "de", "", ""), source="gnome"))
+for keycode, isUp in {ALT_SHIFT!r}:
+	feed.notePassed(keycode, isUp)
+time.sleep(0.5)
+feed.stop()
+result = {{
+	"changes": [[list(s.names), s.group, s.source] for _at, _thread, s in changes],
+	"threads": feedThreads(),
+}}
+""",
+	)
+	assert result.value == {"changes": [[["evdev", "pc105", "de", "", ""], 0, "gnome"]], "threads": []}
+
+
+@pytest.mark.rigSession("x11")
+def test_feedsOfNamesAloneHaveTheirGroupFollowed(tmp_path: Path):
+	"""localed's feed and gamescope's say no group, so the keys passed on lock it."""
+	result = runModule(
+		tmp_path,
+		rf"""
+from linuxPlatform.keys import gamescopeLayout
+
+names = ("evdev", "pc105", "pl,us", ",", "grp:alt_shift_toggle")
+result = {{}}
+for kind in (desktopLayout.LocaledLayoutFeed, gamescopeLayout.GamescopeLayoutFeed):
+	del changes[:]
+	base = LayoutSnapshot(names, source="localed")
+	feed = waylandKeymap.WaylandKeymapFeed(stubFeed(kind, base), None)
+	feed.start(onChange)
+	for keycode, isUp in {ALT_SHIFT!r}:
+		feed.notePassed(keycode, isUp)
+	deadline = time.monotonic() + 5
+	while not changes and time.monotonic() < deadline:
+		time.sleep(0.01)
+	feed.stop()
+	result[kind.__name__] = [s.group for _at, _thread, s in changes]
+result["threads"] = feedThreads()
+""",
+	)
+	assert result.value == {"LocaledLayoutFeed": [1], "GamescopeLayoutFeed": [1], "threads": []}
+
+
 @pytest.mark.rigSession("x11")
 def test_noCompositorNoFeed(tmp_path: Path):
 	"""Told the session is Wayland with no compositor socket, or with pywayland missing, the module

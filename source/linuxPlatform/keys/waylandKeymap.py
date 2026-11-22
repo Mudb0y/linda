@@ -48,8 +48,6 @@ RELEASE_VERSION = 3
 KEYMAP_WAIT = 1.0
 #: A keymap larger than this is not one.
 MAX_KEYMAP = 16 * 1024 * 1024
-#: The sources whose feed says which layout is in use; any other is followed by the keys passed on.
-GROUP_SOURCES = ("gnome", "kde", "sway")
 #: The interval given with keys that do not repeat, as desktopLayout's KDE feed gives it.
 _NO_REPEAT_INTERVAL = 0.04
 #: The highest key code the kernel source reads.
@@ -366,6 +364,19 @@ def mapGroup(naming: Naming, base: LayoutSnapshot, keymap) -> int | None:
 	return 0 if count == 1 else None
 
 
+def saysGroup(feed: LayoutFeed) -> bool:
+	"""Whether the desktop's feed says which layout is in use, whatever source its snapshots name: sway's
+	gives localed's names with sway's own group where the registry knows no layout sway lists, and
+	GNOME's gives localed's until its input sources are filled in. Any other is a feed of names alone,
+	whose group the keys passed on lock."""
+	from .swayLayout import SwayLayoutFeed
+
+	if isinstance(feed, desktopLayout._WithFallback):
+		# Which feed it holds is settled once it has started: another module's, or the desktop's own.
+		feed = feed._feed
+	return isinstance(feed, (desktopLayout.GnomeLayoutFeed, desktopLayout.PlasmaLayoutFeed, SwayLayoutFeed))
+
+
 def readKeymap(fd: int, size: int) -> bytes | None:
 	"""The keymap a wl_keyboard.keymap event's file holds, without its closing NUL."""
 	if not 0 < size <= MAX_KEYMAP:
@@ -400,6 +411,8 @@ class WaylandKeymapFeed:
 		self._last: LayoutSnapshot | None = None
 		self._returned = False
 		self._stopping = False
+		#: Whether the group is followed from the keys passed on, settled once the desktop's feed starts.
+		self._followsKeys = False
 		self._shadow = None
 		self._thread: threading.Thread | None = None
 		self._wake: tuple[int, int] | None = None
@@ -421,9 +434,10 @@ class WaylandKeymapFeed:
 			if self._base is None:
 				self._base = base
 			snapshot = self._snapshot()
+			self._followsKeys = not saysGroup(self._baseFeed)
 			self._returned = True
 			self._last = snapshot
-			if self._shadows(snapshot):
+			if self._followsKeys:
 				self._shadowFor().start(snapshot)
 		return snapshot
 
@@ -493,13 +507,10 @@ class WaylandKeymapFeed:
 		if self._stopping:
 			return
 		snapshot = self._snapshot()
-		if self._shadows(snapshot):
+		if self._followsKeys:
 			self._shadowFor().change(snapshot)
 		else:
 			self._emit(snapshot)
-
-	def _shadows(self, snapshot: LayoutSnapshot) -> bool:
-		return snapshot.source not in GROUP_SOURCES
 
 	def _shadowFor(self):
 		if self._shadow is None:
