@@ -1046,6 +1046,9 @@ class AtSpi(NVDAObject):
 		if self.role == Role.DOCUMENT:
 			from virtualBuffers.atspi import treeInterceptorClassFor
 
+			if atspiClient.windowCoordinates():
+				# While the buffer is rendered, Firefox works out the positions browse mode asks for.
+				_client().startPositions(self.node)
 			cls = treeInterceptorClassFor(self)
 			if cls is not None:
 				return cls

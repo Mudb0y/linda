@@ -59,14 +59,19 @@ REGISTRY_BUS_NAME = "org.a11y.atspi.Registry"
 SCREEN_TOOLKITS = frozenset({"Chromium"})
 #: Firefox keeps no positions of its pages' objects until a client asks for one, and none of their
 #: characters until a client asks for a character's: it answers that first question of each kind with
-#: nothing, and every one of that kind a moment later. Only a Wayland session waits for it, so that the
-#: X route stays as it was.
-GECKO_FIRST_POSITION_SECONDS = 0.05
-GECKO_FIRST_POSITION_GAP = 0.005
+#: nothing, and every one of that kind once it has worked them out for the whole page, which takes
+#: longer the larger the page. Measured under rig Mutter on a busy machine, from the first question:
+#: 0.05 s for objects and 0.07 s for characters on tests/linux/bench/makePage.py's normal page, of 4,100
+#: objects, and up to 0.5 s for either on its large page, of 39,500. Only a Wayland session waits for
+#: it, so that the X route stays as it was.
+GECKO_FIRST_POSITION_SECONDS = 1.0
+GECKO_FIRST_POSITION_GAP = 0.01
 #: The kinds of position Firefox begins to keep separately: an object's, and a character's, which
 #: offsetAtPoint needs as well.
 OBJECT_POSITIONS = "object"
 TEXT_POSITIONS = "text"
+#: How far down its first children a document is walked for a character to ask the position of.
+FIRST_LEAF_DEPTH = 16
 
 
 class NodeGone(LookupError):
@@ -110,14 +115,18 @@ def windowCoordinates() -> bool:
 	return displayServer.isWayland()
 
 
-#: When each Firefox first left a position unanswered, by bus name and kind, in a Wayland session.
+#: When each Firefox was last seen to begin keeping positions, by bus name and kind, in a Wayland
+#: session: when Client.startPositions left one unanswered, or else when a question first was.
 _positionsStarted: dict[tuple[str, str], float] = {}
+#: Firefox documents Client.startPositions has asked, by node key.
+_documentsStarted: set[tuple[str, str]] = set()
 
 
 def firstPosition[T](node: Node, kind: str, ask: Callable[[], T], answered: Callable[[T], bool]) -> T:
 	"""ask(), which asks node's application for a position of kind in a Wayland session. When a Firefox
-	does not answer it, it is asked again until GECKO_FIRST_POSITION_SECONDS after that Firefox first
-	left a position of kind unanswered, so that it is waited on that long at most once for each kind."""
+	does not answer it, it is asked again until GECKO_FIRST_POSITION_SECONDS after that Firefox was last
+	seen to begin keeping positions of kind, so that it is waited on that long at most once for each
+	kind, and not at all when Client.startPositions began them long enough before."""
 	result = ask()
 	if answered(result) or _toolkits.get(node.busName) != "Gecko":
 		return result
@@ -274,6 +283,7 @@ def forgetApplications() -> None:
 	_lastSlowAnswerAt.clear()
 	_toolkits.clear()
 	_positionsStarted.clear()
+	_documentsStarted.clear()
 
 
 _toolkits: dict[str, str] = {}
@@ -432,6 +442,38 @@ class Client:
 		if rect.width <= 0 and rect.height <= 0:
 			return None
 		return WindowExtents((rect.x, rect.y, rect.width, rect.height), node)
+
+	def startPositions(self, document: Node) -> None:
+		"""Have a Firefox begin keeping document's positions in a Wayland session, long before Linda
+		needs one, by asking one object's position and one character's and not waiting for the answers.
+		Asked once for each document rather than for each Firefox: it is a few round trips beside the
+		thousands a buffer takes, and does not rest on whether the first document Linda met was one of
+		the pages."""
+		if not windowCoordinates() or document.key in _documentsStarted:
+			return
+		_documentsStarted.add(document.key)
+		try:
+			if self.toolkit(document) != "Gecko":
+				return
+			kind = self.coordinateType(document)
+			rect = call(document, Atspi.Component.get_extents, kind)
+			if rect.width <= 0 and rect.height <= 0:
+				_positionsStarted[(document.busName, OBJECT_POSITIONS)] = time.monotonic()
+			# The document's own first character is a child's, whose position Firefox keeps with the
+			# objects'; a character of a leaf's text is one it keeps with the characters'.
+			leaf = document
+			for _ in range(FIRST_LEAF_DEPTH):
+				child = self.childAt(leaf, 0) if self.childCount(leaf) > 0 else None
+				if child is None:
+					break
+				leaf = child
+			if leaf == document or "Text" not in self.interfaces(leaf):
+				return
+			rect = call(leaf, Atspi.Text.get_character_extents, 0, kind)
+			if rect.width <= 0 and rect.height <= 0:
+				_positionsStarted[(document.busName, TEXT_POSITIONS)] = time.monotonic()
+		except NodeGone:
+			pass
 
 	def accessibleAtPoint(self, node: Node, x: int, y: int) -> Node | None:
 		"""The child of node at x, y, taken in the space extents gives node's positions in."""

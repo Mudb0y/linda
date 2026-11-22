@@ -51,8 +51,8 @@ ANSWER_BOUND = 10.0
 #: Seconds a program's tree is given to settle after it is shown.
 SETTLE = 2.0
 #: Seconds Firefox takes on these pages to have every position of a kind, an object's or a character's,
-#: once the first of that kind is asked of it.
-FIRST_POSITION_SECONDS = 0.2
+#: once the first of that kind is asked of it: as long as Linda waits for it at most.
+FIRST_POSITION_SECONDS = 1.0
 
 #: Three radio buttons of one group, each in a row of its own, so that their parents differ and Linda
 #: orders them by position, the middle one further right; then a text of two lines.
@@ -160,6 +160,15 @@ PAGE = """<!DOCTYPE html>
 </body></html>
 """
 PAGE_TITLE = "Coordinates page"
+#: PAGE with a paragraph of 20,000 links after it, 300 pixels in, aligned with nothing: Firefox takes 0.2 s
+#: to have its objects' positions and 0.35 s its characters', on a busy machine, where the bench's normal
+#: page takes 0.05 s.
+LARGE_PAGE = PAGE.replace(
+	"</body>",
+	'<p style="margin-left: 300px">'
+	+ " ".join(f'<a href="#l{i}">link {i}</a>' for i in range(20_000))
+	+ "</p>\n</body>",
+)
 #: Each program: its window's title as it starts, and the start of the text read.
 PROGRAMS = {
 	"gtk4": ("Coordinates GTK 4", "One line"),
@@ -286,7 +295,8 @@ result["text"] = entry
 #: NAME" runs browse mode's script_NAME in the focus's document; "radios TITLE" gives the place in its
 #: group, the location and the location's window of each radio button in the window TITLE starts;
 #: "position" gives the focus's location; "location TEXT" the location of the object in the focus's
-#: document whose text starts with TEXT, and "character TEXT" that of its first character, or None.
+#: document whose text starts with TEXT, and "character TEXT" that of its first character, or None;
+#: "complete" whether the whole of the focus's document is in its buffer.
 DRIVER_PLUGIN = '''\
 """The driver of test_waylandCoordinates.py."""
 
@@ -387,6 +397,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				answer["location"] = list(location) if location else None
 			elif command == "character":
 				answer["character"] = _character(argument)
+			elif command == "complete":
+				answer["complete"] = bool(getattr(api.getFocusObject().treeInterceptor, "complete", False))
 		except Exception as e:
 			log.debugWarning("coordinates driver", exc_info=True)
 			answer["error"] = repr(e)
@@ -437,7 +449,9 @@ def socketDir() -> Iterator[Path]:
 		shutil.rmtree(directory, ignore_errors=True)
 
 
-def startProgram(desktop: DesktopSession, program: str, tmp_path: Path, *switches: str) -> None:
+def startProgram(
+	desktop: DesktopSession, program: str, tmp_path: Path, *switches: str, html: str = PAGE
+) -> None:
 	"""Start program on its fixture, wait until its window is on the desktop with the keyboard, and give
 	it SETTLE seconds more; switches are Chromium's."""
 	title = PROGRAMS[program][0]
@@ -448,7 +462,7 @@ def startProgram(desktop: DesktopSession, program: str, tmp_path: Path, *switche
 		desktopSession.activate(title)
 	else:
 		page = tmp_path / "coordinates.html"
-		page.write_text(PAGE)
+		page.write_text(html)
 		if program == "firefox":
 			webSession.startFirefox(desktop, page.as_uri())
 		else:
@@ -611,7 +625,9 @@ class Reader:
 		self.launch.assertClean(logNames=["nvda.log"])
 
 
-def startReader(desktop: DesktopSession, tmp_path: Path, socketDir: Path, program: str) -> Reader:
+def startReader(
+	desktop: DesktopSession, tmp_path: Path, socketDir: Path, program: str, html: str = PAGE
+) -> Reader:
 	"""Linda first, then the program; for Chromium the accessibility status is off before Linda starts,
 	as a desktop has it before a screen reader runs, so that Chromium joins the desktop for Linda."""
 	if program in ("firefox", "chromium"):
@@ -620,9 +636,14 @@ def startReader(desktop: DesktopSession, tmp_path: Path, socketDir: Path, progra
 		chromiumSession.clearAccessibilityStatus()
 	reader = Reader(desktop, tmp_path / "linda", socketDir / "socket")
 	reader.command("ready")
-	startProgram(desktop, program, tmp_path)
+	startProgram(desktop, program, tmp_path, html=html)
 	if program in ("firefox", "chromium"):
 		reader.launch.waitForLog("Buffer rendered", BUFFER_BOUND)
+		# A large page comes into the buffer in parts.
+		deadline = time.monotonic() + BUFFER_BOUND
+		while not reader.command("complete")["complete"]:
+			assert time.monotonic() < deadline, "the page never came wholly into the buffer"
+			time.sleep(0.2)
 		time.sleep(SETTLE)
 	if not isWayland():
 		# On X, Firefox's answer to the first object's position Linda asks of it is lost, and with it the
@@ -657,11 +678,15 @@ def test_radioButtonsAreCountedInTheOrderTheyAreSeen(
 	reader.quit()
 
 
-@pytest.mark.parametrize("program", ["firefox", "chromium"])
+@pytest.mark.parametrize(
+	("program", "html"),
+	[("firefox", PAGE), ("chromium", PAGE), ("firefox", LARGE_PAGE)],
+	ids=["firefox", "chromium", "firefox-large"],
+)
 def test_verticalParagraphNavigation(
-	desktop: DesktopSession, tmp_path: Path, socketDir: Path, program: str
+	desktop: DesktopSession, tmp_path: Path, socketDir: Path, program: str, html: str
 ) -> None:
-	reader = startReader(desktop, tmp_path, socketDir, program)
+	reader = startReader(desktop, tmp_path, socketDir, program, html)
 	reader.said("gesture control+home", "Alpha left paragraph.")
 	reader.said("browse nextVerticalParagraph", "Charlie left paragraph.")
 	reader.said("browse nextVerticalParagraph", "Echo left paragraph.")
