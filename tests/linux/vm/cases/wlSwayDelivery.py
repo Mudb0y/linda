@@ -39,7 +39,8 @@ ABSENT = (
 HAS_KEYBOARD_AGAIN = "Linda has the keyboard again"
 OTHER_LAYOUT = "The desktop gives linda-keyd's keyboard another layout than your keyboard."
 #: What Linda's log says of each proof, and of a start that leaves the hint out.
-PRESENT = "Keys NVDA passes on reach the desktop: sway lists linda-keyd's keyboard with its events on"
+#: Any proof: the helper's light probe gives the first one now, and sway's listing the later ones.
+PRESENT = "Keys NVDA passes on reach the desktop: "
 DISABLED = "Keys NVDA passes on do not reach the desktop: sway takes no events from linda-keyd's keyboard"
 NOT_HINTED = "The rescue hint is not said: keys passed on have reached this desktop before"
 UNANSWERED = re.compile(r"Key delivery: \d+ lock keys passed on running were not answered")

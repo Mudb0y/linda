@@ -54,10 +54,7 @@ OLD_LOG = "/tmp/ground/linda/nvda-old.log"
 STOPPED_LETTERS = "abcdefghijklmnop"
 
 
-def noHelper(ground: "Ground", keyboard: "FakeKeyboard", hints: int = 0) -> int:
-	"""hints is how often the rescue hint is said once the helper holds the keyboard: never on GNOME,
-	which writes the new keyboard's lights and so proves it reads it; once on Plasma, where KWin writes
-	nothing while every lock is off."""
+def noHelper(ground: "Ground", keyboard: "FakeKeyboard") -> int:
 	with ground.subtest("with no helper Linda starts, speaks, and says once that it has no keys"):
 		ground.shell(f"systemctl stop {KEYD}")
 		ground.startLinda()
@@ -78,7 +75,7 @@ def noHelper(ground: "Ground", keyboard: "FakeKeyboard", hints: int = 0) -> int:
 		ground.machine.log(f"Linda took the keyboard: {record.splitlines()[-1]}")
 		saidOnce(ground, mark, HAS_KEYBOARD)
 		ground.settle(2)
-		assert saidCount(ground, mark, HINT) == hints, said(ground, mark)
+		assert saidCount(ground, mark, HINT) == acceptance.hintsExpected(ground), said(ground, mark)
 		assert saidCount(ground, Mark(0, 0.0), NO_HELPER) == 1
 		lindaKeyWorks(ground, keyboard)
 		acceptance.assertNoXConnection(ground, pid, "with the helper holding the keyboard")

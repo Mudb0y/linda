@@ -71,6 +71,17 @@ MARKER = "kqzmxjwv"
 NO_HELPER = "Linda cannot take keys in this Wayland session until linda-keyd runs\N{HORIZONTAL ELLIPSIS}"
 HAS_KEYBOARD = "Linda has the keyboard"
 HINT = "If typing stops reaching programs, hold Backspace, Escape and Enter together."
+#: What Linda logs when linda-keyd's light probe shows the desktop reads its keyboard, which comes before
+#: Linda takes the keyboard and so before the hint would be said.
+PROBE_PROVED = "Keys NVDA passes on reach the desktop: the desktop wrote the lights of linda-keyd's keyboard"
+
+
+def hintsExpected(ground) -> int:
+	"""How often the rescue hint is said at a first take of the keyboard: once, unless the helper's light
+	probe has proved the keyboard, as it does wherever the desktop writes a new keyboard's lights."""
+	return 0 if ground.lindaLogRecords(PROBE_PROVED) else 1
+
+
 LOST = "Linda has lost the keyboard and takes it again as soon as linda-keyd lets it."
 LET_GO = "Linda has let go of the keyboard and has no keys now.\N{HORIZONTAL ELLIPSIS}"
 UNHEARD = "Linda cannot hear one of the keyboards, so its keys reach programs without Linda."
