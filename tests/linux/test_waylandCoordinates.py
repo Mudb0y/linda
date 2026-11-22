@@ -719,12 +719,15 @@ def test_verticalParagraphNavigation(
 def test_aCharactersPositionAfterAnObjects(desktop: DesktopSession, tmp_path: Path, socketDir: Path) -> None:
 	"""Firefox begins to keep its characters' positions only when it is asked for one, after it has been
 	asked for an object's."""
-	if not isWayland():
-		pytest.skip("the X route is left as it was, with Firefox's first answer of each kind lost")
 	reader = startReader(desktop, tmp_path, socketDir, "firefox")
 	location = reader.command("location Bravo")["location"]
 	character = reader.command("character Delta")["character"]
 	print(f"{sessionName()}: Bravo at {location}, Delta's first character at {character}")
 	assert location is not None and location[2] > 0, location
+	if not isWayland():
+		# The X route as it was: the first character's position Firefox is asked for is lost.
+		assert character is None, character
+		time.sleep(FIRST_POSITION_SECONDS)
+		character = reader.command("character Delta")["character"]
 	assert character is not None and character[2] > 0, character
 	reader.quit()
