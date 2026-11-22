@@ -73,9 +73,10 @@ HUMAN_RUNS = 2
 LOG_TAIL = 2_000_000
 #: For the review cursor to walk back over while numpad 1 is held.
 LONG_WORD = string.ascii_lowercase * 3
-#: Repeats of a key held HOLD seconds, passed on and kept, that may differ: both follow GNOME's own
-#: repeat settings, the one by GTK from the compositor and the other by Linda from its layout feed.
-REPEAT_SLACK = 5
+#: Seconds by which the delay and the interval of Linda's own repeat of a key it keeps may miss
+#: GNOME's: speech is given to the synth a few milliseconds late, and the guest's clock is busy.
+REPEAT_DELAY_SLACK = 0.06
+REPEAT_INTERVAL_SLACK = 0.005
 
 # Remote Access: Linda hosts the relay server itself and joins it as the follower, as
 # tests/linux/test_remoteAccess.py's remoteConfig has it, and the leader joins from the guest.
@@ -149,7 +150,9 @@ def waitHeard(ground: "Ground", since: "Mark", *texts: str, timeout: float = 10)
 
 
 def appKeys(ground: "Ground", since: "Mark", keys: tuple[str, ...]) -> list[tuple[str, int]]:
-	return [(r["key"], r["value"]) for r in ground.keys("app", since) if r["key"] in keys]
+	"""The presses of keys the test window had. A release may come to it alone: the press of Escape
+	closes Linda's window, and its release goes where the keyboard is then."""
+	return [(r["key"], r["value"]) for r in ground.keys("app", since) if r["key"] in keys and r["value"]]
 
 
 # Typing echo, as cases/lindaTyping.py has it on X.
@@ -167,8 +170,22 @@ def intervals(times: list[float]) -> str:
 	return f"{len(times)} events, first after the press, then every {statistics.median(ms[1:] or ms):.1f} ms by the median"
 
 
-def holdPassed(ground: "Ground", keyboard: "FakeKeyboard") -> int:
-	"""Hold A, which the program has, and answer how many presses of A it got."""
+def medianGap(times: list[float]) -> float:
+	"""The median of the gaps between times after the first, which is the delay, in seconds."""
+	return statistics.median(b - a for a, b in itertools.pairwise(times[1:]))
+
+
+def gnomeRepeat(ground: "Ground") -> tuple[float, float]:
+	"""GNOME's repeat delay and interval, in seconds, which Linda's layout feed reads."""
+	values = [
+		acceptance.gsettings(ground, "get", "org.gnome.desktop.peripherals.keyboard", key).split()[-1]
+		for key in ("delay", "repeat-interval")
+	]
+	return int(values[0]) / 1000, int(values[1]) / 1000
+
+
+def holdPassed(ground: "Ground", keyboard: "FakeKeyboard") -> list[float]:
+	"""Hold A, which the program has, and answer when each press of A came to it."""
 	mark = ground.mark()
 	written = keyboard.run({"press": "KEY_A"}, {"sleep": HOLD}, {"release": "KEY_A"})
 	ground.waitForKeys("app", [("KEY_A", 1)], mark)
@@ -181,12 +198,12 @@ def holdPassed(ground: "Ground", keyboard: "FakeKeyboard") -> int:
 		f"{(presses[1]['t'] - start) * 1000:.1f} ms after it"
 	)
 	keyboard.chord("KEY_LEFTCTRL", "KEY_BACKSPACE")
-	return len(presses)
+	return [r["t"] for r in presses]
 
 
-def holdKept(ground: "Ground", keyboard: "FakeKeyboard") -> int:
-	"""Hold numpad 1, Linda's review key for the previous character, and answer how many characters it
-	spoke."""
+def holdKept(ground: "Ground", keyboard: "FakeKeyboard") -> list[float]:
+	"""Hold numpad 1, Linda's review key for the previous character, and answer when it spoke each
+	character."""
 	mark = ground.mark()
 	written = keyboard.tap(*[keyFor(c) for c in LONG_WORD], hold=0.01, gap=0.01)
 	ground.waitForKeys("app", [(r["key"], r["value"]) for r in written], mark)
@@ -202,7 +219,7 @@ def holdKept(ground: "Ground", keyboard: "FakeKeyboard") -> int:
 	)
 	assert not ground.keys("app", mark), ground.keys("app", mark)
 	keyboard.chord("KEY_LEFTCTRL", "KEY_BACKSPACE")
-	return len(spoken)
+	return spoken
 
 
 def echoesMissed(ground: "Ground", mark: "Mark", text: str) -> list[tuple[str, int, str]]:
@@ -316,15 +333,22 @@ def typing(ground: "Ground", keyboard: "FakeKeyboard") -> dict:
 		ground.machine.log(f"echoes missed at a person's pace, run by run: {figures['human']}")
 		assert not any(figures["human"]), figures["human"]
 
-	with ground.subtest("a held key repeats at GNOME's rate, passed on by GTK and kept by Linda"):
+	with ground.subtest("a held key repeats: passed on by GTK, and kept by Linda at GNOME's own rate"):
 		ground.settle(1)
-		figures["passed"] = holdPassed(ground, keyboard)
-		figures["kept"] = holdKept(ground, keyboard)
-		ground.machine.log(
-			f"presses of A held: {figures['passed']}; characters spoken with numpad 1 held: {figures['kept']}"
-		)
-		assert figures["passed"] > 20 and figures["kept"] > 15, figures
-		assert abs(figures["passed"] - figures["kept"]) <= REPEAT_SLACK, figures
+		delay, interval = gnomeRepeat(ground)
+		passed = holdPassed(ground, keyboard)
+		kept = holdKept(ground, keyboard)
+		figures["repeat"] = {
+			"gnome": [delay, interval],
+			"passed": [len(passed), round(medianGap(passed), 4)],
+			"kept": [len(kept), round(kept[1] - kept[0], 4), round(medianGap(kept), 4)],
+		}
+		ground.machine.log(f"repeats, as (count, delay, interval) in seconds: {figures['repeat']}")
+		# GTK repeats a key itself, from the compositor's repeat information, on a timer the guest's load
+		# stretches; Linda repeats the keys it keeps from what its layout feed read of GNOME's settings.
+		assert len(passed) > 20, figures["repeat"]
+		assert abs(kept[1] - kept[0] - delay) <= REPEAT_DELAY_SLACK, figures["repeat"]
+		assert abs(medianGap(kept) - interval) <= REPEAT_INTERVAL_SLACK, figures["repeat"]
 	return figures
 
 

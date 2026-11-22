@@ -65,12 +65,10 @@ LAYOUT_AFTER_CONSOLE = (
 	"layout, and it does not take sway's layout again when the session is back in front"
 )
 FOCUS_AFTER_CONSOLE = (
-	"sway takes the keyboard from the focused window as a text console comes in front, which Linda "
-	"hears as the window deactivated and gives the focus to the desktop, and nothing brings Linda's "
-	"focus back to the window when the session is in front again"
+	"under sway the focused window says it is deactivated as a text console comes in front, and no "
+	"window says it is activated when the session is in front again, a new one included, so Linda's "
+	"focus stays on the desktop"
 )
-#: A window to go to and come back from, which brings Linda's focus back after the console.
-OTHER_WINDOW = "Ground window 4"
 
 #: Linda's own windows, as their titles are and as the transcript has what Linda says of them.
 MENU_TITLE = "Linda"
@@ -103,7 +101,9 @@ def waitHeard(ground: "Ground", since: "Mark", *texts: str, timeout: float = 10)
 
 
 def appKeys(ground: "Ground", since: "Mark", keys: tuple[str, ...]) -> list[tuple[str, int]]:
-	return [(r["key"], r["value"]) for r in ground.keys("app", since) if r["key"] in keys]
+	"""The presses of keys the test window had. A release may come to it alone: the press of Escape
+	closes Linda's window, and its release goes where the keyboard is then."""
+	return [(r["key"], r["value"]) for r in ground.keys("app", since) if r["key"] in keys and r["value"]]
 
 
 # AG's subtests, as wlGnomeLinda runs them.
@@ -339,11 +339,13 @@ def console(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 			f"{acceptance.windowEvents(ground, mark.t)}; Linda's layout: "
 			f"{[r.splitlines()[-1] for _t, r in ground.lindaLogRecords('Keyboard layout from')][-3:]}"
 		)
-		# Linda's focus brought back as a person would bring it, by going to another window and back.
-		ground.openWindow(OTHER_WINDOW, name="other", gtk4=True)
+		ground.machine.log(f"after the switch back sway's windows: {ground.focus('windows')}")
+		# The window brought back as a person can, by going to another workspace and back; a new window
+		# does not help, as sway activates none (run 3 of the case).
+		swaymsg(ground, "workspace number 2")
+		swaymsg(ground, "workspace number 1")
 		ground.activate(WINDOW_TITLE)
-		ground.session({"op": "signal", "name": "other", "signal": "SIGTERM"})
-		ground.waitFor(lambda: not ground.running("other"), "the other window to close")
+		ground.machine.log(f"and back from another workspace: {acceptance.windowEvents(ground, mark.t)}")
 		lindaKeyWorks(ground, keyboard)
 		typedThrough(ground, keyboard, "KEY_J", "j", echo="j")
 		assert len(ground.lindaLogRecords(WITHOUT_KEYS)) == without, "Linda lost the route"
