@@ -117,7 +117,9 @@ UNREACHED_SAID_BY = ACTIVATION_BOUND + 2.0
 #: dialog was created 0.49 and 0.57 s after its key and activated 0.76 and 0.80 s after that, and in run
 #: 7, brought forward again, created 0.40 s after the key and activated 1.61 s after that, once Linda had
 #: said how to reach it. Under sway the same windows were activated 0.32 to 0.43 s after their keys, and
-#: under Plasma 0.62 to 0.93 s.
+#: under Plasma 0.62 to 0.93 s. It is held over the three windows at once: the menu misses by as little as
+#: 0.09 s and may come in under the bound on a quiet host, where the dialog brought forward misses by 0.5
+#: to 1 s, and the mark is to come off when none is late.
 WINDOWS_LATE = (
 	"on GNOME Linda's menu window and settings dialog are active only some 1.1 to 2 s after their keys: "
 	"Linda maps them 0.4 to 1 s after the key, and GNOME activates them 0.25 to 1.6 s after that"
@@ -549,11 +551,11 @@ def ownWindowEvents(ground: "Ground", since: float) -> list[dict]:
 	return [r for r in ground.readJsonLines(OWN_WINDOWS) if r.get("t", 0) >= since]
 
 
-def withinBound(figure: dict) -> None:
-	"""A window of Linda's that was activated was activated within ACTIVATION_BOUND of its key; held at
-	the end of a subtest, so that the window is used however long it took."""
-	if figure.get("activated") is not None:
-		assert figure["activated"] < ACTIVATION_BOUND, f"activated later than {ACTIVATION_BOUND} s: {figure}"
+def withinBound(activated: dict[str, float]) -> None:
+	"""Every one of Linda's windows was activated within ACTIVATION_BOUND of its key, given as seconds
+	after it by the window's name."""
+	late = {what: delay for what, delay in activated.items() if delay >= ACTIVATION_BOUND}
+	assert not late, f"activated {ACTIVATION_BOUND} s or more after the key: {late}"
 
 
 def reachRefused(ground: "Ground", keyboard: "FakeKeyboard", title: str) -> None:
@@ -605,8 +607,6 @@ def menu(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		)
 		assert not reached, f"the test window had {reached}"
 		unreachedAtMost(ground, mark, window, figures["the menu"])
-		with ground.expectedFailure(WINDOWS_LATE):
-			withinBound(figures["the menu"])
 
 
 def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
@@ -629,8 +629,6 @@ def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		reached = appKeys(ground, mark, ("KEY_INSERT", "KEY_G", "KEY_TAB"))
 		assert not reached, f"the test window had {reached}"
 		unreachedAtMost(ground, mark, window, figures["the settings dialog"])
-		with ground.expectedFailure(WINDOWS_LATE):
-			withinBound(figures["the settings dialog"])
 
 	with ground.subtest("the settings dialog, behind another window, comes forward at the command again"):
 		ground.activate(WINDOW_TITLE)
@@ -659,8 +657,6 @@ def dialogs(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 		assert not reached, f"the test window had {reached}"
 		if window is not None:
 			unreachedAtMost(ground, mark, window, figures["the settings dialog again"])
-		with ground.expectedFailure(WINDOWS_LATE):
-			withinBound(figures["the settings dialog again"])
 
 
 def windows(ground: "Ground", keyboard: "FakeKeyboard") -> dict:
@@ -679,6 +675,14 @@ def windows(ground: "Ground", keyboard: "FakeKeyboard") -> dict:
 	finally:
 		for job in ("windowEvents", "ownWindows"):
 			ground.session({"op": "signal", "name": job, "signal": "SIGTERM"})
+	with ground.subtest("Linda's menu window and settings dialog are each active within a second of the key"):
+		# A refused window is held to its spoken line, not to the bound.
+		activated = {what: f["activated"] for what, f in figures.items() if f.get("activated") is not None}
+		if activated:
+			with ground.expectedFailure(WINDOWS_LATE):
+				withinBound(activated)
+		else:
+			ground.machine.log(f"no window of Linda's was activated to time: {figures}")
 	return figures
 
 
