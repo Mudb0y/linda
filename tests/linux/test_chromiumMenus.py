@@ -67,3 +67,15 @@ def test_threeDotMenuAndASubmenu(session: Session):
 	# The item the menu is taken down from was said as unavailable.
 	mark = step(session, "Escape", "Usable page document")
 	assert "unavailable" not in session.desktop.spokenSince(mark)
+
+
+@pytest.mark.parametrize("back", ["Left", "Escape"])
+def test_closedFromAnItemASubmenuReturnedTo(session: Session, back: str):
+	step(session, "alt+f", "frame")
+	for item in ("New tab…", "New window…", "New Incognito window…", "Your Chromium…"):
+		step(session, "Down", item)
+	step(session, "Right", "Customize your Chromium…")
+	# The item gets the focus back by its menu's activation, not by a selection of its own.
+	step(session, back, "Your Chromium…")
+	mark = step(session, "Escape", "Usable page document")
+	assert "unavailable" not in session.desktop.spokenSince(mark)
