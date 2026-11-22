@@ -22,6 +22,7 @@ REPLACED_MESSAGE = (
 	"Another program took NVDA's place with linda-keyd and reads every key now. "
 	"NVDA takes its keys from the X display."
 )
+FELL_BACK_MESSAGE = "NVDA now reads keys from the X display"
 
 #: Another client of the session, which the stand-in serves, and which beats so as not to be dropped
 #: for its silence.
@@ -61,7 +62,8 @@ def waitForKernel(source):
 	return source.isKernel
 """
 
-#: Another program has the helper as NVDA starts, and keeps it through three of NVDA's looks.
+#: Another program has the helper as NVDA starts, and keeps it through three of NVDA's looks. Once it
+#: lets go and NVDA has the helper, the helper drops NVDA, and another program has it again first.
 BUSY_CHILD = (
 	OTHER_CLIENT
 	+ r"""
@@ -73,12 +75,23 @@ time.sleep(0.4)
 throughX = [[e["vk"], e["nvda"]] for e in presses()]
 whileBusy = list(said)
 closeOther()
+after = waitForKernel(source)
+saidAfter = list(said)
+keyboard.goodbye(8, "unanswered")
+closeOther = otherClient()
+deadline = time.monotonic() + 5
+while source.isKernel and time.monotonic() < deadline:
+	time.sleep(0.05)
+time.sleep(4.5)
+again = list(said)
+closeOther()
 result = {
 	"refused": [e[2] for e in keyboard.events if e[1] == "refused"],
 	"throughX": throughX,
 	"whileBusy": whileBusy,
-	"after": waitForKernel(source),
-	"said": list(said),
+	"after": after,
+	"said": saidAfter,
+	"again": again,
 }
 source.stop()
 keyboard.close()
@@ -97,6 +110,10 @@ def test_fault_anotherProgramHoldingTheHelperIsNotSaid(tmp_path: Path):
 	assert value["throughX"] == [[0x2D, True], [ord("T"), True]], value
 	assert value["after"], value
 	assert value["said"] == [BUSY_MESSAGE], value
+	# Each spell of another program having the helper is its own, which NVDA's having it in between ends.
+	assert value["again"] == [BUSY_MESSAGE, FELL_BACK_MESSAGE, BUSY_MESSAGE], (
+		f"another program had linda-keyd again after NVDA had it, and NVDA did not say so: {value}"
+	)
 
 
 #: NVDA has the helper, and another program of the session takes its place with it, and keeps it
