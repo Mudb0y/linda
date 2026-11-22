@@ -32,7 +32,7 @@ from desktopSession import PREFIX_MARK, DesktopSession
 from keydStandIn import StandIn
 from test_keys import STARTUP_TIMEOUT, configText
 from test_waylandLayoutCheck import WINDOW_TITLE, typeInto
-from test_waylandRoute import HINT, OWNER_SESSION, runRouteChild
+from test_waylandRoute import HINT, LOST, OWNER_SESSION, runRouteChild
 
 ABSENT = (
 	"Keys NVDA passes on do not reach the desktop, so NVDA has let go of the keyboard. "
@@ -610,6 +610,79 @@ def test_aConsoleSwitchIsNoWordOnDelivery(tmp_path: Path):
 	assert 0.7 <= value["stillMissing"] <= 1.6, value
 	assert value["saidThen"] == [ABSENT]
 	assert value["admissions"] == 1
+
+
+BROKEN_VIRTUAL_CHILD = r"""
+from keydStandIn import RELEASED_VIRTUAL
+
+standIn()
+source = startRoute(waitForKernel=False)
+wait(lambda: source.isKernel, 10, "the route did not take the helper's keys")
+wait(lambda: source._watch.state == "present", 3, "no proof of presence")
+# The helper breaks its virtual keyboard: sway reports it gone, then the helper says it let go.
+fake.change(None, "removed")
+keyboard.letGo(RELEASED_VIRTUAL)
+time.sleep(0.5)
+# Its next one, made as it is asked again, is taken up by sway.
+fake.change(virtualEntry("enabled"), "added")
+wait(lambda: len(admissions()) == 2 and source.isKernel, 6, "the route did not take the helper again")
+time.sleep(1.5)
+result = {"blocked": source._blocked is not None, "isKernel": source.isKernel, "said": list(said)}
+source.stop()
+"""
+
+
+@pytest.mark.rigSession("x11")
+def test_aBrokenVirtualKeyboardIsALoss(tmp_path: Path):
+	"""sway reports the virtual keyboard gone just as the helper breaks it and lets go: a loss, which
+	Linda says and recovers from by asking again, not a proof that keys go nowhere."""
+	value = runDelivery(
+		tmp_path,
+		"START = 'enabled'\n" + FAKE_SWAY + BROKEN_VIRTUAL_CHILD,
+		env={"LINDA_TEST_DELIVERY_RECORD": str(tmp_path / "keyDelivery")},
+	)
+	assert value == {"blocked": False, "isKernel": True, "said": [HINT, LOST]}
+
+
+LATE_WORD_CHILD = r"""
+from keydStandIn import RELEASED_BACKGROUND, RELEASED_VIRTUAL
+
+standIn()
+source = startRoute()
+kernel = source._kernel
+steps = {}
+# The watch's word comes just as the helper lets go, for a console switch, then as it breaks its
+# virtual keyboard.
+keyboard.letGo(RELEASED_BACKGROUND)
+wait(lambda: not kernel.isHolding, 3, "the helper's let-go did not come")
+source._onAbsent(kernel, "a test's word")
+time.sleep(0.5)
+steps["background"] = {"kernel": source._kernel is kernel, "blocked": source._blocked is not None}
+with keyboard._lock:
+	keyboard._capture()
+keyboard._wake()
+wait(lambda: kernel.isHolding, 3, "the helper did not hold again")
+keyboard.letGo(RELEASED_VIRTUAL)
+wait(lambda: not kernel.isHolding, 3, "the helper's let-go did not come")
+source._onAbsent(kernel, "a test's word")
+wait(lambda: len(admissions()) == 2 and source.isKernel, 6, "the route did not take the helper again")
+steps["virtual"] = {"blocked": source._blocked is not None, "isKernel": source.isKernel}
+steps["said"] = list(said)
+steps["givenUp"] = sum("a test's word" in line for line in logged.lines if "given up" in line)
+result = steps
+source.stop()
+"""
+
+
+@pytest.mark.rigSession("x11")
+def test_theWatchsWordAsTheHelperLetsGoIsSetAside(tmp_path: Path):
+	"""Proved absent for a kernel source the helper no longer holds for, or that is lost already, Linda
+	neither blocks the helper nor says the keys go nowhere: a loss is asked again as any is."""
+	value = runRouteChild(tmp_path, LATE_WORD_CHILD, standIn=None)
+	assert value["background"] == {"kernel": True, "blocked": False}
+	assert value["virtual"] == {"blocked": False, "isKernel": True}
+	assert value["said"] == [HINT, LOST]
+	assert value["givenUp"] == 0
 
 
 # An X session.

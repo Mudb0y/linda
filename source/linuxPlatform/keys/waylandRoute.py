@@ -295,6 +295,13 @@ class WaylandRoute(RoutedKeySource):
 		absent, self._absent = self._absent, None
 		if absent is None or absent[0] is not self._kernel:
 			return
+		kernel = absent[0]
+		if not getattr(kernel, "isHolding", True) or any(lost[0] is kernel for lost in self._lost):
+			# The helper let go meanwhile, for a console switch or as it broke its virtual keyboard, as
+			# the desktop took that keyboard away: no word on the keys passed on, and a loss is asked
+			# again as any is.
+			log.debug(f"Key delivery: set aside, as linda-keyd let go meanwhile: {absent[1]}")
+			return
 		self._blocked = self._socketIdentity()
 		self._takingBack = False
 		log.info(
