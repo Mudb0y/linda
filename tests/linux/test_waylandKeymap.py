@@ -640,6 +640,36 @@ def test_aNewKeymapIsFollowedAndItsGroupByTheKeys(tmp_path: Path):
 
 
 @pytest.mark.rigSession("wayland")
+def test_withoutPywaylandTheDesktopsFeedIsTaken(tmp_path: Path):
+	"""A build without pywayland, which meson.build allows: the module offers no feed, and the desktop's
+	own is taken as it was before the module was there."""
+	result = runModule(
+		tmp_path,
+		r"""
+import sys
+from linuxPlatform.keys import desktopLayout
+
+sys.modules["pywayland.client"] = None
+feed = desktopLayout.create(None)
+first = feed.start(onChange)
+feed.stop()
+result = [type(feed).__name__, waylandKeymap.create(None), plain(first)]
+""",
+		env={"XDG_CURRENT_DESKTOP": None, "XKB_DEFAULT_LAYOUT": "pl"},
+	)
+	kind, offered, first = result.value
+	assert offered is None
+	# sway's own feed under sway, the environment's under Mutter.
+	assert kind == ("_WithFallback" if harness.rigSession() == "sway" else "LocaledLayoutFeed")
+	assert first[0][2] == "pl"
+	records = moduleRecords(result)
+	assert (
+		records.count("Keyboard layout: pywayland is not installed, so the compositor's keymap is not read")
+		== 2
+	)
+
+
+@pytest.mark.rigSession("wayland")
 def test_theUSGuessGivesWayToTheCompositorsLayout(tmp_path: Path):
 	"""With nothing to say the layout, the environment's feed guesses US English and says so; the
 	compositor's keymap, the rig's pl, names it, and there is nothing to say."""
