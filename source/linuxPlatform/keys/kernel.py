@@ -132,6 +132,10 @@ MODIFIERS_KEPT_UNDER_NVDA = X.Mod1Mask | X.Mod4Mask
 #: Alt and Super, a chord with which, passed on, commonly moves the focus to another window, as their
 #: release does once Alt+Tab's switcher or Super's overview has had them.
 FOCUS_MOVING_MODS = X.Mod1Mask | X.Mod4Mask
+#: Key codes LATE_PASS may name as the kept press: the helper's MODIFIERS less Caps Lock (keys.rs). A
+#: layout can make another key Alt or Super, as altwin:menu_win does the Menu key, and naming that one
+#: would end the connection, and with it the keyboard.
+LATE_PASSABLE = frozenset(evdev + 8 for evdev in (29, 42, 54, 56, 97, 100, 125, 126))
 _DEPRESSED = xkb.StateComponent.XKB_STATE_MODS_DEPRESSED
 #: The evdev codes TYPE may name, as protocol.rs's TYPEABLE has them: the keys keyMap knows, without
 #: KEY_SLEEP and the power keys. A code the virtual keyboard cannot send ends the connection, and with
@@ -464,7 +468,8 @@ class KernelKeySource:
 		#: Sequence number: the press, released while the helper may still say it passed it on.
 		self._released: dict[int, _Press] = {}
 		#: Key code: the press of each Alt or Super kept under the NVDA key and still held, which goes
-		#: down in the X display before a key passed on with it; and the key codes of those that have.
+		#: down in the X display, or with an environment by LATE_PASS on the helper's virtual keyboard,
+		#: before a key passed on with it; and the key codes of those that have.
 		self._keptModifiers: dict[int, _Press] = {}
 		self._modifiersPutDown: set[int] = set()
 		#: Presses whose verdict the helper has not had, in the order they came.
@@ -755,6 +760,16 @@ class KernelKeySource:
 			# the same. One typed to be decided is among the presses.
 			for vk, mode, _tag in tuple(self._typedDown.values()):
 				if mode == keydClient.TYPE_INJECT and vkCode in (vk, x11.GENERIC_FOR.get(vk)):
+					state = 0x8000
+					break
+			# A modifier kept and then late-passed is down on the virtual keyboard though NVDA kept it.
+			for keycode in tuple(self._modifiersPutDown):
+				press = self._presses.get(keycode)
+				if (
+					press is not None
+					and press.vk is not None
+					and vkCode in (press.vk, x11.GENERIC_FOR.get(press.vk))
+				):
 					state = 0x8000
 					break
 		light = LOCK_LIGHTS.get(vkCode)
@@ -1275,17 +1290,42 @@ class KernelKeySource:
 			return False
 		return not (state.processID and state.windowProcess and state.processID != state.windowProcess)
 
-	def _putDownKeptModifiers(self) -> None:
+	def _putDownKeptModifiers(self, waiting: _Press | None = None) -> None:
 		"""Put down in the X display, before a key passed on reaches it, each Alt or Super kept under the
 		NVDA key and still held, so that the key comes with it as the user typed it, as on the X route,
-		where a grab keeps a key from the application and not from the X server's state."""
+		where a grab keeps a key from the application and not from the X server's state. With an
+		environment there is no X display: the helper puts them on its virtual keyboard just before
+		waiting, the press about to be passed."""
 		codes = [
 			code
 			for code, press in self._keptModifiers.items()
 			if code not in self._modifiersPutDown and self._presses.get(code) is press
 		]
+		if self._environment is not None:
+			if codes and waiting is not None:
+				self._latePass(codes, waiting)
+			return
 		if codes and self._sendToX(codes, False):
 			self._modifiersPutDown.update(codes)
+
+	def _latePass(self, codes: list[int], waiting: _Press) -> None:
+		"""Send LATE_PASS for each kept modifier of codes that the helper can put out just before waiting,
+		in the order they went down. A LATE_PASS the helper finds malformed ends the connection, so only one
+		it is sure to take is sent: a modifier it names, read before waiting and never named before. One that
+		cannot apply stays kept, as it would without the feature."""
+		if not self._welcome.features & keydClient.FEATURE_LATE_PASS or not waiting.asked:
+			return
+		for kept in sorted((self._keptModifiers[code] for code in codes), key=lambda press: press.seq):
+			if kept.keycode not in LATE_PASSABLE or kept.typed or kept.seq >= waiting.seq:
+				continue
+			if not self._send(keydClient.latePass(kept.seq, waiting.seq)):
+				return
+			# Named once only, and from now on down to the applications until its release, which the helper
+			# passes as though its press had been.
+			self._modifiersPutDown.add(kept.keycode)
+			self._tell(self._environment.notePassed, kept.keycode, False)
+			# By number, as which keys they were is the user's typing.
+			log.debug(f"linda-keyd's key {kept.seq} goes out ahead of key {waiting.seq}")
 
 	def _sendToX(self, keycodes: list[int], isUp: bool) -> bool:
 		"""Send keys through XTEST as the X source's own, which it gives to no one, and wait for the X
@@ -1632,7 +1672,7 @@ class KernelKeySource:
 			press.looked.set()
 		if not press.expired:
 			if press.passed and self._keptModifiers:
-				self._putDownKeptModifiers()
+				self._putDownKeptModifiers(press)
 			if self._send(keydClient.verdict(press.seq, keep=not press.passed)):
 				press.answeredBefore = self._beatCounter + 1
 		if press.passed and press.follows is None:
@@ -2040,6 +2080,9 @@ class KernelKeySource:
 			del self._keptModifiers[press.keycode]
 			if press.keycode in self._modifiersPutDown:
 				self._modifiersPutDown.discard(press.keycode)
+				if self._environment is not None and not press.passed:
+					# Late-passed, its release reaches the compositor, which may commit Alt+Tab's switch on it.
+					self._passedUp(press, now)
 				self._sendToX([press.keycode], True)
 		self._remember(press, now)
 
