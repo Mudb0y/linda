@@ -274,8 +274,11 @@ class AtspiCaptureFeed:
 		anchor = self._anchor
 		if anchor is not None and not self._focused and (mode == "off" or self._modeIsStillAway(processID)):
 			self._mode = mode
-		elif (mode == "off") != (self._mode == "off") or (
-			mode != "off" and (anchor is None or not self._focused)
+		elif (
+			(mode == "off") != (self._mode == "off")
+			or (mode != "off" and (anchor is None or not self._focused))
+			# NVDA's focus has reached another program's document before the feed heard the switch.
+			or (mode != "off" and processID and self._anchorProcess and processID != self._anchorProcess)
 		):
 			self._applyCapture(mode)
 		else:

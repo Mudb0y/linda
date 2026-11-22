@@ -481,6 +481,16 @@ def test_anchorWaitsForTheWindowOfTheProcessNVDANames(tmp_path: Path) -> None:
 		assert s.window and s.windowProcess == 100 and s.focused and s.mode == "browse", s
 		assert (s.dormant, s.documentUntil) == (None, None), s
 
+		# From one program's document straight to another's, the feed still having the first in front.
+		feed = anchoredOnFirst(t)
+		feed.setCapture("browse", 200)
+		s = feed.captureState
+		assert (s.window, s.focused, s.processID) == (0, False, 200), s
+		feed._onWindowEvent(FIRST, False, t + 1.2)
+		feed._onWindowEvent(OTHER, True, t + 1.21)
+		s = feed.captureState
+		assert s.window and s.windowProcess == 200 and s.focused, s
+
 		# Off before the window comes leaves nothing waiting for it.
 		feed = feedWithProcesses()
 		feed._onWindowEvent(OTHER, True, t)
