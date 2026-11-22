@@ -300,13 +300,14 @@ class AtSpi(NVDAObject):
 		"""Whether this is an editable element of a page in Firefox, which keeps its text in the
 		paragraphs inside it, as NVDA's Editor is on Windows; a field of a form keeps its own."""
 		states = self.atspiStates
+		# Firefox calls an editable element single-line when its textbox role has no aria-multiline, as
+		# WhatsApp Web's message box has, though its text is still in the paragraph inside it.
 		return (
 			self.toolkit == GECKO
 			and self.role == Role.EDITABLETEXT
 			and "focusable" in states
-			and "multi-line" in states
 			and "Hypertext" in self.atspiInterfaces
-			and self.atspiAttributes.get("tag") != "textarea"
+			and self.atspiAttributes.get("tag") not in ("textarea", "input")
 		)
 
 	def event_caret(self):
