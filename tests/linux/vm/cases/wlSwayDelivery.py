@@ -146,8 +146,12 @@ def consoleSwitch(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 		ground.shell(f"chvt {desktop}")
 		held = ground.waitForHelperLog(f"({UHID}): Held", back, timeout=15)[0]
 		ground.machine.log(f"the helper held the keyboard again {held - back.t:.3f} s after the switch back")
+		# sway takes its devices up again seconds after the helper holds, five to more than ten here.
 		ground.waitFor(
-			lambda: len(ground.lindaLogRecords(PRESENT)) > proofs, "the listing's proof after the return", 10
+			lambda: len(ground.lindaLogRecords(PRESENT)) > proofs, "the listing's proof after the return", 60
+		)
+		ground.machine.log(
+			f"sway listed linda-keyd's keyboard again {ground.mark().t - back.t:.1f} s after the switch back"
 		)
 		lindaKeyWorks(ground, keyboard)
 		typedThrough(ground, keyboard, "KEY_B", "b", echo="b")
