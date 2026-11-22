@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 	from ground import FakeKeyboard, Ground
 
 KWIN_VERSION = "6.5.6"
+KRUNNER = "plasma-krunner.service"
+KRUNNER_ATTEMPTS = 3
 LAYOUT_LOG = "Keyboard layout from kde: "
 KXKBRC = "$HOME/.config/kxkbrc"
 TWO_LAYOUTS = "[Layout]\nLayoutList=pl,us\nUse=true\n"
@@ -115,6 +117,33 @@ def twoLayouts(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 		reconfigure(ground, None, ["pl"])
 
 
+def krunnerRunning(ground: "Ground") -> bool:
+	return ground.run(["systemctl", "--user", "is-active", KRUNNER]).stdout.strip() == "active"
+
+
+def startKRunner(ground: "Ground", keyboard: "FakeKeyboard") -> None:
+	"""Open KRunner once with Alt+F2 and close it, as someone who waits for its window would have it
+	before the way back is typed.
+
+	The first Alt+F2 of a session starts KRunner by D-Bus activation, which took 1.4 s on Plasma 6.5
+	and, on a loaded host, more than the 5 s its unit allows, which fails that start; the letters
+	wlGnomeLinda types 1.5 s after Alt+F2 would come before KRunner's window has the keyboard.
+	"""
+	for _attempt in range(KRUNNER_ATTEMPTS):
+		if krunnerRunning(ground):
+			break
+		ground.settle(acceptance.APART)
+		keyboard.chord("KEY_LEFTALT", "KEY_F2")
+		try:
+			ground.waitFor(lambda: krunnerRunning(ground), "KRunner to start", 15)
+		except AssertionError:
+			ground.machine.log("KRunner did not start from Alt+F2; asking again")
+	assert krunnerRunning(ground), "KRunner did not start"
+	ground.settle(1.5)
+	keyboard.tap("KEY_ESC")
+	ground.settle(0.5)
+
+
 def plasmaRun(ground: "Ground", version: str) -> None:
 	ground.machine.log(f"start-up, seconds from starting the guest: {ground.bootTimes}")
 	facts = ground.focus("facts")
@@ -129,11 +158,7 @@ def plasmaRun(ground: "Ground", version: str) -> None:
 	gnome.lindaStopped(ground, keyboard)
 	gnome.console(ground, keyboard)
 	gnome.pointer(ground, keyboard)
-	# The first Alt+F2 of a session starts KRunner by D-Bus activation, which took 1.4 s on Plasma
-	# 6.5, and the letters wlGnomeLinda types 1.5 s after it then come before KRunner's window has the
-	# keyboard. Someone typing waits for the window; the case starts KRunner first instead.
-	answer = ground.run(["systemctl", "--user", "start", "plasma-krunner.service"])
-	assert answer.returncode == 0, answer
+	startKRunner(ground, keyboard)
 	ground.activate(WINDOW_TITLE)
 	pid = gnome.emergency(ground, keyboard)
 	gnome.nothingLogged(ground, keyboard, pid)
