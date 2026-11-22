@@ -1,0 +1,9 @@
+#!/bin/sh
+# As %systemd_preun: on removal, not on an upgrade, the service is disabled and stopped.
+if [ "$1" -eq 0 ]; then
+	if [ -x /usr/lib/systemd/systemd-update-helper ]; then
+		/usr/lib/systemd/systemd-update-helper remove-system-units linda-keyd.service || :
+	else
+		systemctl --no-reload disable --now linda-keyd.service >/dev/null 2>&1 || :
+	fi
+fi

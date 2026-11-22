@@ -1,0 +1,7 @@
+# The body of post_install in .INSTALL. systemd's own pacman hooks make the user from sysusers.d and
+# reload the manager; as Arch has it, the service is not started or enabled here.
+if [ -d /run/systemd/system ]; then
+	# modules-load.d is read at boot; the unit wants /dev/uinput when it is started.
+	modprobe uinput >/dev/null 2>&1 || true
+fi
+echo "linda-keyd is installed; start it now and at every boot with: systemctl enable --now linda-keyd"

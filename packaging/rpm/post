@@ -1,0 +1,17 @@
+#!/bin/sh
+# As Fedora's %sysusers and %systemd_post write it: the user is made, and on a first install the
+# service is preset, which leaves it off unless a preset turns it on. systemd's own file triggers
+# reload the manager. Without Fedora's update helper, as on openSUSE, the preset is asked directly.
+systemd-sysusers linda-keyd.conf || :
+
+if [ "$1" -eq 1 ]; then
+	if [ -x /usr/lib/systemd/systemd-update-helper ]; then
+		/usr/lib/systemd/systemd-update-helper install-system-units linda-keyd.service || :
+	else
+		systemctl --no-reload preset linda-keyd.service >/dev/null 2>&1 || :
+	fi
+	if [ -d /run/systemd/system ]; then
+		# modules-load.d is read at boot; the unit wants /dev/uinput when it is started.
+		modprobe uinput >/dev/null 2>&1 || :
+	fi
+fi

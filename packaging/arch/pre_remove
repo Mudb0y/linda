@@ -1,0 +1,7 @@
+# The body of pre_remove in .INSTALL: removal leaves nothing running and no enablement naming a unit
+# that is gone. systemd's own pacman hook reloads the manager afterwards.
+if [ -d /run/systemd/system ]; then
+	systemctl --no-reload disable --now linda-keyd.service >/dev/null 2>&1 || true
+else
+	systemctl --no-reload disable linda-keyd.service >/dev/null 2>&1 || true
+fi

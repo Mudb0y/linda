@@ -1,0 +1,12 @@
+#!/bin/sh
+# The unit's enablement is kept until a purge, so that installing the package again keeps the
+# administrator's choice; the system user is kept, as Debian keeps them.
+set -e
+
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+	systemctl --system daemon-reload >/dev/null || true
+fi
+
+if [ "$1" = purge ] && [ -x /usr/bin/deb-systemd-helper ]; then
+	deb-systemd-helper purge linda-keyd.service >/dev/null || true
+fi

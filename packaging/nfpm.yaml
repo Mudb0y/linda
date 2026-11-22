@@ -1,0 +1,97 @@
+# linda-keyd for Debian and Ubuntu, Fedora and Arch Linux, as nfpm packs it. nix/keyd-packages.nix
+# runs nfpm once for each format with these set:
+#   LINDA_KEYD_VERSION  Linda's version with the commit's date and short hash
+#   LINDA_KEYD_ROOT     the Meson build's install with keyd_service, made with that distribution's
+#                       library directory, and the static helper in it
+#   LINDA_KEYD_LIBDIR   that library directory, as /usr/lib/x86_64-linux-gnu
+# The files are those the Meson install lays down, where it lays them, so that the unit's ExecStart
+# names the helper where the package puts it.
+name: linda-keyd
+arch: amd64
+platform: linux
+version: ${LINDA_KEYD_VERSION}
+# Taken as written: the semver parser would move the part after + into build metadata, which deb and
+# rpm compare differently.
+version_schema: none
+release: "1"
+section: admin
+priority: optional
+maintainer: Linda <https://github.com/Mudb0y/linda>
+# One line: Arch's pkgdesc is the whole of it.
+description: Linda's key capture helper, which the screen reader needs to take keys in a Wayland session
+vendor: Linda
+homepage: https://github.com/Mudb0y/linda
+license: GPL-2.0-or-later
+
+contents:
+  - src: ${LINDA_KEYD_ROOT}${LINDA_KEYD_LIBDIR}/linda/linda-keyd
+    dst: ${LINDA_KEYD_LIBDIR}/linda/linda-keyd
+    expand: true
+    file_info:
+      mode: 0755
+  # Owned, so that rpm takes the directory away with the package.
+  - dst: ${LINDA_KEYD_LIBDIR}/linda
+    type: dir
+    expand: true
+    file_info:
+      mode: 0755
+  - src: ${LINDA_KEYD_ROOT}/usr/lib/systemd/system/linda-keyd.service
+    dst: /usr/lib/systemd/system/linda-keyd.service
+    expand: true
+    file_info:
+      mode: 0644
+  - src: ${LINDA_KEYD_ROOT}/usr/lib/sysusers.d/linda-keyd.conf
+    dst: /usr/lib/sysusers.d/linda-keyd.conf
+    expand: true
+    file_info:
+      mode: 0644
+  - src: ${LINDA_KEYD_ROOT}/usr/lib/modules-load.d/linda-keyd.conf
+    dst: /usr/lib/modules-load.d/linda-keyd.conf
+    expand: true
+    file_info:
+      mode: 0644
+  - src: ${LINDA_KEYD_ROOT}/usr/share/polkit-1/actions/io.github.mudb0y.linda.keyd.policy
+    dst: /usr/share/polkit-1/actions/io.github.mudb0y.linda.keyd.policy
+    expand: true
+    file_info:
+      mode: 0644
+
+# What the helper needs at run time is the system's: systemd to run it, logind and polkit to admit a
+# client, and the system bus to reach them. The helper itself is linked statically and needs no
+# library.
+overrides:
+  deb:
+    depends:
+      - systemd
+      - polkitd
+      - default-dbus-system-bus | dbus-system-bus
+      - init-system-helpers
+    scripts:
+      postinstall: deb/postinst
+      preremove: deb/prerm
+      postremove: deb/postrm
+  rpm:
+    depends:
+      - systemd
+      - polkit
+      - dbus
+    scripts:
+      postinstall: rpm/post
+      preremove: rpm/preun
+      postremove: rpm/postun
+  archlinux:
+    depends:
+      - systemd
+      - polkit
+      - dbus-units
+    scripts:
+      postinstall: arch/post_install
+      preremove: arch/pre_remove
+
+rpm:
+  requires:
+    post:
+      - systemd
+
+archlinux:
+  packager: Linda <https://github.com/Mudb0y/linda>

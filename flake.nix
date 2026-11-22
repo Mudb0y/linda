@@ -145,6 +145,15 @@
           ;
         inherit openevvDriver;
       };
+      # linda-keyd for other distributions. Its version is the reader's with the commit's date and
+      # short hash, so that each format orders a later commit's package after an earlier one's.
+      keydPackages = import ./nix/keyd-packages.nix {
+        inherit lib pkgs;
+        version = "${linda.version}+git${self.lastModifiedDate}.${
+          self.shortRev or (lib.replaceStrings [ "-" ] [ "." ] self.dirtyShortRev)
+        }";
+        sourceDateEpoch = self.lastModified;
+      };
       app = name: description: {
         type = "app";
         program = "${linda}/bin/${name}";
@@ -198,6 +207,10 @@
         openevv-libeci = openevvLibeci;
         openevv-driver = openevvDriver;
         linda-libraries = libraries;
+        linda-keyd-static = keydPackages.helper;
+        linda-keyd-deb = keydPackages.deb;
+        linda-keyd-rpm = keydPackages.rpm;
+        linda-keyd-arch = keydPackages.arch;
       };
 
       # linda-keyd as a service, turned on with services.linda-keyd.enable.
