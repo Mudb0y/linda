@@ -377,16 +377,43 @@ def test_anX11SessionLoadsNoShadow(tmp_path: Path):
 # The Wayland route, with the stand-in putting keys out on a NullSink that switches groups as the
 # compositor would.
 
-ROUTE_CODE = r"""
+#: Stands in for WaylandEnvironment.notePassed giving the layout feed the keys passed on, which package SG
+#: asked of that file's owner, unless it does so already: a feed given each key twice takes a press heard
+#: again for a release missed. Says who gives the feed the keys.
+WIRING = r"""
+def wireFeed(environment):
+	from linuxPlatform.keys import shadowGroup
+
+	notePassed = getattr(getattr(environment, "_layoutFeed", None), "notePassed", None)
+	if notePassed is None:
+		return "absent"
+	heard = []
+	onPassed = environment.onPassed
+	shadowNote = shadowGroup.ShadowGroup.notePassed
+	environment.onPassed = lambda keycode, isUp: None
+	shadowGroup.ShadowGroup.notePassed = lambda self, keycode, isUp: heard.append(keycode)
+	try:
+		# No key has code 0, and no shadow hears of it: the recorder stands in for them all.
+		environment.notePassed(0, True)
+	finally:
+		shadowGroup.ShadowGroup.notePassed = shadowNote
+		environment.onPassed = onPassed
+	if heard:
+		return "environment"
+	environment.onPassed = notePassed
+	return "test"
+"""
+
+ROUTE_CODE = (
+	WIRING
+	+ r"""
 from xkbcommon import xkb
 
 sink = NullSink(layout=LAYOUT, options=OPTIONS)
 standIn()
 source = startRoute()
 environment = source._environment
-if WIRE:
-	# What WaylandEnvironment.notePassed is asked to do itself.
-	environment.onPassed = environment._layoutFeed.notePassed
+wiredBy = wireFeed(environment) if WIRE else None
 
 
 def sinkGroup():
@@ -406,18 +433,38 @@ for turn in range(3):
 	keyboard.press("shift+alt")
 	time.sleep(0.3)
 source.stop()
-result = {"turns": turns, "source": environment.layout.source}
+result = {"turns": turns, "source": environment.layout.source, "wiredBy": wiredBy}
 """
+)
 
 #: VK_RMENU and the A key. AltGr, which picks a level, is not told of at all.
 RIGHT_ALT, KEY_A = 0xA5, 0x41
 OGONEK = "\N{LATIN SMALL LETTER A WITH OGONEK}"
 
 
-def routeTurns(tmp_path: Path, layout: str, *, wire: bool = True) -> dict:
+#: The change package SG asked of WaylandEnvironment.notePassed, made here as its owner might make it, to
+#: show that the stand-ins for it step aside once it is in.
+LANDED = r"""
+from linuxPlatform.keys import waylandEnvironment
+
+
+def _givesTheFeedTheKeys(self, keycode, isUp):
+	notePassed = getattr(self._layoutFeed, "notePassed", None)
+	if notePassed is not None:
+		notePassed(keycode, isUp)
+	self.onPassed(keycode, isUp)
+
+
+waylandEnvironment.WaylandEnvironment.notePassed = _givesTheFeedTheKeys
+"""
+
+
+def routeTurns(tmp_path: Path, layout: str, *, wire: bool = True, landed: bool = False) -> dict:
 	return runRouteChild(
 		tmp_path,
-		f"LAYOUT = {layout!r}\nOPTIONS = {TOGGLE!r}\nWIRE = {wire!r}\n" + ROUTE_CODE,
+		f"LAYOUT = {layout!r}\nOPTIONS = {TOGGLE!r}\nWIRE = {wire!r}\n"
+		+ (LANDED if landed else "")
+		+ ROUTE_CODE,
 		env={**noSystemBus(), "XKB_DEFAULT_LAYOUT": layout, "XKB_DEFAULT_OPTIONS": TOGGLE},
 	)
 
@@ -429,6 +476,19 @@ def test_theRouteReadsKeysInTheGroupTheDesktopSwitchedTo(tmp_path: Path):
 	the toggle again both are back in us."""
 	value = routeTurns(tmp_path, "us,pl")
 	assertFollowed(value)
+	# The test until the environment gives the keys itself, which the expected failure below tells of.
+	assert value["wiredBy"] in ("test", "environment")
+
+
+@pytest.mark.rigSession("x11")
+def test_theStandInStepsAsideOnceTheEnvironmentGivesTheFeedTheKeys(tmp_path: Path):
+	"""As test_theRouteReadsKeysInTheGroupTheDesktopSwitchedTo, with WaylandEnvironment.notePassed giving
+	the layout feed the keys as asked of it, and the test's stand-in for that left in: the feed has each
+	key once still. Given each twice, it would take the toggle's second press of Alt for a release
+	missed, and switch the group back at once."""
+	value = routeTurns(tmp_path, "us,pl", landed=True)
+	assertFollowed(value)
+	assert value["wiredBy"] == "environment"
 
 
 def assertFollowed(value: dict) -> None:
@@ -441,7 +501,10 @@ def assertFollowed(value: dict) -> None:
 @pytest.mark.rigSession("x11")
 @pytest.mark.xfail(
 	strict=True,
-	reason="WaylandEnvironment.notePassed does not yet pass keys to the layout feed (package SG's needs)",
+	reason=(
+		"WaylandEnvironment.notePassed does not yet pass keys to the layout feed (package SG's needs); once it"
+		" does, remove this mark, LANDED, WIRING and the tests' uses of them"
+	),
 )
 def test_theEnvironmentGivesTheFeedThePassedKeys(tmp_path: Path):
 	"""As test_theRouteReadsKeysInTheGroupTheDesktopSwitchedTo, with nothing but the environment itself
@@ -452,9 +515,10 @@ def test_theEnvironmentGivesTheFeedThePassedKeys(tmp_path: Path):
 
 # Linda itself.
 
-#: Stands in for WaylandEnvironment.notePassed giving the layout feed the keys passed on, which package
-#: SG asked of that file's owner; remove it once that is there.
-WIRING_PLUGIN = """
+#: WIRING in Linda.
+WIRING_PLUGIN = (
+	WIRING
+	+ """
 import globalPluginHandler
 from linuxPlatform import inputHook
 from logHandler import log
@@ -463,12 +527,10 @@ from logHandler import log
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	def __init__(self):
 		super().__init__()
-		environment = getattr(inputHook._source, "_environment", None)
-		notePassed = getattr(getattr(environment, "_layoutFeed", None), "notePassed", None)
-		if notePassed is not None:
-			environment.onPassed = notePassed
-		log.info(f"shadow group probe: {'ready' if notePassed is not None else 'absent'}")
+		wiredBy = wireFeed(getattr(inputHook._source, "_environment", None))
+		log.info("shadow group probe: absent" if wiredBy == "absent" else f"shadow group probe: ready, keys from the {wiredBy}")
 """
+)
 #: Typed into the field in every test, and never to be found in Linda's log.
 MARKER = "5038264917"
 WINDOW_TITLE = "TextFixture"
@@ -476,11 +538,11 @@ WINDOW_TITLE = "TextFixture"
 SETTLE = 1.0
 
 
-def lindaHooks(directory: Path) -> Path:
+def lindaHooks(directory: Path, landed: bool = False) -> Path:
 	hooks = directory / "hooks"
 	(hooks / "globalPlugins").mkdir(parents=True)
 	(hooks / "synthDrivers").symlink_to(harness.HERE / "synthDrivers")
-	(hooks / "globalPlugins" / "shadowGroupProbe.py").write_text(WIRING_PLUGIN)
+	(hooks / "globalPlugins" / "shadowGroupProbe.py").write_text((LANDED if landed else "") + WIRING_PLUGIN)
 	return hooks
 
 
@@ -555,10 +617,12 @@ def entryText() -> str:
 
 
 @pytest.mark.rigSession("x11")
-def test_lindaNamesAndEchoesKeysInTheGroupTheDesktopSwitchedTo(tmp_path: Path, socketDir: Path):
+@pytest.mark.parametrize("landed", [False, True], ids=["standIn", "landed"])
+def test_lindaNamesAndEchoesKeysInTheGroupTheDesktopSwitchedTo(tmp_path: Path, socketDir: Path, landed: bool):
 	"""The X display set to us and pl with the option, switching its group as a compositor would, and
 	Linda told the session is Wayland, with the same names: Shift with Alt changes what input help calls
-	AltGr with a, and whether typing it echoes a with ogonek, as the field gets one or not."""
+	AltGr with a, and whether typing it echoes a with ogonek, as the field gets one or not. The same with
+	WaylandEnvironment.notePassed giving the feed the keys as asked of it, and the probe left in."""
 	subprocess.run(["setxkbmap", "-layout", "us,pl", "-option", "", "-option", TOGGLE], check=True)
 	try:
 		with (
@@ -568,8 +632,15 @@ def test_lindaNamesAndEchoesKeysInTheGroupTheDesktopSwitchedTo(tmp_path: Path, s
 			config = tmp_path / "nvda.ini"
 			config.write_text(configText("desktop", 7))
 			desktop.startApp(desktop.fixture("textapp", "gtk3"), title=WINDOW_TITLE)
-			nvda = desktop.startNVDA(config, env=lindaEnvironment(lindaHooks(tmp_path), keyboard, "us,pl"))
-			nvda.waitForLog("shadow group probe: ready", STARTUP_TIMEOUT)
+			hooks = lindaHooks(tmp_path, landed)
+			nvda = desktop.startNVDA(config, env=lindaEnvironment(hooks, keyboard, "us,pl"))
+			# Unless landed, the keys come from the test until the environment gives them itself.
+			nvda.waitForLog(
+				"shadow group probe: ready, keys from the environment"
+				if landed
+				else "shadow group probe: ready",
+				STARTUP_TIMEOUT,
+			)
 			keyboard.waitFor(lambda: keyboard.capturing, 10)
 			assert desktopSession._atspi().Component.grab_focus(findField(WINDOW_TITLE, "entry"))
 			time.sleep(SETTLE)
