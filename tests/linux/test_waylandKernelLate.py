@@ -404,6 +404,37 @@ def test_aKeptModifierTheHelperCannotNameStaysKept(tmp_path: Path):
 	assert value["goodbyes"] == [] and value["holding"]
 
 
+TYPED_ALT_CHILD = r"""
+environment = Environment()
+source = startSource(environment)
+passing.add(VK_TAB)
+for vk, extended in ((0x2D, True), (VK_MENU, False), (VK_TAB, False)):
+	source.typeKey(vk, extended, False)
+	time.sleep(0.08)
+for vk, extended in ((VK_TAB, False), (VK_MENU, False), (0x2D, True)):
+	source.typeKey(vk, extended, True)
+	time.sleep(0.08)
+time.sleep(0.3)
+result = {
+	"opened": opened,
+	"latePasses": latePasses(),
+	"outcomes": {tag: outcome for tag, _seq, outcome in keyboard.typed},
+	"goodbyes": goodbyes(),
+	"holding": source.isHolding,
+}
+source.stop()
+"""
+
+
+def test_aTypedAltKeptUnderATypedNVDAKeyIsNeverNamed(tmp_path: Path):
+	"""Remote Access types Insert, Alt and Tab, and NVDA passes Tab: the typed Alt is kept under the typed
+	NVDA key, but the helper ends the connection over a LATE_PASS naming a typed press, so none is sent."""
+	value = runLateChild(tmp_path, TYPED_ALT_CHILD).value
+	assert value["goodbyes"] == [] and value["holding"]
+	assert value["latePasses"] == []
+	assert [value["outcomes"][tag] for tag in ("1", "2", "3")] == [TYPED_KEPT, TYPED_KEPT, TYPED_OUT]
+
+
 @pytest.mark.rigSession("x11")
 def test_theWaylandRoutePutsAltOutAheadOfTheKey(tmp_path: Path):
 	"""The route itself, the session forced, asks for the feature and late-passes as the source does."""
