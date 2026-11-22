@@ -29,8 +29,18 @@ KWIN_VERSION = "6.5.6"
 LAYOUT_LOG = "Keyboard layout from kde: "
 KXKBRC = "$HOME/.config/kxkbrc"
 TWO_LAYOUTS = "[Layout]\nLayoutList=pl,us\nUse=true\n"
-#: What KWin's keyboard settings module sends KWin once it has written kxkbrc.
-RELOAD = ["dbus-send", "--session", "--type=signal", "/Layouts", "org.kde.keyboard.reloadConfig"]
+#: What KConfig sends when Plasma's keyboard settings write kxkbrc's layouts, which KWin's
+#: KConfigWatcher answers by reading the file again (src/keyboard_layout.cpp in 6.5.6).
+RELOAD = [
+	"gdbus",
+	"emit",
+	"--session",
+	"--object-path",
+	"/kxkbrc",
+	"--signal",
+	"org.kde.kconfig.notify.ConfigChanged",
+	"{'Layout': [b'LayoutList']}",
+]
 
 
 def layoutChanges(ground: "Ground", layout: str) -> int:
