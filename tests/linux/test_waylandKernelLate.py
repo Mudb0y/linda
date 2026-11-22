@@ -448,3 +448,63 @@ def test_underSwayTheProgramIsGivenAltWithTheKey(tmp_path: Path, probe, grants: 
 	else:
 		assert keys == ["pressed Tab", "released Tab"]
 		assert value["latePasses"] == []
+
+
+# The look while a chord that may move the focus is unsettled.
+
+LOOK_CHILD = r"""
+named = x11.CaptureState(0, None, False, MODE, None, None, DOCUMENT_PROCESS)
+document = x11.CaptureState(1, DOCUMENT_PROCESS, True, "browse", None, None, DOCUMENT_PROCESS)
+if SETTLED == "absent":
+	environment = Environment(state=named, after=document, lookAfter=0.05)
+else:
+	environment = SettlingEnvironment(SETTLED, state=named, after=document, lookAfter=0.05)
+source = startSource(environment, mode=MODE)
+step("down", "x")
+step("up", "x", 0.4)
+result = {
+	"opened": opened,
+	"looks": len(environment.looks),
+	"asked": getattr(environment, "asked", None),
+	"waits": len(keyboard.waits),
+	"emitted": emitted(),
+	"x": [[e["up"], e["captured"]] for e in delivered if e["vk"] == VK_X],
+}
+source.stop()
+"""
+
+
+@pytest.mark.parametrize(
+	("settled", "mode", "looks"),
+	[
+		(False, "browse", True),
+		(False, "off", False),
+		(True, "browse", False),
+		("absent", "browse", False),
+		("raises", "browse", False),
+	],
+)
+def test_aLetterLooksWhileNVDAHasNamedADocumentAndTheFocusIsUnsettled(
+	tmp_path: Path, settled: bool | str, mode: str, looks: bool
+):
+	"""With no window known for a document's keys, NVDA naming one in browse mode while a chord that may
+	move the focus is unsettled makes a letter wait for the environment's look, which here finds the
+	document's window focused, and NVDA keeps the letter. NVDA in no document, a settled focus, an
+	environment that cannot say, and one that raises asking, pass it at once, as before."""
+	done = runLateChild(
+		tmp_path, f"SETTLED, MODE = {settled!r}, {mode!r}\n" + LOOK_CHILD, grants=FEATURE_WAIT
+	)
+	value = done.value
+	if looks:
+		assert value["looks"] == 1 and value["waits"] == 1
+		assert value["emitted"] == []
+		assert value["x"] == [[False, True], [True, False]]
+	else:
+		assert value["looks"] == 0 and value["waits"] == 0
+		assert value["emitted"] == [[X_KEY, True], [X_KEY, False]]
+		assert [captured for _up, captured in value["x"]] == [False, False]
+	if settled in (False, True) and mode == "browse":
+		assert value["asked"] == 1
+	errors = [line for line in done.logErrors if "whether the focus is settled" in line]
+	assert len(errors) == (1 if settled == "raises" else 0), done.logErrors
+	assert all("RuntimeError" in line for line in errors)

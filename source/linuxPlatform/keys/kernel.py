@@ -1802,6 +1802,33 @@ class KernelKeySource:
 			and (self._inCaptureSets(keycode, effective))
 		)
 
+	def _documentMayBeComing(
+		self, keycode: int, effective: int, capture: x11.CaptureState, now: float
+	) -> bool:
+		"""With an environment, whether a press a mode captures may be a document's whose window the
+		environment has yet to hear has the keyboard: NVDA has named a document in browse or focus mode
+		while a chord that may have moved the focus waits for its window event. NVDA's own focus can follow
+		Alt+Tab before the environment does, which then has no window for the document's keys, or the one
+		left behind."""
+		return (
+			capture.mode in ("browse", "focus")
+			and bool(capture.processID)
+			and self._inCaptureSets(keycode, effective)
+			and not self._environmentSettled(now)
+		)
+
+	def _environmentSettled(self, now: float) -> bool:
+		"""Whether no chord that may move the focus waits for its window event, as the environment says;
+		one that cannot say is taken as settled, which asks nothing more of it than before."""
+		settled = getattr(self._environment, "settled", None)
+		if settled is None:
+			return True
+		try:
+			return bool(settled(now))
+		except Exception:  # noqa: BLE001
+			_logEnvironmentError("Asking the kernel key source's environment whether the focus is settled")
+			return True
+
 	def _lookAtFocus(self, press: _Press, focused: bool) -> None:
 		"""Have the layout's thread read where the focus is before the press is decided. The watch of the
 		focus reads the X server's events as they come, on a thread of its own, and a key typed a few
@@ -1962,7 +1989,10 @@ class KernelKeySource:
 				and kind == own
 				and own in (PASS_KIND, CAPTURE_KIND)
 				and self._environmentCanLook()
-				and self._turnsOnFocus(keycode, effective, capture)
+				and (
+					self._turnsOnFocus(keycode, effective, capture)
+					or self._documentMayBeComing(keycode, effective, capture, now)
+				)
 			)
 		if looks:
 			kind = own = CAPTURE_KIND
