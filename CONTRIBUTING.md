@@ -10,7 +10,9 @@ Say what you did, what Linda said, and what you expected. It helps to name:
 * the commit of Linda you run;
 * the program, and its version if it matters.
 
-A log helps too. It is at `~/.local/state/linda/nvda.log`. A log holds what Linda spoke, which includes what you typed and read, so look through it before you attach it.
+A log helps too. It is at `~/.local/state/linda/nvda.log`.
+
+**Read a log before you share it.** At the default logging level it holds neither what you typed nor what Linda said. With the level set to "input/output" or "debug", in the General settings or with `--debug-logging`, it records everything Linda speaks, as NVDA does on Windows. That includes each character you type, because typing echo is speech, and everything Linda reads to you: pages, messages, file names. Passwords typed into password fields are spoken as "star" and are not in it. A debug log is often what finds a fault, so it is welcome, but look through it first, or send it privately.
 
 ## Testing
 
@@ -28,7 +30,7 @@ Reports from real machines are worth a lot, from Wayland sessions above all: GNO
   ```
 
 * Follow NVDA's style: tabs for indentation, and `ruff format .` and `ruff check .` clean.
-* Nothing a person types may be written to a log, at any level.
+* Linda's own code writes nothing a person types to a log, at any level: no key names, key codes or characters. What NVDA's speech log records at the debug levels is the one exception, and it is left as NVDA has it.
 * Main is what people run as their screen reader, so every change goes through the same checks before it lands.
 
 Linda is distributed under NVDA's licence, in [copying.txt](./copying.txt), and so is a change you send.

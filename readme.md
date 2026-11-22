@@ -264,7 +264,9 @@ Exec=/home/YOU/.nix-profile/bin/linda
 * A program is not read: restart that program while Linda runs, or set the variables above.
 * The screen reader's keys do nothing: check that the session is X11.
 
-When you report a problem, say which distribution and desktop you use and attach `~/.local/state/linda/nvda.log`. The log can hold what you typed and what was on screen, so read through it first.
+When you report a problem, say which distribution and desktop you use and attach `~/.local/state/linda/nvda.log`.
+
+**Read a log before you share it.** At the default logging level it holds neither what you typed nor what Linda said. With the level set to "input/output" or "debug", in the General settings or with `--debug-logging`, it records everything Linda speaks, as NVDA does on Windows: each character you type, because typing echo is speech, and everything Linda reads to you. Passwords typed into password fields are spoken as "star" and are not in it.
 
 ## Building and working on it
 
