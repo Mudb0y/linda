@@ -107,7 +107,7 @@ def _isSocket(path: str) -> bool:
 		return False
 
 
-class _Connection:
+class Connection:
 	"""One connection to sway's IPC."""
 
 	def __init__(self, path: str, timeout: float | None) -> None:
@@ -159,6 +159,10 @@ class _Connection:
 
 	def close(self) -> None:
 		self._socket.close()
+
+
+#: The name deliveryWatch used before Connection was public.
+_Connection = Connection
 
 
 _registries: dict[str, dict[str, tuple[str, str]]] = {}
@@ -337,7 +341,7 @@ class SwayLayoutFeed:
 		self._identifier = identifier
 		self._isHeld = isHeld
 		self._lock = threading.Lock()
-		self._connection: _Connection | None = None
+		self._connection: Connection | None = None
 		self._thread: threading.Thread | None = None
 		self._onChange: Callable[[LayoutSnapshot], None] | None = None
 		self._stopping = False
@@ -357,7 +361,7 @@ class SwayLayoutFeed:
 			raise RuntimeError("the layout feed has started already")
 		self._onChange = onChange
 		registry()
-		connection = _Connection(self._path, START_TIMEOUT)
+		connection = Connection(self._path, START_TIMEOUT)
 		try:
 			reply = connection.ask(SUBSCRIBE, json.dumps(["input"]))
 			if not (isinstance(reply, dict) and reply.get("success")):
@@ -406,7 +410,7 @@ class SwayLayoutFeed:
 		except Exception:
 			log.exception("Keyboard layout: following sway's layout failed")
 
-	def _onEvent(self, connection: _Connection, event: dict) -> None:
+	def _onEvent(self, connection: Connection, event: dict) -> None:
 		device = event.get("input")
 		chosen = self._chosen
 		if (
@@ -551,7 +555,7 @@ def virtualKeyboard(
 	if path is None:
 		return None
 	try:
-		connection = _Connection(path, timeout)
+		connection = Connection(path, timeout)
 		try:
 			inputs = connection.ask(GET_INPUTS)
 		finally:
