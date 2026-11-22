@@ -148,6 +148,8 @@ class Listing:
 
 	listed: bool
 	eventsEnabled: bool | None
+	#: Whether sway lists any other keyboard of libinput's, where it was asked for all of them.
+	othersListed: bool = True
 
 
 def _listingOf(entry: dict | None) -> Listing:
@@ -173,8 +175,24 @@ class SwayListing:
 		"""What sway says now; None when it cannot be asked."""
 		from . import swayLayout
 
-		found = swayLayout.virtualKeyboard(self._path, identifier=self._identifier)
-		return None if found is None else Listing(found.listed, found.eventsEnabled)
+		try:
+			connection = swayLayout._Connection(self._path, swayLayout.STATE_TIMEOUT)
+			try:
+				inputs = connection.ask(swayLayout.GET_INPUTS)
+			finally:
+				connection.close()
+		except (OSError, EOFError, ValueError) as e:
+			log.debug(f"Key delivery: sway did not list its inputs: {type(e).__name__}")
+			return None
+		if not isinstance(inputs, list):
+			return None
+		keyboards = [e for e in inputs if isinstance(e, dict) and e.get("type") == "keyboard"]
+		entry = next((e for e in keyboards if e.get("identifier") == self._identifier), None)
+		if entry is not None:
+			return _listingOf(entry)
+		# Only libinput's devices go as sway's session does, not a program's virtual keyboard.
+		others = any(isinstance(e.get("libinput"), dict) for e in keyboards)
+		return Listing(False, None, othersListed=others)
 
 	def follow(self, onChange: Callable[[Listing], None]) -> None:
 		"""Call onChange with each change sway reports of the virtual keyboard, from a thread of this
@@ -291,8 +309,9 @@ class DeliveryWatch:
 		self._unanswered = 0
 		self._virtual: int | None = None
 		self._remembered = False
-		#: Whether this hold has logged that the echo proved nothing.
+		#: Whether this hold has logged that the echo proved nothing, and that sway listed no keyboard.
 		self._echoDeclined = False
+		self._swayEmptySaid = False
 
 	def start(self) -> None:
 		if self._listing is not None:
@@ -399,6 +418,7 @@ class DeliveryWatch:
 		self._unanswered = 0
 		self._virtual = None
 		self._echoDeclined = False
+		self._swayEmptySaid = False
 		self.state = UNKNOWN
 
 	def _on_released(self, source: object) -> None:
@@ -477,6 +497,14 @@ class DeliveryWatch:
 				)
 
 	def _takeListing(self, listed: Listing) -> None:
+		if not listed.listed and not listed.othersListed:
+			# Back in front, sway lists none of libinput's keyboards until it has taken its devices up again,
+			# seconds after the helper holds; until it lists one, it is asked again.
+			if not self._swayEmptySaid:
+				self._swayEmptySaid = True
+				log.debug("Key delivery: sway lists no keyboard of libinput's yet, and is asked again")
+			self._askAt = time.monotonic() + LISTING_WAIT
+			return
 		self._listed = listed
 		if not listed.listed:
 			self._absent("sway does not list linda-keyd's keyboard")

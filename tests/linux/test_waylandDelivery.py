@@ -18,8 +18,6 @@ and through tests/linux/wayland-gate for the compositors.
 import os
 import re
 import shutil
-import subprocess
-import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -461,6 +459,8 @@ def virtualEntry(events):
 class FakeSway:
 	def __init__(self, path, entry):
 		self.entry = entry
+		#: Whether the user's own keyboard is listed, which sway's session takes away and gives back.
+		self.others = True
 		self.lock = threading.Lock()
 		self.subscribers = []
 		self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -479,7 +479,7 @@ class FakeSway:
 			"xkb_active_layout_index": 0,
 			"libinput": {"send_events": "enabled"},
 		}
-		return [e for e in (self.entry, own) if e is not None]
+		return [e for e in (self.entry, own if self.others else None) if e is not None]
 
 	def accept(self):
 		while True:
@@ -654,8 +654,18 @@ for removedFirst in (False, True):
 		"away": away,
 		"back": {"kernel": source._kernel is kernel, "isKernel": source.isKernel},
 	}
+# Back in front before sway has taken any device up again, which it does seconds later.
+fake.others = False
+background(False)
+before = proofs()
+holdAgain()
+time.sleep(2.5)
+steps["swayBehind"] = {"isKernel": source.isKernel, "blocked": source._blocked is not None}
+fake.others = True
+fake.change(virtualEntry("enabled"), "added")
+wait(lambda: proofs() > before, 3, "no proof of presence once sway listed its devices")
 steps["said"] = list(said)
-# Back in front while sway lists no keyboard of the helper's yet, nor a second later.
+# Back in front while sway lists the user's keyboard but none of the helper's, nor a second later.
 background(False)
 steps["stillMissing"] = letGo(holdAgain())
 steps["saidThen"] = said[len(steps["said"]):]
@@ -669,8 +679,9 @@ source.stop()
 def test_aConsoleSwitchIsNoWordOnDelivery(tmp_path: Path):
 	"""The helper lets go as the session goes to the background, and sway takes every device away:
 	whichever comes first, Linda keeps the helper, says nothing, and once the helper holds again sway
-	is asked afresh, which proves presence; back in front with sway listing no keyboard of the
-	helper's a second later, Linda lets go."""
+	is asked afresh, which proves presence. Held again before sway lists any keyboard of libinput's,
+	as the guest showed for seconds, it is asked until it does. Back in front with sway listing the
+	user's keyboard and none of the helper's a second later, Linda lets go."""
 	value = runDelivery(
 		tmp_path,
 		"START = 'enabled'\n" + FAKE_SWAY + BACKGROUND_CHILD,
@@ -681,6 +692,7 @@ def test_aConsoleSwitchIsNoWordOnDelivery(tmp_path: Path):
 			"away": {"kernel": True, "blocked": False},
 			"back": {"kernel": True, "isKernel": True},
 		}, value
+	assert value["swayBehind"] == {"isKernel": True, "blocked": False}
 	assert value["said"] == [HINT]
 	assert 0.7 <= value["stillMissing"] <= 1.6, value
 	assert value["saidThen"] == [ABSENT]
@@ -897,59 +909,23 @@ def startOn(linda: "waylandKeys.WaylandLinda", env: dict[str, str]) -> harness.L
 	return nvda
 
 
-def takeKeyboard() -> tuple[int, str]:
-	"""linda --take-keyboard, run in the rig's session as a user would."""
-	done = subprocess.run(
-		[sys.executable, "-I", "-B", str(harness.LAUNCHER), "--take-keyboard"],
-		capture_output=True,
-		check=False,
-		text=True,
-		timeout=60,
-		stdin=subprocess.DEVNULL,
-	)
-	return done.returncode, done.stdout
-
-
-def admissions(keyboard: StandIn) -> int:
-	return sum(1 for event in keyboard.events if event[1] == "admitted")
-
-
 @pytest.mark.rigSession("sway")
-def test_rigSwayNotListingTheKeyboardLetsGo(tmp_path: Path, socketDir: Path):
-	"""The rig's sway lists no keyboard of linda-keyd's, as one that never took it up would not: Linda
-	lets go a second after the stand-in holds, says so, and keys reach the probe without it; no HELLO for
-	ten seconds; linda --take-keyboard takes it, and it lets go again."""
+def test_rigSwayWithNoKeyboardOfLibinputsIsAskedAgain(tmp_path: Path, socketDir: Path):
+	"""The rig's headless sway lists no keyboard of libinput's, as a sway whose session has just come
+	back lists none until it has taken its devices up again: linda-keyd's keyboard missing from it is
+	no word, so Linda keeps the keyboard, asks sway again, and says nothing of the keys' delivery."""
 	with waylandKeys.waylandLinda(tmp_path, socketDir) as linda:
 		keyboard = linda.keyboard
 		nvda = startOn(linda, {"LINDA_TEST_DELIVERY_IDENTIFIER": VIRTUAL_IDENTIFIER})
 		keyboard.waitFor(lambda: keyboard.capturing, waylandKeys.STEP_BOUND)
-		held = time.monotonic()
-		keyboard.waitFor(lambda: not keyboard.capturing, 3)
-		letGo = time.monotonic() - held
-		linda.desktop.expect(lindaSays(ABSENT), since=0, timeout=3)
-		asked = admissions(keyboard)
-		since = linda.probeLines()
-		linda.desktop.typeText("a")
-		linda.probe.waitFor(lambda line: line.startswith("text ") and line.endswith("a"), 5, since)
-		time.sleep(10)
-		assert admissions(keyboard) == asked
-		status, output = takeKeyboard()
-		assert status == 0, output
-		keyboard.waitFor(lambda: keyboard.capturing, waylandKeys.STEP_BOUND)
-		retaken = time.monotonic()
-		keyboard.waitFor(lambda: not keyboard.capturing, 3)
-		again = time.monotonic() - retaken
-		time.sleep(1)
+		time.sleep(3.5)
+		capturing = keyboard.capturing
 		spoken = linda.desktop.spokenSince(0)
 		log = quit(nvda)
-	assert letGo <= 1.6, letGo
-	assert again <= 1.6, again
-	assert spoken.count(lindaSays(ABSENT)) == 2, spoken
-	assert spoken.count(lindaSays(HAS_KEYBOARD_AGAIN)) == 1, spoken
-	assert (
-		log.count("Keys NVDA passes on do not reach the desktop: sway does not list linda-keyd's keyboard")
-		== 2
-	)
+	assert capturing
+	assert lindaSays(ABSENT) not in spoken, spoken
+	assert "do not reach the desktop" not in log
+	assert log.count("Key delivery: sway lists no keyboard of libinput's yet, and is asked again") == 1
 
 
 @pytest.mark.rigSession("sway")
