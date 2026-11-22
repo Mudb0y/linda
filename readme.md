@@ -258,14 +258,14 @@ Set up a build of the libraries and the helper alone, with the files that run it
 meson setup build-keyd --prefix=/usr -Dprogram=false -Dkeyd_service=true
 ```
 
-Build it, which fetches the Rust crates it needs the first time, and install it.
+Build it as yourself, which fetches the Rust crates it needs the first time, and then install it without building again, so that nothing is built as root and a Rust from rustup, which root does not have, is not needed there.
 
 ```
 meson compile -C build-keyd
 ```
 
 ```
-sudo meson install -C build-keyd
+sudo meson install -C build-keyd --no-rebuild
 ```
 
 Make the helper's system user, load the kernel's virtual keyboard module, which happens by itself from the next boot on, and start the service now and at every boot.
@@ -292,7 +292,7 @@ This prints `active` when it runs.
 systemctl is-active linda-keyd
 ```
 
-When you update Linda, update the helper too, so that Linda can use everything the helper offers it: `git pull` in the source folder, then the compile and install commands again, then `sudo systemctl restart linda-keyd`.
+When you update Linda, update the helper too, so that Linda can use everything the helper offers it: `git pull` in the source folder, then `meson compile -C build-keyd` and `sudo meson install -C build-keyd --no-rebuild` again, then `sudo systemctl restart linda-keyd`.
 
 To let in only the members of one group, as the NixOS option `allowedGroup` does, save this as `/etc/polkit-1/rules.d/50-linda-keyd.rules`, with the group's name in place of linda, and add yourself to that group.
 
