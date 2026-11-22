@@ -10,7 +10,9 @@
       Linda Is Non-visual Desktop Access: a screen reader for the Linux desktop. It is NVDA, the
       screen reader most blind people use on Windows, brought to Linux. The commands, the settings,
       browse mode for web pages and the add-on interface are NVDA's own. Underneath, Linda reads
-      programs through AT-SPI, speaks through PipeWire and takes its keys from X11.
+      programs through AT-SPI and speaks through PipeWire. It takes its keys from the X server in
+      an X11 session, and in a Wayland session through linda-keyd, a system service of its own that
+      holds the keyboards in the kernel and has to be installed for keys to work there.
     </p>
     <p>
       Linda is based on NVDA by NV Access and the NVDA contributors. It is an independent project

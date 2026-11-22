@@ -1,4 +1,4 @@
-.TH LINDA 1 2026-11-18 Linda "User Commands"
+.TH LINDA 1 2026-11-22 Linda "User Commands"
 .SH NAME
 linda \- a screen reader for the Linux desktop, based on NVDA
 .SH SYNOPSIS
@@ -10,7 +10,12 @@ linda \- a screen reader for the Linux desktop, based on NVDA
 .SH DESCRIPTION
 Linda Is Non-visual Desktop Access: NVDA, the screen reader most blind people use on Windows,
 brought to Linux.
-It reads programs through AT-SPI, speaks through PipeWire and takes its keys from X11.
+It reads programs through AT-SPI and speaks through PipeWire.
+It takes its keys through
+.BR linda-keyd ,
+a system service that holds the keyboards in the kernel, wherever that service runs, and otherwise
+from the X server in an X11 session.
+Without the service, Linda in a Wayland session reads the screen but has no keys, and says so.
 Started without options, it starts the screen reader, or, when a copy is already running for this
 display, stops that copy and takes its place.
 .PP
@@ -84,6 +89,24 @@ The options \-\-install, \-\-install\-silent, \-\-create\-portable, \-\-create\-
 \-\-portable\-path, \-\-launcher, \-\-enable\-start\-on\-logon, \-\-copy\-portable\-config and
 \-\-ease\-of\-access are NVDA's for Windows, where they install it, make portable copies of it and
 start it at sign-in. Linda accepts them because NVDA does.
+.PP
+Two more are Linda's own, each given alone, and
+.B linda \-\-help
+does not list them.
+.TP
+.B \-\-session\-report
+Print what decides how Linda runs in this session, and exit without starting the screen reader:
+the variables the session's kind is decided from, the kind and the rule that decided it, the
+desktop, and whether the socket of
+.B linda-keyd
+is there.
+.TP
+.B \-\-take\-keyboard
+Ask the copy of Linda running in this Wayland session to take the keyboard back through
+.BR linda-keyd ,
+as after the emergency chord of Backspace, Escape and Enter held together, print how it went, and
+exit: 0 if the running copy was asked, 1 if it could not be.
+A copy in an X11 session cannot be asked this way; there Linda+Shift+F12 does it.
 .SH FILES
 .TP
 .I ~/.config/linda
