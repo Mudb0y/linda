@@ -30,6 +30,8 @@
 //! - A key the client types goes out only while the helper captures for it in front, and letting go
 //!   drops every typed key still in line instead of putting it out. One it types to be decided waits
 //!   for its verdict, and its bound, as a press read from a keyboard does.
+//! - A late pass puts out only a modifier the user is holding and the client kept, in the place in
+//!   line of a press still waiting, and never once the helper has let go since.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::os::fd::BorrowedFd;
@@ -159,6 +161,18 @@ impl Entry {
     }
 }
 
+/// A KEY sent the client, remembered with FEATURE_LATE_PASS to judge a LATE_PASS by.
+#[derive(Debug, Clone, Copy)]
+struct Told {
+    key: Key,
+    /// A press the client kept, by a verdict that counted, since the helper last let go.
+    kept: bool,
+    /// For a press, the sequence number of its release, once that was sent.
+    released: Option<u64>,
+    /// A LATE_PASS named it as the kept press.
+    named: bool,
+}
+
 struct Client {
     conn: ConnId,
     peer: Peer,
@@ -237,6 +251,11 @@ pub struct Core<D: Devices> {
     /// yet on the virtual keyboard, in the order they were told: they go there, in that order, just
     /// before the next press that goes out, and not at all if they are let go of first.
     held_back: Vec<(u32, u16)>,
+    /// The last LATE_PASS_RECALL KEYs sent a client granted FEATURE_LATE_PASS, oldest first.
+    told: VecDeque<Told>,
+    /// Kept modifiers that LATE_PASS puts out just before a waiting press, as that press's sequence
+    /// number, then the kept key, in the order the LATE_PASSes came.
+    late: Vec<(u64, u32, u16)>,
     /// How many keyboards hold each key down on the virtual keyboard: a key goes down there with
     /// the first and up with the last, so a Shift held on two keyboards stays down until both let
     /// it go. The client's typed keys count as one keyboard more.
@@ -302,6 +321,8 @@ impl<D: Devices> Core<D> {
             line: VecDeque::new(),
             passed: HashMap::new(),
             held_back: Vec::new(),
+            told: VecDeque::new(),
+            late: Vec::new(),
             pressed: vec![0; KEY_CNT],
             typed_down: KeySet::new(),
             sysrq_active: false,
@@ -548,6 +569,8 @@ impl<D: Devices> Core<D> {
                 // Numbered afresh, so that the first key's number tells nothing of how many keys
                 // another client had. Nothing is in line: no client, no capture.
                 self.next_seq = 1;
+                self.told.clear();
+                self.late.clear();
                 self.send_client(ToClient::welcome(features & FEATURES_KNOWN));
                 self.tell_locks();
             }
@@ -910,6 +933,11 @@ impl<D: Devices> Core<D> {
                 press,
                 mode,
             } => self.type_key(tag, code, press, mode, now),
+            FromClient::LatePass { .. } if c.features & FEATURE_LATE_PASS == 0 => self.drop_later(
+                Goodbye::Malformed,
+                "LATE_PASS without FEATURE_LATE_PASS".into(),
+            ),
+            FromClient::LatePass { kept, waiting } => self.late_pass(kept, waiting),
         }
     }
 
@@ -927,8 +955,109 @@ impl<D: Devices> Core<D> {
             && e.verdict.is_none()
         {
             e.verdict = Some(keep);
+            if keep && let Some(t) = self.recalled(seq) {
+                t.kept = true;
+            }
         }
         self.advance(now);
+    }
+
+    /// LATE_PASS: the kept press numbered `kept` goes out just before the press numbered
+    /// `waiting`, if the one is a kept modifier still down when the other was read, and the other
+    /// still waits for its verdict; malformed only for what the client knew as it sent it.
+    fn late_pass(&mut self, kept: u64, waiting: u64) {
+        let never = |seq: u64| seq == 0 || seq >= self.next_seq;
+        let malformed = if never(kept) || never(waiting) {
+            Some("a LATE_PASS naming a key that was never sent")
+        } else {
+            match (
+                self.recalled(kept).copied(),
+                self.recalled(waiting).copied(),
+            ) {
+                (Some(t), _)
+                    if t.key.value != KEY_PRESS
+                        || t.key.code == KEY_CAPSLOCK
+                        || !MODIFIERS.contains(&t.key.code)
+                        || t.key.flags & KEY_TYPED != 0 =>
+                {
+                    Some("a LATE_PASS whose first key is not a press of a modifier read")
+                }
+                (Some(t), _) if t.named => Some("a LATE_PASS naming a kept key named before"),
+                (_, Some(t)) if t.key.value != KEY_PRESS || t.key.flags & KEY_ASK == 0 => {
+                    Some("a LATE_PASS whose second key is not a press asking for a verdict")
+                }
+                _ => None,
+            }
+        };
+        if let Some(why) = malformed {
+            self.drop_later(Goodbye::Malformed, why.into());
+            return;
+        }
+        let Some(first) = self.recalled(kept) else {
+            return;
+        };
+        first.named = true;
+        let first = *first;
+        // Of a second forgotten nothing can be told, and it is long out of line anyway.
+        if self.recalled(waiting).is_none() {
+            return;
+        }
+        let down_then = kept < waiting && first.released.is_none_or(|r| r > waiting);
+        let still_waiting = self
+            .line
+            .iter()
+            .any(|e| e.seq == waiting && e.press && e.verdict.is_none());
+        if first.kept && down_then && still_waiting {
+            self.late.push((waiting, first.key.device, first.key.code));
+        }
+    }
+
+    /// What was sent as the KEY numbered `seq`, if it is among those remembered.
+    fn recalled(&mut self, seq: u64) -> Option<&mut Told> {
+        let oldest = self.told.front()?.key.seq;
+        let i = usize::try_from(seq.checked_sub(oldest)?).ok()?;
+        self.told.get_mut(i).filter(|t| t.key.seq == seq)
+    }
+
+    /// Remembers a KEY sent, and for a release of a modifier, which press it releases.
+    fn recall(&mut self, key: Key) {
+        if key.value == KEY_RELEASE
+            && MODIFIERS.contains(&key.code)
+            && let Some(press) = self.told.iter_mut().rev().find(|t| {
+                t.key.value == KEY_PRESS
+                    && t.key.device == key.device
+                    && t.key.code == key.code
+                    && t.released.is_none()
+            })
+        {
+            press.released = Some(key.seq);
+        }
+        self.told.push_back(Told {
+            key,
+            kept: false,
+            released: None,
+            named: false,
+        });
+        if self.told.len() > LATE_PASS_RECALL {
+            self.told.pop_front();
+        }
+    }
+
+    /// Puts out, just before the press numbered `seq`, each kept key a LATE_PASS named for it that
+    /// is still kept, its release passed from now on.
+    fn put_late(&mut self, seq: u64) {
+        let mut i = 0;
+        while i < self.late.len() {
+            if self.late[i].0 != seq {
+                i += 1;
+                continue;
+            }
+            let (_, device, code) = self.late.remove(i);
+            if self.passed.get(&(device, code)) == Some(&false) {
+                self.passed.insert((device, code), true);
+                self.press_virtual(code);
+            }
+        }
     }
 
     /// WAIT: the press keeps waiting, to VERDICT_WAIT_TIMEOUT from its reading. Only the first
@@ -1124,9 +1253,16 @@ impl<D: Devices> Core<D> {
     }
 
     fn send_client(&mut self, m: ToClient) {
-        if let Some(c) = &self.client {
-            self.out.push(Output::Send(c.conn, m));
+        let Some(c) = &self.client else {
+            return;
+        };
+        let conn = c.conn;
+        if c.features & FEATURE_LATE_PASS != 0
+            && let ToClient::Key(key) = m
+        {
+            self.recall(key);
         }
+        self.out.push(Output::Send(conn, m));
     }
 
     fn refuse(&mut self, conn: ConnId, reason: Goodbye, text: String, now: Instant) {
@@ -1781,6 +1917,10 @@ impl<D: Devices> Core<D> {
                     None => break,
                 };
                 self.line.pop_front();
+                // In the press's place, whatever becomes of it.
+                if !self.late.is_empty() {
+                    self.put_late(e.seq);
+                }
                 if let Some(tag) = e.tag {
                     let outcome = self.put_typed(e, keep);
                     self.send_client(ToClient::Typed {
@@ -1926,6 +2066,12 @@ impl<D: Devices> Core<D> {
     /// keyboard's events as its ungrab begins, so what comes after reaches the desktop from the
     /// keyboard itself, in order after the taps.
     fn let_go(&mut self, why: Option<Released>, drop_undecided: bool, now: Instant) {
+        // A late pass goes out at its press's turn, which letting go is not, and a press kept
+        // before it is a key the desktop has had up since.
+        self.late.clear();
+        for t in &mut self.told {
+            t.kept = false;
+        }
         self.lose_typed();
         if drop_undecided {
             self.line.clear();
@@ -2052,6 +2198,7 @@ fn name(m: &FromClient) -> &'static str {
         FromClient::Wait { .. } => "WAIT",
         FromClient::Heartbeat { .. } => "HEARTBEAT",
         FromClient::Type { .. } => "TYPE",
+        FromClient::LatePass { .. } => "LATE_PASS",
     }
 }
 

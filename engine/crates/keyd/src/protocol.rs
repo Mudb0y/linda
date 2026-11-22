@@ -169,13 +169,13 @@
 //!
 //! # Typing, the late pass and the virtual keyboard seen
 //!
-//! Three more features of version 1 are specified here. This helper grants [`FEATURE_TYPING`], and
-//! not yet [`FEATURE_LATE_PASS`] or [`FEATURE_VIRTUAL_SEEN`]: those two are not in
-//! [`FEATURES_KNOWN`], so a client may ask for them and WELCOME leaves them out. Until WELCOME
-//! grants a feature its messages are malformed, as for any other: the helper ends the connection of
-//! a client that sends LATE_PASS, or TYPE without FEATURE_TYPING granted, and sends no VIRTUAL, nor
-//! TYPED to a client not granted typing. A client written from this text asks for what it wants,
-//! and sends a feature's messages only once WELCOME has granted it.
+//! Three more features of version 1 are specified here. This helper grants [`FEATURE_TYPING`] and
+//! [`FEATURE_LATE_PASS`], and not yet [`FEATURE_VIRTUAL_SEEN`], which is not in
+//! [`FEATURES_KNOWN`], so a client may ask for it and WELCOME leaves it out. Until WELCOME grants a
+//! feature its messages are malformed, as for any other: the helper ends the connection of a client
+//! that sends TYPE without FEATURE_TYPING granted, or LATE_PASS without FEATURE_LATE_PASS, and sends
+//! no VIRTUAL, nor TYPED to a client not granted typing. A client written from this text asks for
+//! what it wants, and sends a feature's messages only once WELCOME has granted it.
 //!
 //! ## Typing, with FEATURE_TYPING
 //!
@@ -270,7 +270,10 @@
 //! - Malformed, and the end of the connection, is only what the client knows as it sends: a
 //!   sequence number of 0 or one never sent; a first that is not a press of one of the
 //!   [`MODIFIERS`](crate::keys::MODIFIERS) but Caps Lock, or is flagged [`KEY_TYPED`], or that an
-//!   earlier LATE_PASS named already; a second that is not a press flagged [`KEY_ASK`].
+//!   earlier LATE_PASS named already; a second that is not a press flagged [`KEY_ASK`]. The helper
+//!   remembers what it sent as the last [`LATE_PASS_RECALL`] KEYs; a LATE_PASS naming a key sent
+//!   before those, as either, changes nothing and is not judged malformed, since the helper can no
+//!   longer tell.
 //! - What else would keep it from applying can change while it is on its way, so it changes
 //!   nothing, as a late VERDICT does not: the first was not kept after all (the client passed it,
 //!   or it was passed at its bound with EXPIRED and a keep that came after was ignored); its key
@@ -282,7 +285,11 @@
 //!   out just before the second, and its release behind it: a modifier's release waits in line
 //!   behind every press read before it.
 //! - No message answers LATE_PASS, whether it changed anything or not.
-//! - If the helper lets go before the waiting press's turn, the kept key never goes out.
+//! - If the helper lets go before the waiting press's turn, the kept key never goes out, and a
+//!   press kept before a let-go never counts as kept for a LATE_PASS after it.
+//! - Several LATE_PASSes may name one waiting press, one for each kept modifier: Control and Alt
+//!   held under the screen reader's key, then Tab. Each that applies goes out just before the
+//!   press, in the order the LATE_PASSes came.
 //!
 //! TYPE_INJECT would not do: an injected key joins the end of the line, after the press it has to
 //! come before. LATE_PASS also puts out no key but one the user is holding.
@@ -461,13 +468,18 @@ pub const FEATURE_TYPING: u32 = 1;
 /// [`VERDICT_WAIT_TIMEOUT`] instead of [`VERDICT_TIMEOUT`].
 pub const FEATURE_WAIT: u32 = 2;
 /// LATE_PASS: a kept modifier goes on the virtual keyboard ahead of a press the client passes.
-/// Specified, and not yet granted by this helper.
 pub const FEATURE_LATE_PASS: u32 = 4;
 /// VIRTUAL: whether the desktop wrote the lights of a new virtual keyboard. Specified, and not yet
 /// granted by this helper.
 pub const FEATURE_VIRTUAL_SEEN: u32 = 8;
 /// The features this helper grants.
-pub const FEATURES_KNOWN: u32 = FEATURE_WAIT | FEATURE_TYPING;
+pub const FEATURES_KNOWN: u32 = FEATURE_WAIT | FEATURE_TYPING | FEATURE_LATE_PASS;
+/// How many of the KEYs last sent the helper remembers, with [`FEATURE_LATE_PASS`], to judge a
+/// LATE_PASS by. A client names a press it has just been sent as the second, one still waiting
+/// for its verdict, and as the first a modifier the user is still holding; a thousand KEYs is some
+/// five hundred keys typed with that modifier held, far beyond a chord, while the memory stays a
+/// few dozen kilobytes however long the client is served.
+pub const LATE_PASS_RECALL: usize = 1024;
 /// The device number of keys the client types with [`TYPE_DECIDE`]. Real keyboards are numbered as
 /// the kernel numbers input devices, which never comes near this.
 pub const TYPED_DEVICE: u32 = u32::MAX;
@@ -687,6 +699,12 @@ pub enum FromClient {
         code: u16,
         press: bool,
         mode: TypeMode,
+    },
+    /// LATE_PASS, once [`FEATURE_LATE_PASS`] is granted: the kept press, and the waiting press it
+    /// goes out just before.
+    LatePass {
+        kept: u64,
+        waiting: u64,
     },
 }
 
@@ -969,6 +987,11 @@ impl FromClient {
                     TypeMode::Inject => TYPE_INJECT,
                 });
             }
+            FromClient::LatePass { kept, waiting } => {
+                b.push(LATE_PASS);
+                b.extend_from_slice(&kept.to_le_bytes());
+                b.extend_from_slice(&waiting.to_le_bytes());
+            }
         }
         b
     }
@@ -976,9 +999,21 @@ impl FromClient {
     /// A message from a client granted `features`: what [`FromClient::decode`] reads, and the types
     /// those features bring, which from any other client are of an unknown type.
     pub fn decode_granted(m: &[u8], features: u32) -> Result<FromClient, Malformed> {
-        if m.first() != Some(&TYPE) || features & FEATURE_TYPING == 0 {
-            return FromClient::decode(m);
+        match m.first() {
+            Some(&TYPE) if features & FEATURE_TYPING != 0 => FromClient::decode_type(m),
+            Some(&LATE_PASS) if features & FEATURE_LATE_PASS != 0 => {
+                let mut r = Reader::new(m)?;
+                r.fixed("LATE_PASS", 17)?;
+                Ok(FromClient::LatePass {
+                    kept: r.u64(),
+                    waiting: r.u64(),
+                })
+            }
+            _ => FromClient::decode(m),
         }
+    }
+
+    fn decode_type(m: &[u8]) -> Result<FromClient, Malformed> {
         let mut r = Reader::new(m)?;
         r.fixed("TYPE", 9)?;
         let (tag, code, value, mode) = (r.u32(), r.u16(), r.u8(), r.u8());
@@ -1317,7 +1352,7 @@ mod tests {
     }
 
     #[test]
-    fn every_feature_is_specified_and_wait_and_typing_are_granted() {
+    fn every_feature_is_specified_and_all_but_virtual_seen_are_granted() {
         let features = [
             FEATURE_TYPING,
             FEATURE_WAIT,
@@ -1326,7 +1361,10 @@ mod tests {
         ];
         assert!(features.iter().all(|f| f.count_ones() == 1));
         assert_eq!(features.iter().fold(0, |all, f| all | f), 0b1111);
-        assert_eq!(FEATURES_KNOWN, FEATURE_WAIT | FEATURE_TYPING);
+        assert_eq!(
+            FEATURES_KNOWN,
+            FEATURE_WAIT | FEATURE_TYPING | FEATURE_LATE_PASS
+        );
         let client = [HELLO, START, STOP, VERDICT, HEARTBEAT, TYPE, LATE_PASS];
         let helper = [
             WELCOME,
@@ -1355,11 +1393,12 @@ mod tests {
         }
     }
 
-    /// A helper built from this tree, asked for every feature, grants FEATURE_WAIT and
-    /// FEATURE_TYPING, answers a TYPE, and ends the connection of a client that then late-passes a
-    /// key.
+    /// A helper built from this tree, asked for every feature, grants all but FEATURE_VIRTUAL_SEEN,
+    /// answers a TYPE, and reads a LATE_PASS, judging this one, which names keys never sent,
+    /// malformed for that; one asking for FEATURE_WAIT alone, as Linda's X route does, is granted
+    /// that alone, and LATE_PASS is of a type unknown to it.
     #[test]
-    fn a_client_asking_for_every_feature_may_type_and_not_late_pass() {
+    fn a_client_asking_for_every_feature_may_type_and_late_pass() {
         use crate::core::{Core, Front, Output, Peer};
         use std::time::Instant;
 
@@ -1368,7 +1407,13 @@ mod tests {
             uid: 1000,
             gid: 100,
         };
-        for (m, dropped) in planned_client_messages().into_iter().zip([false, true]) {
+        let every = FEATURE_TYPING | FEATURE_WAIT | FEATURE_LATE_PASS | FEATURE_VIRTUAL_SEEN;
+        let [typed, late] = planned_client_messages();
+        for (m, asked, dropped_for) in [
+            (typed, every, None),
+            (late.clone(), every, Some("never sent")),
+            (late, FEATURE_WAIT, Some("unknown message type 0x07")),
+        ] {
             let world = crate::mock::World::new();
             let mut core = Core::new(world.devices());
             let now = Instant::now();
@@ -1383,7 +1428,7 @@ mod tests {
             core.connected(1, peer, now);
             let hello = FromClient::Hello {
                 version: PROTOCOL_VERSION,
-                features: FEATURE_TYPING | FEATURE_WAIT | FEATURE_LATE_PASS | FEATURE_VIRTUAL_SEEN,
+                features: asked,
             };
             core.received(1, &hello.encode(), now);
             assert!(core.take_output().contains(&Output::Admit(1, peer)));
@@ -1396,10 +1441,10 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(granted, vec![FEATURE_WAIT | FEATURE_TYPING]);
+            assert_eq!(granted, vec![asked & FEATURES_KNOWN]);
             core.received(1, &m, now);
             let out = core.take_output();
-            if !dropped {
+            let Some(why) = dropped_for else {
                 // Not capturing yet.
                 let refused = ToClient::Typed {
                     tag: 7,
@@ -1408,7 +1453,7 @@ mod tests {
                 };
                 assert_eq!(out, vec![Output::Send(1, refused)]);
                 continue;
-            }
+            };
             assert!(
                 out.iter().any(|o| matches!(
                     o,
@@ -1416,14 +1461,48 @@ mod tests {
                         1,
                         ToClient::Goodbye {
                             reason: Goodbye::Malformed,
+                            text,
                             ..
                         }
-                    )
+                    ) if text.contains(why)
                 )),
                 "{out:?}"
             );
             assert!(out.contains(&Output::Close(1)), "{out:?}");
         }
+    }
+
+    #[test]
+    fn late_pass_comes_back_as_it_went_and_only_once_granted() {
+        let m = FromClient::LatePass {
+            kept: 0x0102_0304_0506_0708,
+            waiting: 9,
+        };
+        let b = m.encode();
+        assert_eq!(b.len(), 17);
+        assert_eq!(&b[..9], &[LATE_PASS, 8, 7, 6, 5, 4, 3, 2, 1]);
+        assert_eq!(FromClient::decode_granted(&b, FEATURE_LATE_PASS), Ok(m));
+        for features in [0, FEATURE_WAIT | FEATURE_TYPING | FEATURE_VIRTUAL_SEEN] {
+            let e = FromClient::decode_granted(&b, features).unwrap_err();
+            assert!(e.0.contains("unknown message type 0x07"), "{e}");
+        }
+        for len in [16, 18] {
+            let mut wrong = b.clone();
+            wrong.resize(len, 0);
+            let e = FromClient::decode_granted(&wrong, FEATURE_LATE_PASS).unwrap_err();
+            assert!(e.0.contains(&format!("LATE_PASS of {len} bytes")), "{e}");
+        }
+        // TYPE is read as before beside it.
+        let typed = FromClient::Type {
+            tag: 1,
+            code: 30,
+            press: true,
+            mode: TypeMode::Inject,
+        };
+        assert_eq!(
+            FromClient::decode_granted(&typed.encode(), FEATURE_TYPING | FEATURE_LATE_PASS),
+            Ok(typed)
+        );
     }
 
     #[test]

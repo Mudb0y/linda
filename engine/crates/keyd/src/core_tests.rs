@@ -1340,10 +1340,7 @@ fn unknown_features_are_not_granted() {
     t.take();
     assert!(matches!(
         t.sent()[0],
-        ToClient::Welcome {
-            features: FEATURE_TYPING,
-            ..
-        }
+        ToClient::Welcome { features, .. } if features == FEATURE_TYPING | FEATURE_LATE_PASS
     ));
 }
 
@@ -4918,4 +4915,429 @@ fn no_key_typed_to_be_decided_goes_out_after_the_virtual_keyboard_failed_to_take
     t.verdict(sysrq, false);
     assert!(t.sent().contains(&answered(1, b, TYPED_LOST)));
     assert!(t.w.emitted().iter().all(|e| e.0 != KEY_B));
+}
+
+// The late pass, with FEATURE_LATE_PASS: a kept modifier goes out just before a waiting press.
+
+impl T {
+    /// As capturing, with FEATURE_LATE_PASS, FEATURE_WAIT and FEATURE_TYPING granted.
+    fn late_passing() -> (T, u32) {
+        T::typing_asking(FEATURE_LATE_PASS | FEATURE_WAIT | FEATURE_TYPING)
+    }
+
+    fn late_pass(&mut self, kept: u64, waiting: u64) {
+        self.send(FromClient::LatePass { kept, waiting });
+    }
+
+    /// Reads a press, sends nothing for it, and answers its number.
+    fn pressed(&mut self, k: u32, code: u16) -> u64 {
+        self.press(k, code);
+        self.last_seq()
+    }
+
+    /// Reads a press and keeps it, and answers its number.
+    fn kept(&mut self, k: u32, code: u16) -> u64 {
+        let seq = self.pressed(k, code);
+        self.verdict(seq, true);
+        seq
+    }
+
+    fn malformed(&mut self) -> String {
+        let sent = self.sent();
+        let why = sent.iter().find_map(|m| match m {
+            ToClient::Goodbye {
+                reason: Goodbye::Malformed,
+                text,
+                ..
+            } => Some(text.clone()),
+            _ => None,
+        });
+        assert!(self.closed(CLIENT), "{sent:?}");
+        why.unwrap_or_else(|| panic!("no GOODBYE MALFORMED: {sent:?}"))
+    }
+}
+
+/// Alt held under the screen reader's key and kept, then Tab, which the client passes: Alt goes on
+/// the virtual keyboard just before Tab, and comes up when the hand lets it go. No message
+/// answers the LATE_PASS.
+#[test]
+fn a_kept_alt_late_passed_goes_out_just_before_the_key_and_up_with_the_hand() {
+    let (mut t, k) = T::late_passing();
+    let alt = t.kept(k, KEY_LEFTALT);
+    let tab = t.pressed(k, KEY_TAB);
+    assert!(t.w.emitted().is_empty(), "{:?}", t.w.emitted());
+    t.late_pass(alt, tab);
+    assert_eq!(t.sent(), vec![], "the LATE_PASS was answered");
+    assert!(t.w.emitted().is_empty(), "went out before the verdict");
+    t.verdict(tab, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_LEFTALT, 1), (KEY_TAB, 1)]);
+    t.release(k, KEY_TAB);
+    assert_eq!(t.w.emitted()[2..], [(KEY_TAB, 0)]);
+    assert_eq!(t.w.virtual_down(), {
+        let mut s = KeySet::new();
+        s.insert(KEY_LEFTALT);
+        s
+    });
+    // Tab again, under the same Alt, now down on the virtual keyboard: no LATE_PASS needed.
+    let again = t.pressed(k, KEY_TAB);
+    t.verdict(again, false);
+    t.release(k, KEY_TAB);
+    t.release(k, KEY_LEFTALT);
+    assert_eq!(
+        t.w.emitted()[3..],
+        [(KEY_TAB, 1), (KEY_TAB, 0), (KEY_LEFTALT, 0)]
+    );
+    assert!(t.w.virtual_down().is_empty());
+    assert!(!t.closed(CLIENT));
+    t.send(FromClient::Stop);
+    t.assert_let_go();
+}
+
+/// Alt let go of after Tab was read, before the LATE_PASS came: it still goes out before Tab, and
+/// its release behind Tab's, since a modifier's release keeps its place in line.
+#[test]
+fn a_kept_key_let_go_of_after_the_waiting_press_was_read_still_goes_out_before_it() {
+    let (mut t, k) = T::late_passing();
+    let alt = t.kept(k, KEY_LEFTALT);
+    let tab = t.pressed(k, KEY_TAB);
+    t.send(FromClient::Wait { seq: tab });
+    t.release(k, KEY_TAB);
+    t.release(k, KEY_LEFTALT);
+    assert!(t.w.emitted().is_empty());
+    t.late_pass(alt, tab);
+    t.verdict(tab, false);
+    assert_eq!(
+        t.w.emitted(),
+        vec![
+            (KEY_LEFTALT, 1),
+            (KEY_TAB, 1),
+            (KEY_TAB, 0),
+            (KEY_LEFTALT, 0)
+        ]
+    );
+    assert!(t.w.virtual_down().is_empty());
+}
+
+/// The kept key goes out in the press's place whatever becomes of the press: kept too, Alt alone
+/// goes out, and up with the hand.
+#[test]
+fn a_late_pass_goes_out_though_the_waiting_press_is_kept_or_passed_at_its_bound() {
+    let (mut t, k) = T::late_passing();
+    let alt = t.kept(k, KEY_LEFTALT);
+    let tab = t.pressed(k, KEY_TAB);
+    t.late_pass(alt, tab);
+    t.verdict(tab, true);
+    assert_eq!(t.w.emitted(), vec![(KEY_LEFTALT, 1)]);
+    t.release(k, KEY_TAB);
+    t.release(k, KEY_LEFTALT);
+    assert_eq!(t.w.emitted(), vec![(KEY_LEFTALT, 1), (KEY_LEFTALT, 0)]);
+
+    let ctrl = t.kept(k, KEY_LEFTCTRL);
+    let tab = t.pressed(k, KEY_TAB);
+    t.late_pass(ctrl, tab);
+    t.pass(VERDICT_TIMEOUT);
+    assert!(t.sent().contains(&ToClient::Expired { seq: tab }));
+    assert_eq!(t.w.emitted()[2..], [(KEY_LEFTCTRL, 1), (KEY_TAB, 1)]);
+    t.release(k, KEY_TAB);
+    t.release(k, KEY_LEFTCTRL);
+    assert!(t.w.virtual_down().is_empty());
+}
+
+/// Control and Alt held under the screen reader's key, then Tab: each named goes out just before
+/// Tab, in the order the LATE_PASSes came.
+#[test]
+fn several_kept_keys_late_passed_before_one_press_go_out_in_the_order_named() {
+    let (mut t, k) = T::late_passing();
+    let ctrl = t.kept(k, KEY_LEFTCTRL);
+    let alt = t.kept(k, KEY_LEFTALT);
+    let tab = t.pressed(k, KEY_TAB);
+    t.late_pass(alt, tab);
+    t.late_pass(ctrl, tab);
+    t.verdict(tab, false);
+    assert_eq!(
+        t.w.emitted(),
+        vec![(KEY_LEFTALT, 1), (KEY_LEFTCTRL, 1), (KEY_TAB, 1)]
+    );
+    t.release(k, KEY_TAB);
+    t.release(k, KEY_LEFTALT);
+    t.release(k, KEY_LEFTCTRL);
+    assert!(t.w.virtual_down().is_empty());
+    assert!(!t.closed(CLIENT));
+}
+
+/// What would keep a LATE_PASS from applying can change on its way, so it changes nothing and the
+/// connection is kept: the first was passed, or expired before a keep came; it went down after the
+/// second was read, or came up before; the second is answered already.
+#[test]
+fn a_late_pass_that_cannot_apply_changes_nothing() {
+    // Passed: Alt is out already, and goes out once.
+    let (mut t, k) = T::late_passing();
+    let alt = t.pressed(k, KEY_LEFTALT);
+    t.verdict(alt, false);
+    let tab = t.pressed(k, KEY_TAB);
+    t.late_pass(alt, tab);
+    t.verdict(tab, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_LEFTALT, 1), (KEY_TAB, 1)]);
+    t.release(k, KEY_TAB);
+    t.release(k, KEY_LEFTALT);
+    assert!(t.w.virtual_down().is_empty());
+
+    // Expired, a keep coming after it: passed as well.
+    let (mut t, k) = T::late_passing();
+    let alt = t.pressed(k, KEY_LEFTALT);
+    t.pass(VERDICT_TIMEOUT);
+    t.verdict(alt, true);
+    let tab = t.pressed(k, KEY_TAB);
+    t.late_pass(alt, tab);
+    t.verdict(tab, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_LEFTALT, 1), (KEY_TAB, 1)]);
+
+    // Let go of before the second was read.
+    let (mut t, k) = T::late_passing();
+    let alt = t.kept(k, KEY_LEFTALT);
+    t.release(k, KEY_LEFTALT);
+    let tab = t.pressed(k, KEY_TAB);
+    t.late_pass(alt, tab);
+    t.verdict(tab, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_TAB, 1)]);
+
+    // Pressed after the second was read, and kept while the second waited.
+    let (mut t, k) = T::late_passing();
+    let tab = t.pressed(k, KEY_TAB);
+    t.send(FromClient::Wait { seq: tab });
+    let alt = t.kept(k, KEY_LEFTALT);
+    t.late_pass(alt, tab);
+    t.verdict(tab, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_TAB, 1)]);
+
+    // The second answered already, though still in line behind a press that waits.
+    let (mut t, k) = T::late_passing();
+    let alt = t.kept(k, KEY_LEFTALT);
+    let shift = t.pressed(k, KEY_LEFTSHIFT);
+    t.send(FromClient::Wait { seq: shift });
+    let tab = t.pressed(k, KEY_TAB);
+    t.verdict(tab, false);
+    t.late_pass(alt, tab);
+    t.verdict(shift, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_LEFTSHIFT, 1), (KEY_TAB, 1)]);
+    for (k, code) in [(k, KEY_TAB), (k, KEY_LEFTSHIFT), (k, KEY_LEFTALT)] {
+        t.release(k, code);
+    }
+    assert!(t.w.virtual_down().is_empty());
+    assert!(!t.closed(CLIENT));
+}
+
+/// A kept Alt still in line, its keep counted behind a press that waits, counts as kept.
+#[test]
+fn a_keep_counted_while_the_kept_press_is_still_in_line_counts() {
+    let (mut t, k) = T::late_passing();
+    let shift = t.pressed(k, KEY_LEFTSHIFT);
+    t.send(FromClient::Wait { seq: shift });
+    let alt = t.kept(k, KEY_LEFTALT);
+    let tab = t.pressed(k, KEY_TAB);
+    t.late_pass(alt, tab);
+    t.verdict(tab, false);
+    assert!(t.w.emitted().is_empty());
+    t.verdict(shift, false);
+    assert_eq!(
+        t.w.emitted(),
+        vec![(KEY_LEFTSHIFT, 1), (KEY_LEFTALT, 1), (KEY_TAB, 1)]
+    );
+}
+
+/// Keys read for a case, answering the kept press and the waiting press a LATE_PASS then names.
+type LatePassCase = fn(&mut T, u32) -> (u64, u64);
+
+/// Only what the client knew as it sent a LATE_PASS makes it malformed, which ends the connection
+/// and lets go; the words name no key.
+#[test]
+fn a_late_pass_naming_keys_it_may_not_is_malformed() {
+    let cases: [(&str, LatePassCase); 10] = [
+        ("never sent", |t, k| (0, t.pressed(k, KEY_TAB))),
+        ("never sent", |t, k| {
+            let alt = t.kept(k, KEY_LEFTALT);
+            (alt, alt + 5)
+        }),
+        ("not a press of a modifier", |t, k| {
+            let a = t.kept(k, KEY_A);
+            (a, t.pressed(k, KEY_TAB))
+        }),
+        ("not a press of a modifier", |t, k| {
+            let caps = t.kept(k, KEY_CAPSLOCK);
+            (caps, t.pressed(k, KEY_TAB))
+        }),
+        ("not a press of a modifier", |t, k| {
+            let alt = t.kept(k, KEY_LEFTALT);
+            t.release(k, KEY_LEFTALT);
+            (alt + 1, t.pressed(k, KEY_TAB))
+        }),
+        ("not a press of a modifier", |t, k| {
+            t.decide_key(1, KEY_LEFTALT, true);
+            let alt = t.typed_seq();
+            t.verdict(alt, true);
+            (alt, t.pressed(k, KEY_TAB))
+        }),
+        ("not a press of a modifier", |t, k| {
+            let alt = t.kept(k, KEY_LEFTALT);
+            t.w.repeat(k, KEY_LEFTALT);
+            t.core.keyboard_ready(k, t.now);
+            t.take();
+            let repeat = t.last_seq();
+            assert_eq!(repeat, alt + 1);
+            (repeat, t.pressed(k, KEY_TAB))
+        }),
+        ("named before", |t, k| {
+            let alt = t.kept(k, KEY_LEFTALT);
+            let tab = t.pressed(k, KEY_TAB);
+            t.late_pass(alt, tab);
+            t.verdict(tab, false);
+            t.release(k, KEY_TAB);
+            (alt, t.pressed(k, KEY_TAB))
+        }),
+        ("not a press asking for a verdict", |t, k| {
+            let alt = t.kept(k, KEY_LEFTALT);
+            t.pressed(k, KEY_TAB);
+            t.release(k, KEY_TAB);
+            (alt, t.last_seq())
+        }),
+        ("not a press asking for a verdict", |t, k| {
+            let alt = t.kept(k, KEY_LEFTALT);
+            let tab = t.pressed(k, KEY_TAB);
+            t.verdict(tab, false);
+            t.w.repeat(k, KEY_TAB);
+            t.core.keyboard_ready(k, t.now);
+            t.take();
+            (alt, t.last_seq())
+        }),
+    ];
+    for (n, (why, make)) in cases.into_iter().enumerate() {
+        let (mut t, k) = T::late_passing();
+        let (kept, waiting) = make(&mut t, k);
+        t.sent();
+        t.late_pass(kept, waiting);
+        let said = t.malformed();
+        assert!(said.contains(why), "case {n}: {said}");
+        assert!(said.starts_with("a LATE_PASS"), "case {n}: {said}");
+        assert!(
+            !said.chars().any(|c| c.is_ascii_digit()),
+            "case {n}: {said}"
+        );
+        t.assert_let_go();
+    }
+}
+
+/// From a client not granted the feature, as Linda's X route is, a LATE_PASS is of a type it does
+/// not know, and ends the connection.
+#[test]
+fn a_late_pass_from_a_client_not_granted_the_feature_ends_the_connection() {
+    let (mut t, k) = T::typing_asking(FEATURE_WAIT);
+    let alt = t.kept(k, KEY_LEFTALT);
+    let tab = t.pressed(k, KEY_TAB);
+    t.late_pass(alt, tab);
+    assert!(t.malformed().contains("unknown message type 0x07"));
+    assert!(t.w.emitted().iter().all(|e| e.0 != KEY_LEFTALT));
+    t.assert_let_go();
+}
+
+/// Letting go before the waiting press's turn: the kept key never goes out, and a press kept
+/// before a let-go never counts as kept for a LATE_PASS after it.
+#[test]
+fn a_late_pass_does_not_outlive_a_let_go() {
+    let (mut t, k) = T::late_passing();
+    let alt = t.kept(k, KEY_LEFTALT);
+    let tab = t.pressed(k, KEY_TAB);
+    t.send(FromClient::Wait { seq: tab });
+    t.late_pass(alt, tab);
+    t.send(FromClient::Stop);
+    // Tab, waiting, is passed on as the helper lets go; Alt is not.
+    assert_eq!(t.w.emitted(), vec![(KEY_TAB, 1), (KEY_TAB, 0)]);
+    t.assert_let_go();
+
+    let (mut t, k) = T::late_passing();
+    let alt = t.kept(k, KEY_LEFTALT);
+    // The session leaves the front with Alt still held, and comes back once it is up.
+    t.logind(front("c1", 1000));
+    t.w.release(k, KEY_LEFTALT);
+    t.logind(front(SESSION, 1000));
+    assert!(t.w.grabbed(k));
+    let tab = t.pressed(k, KEY_TAB);
+    t.late_pass(alt, tab);
+    t.verdict(tab, false);
+    assert_eq!(t.w.emitted(), vec![(KEY_TAB, 1)]);
+    assert!(!t.closed(CLIENT));
+}
+
+/// A key typed to be decided is a press asking for a verdict like any other, and a kept Alt goes
+/// out before it; a typed SysRq after it is refused, Alt being down.
+#[test]
+fn a_late_pass_goes_out_before_a_key_typed_to_be_decided() {
+    let (mut t, k) = T::late_passing();
+    let alt = t.kept(k, KEY_LEFTALT);
+    t.decide_key(1, KEY_TAB, true);
+    let tab = t.typed_seq();
+    t.late_pass(alt, tab);
+    t.verdict(tab, false);
+    assert_eq!(t.sent(), vec![answered(1, tab, TYPED_OUT)]);
+    assert_eq!(t.w.emitted(), vec![(KEY_LEFTALT, 1), (KEY_TAB, 1)]);
+    t.type_key(2, KEY_SYSRQ, true);
+    assert_eq!(t.typed(), vec![(2, TYPED_REFUSED_KEY)]);
+    t.decide_key(3, KEY_TAB, false);
+    t.release(k, KEY_LEFTALT);
+    assert!(t.w.virtual_down().is_empty(), "{:?}", t.w.emitted());
+}
+
+/// The kept key's keyboard vanishes while the press waits: its made-up release is behind the
+/// press, so the kept key still goes out before it and comes up after.
+#[test]
+fn a_late_passed_key_whose_keyboard_vanished_is_released() {
+    let (mut t, k) = T::late_passing();
+    let other = t.w.plug("USB keyboard");
+    t.core.watch_ready(t.now);
+    t.take();
+    assert!(t.w.grabbed(other));
+    t.sent();
+    let alt = t.kept(k, KEY_LEFTALT);
+    let tab = t.pressed(other, KEY_TAB);
+    t.send(FromClient::Wait { seq: tab });
+    t.w.unplug(k);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    t.late_pass(alt, tab);
+    t.verdict(tab, false);
+    assert_eq!(
+        t.w.emitted(),
+        vec![(KEY_LEFTALT, 1), (KEY_TAB, 1), (KEY_LEFTALT, 0)]
+    );
+    t.release(other, KEY_TAB);
+    assert!(t.w.virtual_down().is_empty());
+}
+
+/// A LATE_PASS naming a kept key older than LATE_PASS_RECALL KEYs changes nothing, and is not
+/// taken for malformed, since the helper can no longer tell.
+#[test]
+fn a_late_pass_naming_a_key_forgotten_changes_nothing() {
+    let (mut t, k) = T::late_passing();
+    let alt = t.kept(k, KEY_LEFTALT);
+    for _ in 0..LATE_PASS_RECALL / 2 {
+        let a = t.pressed(k, KEY_A);
+        t.verdict(a, true);
+        t.release(k, KEY_A);
+    }
+    let tab = t.pressed(k, KEY_TAB);
+    t.late_pass(alt, tab);
+    t.verdict(tab, false);
+    assert!(!t.closed(CLIENT), "{:?}", t.sent());
+    assert_eq!(t.w.emitted(), vec![(KEY_TAB, 1)]);
+    // Kept to its bound however long the client is served.
+    assert_eq!(t.core.told.len(), LATE_PASS_RECALL);
+}
+
+/// Nothing of it is remembered for a client not granted the feature, as Linda's X route is not.
+#[test]
+fn nothing_is_remembered_for_a_client_not_granted_the_late_pass() {
+    let (mut t, k) = T::typing_asking(FEATURE_WAIT);
+    let alt = t.kept(k, KEY_LEFTALT);
+    t.release(k, KEY_LEFTALT);
+    assert!(alt > 0);
+    assert!(t.core.told.is_empty() && t.core.late.is_empty());
 }
