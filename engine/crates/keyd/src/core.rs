@@ -1522,7 +1522,7 @@ impl<D: Devices> Core<D> {
             log!("the virtual keyboard is ready");
             self.virt = Virt::Ready(v);
             if let Some(p) = probe {
-                self.end_probe(p, made);
+                self.end_probe(p, made, now);
             }
         }
     }
@@ -1532,7 +1532,20 @@ impl<D: Devices> Core<D> {
     /// and says which to the client it was made for, if that one still wants to capture, in front. A
     /// writer's lights are the desktop's word on the locks only when one is on, as they would have
     /// been with no probe, on a keyboard that starts with none.
-    fn end_probe(&mut self, p: Probe, made: Instant) {
+    fn end_probe(&mut self, mut p: Probe, made: Instant, now: Instant) {
+        // A write still waiting to be read is the desktop's all the same, and putting the lights back
+        // would put it out.
+        let by = self.session_in_front().map(str::to_owned);
+        if let Virt::Ready(v) = &mut self.virt {
+            match v.read_leds() {
+                Ok(Some(leds)) => p.heard(leds, now, by),
+                Ok(None) => {}
+                Err(e) => {
+                    log!("reading the virtual keyboard failed: {e}");
+                    self.virtual_broken = true;
+                }
+            }
+        }
         let status = match p.written {
             Some((first, leds, by)) => {
                 log!(

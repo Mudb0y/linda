@@ -5503,6 +5503,26 @@ fn sways_lights_off_are_seen_and_the_locks_come_as_before() {
     assert_eq!(t.w.leds(k), LOCK_NUM);
 }
 
+/// The desktop's write lands on the virtual keyboard in the turn that ends the settle, before the
+/// helper has read it: seen all the same, and its lights are kept, not put back.
+#[test]
+fn a_write_unread_as_the_keyboard_settles_is_seen() {
+    let (mut t, k) = T::probing(0);
+    t.pass(VIRTUAL_SETTLE - ms(1));
+    t.w.desktop_sets_leds(LOCK_NUM);
+    t.pass(ms(1));
+    let sent = t.sent();
+    assert!(t.w.grabbed(k));
+    assert_eq!(T::virtual_word(&sent).0, vec![VIRTUAL_SEEN], "{sent:?}");
+    let locks = T::locks_told(&sent);
+    assert!(
+        !locks.is_empty() && locks.iter().all(|l| *l == LOCK_NUM),
+        "{sent:?}"
+    );
+    assert_eq!(t.w.own_leds(), vec![EVERY_LIGHT]);
+    assert_eq!((t.w.virtual_leds(), t.w.leds(k)), (LOCK_NUM, LOCK_NUM));
+}
+
 /// KWin and X with every lock off write nothing: unseen, the lights are put back to none before
 /// anything is grabbed, and the locks come from the first keyboard grabbed, as before.
 #[test]
