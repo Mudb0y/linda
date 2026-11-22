@@ -1,8 +1,8 @@
 """Plasma's own interfaces with Linda, its keys taken by linda-keyd: KWin's Alt+Tab switcher speaks the
 window each Tab selects and then the window Alt's release activates; Alt+F2 speaks KRunner; Plasma's
 polkit agent, raised by pkexec, is read and speaks none of a password typed into it through the
-helper, which is in neither Linda's log nor the helper's journal. The launcher and a notification are
-logged as heard.
+helper, which is in neither Linda's log nor the helper's journal. Neither the switcher's frame nor the
+launcher's is said. The launcher and a notification are logged as heard.
 
 What the desktop sent along the way is written to the log as each step ends, by a recorder that reads
 the accessibility bus and asks nothing of the programs; it records no text event, so nothing typed.
@@ -151,6 +151,13 @@ def openWindow(ground: "Ground", title: str, log: str, name: str, argv: list[str
 		ground.waitFor(ready, f"{title} to have the focus", 30)
 
 
+def assertNoUnnamedFrame(spoken: list[str], what: str) -> None:
+	"""KWin's switcher and plasmashell's popups are unnamed frames, which kwin_wayland.py and
+	plasmashell.py keep from being said."""
+	frames = [text for text in spoken if text == "frame" or text.startswith("frame ")]
+	assert not frames, f"Linda said an unnamed frame for {what}: {spoken}"
+
+
 def item(title: str) -> str:
 	"""A switcher item as Linda says it: the window's title and where it is among the items."""
 	return f"{title} {PREFIX_MARK}"
@@ -182,6 +189,8 @@ def switcher(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
 	with ground.subtest("Alt+Tab speaks the window each Tab selects, and the window Alt's release activates"):
 		figures["three Tabs"] = altTab(ground, keyboard, [QT_TITLE, WINDOW_TITLE, QT_TITLE], QT_WINDOW)
 		figures["one Tab"] = altTab(ground, keyboard, [WINDOW_TITLE], GTK3_WINDOW)
+		assertNoUnnamedFrame(figures["three Tabs"], "three Tabs")
+		assertNoUnnamedFrame(figures["one Tab"], "one Tab")
 
 	with ground.subtest("a quick Alt+Tab speaks the window it activates"):
 		mark = ground.mark()
@@ -222,6 +231,7 @@ def heardOnly(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None
 		closed = ground.mark()
 		keyboard.tap("KEY_ESC")
 		ground.expect(QT_WINDOW[0], since=closed, timeout=SHOWN)
+		assertNoUnnamedFrame(figures["the launcher"], "the launcher")
 		mark = ground.mark()
 		ground.run(["notify-send", "Ground title", "Ground body"])
 		ground.settle(4)
