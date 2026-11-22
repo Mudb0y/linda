@@ -20,8 +20,6 @@ from textInfos.offsets import OffsetsTextInfo, findEndOfLine, findStartOfLine
 LINE_SEPARATORS = ("\n", "\r", " ", " ")
 #: What Qt wraps a line at and leaves out of both lines.
 WRAP_SEPARATORS = (" ", "\t")
-#: The character GTK and Qt show for each character of a password.
-MASK_CHARACTER = "●"
 #: What NVDA says for a character of a protected field, as speech.PROTECTED_CHAR.
 PROTECTED_CHARACTER = "*"
 #: Above this many characters a paragraph is the toolkit's line rather than read from the whole text.
@@ -119,10 +117,17 @@ class AtspiTextInfo(OffsetsTextInfo):
 		return textUtils.WCHAR_ENCODING if self.textSource.unit == "utf16" else None
 
 	def _shown(self, text: str) -> str:
-		"""text as NVDA presents it: a password's masking characters become NVDA's own."""
-		if MASK_CHARACTER in text and self.obj.isProtected:
-			return text.replace(MASK_CHARACTER, PROTECTED_CHARACTER)
-		return text
+		"""text as NVDA presents it: each character of a protected field becomes NVDA's own.
+
+		Every character there, not one masking character: GTK 3 masks with U+25CF under one font and
+		U+2022 under another, and an application may set its own. Each is replaced unit for unit, so
+		that offsets in the toolkit's unit still fit.
+		"""
+		if not text or not self.obj.isProtected:
+			return text
+		if self.encoding is None:
+			return PROTECTED_CHARACTER * len(text)
+		return PROTECTED_CHARACTER * textUtils.WideStringOffsetConverter(text).encodedStringLength
 
 	def _getStoryLength(self) -> int:
 		try:

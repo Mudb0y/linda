@@ -59,6 +59,8 @@ def gtk3():
 	box.pack_start(tv, False, False, 0)
 	pw = named(Gtk.Entry(), "password")
 	pw.set_visibility(False)
+	# GTK 3 masks with U+25CF or U+2022, by the font; Qt's entry has the first, so this one the second.
+	pw.set_invisible_char("\u2022")
 	pw.set_text(TEXTS["password"])
 	box.pack_start(pw, False, False, 0)
 	lab = named(Gtk.Label(label=TEXTS["label"]), "label")
