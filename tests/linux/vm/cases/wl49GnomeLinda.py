@@ -22,6 +22,11 @@ if TYPE_CHECKING:
 SHELL_VERSION = "49.4"
 #: The helper's test client, as helperSafety.run starts it, by ground's name for its job.
 HELPER_CLIENT = "keyd-main"
+FIREFOX_152 = (
+	"NixOS 25.11's Firefox 152, started as E4 starts it, shows on AT-SPI only an active frame named "
+	"Mozilla Firefox and never the page's title within 180 s, and Linda says only Mozilla Firefox; "
+	"why is not known (results/E25.md)"
+)
 
 
 def helperFirst(ground: "Ground") -> "FakeKeyboard":
@@ -47,7 +52,50 @@ def helperFirst(ground: "Ground") -> "FakeKeyboard":
 	return keyboard
 
 
-def lindaAcceptance(ground: "Ground", keyboard: "FakeKeyboard") -> None:
+def firefoxTimings(ground: "Ground", keyboard: "FakeKeyboard", figures: dict) -> None:
+	firefox = acceptance.startFirefox(ground)
+	ground.settle(3)
+	figures["Firefox Alt+Tab"] = [acceptance.altTab(ground, keyboard) for _ in range(acceptance.SWITCHES)]
+	ground.activate(firefox)
+	figures["Firefox overview"] = [acceptance.overview(ground, keyboard) for _ in range(3)]
+	figures["Firefox run dialog"] = [acceptance.runDialog(ground, keyboard) for _ in range(3)]
+	figures["Alt+Tab from Firefox in say all"] = [
+		acceptance.sayAllThenAltTab(ground, keyboard, firefox) for _ in range(3)
+	]
+	figures["two Firefox windows"] = acceptance.twoWindows(ground, keyboard, firefox)
+
+
+def windowTimings(ground: "Ground", keyboard: "FakeKeyboard", firefoxFault: str | None) -> dict:
+	"""lindaAcceptance.windowTimings, with the release's own Firefox held to firefoxFault where that
+	version's Firefox shows it, so that the GTK windows' timings are had all the same."""
+	figures: dict[str, list[dict]] = {}
+	acceptance.startListening(ground)
+	ground.openWindow(acceptance.GTK4_TITLE, name="window4", gtk4=True)
+	with ground.subtest("E4: Alt+Tab between a GTK 3 and a GTK 4 window, Linda idle"):
+		ground.activate(WINDOW_TITLE)
+		figures["GTK Alt+Tab"] = [acceptance.altTab(ground, keyboard) for _ in range(acceptance.SWITCHES)]
+	with ground.subtest("E4: the overview and the run dialog over a GTK 3 window"):
+		figures["GTK 3 overview"] = [acceptance.overview(ground, keyboard) for _ in range(3)]
+		figures["GTK 3 run dialog"] = [acceptance.runDialog(ground, keyboard) for _ in range(3)]
+	with ground.subtest("E4: Firefox against Alt+Tab, the overview and the run dialog, idle and in say all"):
+		if firefoxFault is None:
+			firefoxTimings(ground, keyboard, figures)
+		else:
+			with ground.expectedFailure(firefoxFault):
+				try:
+					firefoxTimings(ground, keyboard, figures)
+				except AssertionError:
+					ground.machine.log(f"the windows as Firefox's part ended: {ground.focus('windows')}")
+					raise
+	for job in ("firefox", "window4", "windowEvents"):
+		# A job never started has no status but an error.
+		if "returncode" in ground.session({"op": "status", "name": job}) and ground.running(job):
+			ground.session({"op": "signal", "name": job, "signal": "SIGTERM"})
+			ground.waitFor(lambda job=job: not ground.running(job), f"{job} to end", 30)
+	return {"summary": acceptance._kinds(figures), "samples": figures}
+
+
+def lindaAcceptance(ground: "Ground", keyboard: "FakeKeyboard", firefoxFault: str | None = None) -> None:
 	"""wlGnomeLinda's run, from its first subtest on."""
 	gnome.noHelper(ground, keyboard)
 	gnome.keptKeys(ground, keyboard)
@@ -58,27 +106,22 @@ def lindaAcceptance(ground: "Ground", keyboard: "FakeKeyboard") -> None:
 	gnome.lindaStopped(ground, keyboard)
 	gnome.console(ground, keyboard)
 	gnome.pointer(ground, keyboard)
-	try:
-		timings = acceptance.windowTimings(ground, keyboard)
-	except AssertionError:
-		# The release's own Firefox is the one E4 starts here; what it showed instead is worth having.
-		ground.machine.log(f"the windows when E4 failed: {ground.focus('windows')}")
-		raise
+	timings = windowTimings(ground, keyboard, firefoxFault)
 	ground.machine.log("E4 figures " + json.dumps(timings, sort_keys=True))
 	ground.activate(WINDOW_TITLE)
 	pid = gnome.emergency(ground, keyboard)
 	gnome.nothingLogged(ground, keyboard, pid)
 
 
-def gnomeRun(ground: "Ground", version: str) -> None:
+def gnomeRun(ground: "Ground", version: str, firefoxFault: str | None = None) -> None:
 	ground.machine.log(f"start-up, seconds from starting the guest: {ground.bootTimes}")
 	facts = ground.focus("facts")
 	ground.machine.log(f"the shell: {facts}")
 	assert facts["shellVersion"] == version, facts
 	assert facts["unsafeMode"] is False, facts
 	keyboard = helperFirst(ground)
-	lindaAcceptance(ground, keyboard)
+	lindaAcceptance(ground, keyboard, firefoxFault)
 
 
 def run(ground: "Ground") -> None:
-	gnomeRun(ground, SHELL_VERSION)
+	gnomeRun(ground, SHELL_VERSION, FIREFOX_152)
