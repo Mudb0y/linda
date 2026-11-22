@@ -87,6 +87,13 @@ def _step(desktop: DesktopSession, key: str, *expected: str) -> None:
 	assert desktop.spokenSince(mark) == list(expected), desktop.spokenSince(mark)
 
 
+def _back(popups: str) -> tuple[str, ...]:
+	"""What closing the popup menu says: the window again after a popup in a window of its own, whose
+	items are that window's, as after GTK's context menus, then the button. A menu bar's items are its
+	menu's in either kind."""
+	return (TITLE, "Press me button") if popups == "heavyweight" else ("Press me button",)
+
+
 def _closeClean(desktop: DesktopSession) -> None:
 	nvda = desktop.nvda
 	desktop.close()
@@ -99,17 +106,18 @@ def test_menuBar(desktop: DesktopSession, popups: str):
 	"""F10 opens the File menu, which Swing opens with no item highlighted; the arrows go through its
 	items, into its submenu and across to the next menu, and Escape closes it."""
 	_start(desktop, popups)
-	_step(desktop, "F10", "File sub Menu 1 of 2")
+	# Swing says a menu is checked while it is open, and that is read as it says it.
+	_step(desktop, "F10", "File checked sub Menu 1 of 2")
 	_step(desktop, "Down", "New 1 of 4")
 	_step(desktop, "Down", "Open 2 of 4")
-	_step(desktop, "Down", "Recent sub Menu 3 of 4")
+	_step(desktop, "Down", "Recent checked sub Menu 3 of 4")
 	_step(desktop, "Right", "First project 1 of 2")
 	_step(desktop, "Down", "Second project 2 of 2")
 	_step(desktop, "Escape", "Press me button")
-	_step(desktop, "F10", "File sub Menu 1 of 2")
-	_step(desktop, "Right", "Edit sub Menu 2 of 2")
+	_step(desktop, "F10", "File checked sub Menu 1 of 2")
+	_step(desktop, "Right", "Edit checked sub Menu 2 of 2")
 	_step(desktop, "Down", "Cut 1 of 2")
-	_step(desktop, "Left", "File sub Menu 1 of 2")
+	_step(desktop, "Left", "File checked sub Menu 1 of 2")
 	_step(desktop, "Escape", "Press me button")
 	_closeClean(desktop)
 
@@ -123,5 +131,5 @@ def test_popupMenu(desktop: DesktopSession, popups: str):
 	_step(desktop, "Down", "Alpha 1 of 3")
 	_step(desktop, "Down", "Beta 2 of 3")
 	_step(desktop, "Up", "Alpha 1 of 3")
-	_step(desktop, "Escape", "Press me button")
+	_step(desktop, "Escape", *_back(popups))
 	_closeClean(desktop)

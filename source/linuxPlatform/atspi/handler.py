@@ -110,6 +110,12 @@ _SHOWN_STATES = frozenset({"showing", "visible"})
 #: Roles whose "selected" state stands for focus in GTK, whose menu items and tabs announce focus with
 #: no focused state.
 SELECTED_AS_FOCUS_ROLES = frozenset({"menu", "menu item", "check menu item", "radio menu item", "page tab"})
+#: The ToolkitName of the Java ATK wrapper, through which Swing programs, JetBrains IDEs among them, reach
+#: AT-SPI.
+JAVA_TOOLKIT = "J2SE-access-bridge"
+#: What a Swing menu's highlighted item carries in place of the focused state the wrapper announces for it:
+#: selected in a menu bar's menus, and only armed in a popup menu.
+_JAVA_HIGHLIGHT_STATES = frozenset({"selected", "armed"})
 #: Containers whose focus belongs to the item within them that has it.
 _ITEM_CONTAINERS = frozenset(
 	{"list", "list box", "page tab list", "tree", "tree table", "table", "layered pane"},
@@ -826,13 +832,19 @@ def _focusCandidate(event) -> Node | None:
 	if "defunct" in states:
 		return None
 	if "focused" not in states:
-		# GTK 3 menu items and notebook tabs announce focus but carry only "selected"; a later loss of
-		# focus in the same batch has already ruled stale events out.
-		if "selected" not in states or c.role(source) not in SELECTED_AS_FOCUS_ROLES:
+		# GTK 3 menu items and notebook tabs announce focus but carry only "selected", and the Java ATK
+		# wrapper's menu items only _JAVA_HIGHLIGHT_STATES; a later loss of focus in the same batch has
+		# already ruled stale events out.
+		if not states & _JAVA_HIGHLIGHT_STATES or c.role(source) not in SELECTED_AS_FOCUS_ROLES:
 			return None
-		if c.toolkit(source).lower() != "gtk":
+		toolkit = c.toolkit(source)
+		if toolkit != JAVA_TOOLKIT and ("selected" not in states or toolkit.lower() != "gtk"):
 			return None
 	role = c.role(source)
+	if role == "root pane" and c.toolkit(source) == JAVA_TOOLKIT:
+		# Swing gives the keyboard focus to the window's root pane while one of its menus is open, as
+		# the menu opens, before any item in it is highlighted; that is no control to report.
+		return None
 	if role == "menu bar" and c.toolkit(source) == "Qt":
 		# Qt focuses its menu bar after the menu it opens, whose first item has the focus without an
 		# event of its own.
