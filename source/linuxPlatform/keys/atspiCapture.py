@@ -19,12 +19,18 @@ at times has said nothing of that window that anyone could hear.
 The window keys are captured on is an anchor, by the X source's rules, the foreground standing in for
 the X focus window: it is the foreground as NVDA last said browse or focus while there was no anchor or
 the anchor did not have the keyboard, it stays while the keyboard is away, and moves only when NVDA
-names another process or when the foreground is another window of the anchor's process.
+names another process or when the foreground is another window of the anchor's process. Unlike the X
+server's focus, the feed's foreground can be behind NVDA's own focus, so a foreground of another
+process than the one NVDA names is not anchored: the first window of that process to be the foreground
+is.
 
 A look, which the kernel source asks for before a key whose place depends on the focus, ends once the
 feed knows the foreground as of the key: after a chord that may move the focus, at the first window
-events and the quiet after them, or unknown at FOCUS_MOVE_GRACE; otherwise after one round trip on
-the feed's own connection, which the bus answers only after every event it routed here before it.
+events and the quiet after them, or at FOCUS_MOVE_GRACE, known if a window event came after the chord
+began and unknown if none did; otherwise after one round trip on the feed's own connection, which the
+bus answers only after every event it routed here before it. Notes of a chord within FOCUS_MOVE_GRACE
+of each other are one chord: sway, and Mutter with no shell, switch as Tab goes down, so their window
+events come before the note of Alt's release, and none after it.
 """
 
 import collections
@@ -102,15 +108,24 @@ def _hasState(states: list[int], state: int) -> bool:
 
 
 class _Look:
-	__slots__ = ("deadline", "done", "number", "roundTrip", "since")
+	__slots__ = ("chord", "deadline", "done", "number", "roundTrip", "since")
 
-	def __init__(self, number: int, deadline: float, done: LookDone, since: float | None) -> None:
+	def __init__(
+		self,
+		number: int,
+		deadline: float,
+		done: LookDone,
+		since: float | None,
+		chord: float | None = None,
+	) -> None:
 		self.number = number
 		self.deadline = deadline
 		self.done = done
 		#: When the chord that may have moved the focus came, for a look asked while it had not settled;
 		#: None for one that waits for a round trip.
 		self.since = since
+		#: When that chord's first note came, which is since itself for a chord of one note.
+		self.chord = since if chord is None else chord
 		self.roundTrip = False
 
 
@@ -156,7 +171,13 @@ class AtspiCaptureFeed:
 		self._windowNumbers: dict[Key, int] = {}
 		self._nextWindowNumber = 1
 		self._lastWindowEventAt = float("-inf")
-		self._mayMoveAt = float("-inf")
+		#: The first and the latest note of the chord that may move the focus, replaced whole, as the
+		#: answering thread writes it and reads it: notes within FOCUS_MOVE_GRACE of each other are one
+		#: chord, as Alt+Tab's Tab and Alt's release are.
+		self._moves: tuple[float, float] = (float("-inf"), float("-inf"))
+		#: Whether NVDA has named a document whose window is not yet the foreground, the first such window
+		#: to be the foreground being its anchor.
+		self._awaiting = False
 		#: Reads in flight whose answer may move the foreground now: no look ends known before them. A
 		#: read about a window that has only shown is not one, as another program starting up or stuck
 		#: would otherwise leave every look unknown for as long as it takes to answer.
@@ -203,11 +224,13 @@ class AtspiCaptureFeed:
 
 	def settled(self, now: float) -> bool:
 		"""Whether no chord that may move the focus waits for its window event."""
-		return not (now < self._mayMoveAt + FOCUS_MOVE_GRACE and self._lastWindowEventAt < self._mayMoveAt)
+		latest = self._moves[1]
+		return not (now < latest + FOCUS_MOVE_GRACE and self._lastWindowEventAt < latest)
 
 	def noteFocusMayMove(self, now: float) -> None:
 		"""A chord that may move the focus, as Alt+Tab, was passed to the compositor at now."""
-		self._mayMoveAt = now
+		first, latest = self._moves
+		self._moves = (first if now - latest <= FOCUS_MOVE_GRACE else now, now)
 
 	def requestLook(self, number: int, now: float, done: LookDone) -> float:
 		"""Find out where the focus is as of now, and call done(number, known) from the feed's thread once
@@ -215,9 +238,10 @@ class AtspiCaptureFeed:
 
 		:return: When the look ends at the latest.
 		"""
-		since = None if self.settled(now) else self._mayMoveAt
+		first, latest = self._moves
+		since = None if self.settled(now) else latest
 		deadline = now + LOOK_ROUND_TRIP if since is None else since + FOCUS_MOVE_GRACE
-		self._looks.append(_Look(number, deadline, done, since))
+		self._looks.append(_Look(number, deadline, done, since, None if since is None else first))
 		wake = self._wakeWrite
 		if wake is not None:
 			try:
@@ -272,26 +296,52 @@ class AtspiCaptureFeed:
 		self._mode = mode
 		self._dropAnchor()
 		foreground = self._foreground
-		if mode == "off" or foreground is None:
+		if mode == "off":
 			return
-		process = self._processes.get(foreground[0])
-		if process is None:
+		# NVDA's own focus can follow a switch sooner than the feed hears of it, and then names the
+		# document of a window that is not yet the foreground, whose keys do not go to the window the
+		# feed still has: the anchor waits for a window of the process NVDA names.
+		self._awaiting = bool(self._processID)
+		if foreground is None:
+			return
+		if foreground[0] not in self._processes:
 			# Asked here from NVDA's thread, and answered on the feed's, where the bus calls back.
 			busName = foreground[0]
 			self._onFeedThread(lambda: self._askProcess(busName))
 			return
+		if self._awaiting:
+			self._takeAwaited()
+			return
+		process = self._processes[foreground[0]]
 		if process == self._ownProcess:
 			# NVDA's own window has the keyboard only until NVDA's focus follows.
 			return
-		self._anchor = foreground
+		self._anchorForeground(process)
+
+	def _takeAwaited(self) -> None:
+		"""Anchor the foreground once it is a window of the process whose document NVDA named while no
+		window of it had the keyboard. Under the lock."""
+		foreground = self._foreground
+		if not self._awaiting or foreground is None:
+			return
+		process = self._processes.get(foreground[0])
+		if process is None or process != self._processID or process == self._ownProcess:
+			return
+		self._awaiting = False
+		self._anchorForeground(process)
+
+	def _anchorForeground(self, process: int) -> None:
+		self._anchor = self._foreground
 		self._anchorProcess = process
 		self._focused = True
+		self._dormant = None
 
 	def _dropAnchor(self) -> None:
 		self._anchor = None
 		self._anchorProcess = None
 		self._focused = False
 		self._dormant = None
+		self._awaiting = False
 
 	def _focusCapture(self, focused: bool, now: float) -> None:
 		"""Follow the keyboard leaving or reaching the anchor, as the X source follows it leaving or
@@ -342,6 +392,7 @@ class AtspiCaptureFeed:
 	# The foreground, on the feed's thread.
 
 	def _followFocus(self, now: float) -> None:
+		self._takeAwaited()
 		focused = self._anchor is not None and self._foreground == self._anchor
 		if focused != self._focused:
 			self._focusCapture(focused, now)
@@ -427,6 +478,9 @@ class AtspiCaptureFeed:
 				if len(self._processes) >= MAX_KNOWN:
 					self._processes.clear()
 				self._processes[busName] = process
+				if self._foreground is not None and self._foreground[0] == busName:
+					self._takeAwaited()
+					self._publish()
 
 	def _askProcess(self, busName: str) -> None:
 		if busName in self._askingProcess:
@@ -627,7 +681,10 @@ class AtspiCaptureFeed:
 			if known and quiet:
 				ended.append((look, True))
 			elif now >= look.deadline:
-				ended.append((look, False))
+				# A compositor that switches as Tab goes down has sent its window events before Alt's
+				# release: the move was heard, and nothing more has come for the whole grace.
+				heard = look.since is not None and self._lastWindowEventAt >= look.chord and quiet
+				ended.append((look, heard))
 		for look, known in ended:
 			self._openLooks.remove(look)
 			try:

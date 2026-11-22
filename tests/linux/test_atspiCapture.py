@@ -397,6 +397,162 @@ def test_lookEndsKnownAtTheWindowEvent(tmp_path: Path) -> None:
 	)
 
 
+def test_aSwitchHeardBeforeAltIsLetGoEndsKnown(tmp_path: Path) -> None:
+	"""sway switches as Tab goes down, so the window events come between the chord's two notes, Tab's
+	and Alt's release, and none after the second: the look ends known at the grace, not unknown."""
+	runLogic(
+		tmp_path,
+		"""\
+		feed = anchoredOnFirst(t)
+		feed._onWindowEvent(FIRST, False, t + 1)
+		feed._onWindowEvent(OTHER, True, t + 1.01)
+		feed.noteFocusMayMove(t + 2)
+		feed._onWindowEvent(OTHER, False, t + 2.005)
+		feed._onWindowEvent(FIRST, True, t + 2.007)
+		feed.noteFocusMayMove(t + 2.06)
+		assert not feed.settled(t + 2.16)
+		deadline = feed.requestLook(1, t + 2.16, feed.done)
+		assert deadline == t + 2.06 + FOCUS_MOVE_GRACE, deadline
+		feed._takeLooks(t + 2.16)
+		feed._serviceLooks(deadline - 0.001)
+		assert feed.ended == [], "ended before the grace, with no window event after Alt's release"
+		feed._serviceLooks(deadline)
+		assert feed.ended == [(1, True)], feed.ended
+		assert feed.captureState.focused
+		assert feed.settled(deadline)
+
+		# A note more than the grace after the one before is a chord of its own, whose move nothing said.
+		feed.noteFocusMayMove(t + 3)
+		feed._onWindowEvent(FIRST, False, t + 3.005)
+		feed._onWindowEvent(OTHER, True, t + 3.007)
+		feed.noteFocusMayMove(t + 3.4)
+		deadline = feed.requestLook(2, t + 3.45, feed.done)
+		feed._takeLooks(t + 3.45)
+		feed._serviceLooks(deadline)
+		assert feed.ended[-1] == (2, False), feed.ended
+
+		# A read in flight that may move the foreground leaves the look unknown at the grace.
+		feed.noteFocusMayMove(t + 4)
+		feed._onWindowEvent(OTHER, False, t + 4.005)
+		feed._onWindowEvent(FIRST, True, t + 4.007)
+		feed.noteFocusMayMove(t + 4.06)
+		feed._onStateChanged(FIRST, "showing", 0, t + 4.01)
+		deadline = feed.requestLook(3, t + 4.1, feed.done)
+		feed._takeLooks(t + 4.1)
+		feed._serviceLooks(deadline)
+		assert feed.ended[-1] == (3, False), feed.ended
+		feed.answer("state", FIRST, states(STATE_ACTIVE, STATE_SHOWING, STATE_VISIBLE))
+
+		# A compositor that switches at Alt's release still has its events waited for.
+		feed.noteFocusMayMove(t + 5)
+		feed.noteFocusMayMove(t + 5.06)
+		deadline = feed.requestLook(4, t + 5.08, feed.done)
+		feed._takeLooks(t + 5.08)
+		feed._onWindowEvent(FIRST, False, t + 5.2)
+		feed._onWindowEvent(OTHER, True, t + 5.21)
+		feed._serviceLooks(t + 5.21 + QUIET)
+		assert feed.ended[-1] == (4, True), feed.ended
+		assert not feed.captureState.focused
+		""",
+	)
+
+
+def test_anchorWaitsForTheWindowOfTheProcessNVDANames(tmp_path: Path) -> None:
+	"""NVDA's own focus follows Alt+Tab sooner than the feed hears of it, and names the document of a
+	window that is not yet the feed's foreground: the foreground it still has is not anchored, and the
+	first window of the process NVDA named to be the foreground is."""
+	runLogic(
+		tmp_path,
+		"""\
+		feed = anchoredOnFirst(t)
+		# Off comes as the keyboard goes to the other program, before the feed hears of the switch.
+		feed.setCapture("off")
+		feed._onWindowEvent(FIRST, False, t + 1.2)
+		feed._onWindowEvent(OTHER, True, t + 1.21)
+		# Back to the document, NVDA there first.
+		feed.setCapture("browse", 100)
+		s = feed.captureState
+		assert (s.window, s.windowProcess, s.focused, s.mode, s.processID) == (0, None, False, "browse", 100), s
+		feed.setCapture("browse", 100)
+		assert feed.captureState.window == 0, feed.captureState
+		feed._onWindowEvent(OTHER, False, t + 1.4)
+		feed._onWindowEvent(FIRST, True, t + 1.41)
+		s = feed.captureState
+		assert s.window and s.windowProcess == 100 and s.focused and s.mode == "browse", s
+		assert (s.dormant, s.documentUntil) == (None, None), s
+
+		# Off before the window comes leaves nothing waiting for it.
+		feed = feedWithProcesses()
+		feed._onWindowEvent(OTHER, True, t)
+		feed.setCapture("browse", 100)
+		feed.setCapture("off")
+		feed._onWindowEvent(OTHER, False, t + 0.1)
+		feed._onWindowEvent(FIRST, True, t + 0.11)
+		assert feed.captureState.window == 0, feed.captureState
+
+		# NVDA's own window in front.
+		feed = feedWithProcesses()
+		feed._onWindowEvent(OWN, True, t)
+		feed.setCapture("browse", 100)
+		assert feed.captureState.window == 0
+		feed._onWindowEvent(OWN, False, t + 0.1)
+		feed._onWindowEvent(FIRST, True, t + 0.11)
+		s = feed.captureState
+		assert s.window and s.windowProcess == 100 and s.focused, s
+
+		# A foreground whose process comes to be known as NVDA's document's is anchored then.
+		feed = Feed()
+		feed._onWindowEvent(OTHER, True, t)
+		feed.setCapture("browse", 200)
+		assert feed.captureState.window == 0
+		feed.answer("process", ":1.20", 200)
+		s = feed.captureState
+		assert s.window and s.windowProcess == 200 and s.focused, s
+		feed = Feed()
+		feed._onWindowEvent(OTHER, True, t)
+		feed.setCapture("browse", 100)
+		feed.answer("process", ":1.20", 200)
+		assert feed.captureState.window == 0, feed.captureState
+
+		# With no process named, the foreground is anchored as it stands.
+		feed = feedWithProcesses()
+		feed._onWindowEvent(OTHER, True, t)
+		feed.setCapture("browse")
+		s = feed.captureState
+		assert s.window and s.windowProcess == 200 and s.focused, s
+		""",
+	)
+
+
+def test_environmentSettledForwardsToTheFeed(tmp_path: Path) -> None:
+	"""WaylandEnvironment.settled(now), which the kernel source asks, is the capture feed's answer."""
+	runLogic(
+		tmp_path,
+		"""\
+		from linuxPlatform.keys import waylandEnvironment
+
+
+		class Asked(Feed):
+			def __init__(self):
+				super().__init__()
+				self.asked = []
+
+			def settled(self, now):
+				self.asked.append(now)
+				return super().settled(now)
+
+
+		feed = Asked()
+		environment = waylandEnvironment.WaylandEnvironment(None, captureFeed=feed)
+		assert environment.settled(t + 1) is True
+		environment.noteFocusMayMove(t + 2)
+		assert environment.settled(t + 2.1) is False
+		assert environment.settled(t + 2 + FOCUS_MOVE_GRACE) is True
+		assert feed.asked == [t + 1, t + 2.1, t + 2 + FOCUS_MOVE_GRACE], feed.asked
+		""",
+	)
+
+
 def test_settledLookTakesOneRoundTrip(tmp_path: Path) -> None:
 	runLogic(
 		tmp_path,
