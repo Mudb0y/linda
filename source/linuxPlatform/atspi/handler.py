@@ -188,9 +188,11 @@ _applicationNames: dict[str, str] = {}
 #: switcher, a popup that lives about 60 ms, names the window or workspace a key chose in one.
 _STATUS_BAR_POPUP_APPLICATIONS = frozenset({"marco"})
 #: Applications whose top-level says it is active while Alt+Tab is held, before the window chosen
-#: does: marco's switcher, GNOME Shell's stage, which holds its switcher, and KWin's switcher, by the
-#: names they give the accessibility bus.
-_SWITCHER_APPLICATIONS = frozenset({"marco", "gnome-shell", "kwin"})
+#: does: marco's switcher, by the name it gives the accessibility bus.
+_SWITCHER_APPLICATIONS = frozenset({"marco"})
+#: The same in a Wayland session only, GNOME Shell's stage, which holds its switcher, and KWin's
+#: switcher: in an X session running either, their active window is the foreground as it always was.
+_WAYLAND_SWITCHER_APPLICATIONS = frozenset({"gnome-shell", "kwin"})
 #: Of those, the ones whose switcher marks the item chosen selected and never gives it the focus.
 _SELECTING_SWITCHERS = frozenset({"gnome-shell"})
 
@@ -338,7 +340,8 @@ def _anyApplicationBusy() -> bool:
 def _isSwitcher(window: Node) -> bool:
 	"""Whether window is a switcher's, which says it is active while Alt is held, as marco's does though it
 	never has the keyboard: a switch is under way, and the window it ends in will say so."""
-	return _applicationName(window.busName) in _SWITCHER_APPLICATIONS
+	name = _applicationName(window.busName)
+	return name in _SWITCHER_APPLICATIONS or (_waylandRules and name in _WAYLAND_SWITCHER_APPLICATIONS)
 
 
 def _setForeground(window: Node | None, active: bool = True) -> None:
