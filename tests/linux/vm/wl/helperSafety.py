@@ -538,6 +538,10 @@ def locks(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", figu
 		assert told, seen["newHelper"]
 		waitForLights(ground, told[-1], "every keyboard lit with what the client was told")
 		assert seen["newHelper"]["locks"] & CAPS, seen["newHelper"]
+		# Were the user's Num Lock lost across the restart, the desktop, the client and the lights would
+		# all agree on Caps Lock alone, and the check above would pass.
+		with faultOn(ground, NUM_DROPPED):
+			assert seen["newHelper"]["locks"] == NUM | CAPS, seen["newHelper"]
 		with faultOn(ground, LIGHTS_GONE):
 			assert told[-1] == seen["newHelper"]["locks"], seen["newHelper"]
 
@@ -564,6 +568,8 @@ def locks(ground: "Ground", keyboard: "FakeKeyboard", client: "KeydClient", figu
 		keyboard.tap("KEY_CAPSLOCK")
 		ground.waitFor(lambda: not lights(ground, UHID) & CAPS, "Caps Lock's light off again")
 		assert letterA(ground, keyboard) == ["a"]
+		with faultOn(ground, NUM_DROPPED):
+			assert again["on"]["locks"] == NUM | CAPS, again
 
 
 # Keyboards that come and go, as keydHotplug proves them.
