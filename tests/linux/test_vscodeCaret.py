@@ -16,7 +16,6 @@ import time
 from collections.abc import Iterator
 
 import chromiumSession
-import desktopSession
 import pytest
 import webSession
 from desktopSession import DesktopSession
@@ -42,7 +41,9 @@ SETTINGS = {
 	"extensions.autoCheckUpdates": False,
 }
 
-pytestmark = pytest.mark.needsVariable("LINDA_VSCODIUM")
+# Under a compositor the rig holds every key down and up for a while, so it cannot press at a held
+# key's rate, let alone faster.
+pytestmark = [pytest.mark.needsVariable("LINDA_VSCODIUM"), pytest.mark.rigSession("x11")]
 
 
 @pytest.fixture(scope="module")
@@ -97,10 +98,7 @@ def pressRepeatedly(session: Session, key: str, delay: int) -> list[str]:
 	character the caret stops on was, or STEP_BOUND later, without the empty records the end of each
 	character's utterance leaves."""
 	mark = session.desktop.mark()
-	if desktopSession.compositor() is None:
-		subprocess.run(["xdotool", "key", "--delay", str(delay), *[key] * len(LINE)], check=True)
-	else:
-		session.desktop.press(*[key] * len(LINE), gap=delay / 1000)
+	subprocess.run(["xdotool", "key", "--delay", str(delay), *[key] * len(LINE)], check=True)
 	last = LINE_END if key == "Right" else LINE[0]
 	deadline = time.monotonic() + STEP_BOUND
 	while last not in session.desktop.spokenSince(mark) and time.monotonic() < deadline:
