@@ -585,6 +585,8 @@ def leftAlone():
 	keyboard._startWaiting = False
 	if LEFT_ALONE_FIRST:
 		keyboard._sendDevice(DEVICE_IGNORED, device=2)
+		# Well inside the settling, so that without it the route would hear of no keyboard held.
+		time.sleep(0.1)
 		StandIn._capture(keyboard)
 	else:
 		keyboard._sendDevice(DEVICE_IGNORED)
