@@ -6,11 +6,16 @@
  * Run inside the rig only, with java launching this source file, the wrapper's jar on the class path,
  * its library on java.library.path and javax.accessibility.assistive_technologies naming it. Its
  * argument "heavyweight" puts every popup in a window of its own, as menus too big for the window
- * are. It prints "ready" once it is shown and quits when its standard input closes.
+ * are, and a further "popupItems" gives the Recent submenu's items its popup menu as their parent,
+ * as a JetBrains IDE's submenus have it. It prints "ready" once it is shown and quits when its standard input closes.
  */
 
+import java.awt.Component;
 import java.awt.event.KeyEvent;
 import java.io.IOException;
+import java.util.Arrays;
+import javax.accessibility.Accessible;
+import javax.accessibility.AccessibleContext;
 import javax.swing.AbstractAction;
 import javax.swing.JButton;
 import javax.swing.JComponent;
@@ -24,10 +29,13 @@ import javax.swing.KeyStroke;
 import javax.swing.SwingUtilities;
 
 public class JavaMenus {
+	static boolean popupItems;
+
 	public static void main(String[] args) {
 		if (args.length > 0 && args[0].equals("heavyweight")) {
 			JPopupMenu.setDefaultLightWeightPopupEnabled(false);
 		}
+		popupItems = Arrays.asList(args).contains("popupItems");
 		SwingUtilities.invokeLater(JavaMenus::show);
 		Thread quit = new Thread(() -> {
 			try {
@@ -49,11 +57,40 @@ public class JavaMenus {
 		return menu;
 	}
 
+	/**
+	 * A submenu whose items give its popup menu as their accessible parent, as a JetBrains IDE's
+	 * submenus do: Swing's own menus make themselves their items' parent as they are asked for them.
+	 */
+	static JMenu popupItemsMenu(String name, String... items) {
+		JMenu menu = new JMenu(name) {
+			@Override
+			public AccessibleContext getAccessibleContext() {
+				if (accessibleContext == null) {
+					accessibleContext = new AccessibleJMenu() {
+						@Override
+						public Accessible getAccessibleChild(int index) {
+							Component child = getPopupMenu().getComponent(index);
+							return child instanceof Accessible ? (Accessible) child : null;
+						}
+					};
+				}
+				return accessibleContext;
+			}
+		};
+		for (String item : items) {
+			menu.add(new JMenuItem(item));
+		}
+		return menu;
+	}
+
 	static void show() {
 		JFrame frame = new JFrame("Java menus");
 		frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
 		JMenuBar bar = new JMenuBar();
-		bar.add(menu("File", "New", "Open", menu("Recent", "First project", "Second project"), "Quit"));
+		JMenu recent = popupItems
+			? popupItemsMenu("Recent", "First project", "Second project")
+			: menu("Recent", "First project", "Second project");
+		bar.add(menu("File", "New", "Open", recent, "Quit"));
 		bar.add(menu("Edit", "Cut", "Copy"));
 		frame.setJMenuBar(bar);
 

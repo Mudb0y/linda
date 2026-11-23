@@ -123,6 +123,25 @@ def test_menuBar(desktop: DesktopSession, popups: str):
 
 
 @pytest.mark.parametrize("popups", ["lightweight", "heavyweight"])
+def test_submenuOfPopupItems(desktop: DesktopSession, popups: str):
+	"""A submenu whose items give its popup menu as their parent, as New in a JetBrains IDE's File menu
+	does (issue 13): Left closes it and says the submenu again, after the window when the items were in
+	a window of their own, and Escape, which closes every menu, says nothing of the submenu."""
+	_start(desktop, popups, "popupItems")
+	_step(desktop, "F10", "File checked sub Menu 1 of 2")
+	_step(desktop, "Down", "New 1 of 4")
+	_step(desktop, "Down", "Open 2 of 4")
+	_step(desktop, "Down", "Recent checked sub Menu 3 of 4")
+	_step(desktop, "Right", "First project 1 of 2")
+	_step(desktop, "Down", "Second project 2 of 2")
+	window = (TITLE,) if popups == "heavyweight" else ()
+	_step(desktop, "Left", *window, "Recent checked sub Menu 3 of 4")
+	_step(desktop, "Right", "First project 1 of 2")
+	_step(desktop, "Escape", "Press me button")
+	_closeClean(desktop)
+
+
+@pytest.mark.parametrize("popups", ["lightweight", "heavyweight"])
 def test_popupMenu(desktop: DesktopSession, popups: str):
 	"""Shift+F10 opens the button's popup menu, which Swing opens with no item highlighted, and says
 	nothing of the root pane the keyboard focus goes to; the arrows go through its items."""
