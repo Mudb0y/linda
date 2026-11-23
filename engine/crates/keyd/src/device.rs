@@ -67,7 +67,8 @@ pub trait Devices {
 
 pub trait Keyboard {
     fn fd(&self) -> BorrowedFd<'_>;
-    /// Appends every event waiting to `out`, without blocking.
+    /// Appends every event waiting to `out`, without blocking, with ABS_VOLUME already in the
+    /// virtual keyboard's range (see [`crate::keys::rescale_volume`]).
     fn read(&mut self, out: &mut Vec<InputEvent>) -> Result<(), ReadError>;
     /// The keys down now, as the kernel holds them.
     fn keys_down(&self) -> io::Result<KeySet>;
@@ -88,6 +89,9 @@ pub trait VirtualKeyboard {
     fn appeared(&mut self) -> io::Result<bool>;
     /// Puts out one key event and the report that ends it.
     fn emit(&mut self, code: u16, value: i32) -> io::Result<()>;
+    /// Puts out a frame of events, consumer controls, and the one report that ends it, so that
+    /// what a keyboard reported together comes out together.
+    fn emit_frame(&mut self, events: &[InputEvent]) -> io::Result<()>;
     /// Reads what the desktop sent the device; the lock lights after it, when it set any. The echo of
     /// the helper's own write, by set_own_leds, is none of the desktop's.
     fn read_leds(&mut self) -> io::Result<Option<u16>>;

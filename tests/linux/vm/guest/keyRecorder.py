@@ -16,8 +16,9 @@ Every record has "t", the time of the event on the guest's CLOCK_MONOTONIC in se
 it is "received": the X server stamps its events in whole milliseconds of a clock that lags this one
 by as much as two, which is kept as "serverTime". A key record has "code" and "key", the evdev code and its name (X key
 codes less 8), "value" (1 press, 0 release, 2 the kernel's repeat) and "device", the device's name.
-A device record says a device was found ("added") or went ("removed"). A first record of kind
-"ready" says the recorder is listening.
+A device record says a device was found ("added") or went ("removed"). An axis record, of evdev
+alone, is a relative or absolute axis of a keyboard node, with "type" ("rel" or "abs"), "code",
+"value" and "device". A first record of kind "ready" says the recorder is listening.
 
 The test window records what reaches the application in the same form (testWindow.py).
 """
@@ -113,6 +114,16 @@ def recordEvdev(out: Output) -> None:
 						device=device.name,
 						code=event.code,
 						key=keyName(event.code),
+						value=event.value,
+					)
+				elif event.type in (ecodes.EV_REL, ecodes.EV_ABS):
+					out(
+						"axis",
+						t=event.timestamp(),
+						node=device.path,
+						device=device.name,
+						type="rel" if event.type == ecodes.EV_REL else "abs",
+						code=event.code,
 						value=event.value,
 					)
 

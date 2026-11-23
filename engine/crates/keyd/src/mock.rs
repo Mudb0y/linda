@@ -13,7 +13,8 @@ use crate::device::{
     Devices, Found, GrabError, Guard, InputEvent, Keyboard, Lights, ReadError, VirtualKeyboard,
 };
 use crate::keys::{
-    self, Assessment, Description, EV_KEY, EV_SYN, KeySet, LEDS, SYN_DROPPED, SYN_REPORT,
+    self, ABS_VOLUME, Assessment, Description, EV_ABS, EV_KEY, EV_SYN, KeySet, LEDS, SYN_DROPPED,
+    SYN_REPORT, rescale_volume,
 };
 
 struct Wake {
@@ -55,6 +56,8 @@ struct Dev {
     /// Letting go fails, as when the call is interrupted.
     ungrab_fails: bool,
     grabs: usize,
+    /// The range of its ABS_VOLUME, when it has one.
+    volume: Option<(i32, i32)>,
     wake: Arc<Wake>,
 }
 
@@ -63,8 +66,10 @@ struct Virt {
     exists: bool,
     made: usize,
     /// Every key event the virtual keyboard put out, the kernel's own releases at its destruction
-    /// included.
+    /// included, the buttons of frames among them.
     emitted: Vec<(u16, i32)>,
+    /// Every frame of consumer controls it put out.
+    frames: Vec<Vec<InputEvent>>,
     down: KeySet,
     /// Destroyed by the guard, from outside the loop, which still has it: it takes no more keys.
     destroyed: bool,
@@ -142,6 +147,8 @@ impl World {
         let mut s = self.lock();
         let n = s.next_number;
         s.next_number += 1;
+        // The range hid-input gives a 16-bit consumer control array of usages 0 to 0xFFF.
+        let volume = (description.abs & 1 << ABS_VOLUME != 0).then_some((0, 4095));
         s.devices.insert(
             n,
             Dev {
@@ -156,6 +163,7 @@ impl World {
                 down_at_grab: None,
                 ungrab_fails: false,
                 grabs: 0,
+                volume,
                 wake: Arc::new(Wake::new()),
             },
         );
@@ -201,6 +209,36 @@ impl World {
 
     pub fn repeat(&self, n: u32, code: u16) {
         self.input(n, code, 2);
+    }
+
+    /// One report of the device: the events, as (type, code, value), and the report that ends
+    /// them. ABS_VOLUME is in the device's own range.
+    pub fn report(&self, n: u32, events: &[(u16, u16, i32)]) {
+        let mut s = self.lock();
+        let d = s.devices.get_mut(&n).expect("a plugged device");
+        for &(kind, code, value) in events {
+            match (kind, value) {
+                (EV_KEY, 1) => d.down.insert(code),
+                (EV_KEY, 0) => d.down.remove(code),
+                _ => {}
+            }
+            if d.open > 0 && !d.gone {
+                d.queue.push_back(InputEvent { kind, code, value });
+            }
+        }
+        if d.open > 0 && !d.gone {
+            d.queue.push_back(InputEvent {
+                kind: EV_SYN,
+                code: SYN_REPORT,
+                value: 0,
+            });
+            d.wake.poke();
+        }
+    }
+
+    /// The range of the device's ABS_VOLUME, as the kernel has it.
+    pub fn set_volume_range(&self, n: u32, min: i32, max: i32) {
+        self.lock().devices.get_mut(&n).unwrap().volume = Some((min, max));
     }
 
     /// The kernel's buffer overflowed: what was in it is lost, and the key changes made meanwhile
@@ -323,6 +361,16 @@ impl World {
 
     pub fn emitted(&self) -> Vec<(u16, i32)> {
         self.lock().virt.emitted.clone()
+    }
+
+    /// The frames of consumer controls the virtual keyboard put out, as (type, code, value).
+    pub fn frames(&self) -> Vec<Vec<(u16, u16, i32)>> {
+        self.lock()
+            .virt
+            .frames
+            .iter()
+            .map(|f| f.iter().map(|e| (e.kind, e.code, e.value)).collect())
+            .collect()
     }
 
     /// Keys held down on the virtual keyboard.
@@ -459,7 +507,13 @@ impl Keyboard for MockKeyboard {
         if d.gone {
             return Err(ReadError::Gone);
         }
-        out.extend(d.queue.drain(..));
+        let (min, max) = d.volume.unwrap_or((0, 0));
+        out.extend(d.queue.drain(..).map(|mut e| {
+            if e.kind == EV_ABS && e.code == ABS_VOLUME {
+                e.value = rescale_volume(e.value, min, max);
+            }
+            e
+        }));
         Ok(())
     }
 
@@ -551,6 +605,23 @@ impl VirtualKeyboard for MockVirtual {
             0 => s.virt.down.remove(code),
             _ => {}
         }
+        Ok(())
+    }
+
+    fn emit_frame(&mut self, events: &[InputEvent]) -> io::Result<()> {
+        let mut s = self.world.lock();
+        if s.fail_emit || s.virt.destroyed {
+            return Err(io::Error::from_raw_os_error(libc::ENODEV));
+        }
+        for e in events.iter().filter(|e| e.kind == EV_KEY) {
+            s.virt.emitted.push((e.code, e.value));
+            match e.value {
+                1 => s.virt.down.insert(e.code),
+                0 => s.virt.down.remove(e.code),
+                _ => {}
+            }
+        }
+        s.virt.frames.push(events.to_vec());
         Ok(())
     }
 

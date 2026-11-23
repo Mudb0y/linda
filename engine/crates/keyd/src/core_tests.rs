@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use super::*;
-use crate::keys::tests::{description, keyboard};
+use crate::keys::tests::{consumer_keyboard, description, keyboard};
 use crate::keys::*;
 use crate::mock::{MockDevices, World};
 
@@ -2309,6 +2309,7 @@ fn keyboards_that_come_later_are_taken_and_other_devices_are_not() {
     let usb = t.w.plug("USB keyboard");
     let mut touchpad_desc = keyboard("Logitech K400");
     touchpad_desc.types |= 1 << EV_REL;
+    touchpad_desc.rel = 1 << REL_X | 1 << REL_Y;
     let touchpad = t.w.plug_device(touchpad_desc);
     let power = t.w.plug_device(description(
         "Power Button",
@@ -5732,4 +5733,312 @@ fn a_client_not_asking_for_the_probe_has_the_lights_as_before() {
     assert!(t.w.grabbed(k));
     assert!(T::virtual_word(&sent).0.is_empty(), "{sent:?}");
     assert_eq!(t.w.leds(k), LOCK_NUM);
+}
+
+// Consumer controls: the horizontal wheel, volume and BTN_0 of a keyboard's consumer control
+// collection.
+
+/// One turn of the horizontal wheel, as hid-input reports it: both axes in one report.
+const PAN: [(u16, u16, i32); 2] = [(EV_REL, REL_HWHEEL, 1), (EV_REL, REL_HWHEEL_HI_RES, 120)];
+const BUTTON_DOWN: [(u16, u16, i32); 1] = [(EV_KEY, BTN_0, 1)];
+const BUTTON_UP: [(u16, u16, i32); 1] = [(EV_KEY, BTN_0, 0)];
+
+impl T {
+    /// As capturing, with a keyboard that has consumer controls.
+    fn capturing_consumer() -> (T, u32) {
+        let mut t = T::new();
+        let k = t.w.plug_device(consumer_keyboard("Keychron Q6 Ultra 8K"));
+        t.admit(CLIENT);
+        t.send(FromClient::Start);
+        t.pass(VIRTUAL_SETTLE);
+        assert!(t.w.grabbed(k), "{:?}", t.sent());
+        t.out.clear();
+        (t, k)
+    }
+
+    fn report(&mut self, k: u32, events: &[(u16, u16, i32)]) {
+        self.w.report(k, events);
+        self.core.keyboard_ready(k, self.now);
+        self.take();
+    }
+}
+
+#[test]
+fn consumer_controls_of_a_keyboard_taken_go_out_a_report_at_a_time_and_are_never_told() {
+    let (mut t, k) = T::capturing_consumer();
+    t.report(k, &PAN);
+    // The scan code a key's report carries goes nowhere, as ever.
+    t.report(k, &[(EV_MSC, 4, 0xc0238), PAN[0], PAN[1]]);
+    t.report(k, &[(EV_ABS, ABS_VOLUME, 4095)]);
+    t.report(k, &BUTTON_DOWN);
+    assert_eq!(t.w.virtual_down(), [BTN_0].into_iter().collect());
+    assert!(t.core.holding());
+    // Its repeats go nowhere, the virtual keyboard repeating by itself.
+    t.report(k, &[(EV_KEY, BTN_0, 2)]);
+    t.report(k, &BUTTON_UP);
+    assert_eq!(
+        t.w.frames(),
+        vec![
+            PAN.to_vec(),
+            PAN.to_vec(),
+            vec![(EV_ABS, ABS_VOLUME, VOLUME_MAX)],
+            BUTTON_DOWN.to_vec(),
+            BUTTON_UP.to_vec(),
+        ]
+    );
+    assert_eq!(t.w.emitted(), vec![(BTN_0, 1), (BTN_0, 0)]);
+    assert!(t.sent().is_empty(), "the client was told");
+    // Volume from the keyboard's own range.
+    t.w.set_volume_range(k, -100, 100);
+    t.report(k, &[(EV_ABS, ABS_VOLUME, 0)]);
+    assert_eq!(
+        t.w.frames().last(),
+        Some(&vec![(EV_ABS, ABS_VOLUME, 32768)])
+    );
+    t.send(FromClient::Stop);
+    t.assert_let_go();
+}
+
+#[test]
+fn consumer_controls_read_after_a_press_wait_for_its_verdict_in_order() {
+    let (mut t, k) = T::capturing_consumer();
+    t.press(k, KEY_A);
+    let a = t.last_seq();
+    t.report(k, &PAN);
+    t.report(k, &BUTTON_DOWN);
+    // A key and the wheel in one report: the report goes out whole, after the key.
+    t.report(k, &[PAN[0], (EV_KEY, KEY_T, 1), PAN[1]]);
+    let tee = t.last_seq();
+    assert!(t.w.frames().is_empty() && t.w.emitted().is_empty());
+    t.verdict(a, false);
+    assert_eq!(t.w.frames(), vec![PAN.to_vec(), BUTTON_DOWN.to_vec()]);
+    assert_eq!(t.w.emitted(), vec![(KEY_A, 1), (BTN_0, 1)]);
+    // Kept, T goes nowhere, and what came with it goes out all the same.
+    t.verdict(tee, true);
+    assert_eq!(t.w.frames().len(), 3);
+    assert_eq!(t.w.frames()[2], PAN.to_vec());
+    // A button's release behind a press waiting goes at once, as a key's does, the button
+    // repeating on the virtual keyboard meanwhile.
+    t.press(k, KEY_LEFTSHIFT);
+    let shift = t.last_seq();
+    t.report(k, &BUTTON_UP);
+    assert!(!t.w.virtual_down().contains(BTN_0));
+    assert_eq!(t.w.frames().last(), Some(&BUTTON_UP.to_vec()));
+    t.verdict(shift, false);
+    assert!(t.sent().iter().all(|m| match m {
+        ToClient::Key(key) => key.code != BTN_0,
+        _ => true,
+    }));
+    t.release(k, KEY_A);
+    t.release(k, KEY_T);
+    t.release(k, KEY_LEFTSHIFT);
+    t.send(FromClient::Stop);
+    t.assert_let_go();
+}
+
+#[test]
+fn a_button_held_on_two_keyboards_stays_down_until_both_let_it_go() {
+    let (mut t, k) = T::capturing_consumer();
+    let k2 = t.w.plug_device(consumer_keyboard("second keyboard"));
+    t.core.watch_ready(t.now);
+    t.take();
+    assert!(t.w.grabbed(k2));
+    t.report(k, &BUTTON_DOWN);
+    t.report(k2, &BUTTON_DOWN);
+    t.report(k, &BUTTON_UP);
+    assert!(t.w.virtual_down().contains(BTN_0));
+    t.report(k2, &BUTTON_UP);
+    assert!(t.w.virtual_down().is_empty());
+    assert_eq!(t.w.emitted(), vec![(BTN_0, 1), (BTN_0, 0)]);
+}
+
+/// What ends a button held on a keyboard.
+type Ending = (&'static str, fn(&mut T, u32));
+
+/// Each way of letting go, or of losing the keyboard, with BTN_0 held: it is released on the
+/// virtual keyboard, and the client is told nothing of it.
+#[test]
+fn a_button_held_is_released_whatever_ends_it() {
+    let cases: [Ending; 5] = [
+        ("the client goes", |t, _| {
+            t.core.disconnected(CLIENT, t.now);
+            t.take();
+        }),
+        ("the emergency chord", |t, k| {
+            for c in CHORD.map(|keys| keys[0]) {
+                t.press(k, c);
+            }
+            assert!(t.sent().contains(&released(Released::Emergency)));
+        }),
+        ("STOP", |t, _| t.send(FromClient::Stop)),
+        ("the keyboard vanishes", |t, k| {
+            t.w.unplug(k);
+            t.core.keyboard_ready(k, t.now);
+            t.take();
+            assert_eq!(status(&t.sent(), k), vec![DeviceStatus::Gone]);
+        }),
+        ("events are lost with its release", |t, k| {
+            t.w.overflow(k, &[BTN_0]);
+            t.core.keyboard_ready(k, t.now);
+            t.take();
+            assert!(t.w.grabbed(k));
+        }),
+    ];
+    for (why, end) in cases {
+        let (mut t, k) = T::capturing_consumer();
+        t.report(k, &BUTTON_DOWN);
+        assert!(t.w.virtual_down().contains(BTN_0), "{why}");
+        end(&mut t, k);
+        assert!(t.w.virtual_down().is_empty(), "{why}");
+        assert_eq!(t.w.emitted(), vec![(BTN_0, 1), (BTN_0, 0)], "{why}");
+        assert!(!t.core.holding() || t.w.grabbed(k), "{why}");
+        assert!(
+            t.sent().iter().all(|m| match m {
+                ToClient::Key(key) => key.code != BTN_0,
+                _ => true,
+            }),
+            "{why}"
+        );
+    }
+}
+
+#[test]
+fn a_button_still_held_after_lost_events_stays_down_and_one_pressed_unseen_goes_nowhere() {
+    let (mut t, k) = T::capturing_consumer();
+    t.report(k, &BUTTON_DOWN);
+    t.w.overflow(k, &[]);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    assert!(t.w.virtual_down().contains(BTN_0));
+    t.report(k, &BUTTON_UP);
+    assert!(t.w.virtual_down().is_empty());
+    // Pressed while events were lost: the kernel has it down, the helper put nothing out, and its
+    // release goes nowhere.
+    t.w.overflow(k, &[]);
+    t.w.change_unread(k, BTN_0, true);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    t.report(k, &BUTTON_UP);
+    assert_eq!(t.w.emitted(), vec![(BTN_0, 1), (BTN_0, 0)]);
+    assert!(t.sent().is_empty());
+}
+
+/// Consumer controls are no part of the emergency chord: Backspace and Escape with BTN_0 held
+/// lets go of nothing, and the chord itself still works with BTN_0 among its keys.
+#[test]
+fn a_button_never_completes_the_emergency_chord() {
+    let (mut t, k) = T::capturing_consumer();
+    t.press(k, KEY_BACKSPACE);
+    t.press(k, KEY_ESC);
+    t.report(k, &BUTTON_DOWN);
+    t.report(k, &[(EV_KEY, BTN_0, 2)]);
+    let sent = t.sent();
+    assert!(!sent.contains(&released(Released::Emergency)), "{sent:?}");
+    assert!(t.w.grabbed(k));
+    t.press(k, KEY_ENTER);
+    assert!(t.sent().contains(&released(Released::Emergency)));
+    t.assert_let_go();
+}
+
+#[test]
+fn consumer_controls_read_as_the_helper_lets_go_are_passed_on() {
+    let (mut t, k) = T::capturing_consumer();
+    // Read by the helper only as it lets go.
+    t.w.report(k, &PAN);
+    t.w.report(k, &BUTTON_DOWN);
+    t.send(FromClient::Stop);
+    t.assert_let_go();
+    // The button as a tap, as a key read then is.
+    assert_eq!(
+        t.w.frames(),
+        vec![PAN.to_vec(), BUTTON_DOWN.to_vec(), BUTTON_UP.to_vec()]
+    );
+    assert!(t.sent().iter().all(|m| !matches!(m, ToClient::Key(_))));
+}
+
+/// The protocol has no way to type a button: a TYPE of one breaks it.
+#[test]
+fn a_button_cannot_be_typed() {
+    let mut t = T::new();
+    t.w.plug_device(consumer_keyboard("Keychron Q6 Ultra 8K"));
+    assert_eq!(t.admit_asking(CLIENT, FEATURE_TYPING), FEATURE_TYPING);
+    t.send(FromClient::Start);
+    t.pass(VIRTUAL_SETTLE);
+    t.out.clear();
+    t.send(FromClient::Type {
+        tag: 7,
+        code: BTN_0,
+        press: true,
+        mode: TypeMode::Inject,
+    });
+    assert_eq!(goodbye_reason(&t.sent()), Some(Goodbye::Malformed));
+    assert!(t.w.emitted().is_empty() && t.w.frames().is_empty());
+}
+
+#[test]
+fn a_buttons_release_waits_only_behind_its_own_press() {
+    let (mut t, k) = T::capturing_consumer();
+    t.press(k, KEY_A);
+    let a = t.last_seq();
+    // Pressed and let go behind A: the release waits for its own press.
+    t.report(k, &BUTTON_DOWN);
+    t.report(k, &BUTTON_UP);
+    assert!(t.w.frames().is_empty());
+    t.verdict(a, false);
+    assert_eq!(t.w.frames(), vec![BUTTON_DOWN.to_vec(), BUTTON_UP.to_vec()]);
+    // A release with the wheel in one report keeps its place.
+    t.report(k, &BUTTON_DOWN);
+    t.press(k, KEY_T);
+    let tee = t.last_seq();
+    t.report(k, &[BUTTON_UP[0], PAN[0], PAN[1]]);
+    assert!(t.w.virtual_down().contains(BTN_0));
+    t.verdict(tee, false);
+    assert!(t.w.virtual_down().contains(KEY_T) && !t.w.virtual_down().contains(BTN_0));
+}
+
+/// The chord came in the batch that also had the wheel, read before it with nothing waiting
+/// ahead: the wheel goes out as it would have, and what is behind a press waiting does not.
+#[test]
+fn the_emergency_chord_puts_out_what_had_nothing_waiting_ahead_of_it() {
+    let (mut t, k) = T::capturing_consumer();
+    for c in [KEY_BACKSPACE, KEY_ESC] {
+        t.press(k, c);
+        let seq = t.last_seq();
+        t.verdict(seq, false);
+    }
+    t.w.report(k, &PAN);
+    t.w.press(k, KEY_ENTER);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    assert!(t.sent().contains(&released(Released::Emergency)));
+    assert_eq!(t.w.frames(), vec![PAN.to_vec()]);
+    t.assert_let_go();
+
+    let (mut t, k) = T::capturing_consumer();
+    t.press(k, KEY_BACKSPACE);
+    t.press(k, KEY_ESC);
+    t.w.report(k, &PAN);
+    t.w.press(k, KEY_ENTER);
+    t.core.keyboard_ready(k, t.now);
+    t.take();
+    assert!(t.sent().contains(&released(Released::Emergency)));
+    assert!(t.w.frames().is_empty());
+    t.assert_let_go();
+}
+
+/// Control held through a loss of events, made up and passed, is held back until something goes
+/// out under it: the wheel is such a thing, Control and wheel zooming in a browser.
+#[test]
+fn the_wheel_goes_out_under_a_modifier_held_back() {
+    let (mut t, k) = T::capturing_consumer();
+    t.made_up_and_passed(k, &[KEY_LEFTCTRL]);
+    assert!(t.w.emitted().is_empty());
+    // A button's release alone brings nothing out, as a key's does not.
+    t.report(k, &BUTTON_UP);
+    assert!(t.w.emitted().is_empty());
+    t.report(k, &PAN);
+    assert_eq!(t.w.emitted(), vec![(KEY_LEFTCTRL, 1)]);
+    assert_eq!(t.w.frames(), vec![PAN.to_vec()]);
+    t.release(k, KEY_LEFTCTRL);
+    assert!(t.w.virtual_down().is_empty());
 }
