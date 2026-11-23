@@ -7,9 +7,17 @@ nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_javaMenus
 
 LINDA_JAVA names a JDK's java, which runs the fixture from its source, and LINDA_JAVA_ATK_WRAPPER the
 wrapper's installation, with lib/libatk-wrapper.so and share/java/java-atk-wrapper.jar.
+
+The tests of IntelliJ IDEA itself run when LINDA_INTELLIJ_IDEA names nixpkgs' intellij-idea package, which
+is not free software and so not in the dev shell:
+
+NIXPKGS_ALLOW_UNFREE=1 nix build --impure -o /some/dir/idea nixpkgs#intellij-idea
+LINDA_INTELLIJ_IDEA=/some/dir/idea nix develop . -c tests/linux/rig --bind /some/dir python3 -m pytest ...
 """
 
 import os
+import re
+import subprocess
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -29,7 +37,20 @@ JAVA_START_BOUND = 60.0
 #: Seconds with nothing new spoken after which NVDA is taken to have finished speaking.
 QUIET = 0.8
 
+#: The project the IDE opens, a folder of one text file, and the IDE's window's name with it open.
+IDEA_PROJECT = "demo"
+IDEA_TITLE = "demo - IntelliJ IDEA"
+IDEA_FILE = "notes.txt"
+#: The start of what NVDA says for the editor of IDEA_FILE, as the transcript synth spells it.
+IDEA_EDITOR = "Editor for notes dot txt…"
+#: Seconds IntelliJ IDEA takes to show its window under the rig, about thirty when nothing else runs.
+IDEA_START_BOUND = 240.0
+#: Seconds a fresh IDE takes to index its runtime once its editor is up, during which it answered AT-SPI
+#: about a key in its editor too late for NVDA, which then said nothing of the key.
+IDEA_SETTLE = 40.0
+
 pytestmark = [pytest.mark.needsVariable("LINDA_JAVA"), pytest.mark.needsVariable("LINDA_JAVA_ATK_WRAPPER")]
+needsIdea = pytest.mark.needsVariable("LINDA_INTELLIJ_IDEA")
 
 
 @pytest.fixture
@@ -82,6 +103,73 @@ def _step(desktop: DesktopSession, key: str, *expected: str) -> None:
 		desktop.expect(*expected, since=mark)
 	_waitForQuiet(desktop)
 	assert desktop.spokenSince(mark) == list(expected), desktop.spokenSince(mark)
+
+
+def startIdea(desktop: DesktopSession, directory: Path) -> None:
+	"""Start IntelliJ IDEA with its support for screen readers on, the wrapper loaded, every setting in
+	directory and its first run's tour left out, open IDEA_FILE in it and start NVDA on its editor.
+
+	The IDE's own runtime has no wrapper; the jar goes on its boot class path, which finds its library on
+	the boot library path."""
+	package = Path(os.environ["LINDA_INTELLIJ_IDEA"])
+	wrapper = Path(os.environ["LINDA_JAVA_ATK_WRAPPER"])
+	home = package / "intellij-idea"
+	settings = directory / "settings"
+	names = ("config", "system", "plugins", "log")
+	for name in names:
+		(settings / name).mkdir(parents=True)
+	properties = settings / "idea.properties"
+	properties.write_text(
+		"".join(f"idea.{name}.path={settings / name}\n" for name in names)
+		+ "ide.support.screenreaders.enabled=true\n"
+	)
+	options = settings / "idea.vmoptions"
+	options.write_text(
+		(home / "bin" / "idea64.vmoptions").read_text()
+		+ "\n-Djavax.accessibility.assistive_technologies=org.GNOME.Accessibility.AtkWrapper\n"
+		+ f"-Xbootclasspath/a:{wrapper / 'share' / 'java' / 'java-atk-wrapper.jar'}\n"
+		+ f"-Dsun.boot.library.path={home / 'jbr' / 'lib'}:{wrapper / 'lib'}\n"
+		+ "-Djb.consents.confirmation.enabled=false\n"
+		+ "-Djb.privacy.policy.text=<!--999.999-->\n"
+		+ "-Dide.experimental.ui.onboarding=false\n"
+		+ "-Didea.trust.all.projects=true\n"
+	)
+	project = directory / IDEA_PROJECT
+	project.mkdir()
+	(project / IDEA_FILE).write_text("hello world\n")
+	launch = [
+		"env",
+		f"IDEA_PROPERTIES={properties}",
+		f"IDEA_VM_OPTIONS={options}",
+		str(package / "bin" / "intellij-idea"),
+	]
+	# Its standard output goes to a file, not to startApp's pipe, which nothing reads and which would fill.
+	output = directory / "idea.stdout.txt"
+	desktop.startApp(
+		["sh", "-c", 'exec "$@" > "$0"', str(output), *launch, str(project)],
+		title=IDEA_TITLE,
+		timeout=IDEA_START_BOUND,
+	)
+	desktopSession.activate(IDEA_TITLE)
+	desktop.startNVDA(SESSION_CONFIG)
+	desktop.expect("Project structure tree tree view", since=0, timeout=STARTUP_BOUND)
+	time.sleep(IDEA_SETTLE)
+	_waitForQuiet(desktop)
+	# The file is opened once NVDA runs: NVDA starting with the editor already focused finds another
+	# object for it than the one its text changes come from, and says nothing of them.
+	mark = desktop.mark()
+	# A second start hands the file to the first and quits.
+	subprocess.run([*launch, str(project / IDEA_FILE)], stdout=subprocess.DEVNULL, check=True, timeout=120)
+	desktop.expect(IDEA_EDITOR, since=mark, timeout=IDEA_START_BOUND)
+	_waitForQuiet(desktop)
+
+
+def _says(desktop: DesktopSession, key: str, *expected: str) -> None:
+	"""Press key; NVDA says expected, in order, among what it says."""
+	mark = desktop.mark()
+	desktop.press(key)
+	desktop.expect(*expected, since=mark)
+	_waitForQuiet(desktop)
 
 
 def _back(popups: str) -> tuple[str, ...]:
@@ -151,4 +239,28 @@ def test_popupMenu(desktop: DesktopSession, popups: str):
 	_step(desktop, "Down", "Beta 2 of 3")
 	_step(desktop, "Up", "Alpha 1 of 3")
 	_step(desktop, "Escape", *_back(popups))
+	_closeClean(desktop)
+
+
+@needsIdea
+def test_ideaMenus(desktop: DesktopSession, tmp_path: Path):
+	"""IntelliJ IDEA's File menu, its New submenu and the editor's context menu (issue 13): Left and
+	Escape close New's submenu and say New again, and the context menu's items are read."""
+	startIdea(desktop, tmp_path)
+	_says(desktop, "alt+f", "New sub Menu…")
+	_says(desktop, "Right", "Project... 1 of…")
+	_says(desktop, "Down", "Project from Existing Sources... 2 of…")
+	_says(desktop, "Left", "New sub Menu…")
+	_says(desktop, "Right", "Project... 1 of…")
+	_says(desktop, "Escape", "New sub Menu…")
+	_says(desktop, "Escape", IDEA_EDITOR)
+	# The menu opens under the pointer, which may highlight an item at once.
+	desktop.press("Menu")
+	_waitForQuiet(desktop)
+	mark = desktop.mark()
+	desktop.press("Down")
+	_waitForQuiet(desktop)
+	spoken = desktop.spokenSince(mark)
+	assert any(re.search(r" \d+ of \d+$", text) for text in spoken), spoken
+	_says(desktop, "Escape", IDEA_EDITOR)
 	_closeClean(desktop)
