@@ -42,13 +42,13 @@ SETTINGS = {
 	"extensions.autoCheckUpdates": False,
 }
 
+pytestmark = pytest.mark.needsVariable("LINDA_VSCODIUM")
+
 
 @pytest.fixture(scope="module")
 def session(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Session]:
 	webSession.requireBrowseLibraries()
-	codium = os.environ.get("LINDA_VSCODIUM")
-	if not codium:
-		pytest.skip("LINDA_VSCODIUM does not name VSCodium's Electron program")
+	codium = os.environ["LINDA_VSCODIUM"]
 	directory = tmp_path_factory.mktemp("vscode")
 	userData = directory / "userData"
 	(userData / "User").mkdir(parents=True)
