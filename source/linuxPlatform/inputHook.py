@@ -63,6 +63,20 @@ CHANGE_SETTLE = 0.01
 #: name in a gesture.
 _GESTURE_MODIFIERS = {0x10: "shift", 0x11: "control", 0x12: "alt", "windows": "windows"}
 _KEYBOARD_GESTURE = re.compile(r"^kb(?:\((\w+)\))?:(.+)$")
+#: The names of modifiers in a gesture identifier as inputCore normalises it, lower case.
+_MODIFIER_NAMES = frozenset(
+	f"{side}{name}" for side in ("", "left", "right") for name in ("shift", "control", "alt", "windows")
+) | {"nvda"}
+#: Virtual-key codes never captured as a gesture's main key: the locks; and, not extended, the numpad's
+#: keys, which numpad review takes with Num Lock off and which type digits with it on.
+_NEVER_CAPTURED = frozenset((0x14, 0x90, 0x91))
+_NUMPAD_KEYS = frozenset((0x0C, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E))
+#: Whether the keys bound outside a document are captured there: not in a Wayland session, where
+#: what is captured follows the capture feed's document.
+_captureBound = False
+#: (what they follow, the keys) bound outside a document by the running global plugins, and the user's
+#: own bindings of NVDA's global commands, as the keyboard watcher last found them.
+_bound: tuple[tuple, frozenset[GestureKey]] = ((), frozenset())
 
 
 def initialize() -> None:
@@ -86,23 +100,24 @@ def isRunning() -> bool:
 
 
 def _startSource() -> None:
-	global _source, _watcher
+	global _source, _watcher, _captureBound
 	_installLogMask()
 	source = keys.createSource(_configuredRoute(), _announce)
 	if source is None:
 		return
 	from logHandler import log
 
+	from linuxPlatform import displayServer
+
 	try:
 		source.start(_onKey, _modeNow)
 	except Exception:
-		from linuxPlatform import displayServer
-
 		if displayServer.isWayland():
 			log.warning("NVDA cannot read the keyboard", exc_info=True)
 		else:
 			log.warning("NVDA cannot read the keyboard from the X display", exc_info=True)
 		return
+	_captureBound = not displayServer.isWayland()
 	_source = source
 	_stopWatching.clear()
 	_watcher = threading.Thread(target=_watch, args=(source,), name="keyboardWatch", daemon=True)
@@ -191,13 +206,25 @@ def _watch(source: KeySource) -> None:
 				source.holdKeyboard(hold)
 				held = hold
 			focus = api.getFocusObject()
+			_findBound()
 			capture = "off" if watchdog.isAttemptingRecovery else captureModeFor(focus)
 			if capture != "off":
 				try:
-					interceptor = focus.treeInterceptor
-					signature = _gestureSignature(interceptor)
+					# Outside a document, the keys bound there alone, given as focus mode's.
+					interceptor = focus.treeInterceptor if capture != "bound" else None
+					signature = (
+						_gestureSignature(interceptor) if interceptor is not None else None,
+						_bound[0],
+					)
 					if gestures is None or gestures[0] != signature:
-						gestures = (signature, *_gesturesFor(interceptor))
+						own = (
+							_gesturesFor(interceptor)
+							if interceptor is not None
+							else (frozenset(), frozenset())
+						)
+						# Global plugins answer before the document does, in either of its modes.
+						bound = _bound[1]
+						gestures = (signature, own[0] | bound, own[1] | bound)
 						source.setCaptureGestures(gestures[1], gestures[2])
 				# This thread must go on whatever a focus going away or an add-on's gesture map raises: it
 				# lets the keyboard go during recovery. The keys captured anyway are browse mode's own.
@@ -227,7 +254,8 @@ def _watch(source: KeySource) -> None:
 
 def captureModeFor(focus) -> CaptureMode:
 	"""Which keys to capture with this focus: browse mode's while it is in a document in browse mode,
-	Escape alone while that document is in focus mode, and otherwise none.
+	Escape alone while that document is in focus mode, and otherwise those bound outside a document,
+	when there are any and the session is not Wayland's.
 
 	Asked off the main thread: the focus's tree interceptor is the one api.setFocusObject set on it,
 	so asking for it calls nothing in the application.
@@ -236,13 +264,14 @@ def captureModeFor(focus) -> CaptureMode:
 		return "off"
 	import browseMode
 
+	outside: CaptureMode = "bound" if _captureBound and _bound[1] else "off"
 	try:
 		interceptor = focus.treeInterceptor
 	# A focus that has just gone away raises whatever its kind of object raises; it has no document.
 	except Exception:  # noqa: BLE001
-		return "off"
+		return outside
 	if not isinstance(interceptor, browseMode.BrowseModeTreeInterceptor) or not interceptor.isReady:
-		return "off"
+		return outside
 	return "focus" if interceptor.passThrough else "browse"
 
 
@@ -288,21 +317,80 @@ def _gestureSignature(interceptor) -> tuple:
 	)
 
 
-def _gesturesFor(interceptor) -> tuple[frozenset[GestureKey], frozenset[GestureKey]]:
+def _findBound() -> None:
+	"""Find again the keys bound outside a document, when what they follow has changed since the last
+	look: the running global plugins, their bindings, the keyboard layout and the gesture maps.
+
+	These are the keys inputCore finds a script for before the focus's own: those of the global plugins,
+	by their classes and by the gesture maps, and those the user bound to NVDA's global commands. The
+	app modules', the focus object's and its ancestors' are left to reach the application, as on main:
+	NVDA's own among them, as Eclipse's Tab and Enter, send the key on and read what it did, which here
+	the key reaching the application first does, and the app module's would change with every program.
+	"""
+	global _bound
+	import config
+	import globalCommands
+	import globalPluginHandler
+	import inputCore
+	from logHandler import log
+
+	manager = inputCore.manager
+	if manager is None:
+		return
+	plugins = list(globalPluginHandler.runningPlugins)
+	signature = (
+		tuple((id(plugin), len(getattr(plugin, "_gestureMap", ()))) for plugin in plugins),
+		config.conf["keyboard"]["keyboardLayout"],
+		repr(manager.userGestureMap._map),
+		id(manager.localeGestureMap),
+	)
+	if signature == _bound[0]:
+		return
+	found: set[GestureKey] = set()
+	for owner, userOnly in (
+		*((plugin, False) for plugin in plugins),
+		(globalCommands.commands, True),
+		(globalCommands.configProfileActivationCommands, True),
+	):
+		try:
+			bound, _focus = _gesturesFor(owner, userOnly=userOnly)
+		# An add-on's gesture map may raise anything; its keys are then not captured.
+		except Exception:  # noqa: BLE001
+			log.debugWarning("Finding the keys a global plugin binds", exc_info=True)
+			continue
+		found.update(
+			key
+			for key in bound
+			if key[1] not in _NEVER_CAPTURED and not (key[1] in _NUMPAD_KEYS and not key[2])
+		)
+	_bound = (signature, frozenset(found))
+
+
+def _gesturesFor(interceptor, userOnly: bool = False) -> tuple[frozenset[GestureKey], frozenset[GestureKey]]:
 	"""The keys bound to scripts of interceptor without the NVDA key, by its classes and by the gesture
-	maps of the locale and the user, add-ons' included: (all of them, those that work in focus mode)."""
+	maps of the locale and the user, add-ons' included: (all of them, those that work in focus mode).
+
+	:param userOnly: Whether to take the user's gesture map's alone, as for NVDA's global commands.
+	"""
 	import config
 	import inputCore
 	import keyboardHandler
 
 	layout = config.conf["keyboard"]["keyboardLayout"]
-	scripts = dict(interceptor._gestureMap)
+	scripts = {} if userOnly else dict(interceptor._gestureMap)
 	classes = {(cls.__module__, cls.__name__) for cls in type(interceptor).__mro__}
 	manager = inputCore.manager
-	for gestureMap in (manager.localeGestureMap, manager.userGestureMap):
+	for gestureMap in (
+		(manager.userGestureMap,) if userOnly else (manager.localeGestureMap, manager.userGestureMap)
+	):
 		for identifier, entries in gestureMap._map.items():
 			for module, className, scriptName in entries:
-				if (module, className) in classes:
+				if (module, className) not in classes:
+					continue
+				if scriptName and scriptName.startswith("kb:"):
+					# Bound to emulate another key, which NVDA sends in its place.
+					scripts[identifier] = scriptName
+				else:
 					scripts[identifier] = (
 						getattr(type(interceptor), f"script_{scriptName}", None) if scriptName else None
 					)
@@ -310,10 +398,19 @@ def _gesturesFor(interceptor) -> tuple[frozenset[GestureKey], frozenset[GestureK
 	focus: set[GestureKey] = set()
 	for identifier, script in scripts.items():
 		match = _KEYBOARD_GESTURE.match(identifier)
-		if script is None or match is None or match[1] not in (None, layout) or "nvda" in match[2].split("+"):
+		if script is None or match is None or match[1] not in (None, layout):
+			continue
+		# inputCore keeps a gesture's keys sorted by name, "kb:f12+shift", where fromName takes the last
+		# as the main key: the modifiers go first, and a gesture of modifiers alone is never captured.
+		parts = match[2].split("+")
+		if "nvda" in parts:
+			continue
+		modifiers = [part for part in parts if part.lower() in _MODIFIER_NAMES]
+		main = [part for part in parts if part.lower() not in _MODIFIER_NAMES]
+		if len(main) != 1:
 			continue
 		try:
-			gesture = keyboardHandler.KeyboardInputGesture.fromName(match[2])
+			gesture = keyboardHandler.KeyboardInputGesture.fromName("+".join(modifiers + main))
 		# A name for a key this keyboard does not have.
 		except (LookupError, ValueError, NoLinuxImplementation):
 			continue
