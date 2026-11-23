@@ -92,6 +92,8 @@ class WaylandRoute(RoutedKeySource):
 		self._saidNoKeyboard = False
 		#: (when, status) of the helper's notes on keyboards not yet said, from the kernel source's thread.
 		self._deviceNotes: collections.deque[tuple[float, int]] = collections.deque()
+		#: What wakes the route as the oldest of those settles; None once it has.
+		self._settleTimer: threading.Timer | None = None
 		self._saidNotices: set[str] = set()
 		#: The helper's sockets, by identity, for which BUSY, or REPLACED, which BUSY follows, was said.
 		self._saidBusyFor: set[tuple[int, int, int] | None] = set()
@@ -412,12 +414,15 @@ class WaylandRoute(RoutedKeySource):
 			)
 
 	def _onDevice(self, status: int) -> None:
+		"""On the thread that answers keys, so it only records and wakes the route, which times the settling."""
 		unheard = (keydClient.DEVICE_BUSY, keydClient.DEVICE_IGNORED, keydClient.DEVICE_WAITING)
 		if status in unheard and not self._saidUnheard:
 			self._deviceNotes.append((time.monotonic(), status))
-			timer = threading.Timer(DEVICE_SETTLE, self._wake.set)
-			timer.daemon = True
-			timer.start()
+			self._wake.set()
+
+	def _settled(self) -> None:
+		self._settleTimer = None
+		self._wake.set()
 
 	def _sayUnheard(self) -> None:
 		"""Say, on the route's own thread, what the notes on keyboards that have settled add up to."""
@@ -426,6 +431,11 @@ class WaylandRoute(RoutedKeySource):
 		statuses = set()
 		while notes and notes[0][0] + DEVICE_SETTLE <= now:
 			statuses.add(notes.popleft()[1])
+		if notes and self._settleTimer is None:
+			# Notes come in order, so one timer for the oldest serves; when it fires, the next is started.
+			timer = self._settleTimer = threading.Timer(notes[0][0] + DEVICE_SETTLE - now, self._settled)
+			timer.daemon = True
+			timer.start()
 		if self._saidUnheard or not statuses & {keydClient.DEVICE_BUSY, keydClient.DEVICE_IGNORED}:
 			return
 		self._saidUnheard = True

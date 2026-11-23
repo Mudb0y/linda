@@ -567,6 +567,19 @@ def test_anUnheardKeyboardIsSaidOnce(tmp_path: Path):
 LEFT_ALONE_CHILD = r"""
 from keydStandIn import StandIn
 
+_start = threading.Thread.start
+startedByReader = []
+
+
+def recordStart(thread):
+	# The kernel source's reading thread answers keys, and a note it makes may only record and return.
+	if threading.current_thread().name == "KernelKeySource":
+		startedByReader.append(thread.name)
+	_start(thread)
+
+
+threading.Thread.start = recordStart
+
 
 def leftAlone():
 	keyboard._startWaiting = False
@@ -592,7 +605,7 @@ if not LEFT_ALONE_FIRST:
 	wait(lambda: source.isKernel, 5, "the route did not take the keyboard held later")
 	time.sleep(0.3)
 source.stop()
-result = {"before": before, "said": said}
+result = {"before": before, "said": said, "startedByReader": startedByReader}
 """
 
 
@@ -608,6 +621,7 @@ def test_theOnlyKeyboardLeftAloneLeavesNoKeysUntilOneIsHeld(tmp_path: Path):
 	value = leftAloneChild(tmp_path, first=False)
 	assert value["before"] == {"said": [NO_KEYBOARD], "kernel": False}
 	assert value["said"] == [NO_KEYBOARD, HAS_KEYBOARD, HINT]
+	assert value["startedByReader"] == []
 
 
 def test_oneOfTwoKeyboardsLeftAloneIsUnheard(tmp_path: Path):
@@ -616,6 +630,7 @@ def test_oneOfTwoKeyboardsLeftAloneIsUnheard(tmp_path: Path):
 	said = value["said"]
 	assert sorted(said) == sorted([HINT, UNHEARD]), said
 	assert value["before"]["kernel"]
+	assert value["startedByReader"] == []
 
 
 MODE_CHILD = r"""
