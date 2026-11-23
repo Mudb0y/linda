@@ -4,6 +4,7 @@ Run inside the rig only. It takes X input focus itself (there is no window manag
 prints "ready" once it is shown.
 """
 
+import os
 import sys
 
 import gi
@@ -43,6 +44,8 @@ def build():
 	recentItem = Gtk.MenuItem.new_with_mnemonic("_Recent")
 	recentMenu = Gtk.Menu()
 	recentMenu.append(Gtk.MenuItem(label="one.txt"))
+	for n in range(int(os.environ.get("LINDA_RECENTSIZE", "0"))):
+		recentMenu.append(Gtk.MenuItem(label=f"file{n}.txt"))
 	recentItem.set_submenu(recentMenu)
 	fileMenu.append(recentItem)
 	wrapItem = Gtk.CheckMenuItem.new_with_mnemonic("_Wrap lines")
@@ -98,8 +101,6 @@ def build():
 	labelled(box, "C_ount:", spin)
 
 	store = Gtk.ListStore(str)
-	import os
-
 	for fruit in ["Apples", "Pears", "Plums"] + [
 		f"Item {n}" for n in range(int(os.environ.get("LINDA_LISTSIZE", "0")))
 	]:

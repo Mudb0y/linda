@@ -827,6 +827,24 @@ def _isFocusEvent(event) -> bool:
 	)
 
 
+def _isMenuSelection(event) -> bool:
+	"""Whether event is a GTK 3 menu item becoming selected, which is its focus. GTK 3 says that an item
+	with a submenu has the focus only once the submenu shows, which it opens 225 ms after the item was
+	selected, and not at all when the menu is rebuilt before then, as nm-applet's is while it looks for
+	networks; the focus it says later is a repeat, which _processFocus drops. The toolkit is the one known
+	without asking, as for _takesLegacyFocus: a GTK program's is known once a window of it is activated,
+	as the window its menu opens in is."""
+	eventType, source, detail1, _detail2, _anyData = event
+	if eventType != "object:state-changed:selected" or not detail1:
+		return False
+	if _clientModule.knownToolkit(source.busName) != "gtk":
+		return False
+	try:
+		return client().role(source) in _SELECTED_NOT_A_STATE_ROLES
+	except (AppHung, NodeGone):
+		return False
+
+
 def _isBlur(event) -> bool:
 	return event[0] == "object:state-changed:focused" and not event[2]
 
@@ -1739,6 +1757,12 @@ def pumpAll() -> None:
 	perApplication: collections.Counter = collections.Counter()
 	overLimit: set[int] = set()
 	alwaysAllowed = {focusKey, _foreground.key if _foreground is not None else None}
+	# A GTK 3 menu's selection is kept whatever came after it, as a focus is: GTK says that each item of a
+	# submenu shows just after the item that opens it is selected. It is asked about here, and not as it
+	# comes, as _asMenuItemFocus asks of a Chromium menu's: only an application's newest selection can be
+	# its menu's focus, and a GTK list can select thousands of rows at once.
+	menuSelections: set[int] = set()
+	selecting: set[str] = set()
 	for index in range(len(kept) - 1, -1, -1):
 		event = kept[index]
 		if (
@@ -1750,6 +1774,11 @@ def pumpAll() -> None:
 		):
 			continue
 		node = event[1]
+		if event[0] == "object:state-changed:selected" and event[2] and node.busName not in selecting:
+			selecting.add(node.busName)
+			if _isMenuSelection(event):
+				menuSelections.add(index)
+				continue
 		if node.key not in alwaysAllowed:
 			perApplication[node.busName] += 1
 			# Asked only past the limit, as it costs a round trip for each of the shell's showing events.
@@ -1781,7 +1810,7 @@ def pumpAll() -> None:
 			_trackWindow(event)
 		if _isBlur(event):
 			continue
-		if _isFocusEvent(event):
+		if _isFocusEvent(event) or index in menuSelections:
 			if index not in blurredAfter:
 				focusEvents.append(event)
 			continue
