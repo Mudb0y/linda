@@ -225,7 +225,7 @@ def test_submenuOfPopupItems(desktop: DesktopSession, popups: str):
 	window = (TITLE,) if popups == "heavyweight" else ()
 	_step(desktop, "Left", *window, "Recent checked sub Menu 3 of 4")
 	_step(desktop, "Right", "First project 1 of 2")
-	_step(desktop, "Escape", "Press me button")
+	_step(desktop, "Escape", *_back(popups))
 	_closeClean(desktop)
 
 

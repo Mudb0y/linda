@@ -1485,8 +1485,8 @@ def _noteJavaSubmenu(source: Node) -> None:
 	if (
 		menu is None
 		or menu == source
-		or getattr(focus, "atspiRole", None) != "menu"
 		or _clientModule.knownToolkit(source.busName) != JAVA_TOOLKIT
+		or getattr(focus, "atspiRole", None) != "menu"
 	):
 		return
 	c = client()
