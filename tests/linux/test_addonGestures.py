@@ -51,6 +51,8 @@ from scriptHandler import script
 RECORD = os.environ["LINDA_ADDON_KEYS_RECORD"]
 #: Escape, X, F5, F9, F11 and F12.
 WATCHED = {0x1B, 0x58, 0x74, 0x78, 0x7A, 0x7B}
+#: The X key codes of x, Escape, F5 and F12.
+KEY_CODES = (53, 9, 71, 96)
 
 
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
@@ -87,11 +89,29 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	def script_late(self, gesture):
 		ui.message("late script")
 
+	@script(gesture="kb:NVDA+control+shift+f9")
+	def script_grabs(self, gesture):
+		# What the key sources take of x, Escape, F5 and F12 as they stand: the key codes the X source
+		# grabs, and what the kernel source makes of each with no modifier.
+		routed = inputHook._source
+		x = routed._x
+		grabbed = set()
+		for grabs in (x._grabbed, x._captured, x._boundGrabbed):
+			grabbed.update(tuple(grabs))
+		kernel = routed._kernel if routed.isKernel else None
+		kinds = None
+		if kernel is not None:
+			capture = kernel._captureState()
+			kinds = {str(code): kernel._ownKind(code, 0, capture) for code in KEY_CODES}
+		state = {"grabbed": sorted(code for code in grabbed if code in KEY_CODES), "kinds": kinds}
+		with open(RECORD + ".grabs", "w", encoding="utf-8") as record:
+			json.dump(state, record)
+		ui.message("grabs written")
 """
 
 ESCAPE, X_KEY, F5, F9, F11, F12 = 0x1B, 0x58, 0x74, 0x78, 0x7A, 0x7B
-#: F12's X key code.
-F12_CODE = 96
+#: X key codes, as the plugin's KEY_CODES.
+X_CODE, ESCAPE_CODE, F5_CODE, F12_CODE = 53, 9, 71, 96
 #: (chord, what the plugin says) of each key it binds.
 BOUND = (("F12", "history newest"), ("shift+F12", "history next"), ("shift+F11", "history previous"))
 
@@ -144,6 +164,18 @@ class AddonSession:
 		"""Whether each press of vk came to NVDA captured, in order."""
 		records = [json.loads(line) for line in self.record.read_text(encoding="utf-8").splitlines()]
 		return [record["captured"] for record in records if record["vk"] == vk]
+
+	def grabs(self) -> dict:
+		"""What the key sources take of x, Escape, F5 and F12 now, as the plugin writes it: the key codes
+		among them the X source grabs, and the kind the kernel source gives each, None on the X route."""
+		mark = self.desktop.mark()
+		self.keyboard.press("Insert+control+shift+F9")
+		self.desktop.expect("grabs written", since=mark, timeout=STEP_TIMEOUT)
+		state = json.loads(Path(f"{self.record}.grabs").read_text(encoding="utf-8"))
+		return {
+			"grabbed": state["grabbed"],
+			"kinds": state["kinds"] and {int(k): v for k, v in state["kinds"].items()},
+		}
 
 	def quit(self) -> None:
 		self.launch.process.terminate()
@@ -203,7 +235,9 @@ def test_boundKeysRunTheScriptAndNeverReachTheProgram(addon: AddonSession):
 @pytest.mark.rigSession("x11")
 def test_unboundKeysReachTheProgramUncaptured(addon: AddonSession):
 	"""F5, X and Escape are bound nowhere here: each reaches the probe, and came to NVDA as a key the
-	program already had, with no wait for NVDA's answer."""
+	program already had, with no wait for NVDA's answer. That a press came uncaptured does not tell a key
+	passed straight through from one held and then passed as NVDA's mode does not take it: the sources
+	are asked too, while F12 is bound, whether they take the three, and they take none of them."""
 	given = addon.press("x")
 	assert "pressed x" in given
 	given = addon.press("Escape")
@@ -211,6 +245,10 @@ def test_unboundKeysReachTheProgramUncaptured(addon: AddonSession):
 	assert addon.presses(X_KEY) == [False]
 	assert addon.presses(ESCAPE) == [False]
 	assert addon.presses(F5) == [False, False]
+	grabs = addon.grabs()
+	assert grabs["grabbed"] == [F12_CODE], grabs
+	if grabs["kinds"] is not None:
+		assert grabs["kinds"] == {X_CODE: "pass", ESCAPE_CODE: "pass", F5_CODE: "pass", F12_CODE: "capture"}
 	addon.quit()
 
 
