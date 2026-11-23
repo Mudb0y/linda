@@ -119,6 +119,9 @@ _JAVA_HIGHLIGHT_STATES = frozenset({"selected", "armed"})
 #: Seconds after a JetBrains IDE's submenu item lost its highlight before the submenu is asked whether it
 #: closed: the IDE hides it, and takes the selection from every menu when all close, some 30 ms after.
 JAVA_MENU_RETURN_SECONDS = 0.15
+#: How many times, JAVA_MENU_RETURN_SECONDS apart, the submenu is asked at most: an IDE busy indexing or
+#: collecting garbage can take longer to hide it.
+JAVA_MENU_RETURN_LOOKS = 3
 #: The menu each Java popup menu was opened from, by the popup menu's key, as NVDA's focus went from the
 #: one to an item of the other.
 _javaSubmenus: dict[tuple[str, str], Node] = {}
@@ -1456,9 +1459,10 @@ def _asJavaMenuReturn(event) -> tuple | None:
 	return None
 
 
-def _returnToJavaMenu(item: Node, menu: Node) -> None:
+def _returnToJavaMenu(item: Node, menu: Node, looks: int = JAVA_MENU_RETURN_LOOKS) -> None:
 	"""Queue a focus on menu, which _focusCandidate takes only while the menu is highlighted, if item, whose
-	highlight went JAVA_MENU_RETURN_SECONDS ago, is still NVDA's focus and its submenu has closed."""
+	highlight went JAVA_MENU_RETURN_SECONDS ago, is still NVDA's focus and its submenu has closed; while it
+	has not, look again, looks times in all."""
 	import core
 	import eventHandler
 
@@ -1466,7 +1470,12 @@ def _returnToJavaMenu(item: Node, menu: Node) -> None:
 		return
 	try:
 		if "showing" in client().states(item):
-			# The highlight moved on within the submenu, whose next item says so.
+			# The highlight moved on within the submenu, whose next item says so and takes NVDA's focus
+			# before the next look; or the IDE, busy, has not hidden the submenu yet.
+			if looks > 1:
+				core.callLater(
+					round(JAVA_MENU_RETURN_SECONDS * 1000), _returnToJavaMenu, item, menu, looks - 1
+				)
 			return
 	except NodeGone:
 		# Gone with its submenu.
