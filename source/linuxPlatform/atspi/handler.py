@@ -116,8 +116,8 @@ JAVA_TOOLKIT = "J2SE-access-bridge"
 #: What a Swing menu's highlighted item carries in place of the focused state the wrapper announces for it:
 #: selected in a menu bar's menus, and only armed in a popup menu.
 _JAVA_HIGHLIGHT_STATES = frozenset({"selected", "armed"})
-#: Seconds after a Java submenu's item lost its highlight before its menu is asked whether it has the
-#: highlight again: a JetBrains IDE closing every menu takes the selection from them some 30 ms after.
+#: Seconds after a JetBrains IDE's submenu item lost its highlight before the submenu is asked whether it
+#: closed: the IDE hides it, and takes the selection from every menu when all close, some 30 ms after.
 JAVA_MENU_RETURN_SECONDS = 0.15
 #: The menu each Java popup menu was opened from, by the popup menu's key, as NVDA's focus went from the
 #: one to an item of the other.
@@ -1422,10 +1422,11 @@ def _asJavaMenuReturn(event) -> tuple | None:
 	the menu again as Left closes the submenu, and the Java ATK wrapper says nothing of it. Without the
 	menu as the focus, Right's focus on the item it had would also be dropped as a repeat.
 
-	A submenu a JetBrains IDE fills as it opens gives its popup menu as its items' parent, which leads
-	nowhere back to the menu: that is noted in _javaSubmenus as the focus first reaches one of its items,
-	and the menu's focus is tried JAVA_MENU_RETURN_SECONDS later, when it holds only if the menu is still
-	highlighted."""
+	A JetBrains IDE hides the submenu only after the item says it lost the highlight, and says nothing of
+	its menus being checked; its submenus also give their popup menu as their items' parent, which leads
+	nowhere back to the menu, so the menu is noted in _javaSubmenus as the focus first reaches one of
+	its items. When the menu is not found open at once, _returnToJavaMenu looks again
+	JAVA_MENU_RETURN_SECONDS later."""
 	eventType, source, detail1, _detail2, _anyData = event
 	if eventType == "object:state-changed:focused" and detail1:
 		_noteJavaSubmenu(source)
@@ -1437,23 +1438,41 @@ def _asJavaMenuReturn(event) -> tuple | None:
 		return None
 	c = client()
 	try:
-		if "showing" in c.states(source):
-			# The highlight moved on within the submenu, whose next item says so.
-			return None
-		# The menu bar's menus give their items as their children. Swing says a menu is checked while it
-		# is open, which Escape's closing every menu has already undone.
 		menu = c.parent(source)
-		if menu is not None and c.role(menu) == "popup menu":
-			opener = _javaSubmenus.get(menu.key)
-			if opener is not None:
-				due = time.monotonic() + JAVA_MENU_RETURN_SECONDS
-				_retries.append((due, ("object:state-changed:focused", opener, 1, 0, None)))
-			return None
-		if menu is None or c.role(menu) != "menu" or not {"checked", "showing"} <= c.states(menu):
-			return None
+		role = c.role(menu) if menu is not None else None
+		# The highlight may have moved on within the submenu, whose next item says so. The menu bar's
+		# menus give their items as their children. Swing says a menu is checked while it is open, which
+		# Escape's closing every menu has already undone.
+		if role == "menu" and "showing" not in c.states(source) and {"checked", "showing"} <= c.states(menu):
+			return ("object:state-changed:focused", menu, 1, 0, None)
+		opener = menu if role == "menu" else _javaSubmenus.get(menu.key) if role == "popup menu" else None
 	except NodeGone:
 		return None
-	return ("object:state-changed:focused", menu, 1, 0, None)
+	if opener is not None:
+		import core
+
+		core.callLater(round(JAVA_MENU_RETURN_SECONDS * 1000), _returnToJavaMenu, source, opener)
+	return None
+
+
+def _returnToJavaMenu(item: Node, menu: Node) -> None:
+	"""Queue a focus on menu, which _focusCandidate takes only while the menu is highlighted, if item, whose
+	highlight went JAVA_MENU_RETURN_SECONDS ago, is still NVDA's focus and its submenu has closed."""
+	import core
+	import eventHandler
+
+	if _exiting or getattr(eventHandler.lastQueuedFocusObject, "node", None) != item:
+		return
+	try:
+		if "showing" in client().states(item):
+			# The highlight moved on within the submenu, whose next item says so.
+			return
+	except NodeGone:
+		# Gone with its submenu.
+		pass
+	with _queueLock:
+		_queue.append(("object:state-changed:focused", menu, 1, 0, None))
+	core.requestPump()
 
 
 def _noteJavaSubmenu(source: Node) -> None:
