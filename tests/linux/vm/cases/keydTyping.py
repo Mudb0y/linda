@@ -369,7 +369,9 @@ def run(ground: "Ground") -> None:
 		}
 		out = seen["rate"]["pressesOut"] + seen["paced"]["pressesOut"]
 		ground.machine.log(f"of {out} typed A taps put out, the readers had {seenBy}")
-		state = ground.run(["xinput", "query-state", VIRTUAL_KEYBOARD])
+		keyboard = ground.xinputDevice(VIRTUAL_KEYBOARD)
+		assert keyboard is not None
+		state = ground.run(["xinput", "query-state", keyboard])
 		assert state.returncode == 0, state
 		assert "=down" not in state.stdout, state.stdout
 

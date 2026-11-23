@@ -44,8 +44,11 @@ def plainLetter(ground: "Ground", keyboard: "FakeKeyboard", key: str, keyval: st
 
 
 def keysDownInX(ground: "Ground", device: str) -> list[int]:
-	"""The key codes the X server has down on the slave device named device; none for one it lacks."""
-	state = ground.run(["xinput", "query-state", device])
+	"""The key codes the X server has down on the slave keyboard named device; none for one it lacks."""
+	keyboard = ground.xinputDevice(device)
+	if keyboard is None:
+		return []
+	state = ground.run(["xinput", "query-state", keyboard])
 	if state.returncode != 0:
 		return []
 	return [
