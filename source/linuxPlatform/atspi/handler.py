@@ -113,6 +113,10 @@ SELECTED_AS_FOCUS_ROLES = frozenset({"menu", "menu item", "check menu item", "ra
 #: The ToolkitName of the Java ATK wrapper, through which Swing programs, JetBrains IDEs among them, reach
 #: AT-SPI.
 JAVA_TOOLKIT = "J2SE-access-bridge"
+#: GTK 2's ToolkitName, which GAIL, its accessibility module, gives.
+GAIL_TOOLKIT = "GAIL"
+#: The toolkits, by ToolkitName, whose menu items are the focus as they are selected: GTK 3's and GTK 2's.
+MENU_SELECTION_TOOLKITS = frozenset({"gtk", GAIL_TOOLKIT})
 #: What a Swing menu's highlighted item carries in place of the focused state the wrapper announces for it:
 #: selected in a menu bar's menus, and only armed in a popup menu.
 _JAVA_HIGHLIGHT_STATES = frozenset({"selected", "armed"})
@@ -828,16 +832,17 @@ def _isFocusEvent(event) -> bool:
 
 
 def _isMenuSelection(event) -> bool:
-	"""Whether event is a GTK 3 menu item becoming selected, which is its focus. GTK 3 says that an item
-	with a submenu has the focus only once the submenu shows, which it opens 225 ms after the item was
+	"""Whether event is a GTK 3 or GTK 2 menu item becoming selected, which is its focus. GTK says that an
+	item with a submenu has the focus only once the submenu shows, which it opens 225 ms after the item was
 	selected, and not at all when the menu is rebuilt before then, as nm-applet's is while it looks for
-	networks; the focus it says later is a repeat, which _processFocus drops. The toolkit is the one known
-	without asking, as for _takesLegacyFocus: a GTK program's is known once a window of it is activated,
-	as the window its menu opens in is."""
+	networks; the focus it says later is a repeat, which _processFocus drops. GTK 2 says before it that
+	the menu has the focus, which _focusCandidate drops while an item of the menu is selected. The toolkit
+	is the one known without asking, as for _takesLegacyFocus: a GTK program's is known once a window of
+	it is activated, as the window its menu opens in is."""
 	eventType, source, detail1, _detail2, _anyData = event
 	if eventType != "object:state-changed:selected" or not detail1:
 		return False
-	if _clientModule.knownToolkit(source.busName) != "gtk":
+	if _clientModule.knownToolkit(source.busName) not in MENU_SELECTION_TOOLKITS:
 		return False
 	try:
 		return client().role(source) in _SELECTED_NOT_A_STATE_ROLES
@@ -876,7 +881,7 @@ def _focusCandidate(event) -> Node | None:
 	states = c.states(source)
 	if "defunct" in states:
 		return None
-	if "focused" not in states:
+	if "focused" not in states and not _isSelectedGtk2MenuItem(source):
 		# GTK 3 menu items and notebook tabs announce focus but carry only "selected", and the Java ATK
 		# wrapper's menu items only _JAVA_HIGHLIGHT_STATES; a later loss of focus in the same batch has
 		# already ruled stale events out.
@@ -897,7 +902,8 @@ def _focusCandidate(event) -> Node | None:
 		return inside[-1] if inside else source
 	if role == "menu" and _hasSelectedChild(source):
 		# GTK 3 focuses a menu item again as its submenu opens on a child that is already highlighted;
-		# the child's own focus event follows.
+		# the child's own focus event follows. GTK 2 focuses a menu, or the item that opens it, as the
+		# highlight leaves one of its items for one with a submenu, whose selection was the focus.
 		return None
 	if "manages-descendants" in states or role in _ITEM_CONTAINERS:
 		node = activeDescendant(source) or _focusKeptIn(source)
@@ -1140,8 +1146,25 @@ def _focusedItemIn(container: Node) -> Node | None:
 	return found if found is not None and found != container else None
 
 
+def _isSelectedGtk2MenuItem(node: Node) -> bool:
+	"""Whether node is a GTK 2 menu item that its menu says is selected. GTK 2 marks no menu item selected,
+	and takes the focused state from every item of a menu that a menu item opens, as each of a menu bar's
+	menus is; the menu, or the item that opens it, says which of its items is selected. The toolkit is the
+	one known without asking, as for _takesLegacyFocus."""
+	if _clientModule.knownToolkit(node.busName) != GAIL_TOOLKIT:
+		return False
+	c = client()
+	if c.role(node) not in _SELECTED_NOT_A_STATE_ROLES:
+		return False
+	menu = c.parent(node)
+	return menu is not None and "Selection" in c.interfaces(menu) and c.selectedChild(menu) == node
+
+
 def _hasSelectedChild(node: Node) -> bool:
 	c = client()
+	if _clientModule.knownToolkit(node.busName) == GAIL_TOOLKIT:
+		# GTK 2 marks no menu item selected; a menu, and an item that opens one, says which item it holds.
+		return "Selection" in c.interfaces(node) and c.selectedCount(node) > 0
 	for child in c.children(node):
 		if {"selected", "showing"} <= c.states(child):
 			return True
@@ -1757,7 +1780,7 @@ def pumpAll() -> None:
 	perApplication: collections.Counter = collections.Counter()
 	overLimit: set[int] = set()
 	alwaysAllowed = {focusKey, _foreground.key if _foreground is not None else None}
-	# A GTK 3 menu's selection is kept whatever came after it, as a focus is: GTK says that each item of a
+	# A GTK menu's selection is kept whatever came after it, as a focus is: GTK says that each item of a
 	# submenu shows just after the item that opens it is selected. It is asked about here, and not as it
 	# comes, as _asMenuItemFocus asks of a Chromium menu's: only an application's newest selection can be
 	# its menu's focus, and a GTK list can select thousands of rows at once.
