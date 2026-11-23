@@ -30,9 +30,11 @@ from .client import ROOT_PATH, AppHung, Client, Node, NodeGone
 #: toolkits in LEGACY_FOCUS_TOOLKITS.
 LEGACY_FOCUS_EVENT = "focus:"
 #: The toolkits whose focus: is a focus, by their ToolkitName in lower case: GTK 3's, and GTK 2's. Today's
-#: GTK 3 never sends it. Firefox and Qt send it beside the state change, and Firefox also for a menu as it
-#: opens, which NVDA on Windows never takes for the focus, as the item focused in it is.
+#: GTK 3 never sends it. Firefox and Qt send it beside the state change; Firefox's is taken only for a
+#: popup menu as it opens (see _geckoMenuStart).
 LEGACY_FOCUS_TOOLKITS = frozenset({"gtk", "gail"})
+#: Firefox's ToolkitName in lower case.
+GECKO_TOOLKIT = "gecko"
 #: The events that say an object has the focus, the state change only with detail1 set.
 _FOCUS_EVENTS = frozenset({"object:state-changed:focused", LEGACY_FOCUS_EVENT})
 
@@ -633,7 +635,7 @@ def _takesLegacyFocus(busName: str) -> bool:
 	activated. Asking for an application not asked yet would be a round trip in the middle of wx.Yield,
 	which every event of Firefox's content process after it would then wait for."""
 	toolkit = _clientModule.knownToolkit(busName)
-	return toolkit is not None and toolkit.lower() in LEGACY_FOCUS_TOOLKITS
+	return toolkit is not None and toolkit.lower() in LEGACY_FOCUS_TOOLKITS | {GECKO_TOOLKIT}
 
 
 def _onEvent(eventType: str, source: Node | None, detail1: int, detail2: int, anyData) -> None:
@@ -875,6 +877,8 @@ def _focusCandidate(event) -> Node | None:
 	c = client()
 	if eventType == "window:activate":
 		return _focusIn(source) or _popupMenuIn(source) or source
+	if eventType == LEGACY_FOCUS_EVENT and c.toolkit(source).lower() == GECKO_TOOLKIT:
+		return _geckoMenuStart(source)
 	if eventType == "object:active-descendant-changed":
 		if not isinstance(anyData, Node) or "focused" not in c.states(source):
 			return None
@@ -979,6 +983,23 @@ def _popupMenuIn(window: Node) -> Node | None:
 		return menu if menu is not None and c.role(menu) == "menu" else None
 	except NodeGone:
 		return None
+
+
+def _geckoMenuStart(menu: Node) -> Node | None:
+	"""Firefox's popup menu as it opens, before an item of it is highlighted, which Firefox says only with
+	focus:. NVDA on Windows takes a popup menu's start for the focus unless the focus is already on a menu
+	or menu item (IAccessibleHandler.processMenuStartWinEvent); left in the document, the focus would keep
+	browse mode's arrows from the menu."""
+	import eventHandler
+	from controlTypes import Role
+
+	c = client()
+	if c.role(menu) != "menu" or "showing" not in c.states(menu):
+		return None
+	last = getattr(eventHandler.lastQueuedFocusObject, "role", None)
+	if last in (Role.POPUPMENU, Role.MENU, Role.MENUITEM, Role.CHECKMENUITEM, Role.RADIOMENUITEM):
+		return None
+	return menu
 
 
 def _processFocus(event, mayRetry: bool = True) -> bool:
