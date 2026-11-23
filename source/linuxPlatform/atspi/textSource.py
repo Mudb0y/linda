@@ -173,8 +173,15 @@ def toolkitOf(node: Node) -> str:
 	if toolkit is None:
 		try:
 			# ToolkitName is a property of the application object, which Qt's widgets do not answer for.
-			application = _call(node, Atspi.Accessible.get_application, node.ref)
-			toolkit = _call(node, Atspi.Accessible.get_toolkit_name, application) or ""
+			# Asked in one function of its own: the call wrapper would hand a libatspi function node's own
+			# accessible as well as the application, which it does not take.
+			toolkit = (
+				_call(
+					node,
+					lambda: (Atspi.Accessible.get_application(node.ref) or node.ref).get_toolkit_name(),
+				)
+				or ""
+			)
 		except NodeGone:
 			return ""
 		_toolkits[node.busName] = toolkit

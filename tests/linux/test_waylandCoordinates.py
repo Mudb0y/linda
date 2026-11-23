@@ -263,6 +263,8 @@ def described(extents):
 
 
 result = {"toolkit": c.toolkit(top), "radios": {}, "windowCoordinates": atspiClient.windowCoordinates()}
+# The text source's own lookup, which a text whose object names no toolkit falls back to.
+result["textSourceToolkit"] = textSource.toolkitOf(top)
 for name, node in radios.items():
 	extents = c.extents(node)
 	entry = {"client": described(extents), "raw": raw(node)}
@@ -537,6 +539,8 @@ def test_theClientAsksInTheSessionsSpace(desktop: DesktopSession, tmp_path: Path
 	radios = found["radios"]
 	text = found["text"]
 	assert found["windowCoordinates"] is isWayland()
+	# The text source's own lookup raised for every program until it asked in one call (issue 15).
+	assert found["textSourceToolkit"] == found["toolkit"], found
 	if not isWayland():
 		# The X route as it was: SCREEN, as plain tuples with no window, whatever the toolkit answers.
 		for entry in [*radios.values(), text]:
