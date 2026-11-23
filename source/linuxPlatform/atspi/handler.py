@@ -792,6 +792,7 @@ def terminate() -> None:
 	_activationWhileHung.clear()
 	_switcherEventsWhileHung.clear()
 	_switcherHandedBack.clear()
+	_javaSubmenus.clear()
 	_rescansExtended = False
 	_setForeground(None)
 	_settleStartedAt = None
@@ -1461,7 +1462,7 @@ def _returnToJavaMenu(item: Node, menu: Node) -> None:
 	import core
 	import eventHandler
 
-	if _exiting or getattr(eventHandler.lastQueuedFocusObject, "node", None) != item:
+	if _exiting or not _listening or getattr(eventHandler.lastQueuedFocusObject, "node", None) != item:
 		return
 	try:
 		if "showing" in client().states(item):
