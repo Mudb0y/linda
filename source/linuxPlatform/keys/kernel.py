@@ -503,13 +503,13 @@ class KernelKeySource:
 		# What NVDA asked, each replaced whole, as the thread that answers keys reads them without a lock.
 		self._consumed = (0, False)
 		self._held = False
-		self._gestureKeys: dict[str, frozenset[GestureKey]] = {
-			"browse": frozenset(),
-			"focus": frozenset(),
-			"bound": frozenset(),
-		}
-		#: Mode: key code: the modifier masks it is captured with; every mode or none.
+		self._gestureKeys: dict[str, frozenset[GestureKey]] = {"browse": frozenset(), "focus": frozenset()}
+		#: Mode: key code: the modifier masks it is captured with; both modes or none.
 		self._modeSets: dict[str, dict[int, set[int]]] = {}
+		#: The keys bound to NVDA's scripts in every program, and their key codes: the modifier masks they
+		#: are captured with, as x11.boundSet has them.
+		self._boundKeys: frozenset[GestureKey] = frozenset()
+		self._boundSet: dict[int, set[int]] = {}
 		self._beatCounter = 0
 		self._nextBeat = 0.0
 		self._lastEcho = 0.0
@@ -761,10 +761,15 @@ class KernelKeySource:
 			self._makeModeSets()
 
 	def setCaptureGestures(self, browse: frozenset[GestureKey], focus: frozenset[GestureKey]) -> None:
-		# As the X source has them: outside a document the keys bound there come as focus mode's.
-		wanted = {"browse": browse, "focus": focus, "bound": focus}
+		wanted = {"browse": browse, "focus": focus}
 		if wanted != self._gestureKeys:
 			self._gestureKeys = wanted
+			self._makeModeSets()
+
+	def setBoundKeys(self, keys: frozenset[GestureKey]) -> None:
+		"""As the X source's: these are captured in every program, a document or not."""
+		if keys != self._boundKeys:
+			self._boundKeys = keys
 			self._makeModeSets()
 
 	def holdKeyboard(self, hold: bool) -> None:
@@ -1168,8 +1173,9 @@ class KernelKeySource:
 				return
 			self._modeSets = {
 				mode: x11.captureSet(self._query, mode, self._gestureKeys[mode])
-				for mode in ("browse", "focus", "bound")
+				for mode in ("browse", "focus")
 			}
+			self._boundSet = x11.boundSet(self._query, self._boundKeys)
 
 	def _followLayout(self) -> None:
 		d = self._events
@@ -1846,30 +1852,38 @@ class KernelKeySource:
 			return NVDA_KIND
 		if numpadReview and keycode in NUMPAD_REVIEW_KEYCODES and not effective & ~NUMPAD_REVIEW_MODS:
 			return NVDA_KIND
-		if self._grabsTake(capture) and self._inCaptureSets(keycode, effective, capture):
+		if self._isBound(keycode, effective):
+			# As the X source's grabs of these, which follow the focus to every window.
+			return CAPTURE_KIND
+		if self._grabsTake(capture) and self._inCaptureSets(keycode, effective):
 			return CAPTURE_KIND
 		return PASS_KIND
 
-	def _inCaptureSets(self, keycode: int, effective: int, capture: x11.CaptureState) -> bool:
-		"""Whether the X source's grabs of a document's keys, or of the keys bound outside one, are made
-		for this key with these modifiers."""
+	def _isBound(self, keycode: int, effective: int) -> bool:
+		"""Whether the key with these modifiers is bound to NVDA's scripts in every program."""
+		masks = self._boundSet.get(keycode)
+		return masks is not None and effective & ~LOCK_MODS in masks
+
+	def _inCaptureSets(self, keycode: int, effective: int) -> bool:
+		"""Whether the X source's grabs of a document's keys are made for this key with these modifiers."""
 		modeSets = self._modeSets
 		if not modeSets:
 			self._makeModeSets()
 			modeSets = self._modeSets
-		modes = ("bound",) if capture.bound else ("browse", "focus")
-		for masks in (modeSets.get(mode, {}).get(keycode) for mode in modes):
+		for masks in (modeSets.get("browse", {}).get(keycode), modeSets.get("focus", {}).get(keycode)):
 			if masks is not None and effective & ~LOCK_MODS in masks:
 				return True
 		return False
 
 	def _turnsOnFocus(self, keycode: int, effective: int, capture: x11.CaptureState) -> bool:
 		"""Whether a press is a document's or the application's by where the focus is alone: the window
-		its keys are grabbed on having it or not."""
+		its keys are grabbed on having it or not. A key bound in every program is NVDA's wherever the
+		focus is."""
 		return (
-			bool(capture.window)
+			not self._isBound(keycode, effective)
+			and bool(capture.window)
 			and self._grabsTake(capture._replace(focused=True))
-			and (self._inCaptureSets(keycode, effective, capture))
+			and (self._inCaptureSets(keycode, effective))
 		)
 
 	def _documentMayBeComing(
@@ -1882,8 +1896,9 @@ class KernelKeySource:
 		left behind."""
 		return (
 			capture.mode in ("browse", "focus")
+			and not self._isBound(keycode, effective)
 			and bool(capture.processID)
-			and self._inCaptureSets(keycode, effective, capture)
+			and self._inCaptureSets(keycode, effective)
 			and not self._environmentSettled(now)
 		)
 
@@ -2068,7 +2083,12 @@ class KernelKeySource:
 		press = _Press(seq, keycode, now, kind, own, effective, under=under, device=device, asked=not decided)
 		if typed:
 			press.typed = True
-		if kind == CAPTURE_KIND and capture.documentUntil is not None and now < capture.documentUntil:
+		if (
+			kind == CAPTURE_KIND
+			and capture.documentUntil is not None
+			and now < capture.documentUntil
+			and not self._isBound(keycode, effective)
+		):
 			press.document = True
 		if looks:
 			self._lookAtFocus(press, self._grabsTake(capture))
@@ -2447,6 +2467,9 @@ class KernelKeySource:
 		as the X source's decider has it: a key typed in a document's window before NVDA's focus is back
 		in it waits for that focus as long as the X route lets it, half a second, less the time to
 		answer; then, whether the grabs would still take it, the focus having had time to move."""
+		if self._isBound(press.keycode, press.effective):
+			# NVDA's in every mode, and outside a document.
+			return True
 		waitUntil = self._answerBy(press) - x11.CAPTURE_TIMEOUT / 2 if press.document else None
 		mode = self._askMode()
 		while mode == "off" and waitUntil is not None and time.monotonic() < waitUntil:

@@ -71,10 +71,10 @@ _MODIFIER_NAMES = frozenset(
 #: keys, which numpad review takes with Num Lock off and which type digits with it on.
 _NEVER_CAPTURED = frozenset((0x14, 0x90, 0x91))
 _NUMPAD_KEYS = frozenset((0x0C, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E))
-#: Whether the keys bound outside a document are captured there: not in a Wayland session, where
-#: what is captured follows the capture feed's document.
+#: Whether the keys bound in every program are captured outside a document: not in a Wayland session,
+#: where what is captured follows the capture feed's document.
 _captureBound = False
-#: (what they follow, the keys) bound outside a document by the running global plugins, and the user's
+#: (what they follow, the keys) bound in every program by the running global plugins, and the user's
 #: own bindings of NVDA's global commands, as the keyboard watcher last found them.
 _bound: tuple[tuple, frozenset[GestureKey]] = ((), frozenset())
 
@@ -186,6 +186,7 @@ def _watch(source: KeySource) -> None:
 	held = False
 	captured: CaptureMode = "off"
 	gestures = None
+	bound: frozenset[GestureKey] = frozenset()
 	route = _configuredRoute()
 	interval = WATCH_INTERVAL
 	while True:
@@ -207,24 +208,20 @@ def _watch(source: KeySource) -> None:
 				held = hold
 			focus = api.getFocusObject()
 			_findBound()
+			if _captureBound and _bound[1] != bound and (setBound := getattr(source, "setBoundKeys", None)):
+				# Kept apart from a document's keys, whose grabs stay with its window while the focus is
+				# away: these follow the focus to every window.
+				setBound(_bound[1])
+				bound = _bound[1]
 			capture = "off" if watchdog.isAttemptingRecovery else captureModeFor(focus)
 			if capture != "off":
 				try:
-					# Outside a document, the keys bound there alone, given as focus mode's.
-					interceptor = focus.treeInterceptor if capture != "bound" else None
-					signature = (
-						_gestureSignature(interceptor) if interceptor is not None else None,
-						_bound[0],
-					)
+					interceptor = focus.treeInterceptor
+					signature = (_gestureSignature(interceptor), _bound[0])
 					if gestures is None or gestures[0] != signature:
-						own = (
-							_gesturesFor(interceptor)
-							if interceptor is not None
-							else (frozenset(), frozenset())
-						)
+						own = _gesturesFor(interceptor)
 						# Global plugins answer before the document does, in either of its modes.
-						bound = _bound[1]
-						gestures = (signature, own[0] | bound, own[1] | bound)
+						gestures = (signature, own[0] | _bound[1], own[1] | _bound[1])
 						source.setCaptureGestures(gestures[1], gestures[2])
 				# This thread must go on whatever a focus going away or an add-on's gesture map raises: it
 				# lets the keyboard go during recovery. The keys captured anyway are browse mode's own.
@@ -254,8 +251,7 @@ def _watch(source: KeySource) -> None:
 
 def captureModeFor(focus) -> CaptureMode:
 	"""Which keys to capture with this focus: browse mode's while it is in a document in browse mode,
-	Escape alone while that document is in focus mode, and otherwise those bound outside a document,
-	when there are any and the session is not Wayland's.
+	Escape alone while that document is in focus mode, and otherwise none.
 
 	Asked off the main thread: the focus's tree interceptor is the one api.setFocusObject set on it,
 	so asking for it calls nothing in the application.
@@ -264,14 +260,13 @@ def captureModeFor(focus) -> CaptureMode:
 		return "off"
 	import browseMode
 
-	outside: CaptureMode = "bound" if _captureBound and _bound[1] else "off"
 	try:
 		interceptor = focus.treeInterceptor
 	# A focus that has just gone away raises whatever its kind of object raises; it has no document.
 	except Exception:  # noqa: BLE001
-		return outside
+		return "off"
 	if not isinstance(interceptor, browseMode.BrowseModeTreeInterceptor) or not interceptor.isReady:
-		return outside
+		return "off"
 	return "focus" if interceptor.passThrough else "browse"
 
 
@@ -318,7 +313,7 @@ def _gestureSignature(interceptor) -> tuple:
 
 
 def _findBound() -> None:
-	"""Find again the keys bound outside a document, when what they follow has changed since the last
+	"""Find again the keys bound in every program, when what they follow has changed since the last
 	look: the running global plugins, their bindings, the keyboard layout and the gesture maps.
 
 	These are the keys inputCore finds a script for before the focus's own: those of the global plugins,

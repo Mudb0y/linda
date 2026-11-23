@@ -36,9 +36,8 @@ TEST_VIRTUAL_KEYBOARD_VARIABLE = "LINDA_TEST_KEYD_VIRTUAL"
 #: The scan code Windows' hook gives the left Control it reports with AltGr, before right Alt.
 ALTGR_CONTROL_SCAN = 0x21D
 
-#: Which keys are captured: none beyond the NVDA keys, Escape alone for focus mode, browse mode's, or
-#: outside a document only the keys bound there to scripts, as an add-on binds F12.
-CaptureMode = Literal["off", "focus", "browse", "bound"]
+#: Which keys are captured: none beyond the NVDA keys, Escape alone for focus mode, or browse mode's.
+CaptureMode = Literal["off", "focus", "browse"]
 
 
 @dataclass(frozen=True)
@@ -99,7 +98,11 @@ class KeySource(Protocol):
 
 	def setCaptureGestures(self, browse: frozenset[GestureKey], focus: frozenset[GestureKey]) -> None:
 		"""Capture these too, beyond the keys each mode always captures: the gestures the gesture maps
-		bind in each mode."""
+		bind in each mode.
+
+		The keys bound in every program, as a global plugin binds F12, go to the X display's sources
+		through setBoundKeys, which only they have: those are captured in every window, a document's or
+		not, apart from a document's keys, whose grabs stay with its window while the focus is away."""
 
 	def setConsumed(self, nvdaModifierKeys: int, numpadReview: bool) -> None:
 		"""Take these keys from the applications.

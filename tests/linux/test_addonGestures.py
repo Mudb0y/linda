@@ -1,9 +1,10 @@
 """Keys a global plugin binds without the NVDA key, as the Speech History add-on binds F12, Shift+F12
-and Shift+F11: outside a document each runs the plugin's script and never reaches the program in front,
-on the X route and on the kernel route, as on Windows; a key bound nowhere reaches the program at once,
-never captured; and a binding the plugin adds while NVDA runs is captured from then on. In a Wayland
-session the keys outside a document are left as they were, reaching the program as well. Run under the
-rig:
+and Shift+F11: each runs the plugin's script and never reaches the program in front, a page or not, on
+the X route and on the kernel route, as on Windows; a key bound nowhere reaches the program at once,
+never captured; a binding the plugin adds while NVDA runs is captured from then on; and a page's own
+keys stay grabbed on its window while the focus is away, so that the first key after Alt+Tab back to
+it is still browse mode's. In a Wayland session the keys outside a document are left as they were,
+reaching the program as well. Run under the rig:
 
 	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_addonGestures.py
 	LINDA_RIG_COMPOSITOR=sway nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_addonGestures.py
@@ -14,12 +15,17 @@ import shutil
 import tempfile
 import time
 from collections.abc import Iterator
+from contextlib import ExitStack
 from pathlib import Path
 
+import desktopSession
 import harness
 import pytest
+import test_browseKeys as browseKeys
+import webSession
 from desktopSession import PREFIX_MARK, DesktopSession
 from keydStandIn import StandIn, virtualKeyboardName
+from test_kernelKeys import runKernelChild
 from test_keys import STARTUP_TIMEOUT, Keyboard, configText
 from test_waylandKeys import waylandLinda
 from test_waylandMenu import KeyProbe
@@ -80,9 +86,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
 	def script_late(self, gesture):
 		ui.message("late script")
+
 """
 
 ESCAPE, X_KEY, F5, F9, F11, F12 = 0x1B, 0x58, 0x74, 0x78, 0x7A, 0x7B
+#: F12's X key code.
+F12_CODE = 96
 #: (chord, what the plugin says) of each key it binds.
 BOUND = (("F12", "history newest"), ("shift+F12", "history next"), ("shift+F11", "history previous"))
 
@@ -218,6 +227,201 @@ def test_bindingAddedWhileRunningIsCaptured(addon: AddonSession):
 	# The F9 between is the NVDA key's chord's.
 	assert addon.presses(F9) == [False, True, True]
 	addon.quit()
+
+
+#: The kernel key source's child, F12 bound: the focus leaves the document's window for another
+#: application's, where F12 and x are typed, and comes back, and h, browse mode's next heading, is typed
+#: 50 ms after it is back, while NVDA's focus takes 150 ms to follow. NVDA says off outside the document,
+#: as inputHook does: which window had which key, what NVDA was told of each, and what the X source
+#: grabbed while the focus was away.
+BOUND_AWAY_CHILD = r"""
+F12 = 0x7B
+
+
+def keysByWindow():
+	keys = []
+	while app.pending_events():
+		event = app.next_event()
+		if event.type == X.KeyPress:
+			keys.append(["other" if event.window.id == other.id else "document", event.detail - 8])
+	return keys
+
+
+def told(vk):
+	return [[e["captured"], e["reached"]] for e in presses(vk)]
+
+
+other = root.create_window(0, 0, 100, 100, 0, app.screen().root_depth, event_mask=X.KeyPressMask)
+other.change_property(pidAtom, Xatom.CARDINAL, 32, [2])
+other.map()
+app.sync()
+source = startSource(ROUTE)
+source.setBoundKeys(frozenset({(frozenset(), F12, False)}))
+mode["now"] = "browse"
+source.setCapture("browse", 1)
+time.sleep(0.3)
+other.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+time.sleep(0.2)
+mode["now"] = "off"
+source.setCapture("off")
+time.sleep(0.3)
+keysByWindow()
+delivered.clear()
+keyboard.press("F12", hold=0.03)
+keyboard.press("x", hold=0.03)
+time.sleep(0.4)
+away = keysByWindow()
+boundGrabs = sorted(source._x._boundGrabbed)
+window.set_input_focus(X.RevertToParent, X.CurrentTime)
+app.sync()
+
+
+def follow():
+	time.sleep(0.15)
+	mode["now"] = "browse"
+	source.setCapture("browse", 1)
+
+
+threading.Thread(target=follow, daemon=True).start()
+time.sleep(0.05)
+keyboard.press("h", hold=0.03)
+time.sleep(0.8)
+result = {
+	"kernel": source.isKernel,
+	"away": away,
+	"back": keysByWindow(),
+	"boundGrabs": boundGrabs,
+	"f12": told(F12),
+	"x": told(ord("X")),
+	"h": told(ord("H")),
+}
+source.stop()
+keyboard.close()
+"""
+
+
+@pytest.mark.rigSession("x11")
+@pytest.mark.parametrize("route", ("x11", "auto"))
+def test_boundKeyFollowsTheFocusAndThePageKeepsItsKeys(tmp_path: Path, route: str):
+	"""With F12 bound, the page's keys stay grabbed on its window while the focus is away, so that the
+	first key typed after Alt+Tab back is still browse mode's, as test_kernelKeysReview's
+	test_firstKeyBackInADocumentIsBrowseModes has it with nothing bound; and F12 is NVDA's in the other
+	window, where x is that window's alone, never waiting for NVDA."""
+	value = runKernelChild(tmp_path, f"ROUTE = {route!r}\n" + BOUND_AWAY_CHILD)
+	assert value["kernel"] == (route == "auto")
+	assert value["away"] == [["other", 45]], f"on the {route} route the other window had {value['away']}"
+	assert value["f12"] == [[True, False]], value
+	assert value["x"] == [[False, True]], value
+	assert value["boundGrabs"] == [F12_CODE], value
+	assert value["back"] == [], f"on the {route} route h reached the page instead of browse mode: {value}"
+	assert value["h"] == [[True, False]], value
+
+
+#: Seconds Firefox and NVDA have to build the page's buffer.
+BUFFER_BOUND = browseKeys.BUFFER_BOUND
+
+
+@pytest.mark.rigSession("x11")
+@pytest.mark.parametrize("route", ("x11", "kernel"))
+def test_pageKeepsItsKeysWithABoundKey(desktop: DesktopSession, tmp_path: Path, route: str):
+	"""test_browseKeys.test_altTabLeavesThePageItsKeys with the add-on's F12 bound, on the X route and on
+	the kernel route: the first key typed after Alt+Tab back to the page is browse mode's and never
+	reaches the page; F12 runs the add-on's script in the other program and in the page, in browse mode
+	and in focus mode, and the page never has it."""
+	webSession.requireBrowseLibraries()
+	with ExitStack() as stack:
+		record = tmp_path / "presses.jsonl"
+		record.touch()
+		env = {"LINDA_TEST_HOOKS_DIR": str(hooks(tmp_path)), "LINDA_ADDON_KEYS_RECORD": str(record)}
+		if route == "kernel":
+			socketDir = Path(tempfile.mkdtemp(prefix="keyd", dir="/tmp"))
+			stack.callback(shutil.rmtree, socketDir, ignore_errors=True)
+			standIn = stack.enter_context(StandIn(socketDir / "socket"))
+			board = standIn
+			env |= {"LINDA_TEST_KEYD_SOCKET": standIn.path, "LINDA_TEST_KEYD_VIRTUAL": virtualKeyboardName()}
+		else:
+			board = Keyboard()
+			stack.callback(board.close)
+		desktop.startApp(desktop.fixture("gtkFixture"), title="Fixture window")
+		desktopSession.activate("Fixture window")
+		# To the text field, which holds "Alice".
+		desktop.press("Tab", "Tab", "Tab", "Tab")
+		webSession.startFirefox(desktop, "keys.html")
+		nvda = desktop.startNVDA(browseKeys.browseConfig(tmp_path), env=env)
+		nvda.waitForLog("Buffer rendered", BUFFER_BOUND)
+		browseKeys.waitForCapture(nvda, "browse", timeout=BUFFER_BOUND)
+		if route == "kernel":
+			standIn.waitFor(lambda: standIn.capturing, 10)
+			nvda.waitForLog("Keys come from the kernel through linda-keyd: linda-keyd admitted NVDA", 5)
+		time.sleep(browseKeys.SETTLE)
+		page = browseKeys.KeysPage()
+		assert page.log() == []
+
+		def step(chord: str, *expected: str) -> None:
+			mark = desktop.mark()
+			board.press(chord)
+			browseKeys.expect(desktop, *expected, since=mark)
+			time.sleep(browseKeys.SETTLE)
+
+		def waitForLeftPage() -> None:
+			# By what is captured, neither of the page's modes, whatever NVDA calls the mode outside.
+			deadline = time.monotonic() + 5
+			while browseKeys.captureMode(nvda) in ("browse", "focus"):
+				assert time.monotonic() < deadline, f"NVDA's focus did not leave the page:\n{nvda.describe()}"
+				time.sleep(0.05)
+
+		def waitForField(letter: str) -> None:
+			deadline = time.monotonic() + 3
+			while letter not in (text := browseKeys.gtkEntryText()):
+				assert time.monotonic() < deadline, f"{letter} did not reach the fixture's field: {text!r}"
+				time.sleep(0.05)
+
+		step("control+Home", "heading level 1 Keys page")
+		step("F12", "history newest")
+		step("alt+Tab", "Fixture window" + PREFIX_MARK)
+		waitForLeftPage()
+		step("F12", "history newest")
+		board.press("x")
+		waitForField("x")
+
+		step("alt+Tab", "Keys page" + PREFIX_MARK)
+		browseKeys.waitForCapture(nvda, "browse")
+		step("control+Home", "heading level 1 Keys page")
+		step("h", "Field and link heading level 2")
+		assert page.log() == []
+
+		# The first key after Alt+Tab is the new window's, though NVDA's focus follows the window only once
+		# its application has told it: typing in the fixture, and NVDA's on the page.
+		mark = desktop.mark()
+		board.press("alt+Tab")
+		board.press("y")
+		browseKeys.expect(desktop, "Fixture window" + PREFIX_MARK, since=mark)
+		waitForLeftPage()
+		waitForField("y")
+		time.sleep(browseKeys.SETTLE)
+		mark = desktop.mark()
+		board.press("alt+Tab")
+		board.press("h")
+		browseKeys.expect(desktop, "no next heading", since=mark)
+		time.sleep(browseKeys.SETTLE)
+		assert page.log() == [], f"on the {route} route the page had {page.log()}"
+
+		# In focus mode, where the page has every other key.
+		step("Tab", "Field edit" + PREFIX_MARK, "Focus mode")
+		browseKeys.waitForCapture(nvda, "focus")
+		step("F12", "history newest")
+		board.press("a")
+		page.waitForLog(["a"])
+		step("Escape", "Browse mode")
+		assert page.log() == ["a"]
+		records = [json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()]
+		# In the page in browse mode, in the fixture, and in the page in focus mode: each NVDA's alone.
+		assert [r["captured"] for r in records if r["vk"] == F12] == [True, True, True]
+		step("Insert+q", "Exit Linda" + PREFIX_MARK)
+		board.press("Return")
+		nvda.waitForExit(10)
+		nvda.assertClean(logNames=("nvda.log",))
 
 
 @pytest.mark.rigSession("wayland")
