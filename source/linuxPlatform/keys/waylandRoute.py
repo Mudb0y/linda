@@ -16,6 +16,7 @@ the desktop, and the helper is given up the moment they are proved not to.
 
 import collections
 import os
+import threading
 import time
 from functools import partial
 from typing import TYPE_CHECKING
@@ -43,6 +44,9 @@ LOSSES_TOO_MANY = 3
 LOSS_SPAN = 120.0
 #: compositor() names whose session has a run dialog on Alt+F2 that starts a program by name.
 RUN_DIALOG_DESKTOPS = ("gnome", "kde")
+#: Seconds a note on a keyboard waits before it is said: one scan's notes come together, a keyboard left
+#: alone perhaps just before one held, and only then is it known whether NVDA has any keys.
+DEVICE_SETTLE = 0.3
 
 
 class WaylandRoute(RoutedKeySource):
@@ -85,6 +89,9 @@ class WaylandRoute(RoutedKeySource):
 		self._saidHasKeyboard = False
 		self._hinted = False
 		self._saidUnheard = False
+		self._saidNoKeyboard = False
+		#: (when, status) of the helper's notes on keyboards not yet said, from the kernel source's thread.
+		self._deviceNotes: collections.deque[tuple[float, int]] = collections.deque()
 		self._saidNotices: set[str] = set()
 		#: The helper's sockets, by identity, for which BUSY, or REPLACED, which BUSY follows, was said.
 		self._saidBusyFor: set[tuple[int, int, int] | None] = set()
@@ -214,6 +221,7 @@ class WaylandRoute(RoutedKeySource):
 			self._giveUpAbsent()
 			super()._turn()
 		finally:
+			self._sayUnheard()
 			while self._toSay:
 				self._say(self._toSay.popleft())
 
@@ -386,10 +394,10 @@ class WaylandRoute(RoutedKeySource):
 
 	def _tookKeyboard(self) -> None:
 		"""The helper holds the keyboard for NVDA and the route is taken."""
-		if self._saidNoHelper and not self._saidHasKeyboard:
+		if (self._saidNoHelper or self._saidNoKeyboard) and not self._saidHasKeyboard:
 			self._saidHasKeyboard = True
 			# Translators: Said on Linux in a Wayland session when NVDA takes keys through linda-keyd, the
-			# program that takes the keyboard in the kernel, after it said at start that it had none.
+			# program that takes the keyboard in the kernel, after it said that it had none.
 			self._say(_("NVDA has the keyboard"))
 		if not self._hinted:
 			self._hinted = True
@@ -404,14 +412,46 @@ class WaylandRoute(RoutedKeySource):
 			)
 
 	def _onDevice(self, status: int) -> None:
-		if status in (keydClient.DEVICE_BUSY, keydClient.DEVICE_IGNORED) and not self._saidUnheard:
-			self._saidUnheard = True
-			self._later(
+		unheard = (keydClient.DEVICE_BUSY, keydClient.DEVICE_IGNORED, keydClient.DEVICE_WAITING)
+		if status in unheard and not self._saidUnheard:
+			self._deviceNotes.append((time.monotonic(), status))
+			timer = threading.Timer(DEVICE_SETTLE, self._wake.set)
+			timer.daemon = True
+			timer.start()
+
+	def _sayUnheard(self) -> None:
+		"""Say, on the route's own thread, what the notes on keyboards that have settled add up to."""
+		notes = self._deviceNotes
+		now = time.monotonic()
+		statuses = set()
+		while notes and notes[0][0] + DEVICE_SETTLE <= now:
+			statuses.add(notes.popleft()[1])
+		if self._saidUnheard or not statuses & {keydClient.DEVICE_BUSY, keydClient.DEVICE_IGNORED}:
+			return
+		self._saidUnheard = True
+		kernel = self._kernel
+		if (
+			statuses == {keydClient.DEVICE_IGNORED}
+			and kernel is not None
+			and not getattr(kernel, "isHolding", True)
+		):
+			self._saidNoKeyboard = True
+			self._say(
 				# Translators: Said on Linux in a Wayland session when linda-keyd, the program that takes the
-				# keyboard in the kernel, cannot take one of the keyboards, or leaves it alone: NVDA does not
-				# hear what is typed on it.
-				_("NVDA cannot hear one of the keyboards, so its keys reach programs without NVDA."),
+				# keyboard in the kernel, holds no keyboard for NVDA, as it left every one alone: it does
+				# not take a keyboard that is also a mouse or touchpad. NVDA has no keys at all then.
+				_(
+					"NVDA has no keys in this Wayland session, as linda-keyd leaves alone a keyboard that is "
+					"also a pointing device. NVDA still reads the screen.",
+				),
 			)
+			return
+		self._say(
+			# Translators: Said on Linux in a Wayland session when linda-keyd, the program that takes the
+			# keyboard in the kernel, cannot take one of the keyboards, or leaves it alone: NVDA does not
+			# hear what is typed on it.
+			_("NVDA cannot hear one of the keyboards, so its keys reach programs without NVDA."),
+		)
 
 	def _onNotice(self, notice: str) -> None:
 		if notice not in self._saidNotices:

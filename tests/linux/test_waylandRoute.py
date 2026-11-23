@@ -63,6 +63,10 @@ TURNED_AWAY = (
 	"It reads the screen meanwhile."
 )
 UNHEARD = "NVDA cannot hear one of the keyboards, so its keys reach programs without NVDA."
+NO_KEYBOARD = (
+	"NVDA has no keys in this Wayland session, as linda-keyd leaves alone a keyboard that is also a "
+	"pointing device. NVDA still reads the screen."
+)
 NO_SENDER = "NVDA cannot type into programs here."
 US_NOTICE = "NVDA cannot find this desktop's keyboard layout, so it reads keys as US English."
 #: GOODBYE's and DEVICE's numbers, as protocol.rs gives them.
@@ -555,6 +559,63 @@ def test_anUnheardKeyboardIsSaidOnce(tmp_path: Path):
 		standIn={},
 	)
 	assert value["said"] == [HINT, UNHEARD]
+
+
+#: The stand-in's capture with its own keyboard, device 3, left alone in place of held, as linda-keyd
+#: leaves a keyboard that is also a pointer; with LEFT_ALONE_FIRST, a keyboard 2 is left alone and the
+#: stand-in's own is held just after it, in the one scan.
+LEFT_ALONE_CHILD = r"""
+from keydStandIn import StandIn
+
+
+def leftAlone():
+	keyboard._startWaiting = False
+	if LEFT_ALONE_FIRST:
+		keyboard._sendDevice(DEVICE_IGNORED, device=2)
+		StandIn._capture(keyboard)
+	else:
+		keyboard._sendDevice(DEVICE_IGNORED)
+
+
+keyboard._capture = leftAlone
+source = startRoute(waitForKernel=LEFT_ALONE_FIRST)
+wait(lambda: said, 5, "nothing was said of the keyboard left alone")
+time.sleep(1)
+before = {"said": list(said), "kernel": source.isKernel}
+if not LEFT_ALONE_FIRST:
+	# Said again, as at every capture, and a keyboard held at last.
+	with keyboard._lock:
+		keyboard._sendDevice(DEVICE_IGNORED)
+	time.sleep(1)
+	with keyboard._lock:
+		StandIn._capture(keyboard)
+	wait(lambda: source.isKernel, 5, "the route did not take the keyboard held later")
+	time.sleep(0.3)
+source.stop()
+result = {"before": before, "said": said}
+"""
+
+
+def leftAloneChild(tmp_path: Path, first: bool) -> dict:
+	return runRouteChild(
+		tmp_path,
+		f"DEVICE_IGNORED = {DEVICE_IGNORED}\nLEFT_ALONE_FIRST = {first}\n" + LEFT_ALONE_CHILD,
+		standIn={},
+	)
+
+
+def test_theOnlyKeyboardLeftAloneLeavesNoKeysUntilOneIsHeld(tmp_path: Path):
+	value = leftAloneChild(tmp_path, first=False)
+	assert value["before"] == {"said": [NO_KEYBOARD], "kernel": False}
+	assert value["said"] == [NO_KEYBOARD, HAS_KEYBOARD, HINT]
+
+
+def test_oneOfTwoKeyboardsLeftAloneIsUnheard(tmp_path: Path):
+	"""Left alone just before the other is held, it is still only one of them that NVDA cannot hear."""
+	value = leftAloneChild(tmp_path, first=True)
+	said = value["said"]
+	assert sorted(said) == sorted([HINT, UNHEARD]), said
+	assert value["before"]["kernel"]
 
 
 MODE_CHILD = r"""
