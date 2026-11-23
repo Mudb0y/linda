@@ -21,6 +21,8 @@ SERVICES = harness.HERE / "fixtures" / "lockServices.py"
 SESSION_PATH = "/org/freedesktop/login1/session/_31"
 ANOTHER_SESSION = "/org/freedesktop/login1/session/_32"
 SESSION_CONFIG = harness.HERE / "fixtures" / "sessionConfig" / "nvda.ini"
+#: The rig's own bus configuration, which the stand-in system bus starts with rather than the host's.
+RIG_SESSION_CONF = harness.HERE / "rig-session.conf"
 
 #: Starts the stand-ins and defines the helpers the tests share.
 PRELUDE = f"""
@@ -33,6 +35,7 @@ import time
 import globalVars
 
 SERVICES = {str(SERVICES)!r}
+RIG_SESSION_CONF = {str(RIG_SESSION_CONF)!r}
 SESSION_PATH = {SESSION_PATH!r}
 started = []
 
@@ -91,7 +94,7 @@ def openDialog(saver):
 
 def startSystemBus(address="unix:tmpdir=/tmp"):
 	daemon = subprocess.Popen(
-		["dbus-daemon", "--session", "--nofork", "--print-address=1", f"--address={{address}}"],
+		["dbus-daemon", f"--config-file={{RIG_SESSION_CONF}}", "--nofork", "--print-address=1", f"--address={{address}}"],
 		stdout=subprocess.PIPE,
 		stderr=open(os.path.join(os.environ["XDG_CONFIG_HOME"], f"bus{{len(started)}}.stderr"), "w"),
 		text=True,

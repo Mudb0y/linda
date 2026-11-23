@@ -10,9 +10,9 @@
 #
 # Inside, the checkout and the system are read-only and /tmp is empty.
 # --bind DIR makes DIR visible and writable, for results that should outlive
-# the run or scripts kept outside the checkout. The locale is C.UTF-8 and the
-# time zone UTC, and of the caller's variables only LINDA_ and BENCH_
-# ones get in; anything else goes through env, as in
+# the run or scripts kept outside the checkout. The locale is C.UTF-8, the
+# time zone UTC and the fonts the dev shell's, and of the caller's variables
+# only LINDA_ and BENCH_ ones get in; anything else goes through env, as in
 # rig env LANG=pl_PL.UTF-8 command.
 #
 # LINDA_RIG_NET=1 in the caller's environment gives the sandbox the
@@ -291,7 +291,8 @@ within() {
 	return 1
 }
 
-if [ -z "${AT_SPI_BUS_LAUNCHER:-}" ] || [ -z "${LINDA_RIG_PATH:-}" ]; then
+if [ -z "${AT_SPI_BUS_LAUNCHER:-}" ] || [ -z "${LINDA_RIG_PATH:-}" ] ||
+	[ -z "${LINDA_RIG_FONTCONFIG_FILE:-}" ]; then
 	fail "run inside the dev shell, nix develop"
 fi
 case "${LINDA_RIG_NET:-}" in
@@ -401,6 +402,9 @@ done
 variables+=(
 	"PATH=$(storeOnly "$LINDA_RIG_PATH")"
 	"XDG_DATA_DIRS=$(storeOnly "${LINDA_RIG_XDG_DATA_DIRS:-}")"
+	# Otherwise fontconfig reads the host's /etc/fonts, and which fonts there
+	# are changes where lines wrap.
+	"FONTCONFIG_FILE=$LINDA_RIG_FONTCONFIG_FILE"
 	"HOME=$root/home"
 	"USER=$(id -un)"
 	"LOGNAME=$(id -un)"

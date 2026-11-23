@@ -21,6 +21,7 @@ import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
+from xml.etree import ElementTree
 
 import harness
 import pytest
@@ -234,6 +235,20 @@ def _virtualKeyboardProtocol(value: str) -> None:
 	assert '<interface name="zwp_virtual_keyboard_manager_v1"' in path.read_text(encoding="utf-8"), value
 
 
+def _rigFontconfigFile(value: str) -> None:
+	path = Path(value)
+	assert path.is_file() and value.startswith(STORE), value
+	# Fonts and rules from the store alone, or from the rig's own HOME, which xdg names; none of the host's.
+	named = [
+		element
+		for element in ElementTree.parse(path).getroot()
+		if element.tag in ("dir", "include") and element.get("prefix") != "xdg"
+	]
+	outside = [element.text for element in named if not (element.text or "").startswith(STORE)]
+	assert not outside, outside
+	assert any(element.tag == "dir" and os.path.isdir(element.text) for element in named), value
+
+
 def _storePath(path: Path) -> Path:
 	"""The store path a file is in."""
 	return Path(STORE) / path.relative_to(STORE).parts[0]
@@ -315,6 +330,7 @@ SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
 	"LINDA_VIRTUAL_KEYBOARD_PROTOCOL": _virtualKeyboardProtocol,
 	"LINDA_RIG_PATH": _searchPath,
 	"LINDA_RIG_XDG_DATA_DIRS": _searchPath,
+	"LINDA_RIG_FONTCONFIG_FILE": _rigFontconfigFile,
 }
 
 

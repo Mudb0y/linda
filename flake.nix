@@ -402,6 +402,18 @@
         # on the ones the host happens to have built.
         LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
 
+        # The fonts tests/linux/rig gives its sandbox, so that where a
+        # fixture's lines wrap does not depend on the host's /etc/fonts and
+        # /usr/share/fonts: the ones a NixOS desktop has for its default
+        # families, DejaVu, and for emoji, Noto Color Emoji, with fontconfig's
+        # own rules. For the rig alone: as FONTCONFIG_FILE it would change the
+        # fonts of everything started from this shell.
+        LINDA_RIG_FONTCONFIG_FILE = pkgs.makeFontsConf {
+          fontDirectories = with pkgs; [ dejavu_fonts noto-fonts-color-emoji ];
+          impureFontDirectories = [ ];
+          includes = [ "${pkgs.fontconfig.out}/etc/fonts/conf.d" ];
+        };
+
         # The host session exports one pointing at its own alsa-lib and
         # PipeWire's libjack. Inherited, it would put host audio libraries
         # ahead of the pinned ones in every process started from here,

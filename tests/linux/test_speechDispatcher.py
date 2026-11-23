@@ -1,19 +1,18 @@
 """Linda's Speech Dispatcher driver, against a private daemon started inside the rig.
 
-The daemon is the dev shell's, LINDA_SPEECHD, started with its own package's configuration, which
-it only reads, on a socket in the test's own runtime directory, with a configuration directory of the
-test's own that stays empty. The child the driver runs in is given that runtime directory and that
-socket as SPEECHD_ADDRESS, and before anything of NVDA is imported it installs an audit hook that
-refuses, before it is made, every connection but one to that socket. So a test can fail, but it cannot
-reach another daemon; the rig, which has an empty /run and none of the host's sockets, is the second
-wall. Run under the rig:
+The daemon is the dev shell's, LINDA_SPEECHD, started with its own package's configuration and the
+audio output and modules the tests use, which it only reads, on a socket in the test's own runtime
+directory, with a configuration directory of the test's own that stays empty. The child the driver runs
+in is given that runtime directory and that socket as SPEECHD_ADDRESS, and before anything of NVDA is
+imported it installs an audit hook that refuses, before it is made, every connection but one to that
+socket. So a test can fail, but it cannot reach another daemon; the rig, which has an empty /run and
+none of the host's sockets, is the second wall. Run under the rig:
 
 	nix develop . -c tests/linux/rig python3 -m pytest tests/linux/test_speechDispatcher.py
 
-The tests that time sound start the rig's private PipeWire with its PulseAudio server, which the stock
-configuration's audio output reaches, and listen on the sink with pwmon. The others give the daemon no
-sound server, and it falls back to libao, which plays nothing, so marks and ends come as fast as the
-module synthesizes.
+The tests that time sound start the rig's private PipeWire, which the daemon plays to through its
+PipeWire output, and listen on the sink with pwmon. The others give the daemon libao, which plays
+nothing in the rig, so marks and ends come as fast as the module synthesizes.
 """
 
 import json
@@ -46,10 +45,41 @@ def speechdConfigDir() -> Path:
 	return speechdBinary().parent.parent / "etc" / "speech-dispatcher"
 
 
+#: Added to the package's configuration for the tests' daemons, which the stock one leaves to the host
+#: and to chance. Its audio output is libao, which plays wherever the host's /etc/libao.conf says: on a
+#: host whose file names ALSA, nothing reaches the rig's PipeWire. A daemon that is to be heard is given
+#: PipeWire's own output instead, which plays to the daemon PIPEWIRE_REMOTE names; the others keep
+#: libao, which opens whatever the host's file says and, with no sound device or server in the rig,
+#: plays nothing, where an output that cannot open would report no marks and no ends at all. With no
+#: module named the daemon starts every one it has, sd_voxin among them, which exits at once without
+#: its library and can kill the daemon with SIGPIPE as it starts; here it starts only those the tests
+#: use, pico first, which makes it the default as the stock configuration does.
+TEST_SETTINGS = """
+AudioOutputMethod "{audioOutput}"
+AddModule "pico" "sd_pico" "pico.conf"
+AddModule "espeak-ng" "sd_espeak-ng" "espeak-ng.conf"
+AddModule "espeak-ng-mbrola" "sd_espeak-ng-mbrola" "espeak-ng-mbrola.conf"
+AddModule "flite" "sd_flite" "flite.conf"
+"""
+
+
+def writeTestConfig(directory: Path, audioOutput: str) -> Path:
+	"""A configuration directory with the package's configuration and TEST_SETTINGS. The daemon reads
+	modules' and clients' files relative to its configuration directory, so those are the package's."""
+	stock = speechdConfigDir()
+	directory.mkdir(parents=True)
+	for name in ("modules", "clients"):
+		(directory / name).symlink_to(stock / name)
+	(directory / "speechd.conf").write_text(
+		(stock / "speechd.conf").read_text() + TEST_SETTINGS.format(audioOutput=audioOutput)
+	)
+	return directory
+
+
 class PrivateDaemon:
 	"""A Speech Dispatcher of the test's own, which it alone started and alone stops."""
 
-	def __init__(self, workDir: Path, *, pulseServer: str | None = None) -> None:
+	def __init__(self, workDir: Path, *, pipewireRemote: str | None = None) -> None:
 		harness.requireRig()
 		self.workDir = workDir
 		# The rig's own /tmp, as a socket's path may not be longer than 107 bytes, which the test's
@@ -57,10 +87,11 @@ class PrivateDaemon:
 		self.runtime = Path(tempfile.mkdtemp(prefix="speechd-", dir="/tmp"))
 		self.socket = self.runtime / "speech-dispatcher" / "speechd.sock"
 		self.configHome = workDir / "config"
+		self.configDir = writeTestConfig(workDir / "configuration", "pipewire" if pipewireRemote else "libao")
 		self.log = workDir / "log"
 		for directory in (self.socket.parent, self.configHome, self.log):
 			directory.mkdir(parents=True, exist_ok=True)
-		self.pulseServer = pulseServer
+		self.pipewireRemote = pipewireRemote
 		self.process: subprocess.Popen | None = None
 
 	def command(self) -> list[str]:
@@ -78,13 +109,13 @@ class PrivateDaemon:
 			"--socket-path",
 			str(self.socket),
 			"--config-dir",
-			str(speechdConfigDir()),
+			str(self.configDir),
 		]
 
 	def environment(self) -> dict[str, str]:
 		env = {**os.environ, "XDG_RUNTIME_DIR": str(self.runtime), "XDG_CONFIG_HOME": str(self.configHome)}
-		if self.pulseServer:
-			env["PULSE_SERVER"] = self.pulseServer
+		if self.pipewireRemote:
+			env["PIPEWIRE_REMOTE"] = self.pipewireRemote
 		return env
 
 	def start(self) -> "PrivateDaemon":
@@ -135,20 +166,11 @@ def daemon(tmp_path: Path):
 
 @pytest.fixture
 def heardDaemon(tmp_path: Path):
-	"""A private daemon playing into the rig's PipeWire through its PulseAudio server, and a monitor on
-	the sink it plays to."""
+	"""A private daemon playing into the rig's PipeWire, and a monitor on the sink it plays to."""
 	pipewire = PipewireFixture(tmp_path / "pipewire")
 	pipewire.start()
 	try:
-		pulse = pipewire._spawn(
-			[pipewire.pipewireBin / "pipewire-pulse"],
-			"pipewire-pulse",
-			# Its package's own configuration, and none of the host's drop-ins.
-			{"PIPEWIRE_CONFIG_DIR": str(pipewire.pipewireBin.parent / "share" / "pipewire")},
-		)
-		native = Path(os.environ["XDG_RUNTIME_DIR"]) / "pulse" / "native"
-		pipewire._waitFor(lambda: native.exists() or pulse.poll() is not None, "PipeWire's PulseAudio server")
-		private = PrivateDaemon(tmp_path / "speechd", pulseServer=f"unix:{native}").start()
+		private = PrivateDaemon(tmp_path / "speechd", pipewireRemote=str(pipewire.socket)).start()
 		try:
 			yield private, pipewire.monitor()
 		finally:
@@ -391,7 +413,7 @@ def test_aModuleReportingNoMarksIsSplitAtEachMark(tmp_path: Path, daemon: Privat
 
 
 #: Stands in for the distribution's speech-dispatcher on PATH: it records how it was started, then
-#: runs the dev shell's daemon with its package's configuration.
+#: runs the dev shell's daemon with the tests' configuration.
 SPAWN_WRAPPER = """#!{bash}
 printf '%s\\n' "$@" > {record}/arguments
 env > {record}/environment
@@ -411,7 +433,7 @@ def test_startsTheDaemonOnPathWhenNoneRuns(tmp_path: Path):
 			bash=os.environ["LINDA_BASH"],
 			record=record,
 			speechd=speechdBinary(),
-			config=speechdConfigDir(),
+			config=absent.configDir,
 		),
 	)
 	wrapper.chmod(0o755)
