@@ -262,7 +262,10 @@ def test_twoWindowsOfOneProgram(desktop: DesktopSession, tmp_path: Path):
 
 
 def test_thereAndBackSaysOnlyWhereItEnds(desktop: DesktopSession, tmp_path: Path):
-	desktop.startApp(desktop.fixture("qtFixture"), title=QT_TITLE)
+	# A fixture asks for the keyboard as it says it is ready, so the second window is started after that,
+	# or the first can take the keyboard back from it.
+	qt = desktop.startApp(desktop.fixture("qtFixture"), title=QT_TITLE)
+	assert qt.stdout.readline() == "ready\n"
 	gtk = desktop.startApp(desktop.fixture("gtkFixture"), title=GTK_TITLE)
 	assert gtk.stdout.readline() == "ready\n"
 	desktopSession.activate(GTK_TITLE)

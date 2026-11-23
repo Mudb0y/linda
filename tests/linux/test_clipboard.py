@@ -56,10 +56,15 @@ def ownClipboard(text: str) -> subprocess.Popen:
 	process.stdin.write(text.encode("utf-8"))
 	process.stdin.close()
 	deadline = time.monotonic() + XCLIP_BOUND
-	while readClipboard() != text:
+	while True:
+		try:
+			if readClipboard() == text:
+				return process
+		except subprocess.CalledProcessError:
+			# Until xclip has taken it, the clipboard may have no owner at all to read from.
+			pass
 		assert time.monotonic() < deadline, "xclip did not take the clipboard"
 		time.sleep(0.05)
-	return process
 
 
 def step(desktop: DesktopSession, chord: str, *expected: str, timeout: float = 5) -> int:
@@ -118,7 +123,13 @@ def test_clipboardIsSharedWithOtherPrograms(desktop: DesktopSession):
 	version = readClipboard()
 	assert version and " (" in version, version
 	step(desktop, "Escape", "Fixture window", "Name: edit…")
-	step(desktop, "Insert+c", version)
+	# NVDA's built-in speech dictionary puts spaces into words, as wherever a letter runs into a digit
+	# in the version's commit hash, so what is read is compared without spaces.
+	readMark = step(desktop, "Insert+c")
+	deadline = time.monotonic() + 5
+	while "".join(version.split()) not in ["".join(text.split()) for text in desktop.spokenSince(readMark)]:
+		assert time.monotonic() < deadline, (version, desktop.spokenSince(readMark))
+		time.sleep(0.05)
 	assert "Unable to copy" not in desktop.spokenSince(mark)
 
 	desktop.close()

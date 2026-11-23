@@ -264,7 +264,10 @@ def test_startWhileTheActiveApplicationIsBusySpeaksItsFocusOnceItAnswers(
 
 
 def test_altTabSpeaksTitleAndFocusOnce(desktop: DesktopSession, tmp_path: Path):
-	desktop.startApp(desktop.fixture("qtFixture"), title=QT_TITLE)
+	# A fixture asks for the keyboard as it says it is ready, so the second window is started after that,
+	# or the first can take the keyboard back from it.
+	qt = desktop.startApp(desktop.fixture("qtFixture"), title=QT_TITLE)
+	assert qt.stdout.readline() == "ready\n"
 	gtk = desktop.startApp(desktop.fixture("gtkFixture"), title=GTK_TITLE)
 	assert gtk.stdout.readline() == "ready\n"
 	_waitUntilActive(GTK_TITLE)
@@ -286,7 +289,8 @@ def test_altTabSpeaksTitleAndFocusOnce(desktop: DesktopSession, tmp_path: Path):
 def test_altTabHeldWhileListeningSpeaksOnlyTheWindows(desktop: DesktopSession, tmp_path: Path):
 	"""Alt held through the switcher for longer than NVDA looks for a window to take over before it gives
 	the desktop the focus: nothing comes between the window the switcher names and the one arrived at."""
-	desktop.startApp(desktop.fixture("qtFixture"), title=QT_TITLE)
+	qt = desktop.startApp(desktop.fixture("qtFixture"), title=QT_TITLE)
+	assert qt.stdout.readline() == "ready\n"
 	gtk = desktop.startApp(desktop.fixture("gtkFixture"), title=GTK_TITLE)
 	assert gtk.stdout.readline() == "ready\n"
 	_waitUntilActive(GTK_TITLE)
@@ -342,6 +346,7 @@ def test_closingADialogReturnsToTheWindowsFocus(desktop: DesktopSession, tmp_pat
 
 def test_stoppedApplicationsDoNotStallSpeech(desktop: DesktopSession, tmp_path: Path):
 	qt = desktop.startApp(desktop.fixture("qtFixture"), title=QT_TITLE)
+	assert qt.stdout.readline() == "ready\n"
 	gtk = desktop.startApp(desktop.fixture("gtkFixture"), title=GTK_TITLE)
 	assert gtk.stdout.readline() == "ready\n"
 	_waitUntilActive(GTK_TITLE)
