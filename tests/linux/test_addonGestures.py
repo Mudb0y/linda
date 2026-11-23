@@ -76,7 +76,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	@script(gesture="kb:NVDA+shift+f9")
 	def script_bindLate(self, gesture):
 		self.bindGesture("kb:f9", "late")
-		ui.message("f9 bound")
+		ui.message("late binding made")
 
 	def script_late(self, gesture):
 		ui.message("late script")
@@ -180,10 +180,12 @@ def addon(request: pytest.FixtureRequest, desktop: DesktopSession, tmp_path: Pat
 
 @pytest.mark.rigSession("x11")
 def test_boundKeysRunTheScriptAndNeverReachTheProgram(addon: AddonSession):
+	leaked = {}
 	for chord, said in BOUND:
 		given = addon.press(chord, said)
-		main = chord.split("+")[-1]
-		assert f"pressed {main}" not in given, (chord, given)
+		if f"pressed {chord.split('+')[-1]}" in given:
+			leaked[chord] = given
+	assert not leaked
 	assert addon.presses(F12) == [True, True]
 	assert addon.presses(F11) == [True]
 	addon.quit()
@@ -209,7 +211,7 @@ def test_bindingAddedWhileRunningIsCaptured(addon: AddonSession):
 	assert "pressed F9" in given
 	mark = addon.desktop.mark()
 	addon.keyboard.press("Insert+shift+F9")
-	addon.desktop.expect("f9 bound", since=mark, timeout=STEP_TIMEOUT)
+	addon.desktop.expect("late binding made", since=mark, timeout=STEP_TIMEOUT)
 	time.sleep(SETTLE)
 	given = addon.press("F9", "late script")
 	assert "pressed F9" not in given
