@@ -71,7 +71,7 @@ NO_SENDER = "NVDA cannot type into programs here."
 US_NOTICE = "NVDA cannot find this desktop's keyboard layout, so it reads keys as US English."
 #: GOODBYE's and DEVICE's numbers, as protocol.rs gives them.
 GOODBYE_VERSION, GOODBYE_NOT_IN_FRONT, GOODBYE_NOT_AUTHORIZED, GOODBYE_BUSY, GOODBYE_REPLACED = 1, 2, 3, 4, 9
-DEVICE_BUSY, DEVICE_IGNORED = 3, 5
+DEVICE_WAITING, DEVICE_BUSY, DEVICE_IGNORED = 2, 3, 5
 
 #: The route in a child, built by createSource, its NVDA keeping every captured press and recording each
 #: event. The keys package may not open the X display: Display raises when called from it, and records
@@ -633,6 +633,34 @@ def test_oneOfTwoKeyboardsLeftAloneIsUnheard(tmp_path: Path):
 	assert sorted(said) == sorted([HINT, UNHEARD]), said
 	assert value["before"]["kernel"]
 	assert value["startedByReader"] == []
+
+
+#: The stand-in's capture with a keyboard 2 left alone and its own still waiting for a key to come up.
+WAITING_CHILD = r"""
+def scan():
+	keyboard._startWaiting = False
+	keyboard._sendDevice(DEVICE_IGNORED, device=2)
+	keyboard._sendDevice(DEVICE_WAITING)
+
+
+keyboard._capture = scan
+source = startRoute(waitForKernel=False)
+wait(lambda: said, 5, "nothing was said of the keyboards")
+time.sleep(1)
+result = {"said": said, "kernel": source.isKernel}
+source.stop()
+"""
+
+
+def test_aKeyboardLeftAloneBesideOneWaitingIsUnheard(tmp_path: Path):
+	"""Nothing is held yet, but the keyboard waiting for its keys to come up will be: NVDA is not
+	without keys, it only cannot hear the one left alone."""
+	value = runRouteChild(
+		tmp_path,
+		f"DEVICE_IGNORED, DEVICE_WAITING = {DEVICE_IGNORED}, {DEVICE_WAITING}\n" + WAITING_CHILD,
+		standIn={},
+	)
+	assert value == {"said": [UNHEARD], "kernel": False}
 
 
 MODE_CHILD = r"""
