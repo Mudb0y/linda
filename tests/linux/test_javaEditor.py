@@ -98,6 +98,26 @@ def test_backspaceInsideTheText(desktop: DesktopSession):
 	_closeClean(desktop)
 
 
+def test_backspaceAfterTypingOverASelection(desktop: DesktopSession):
+	"""Backspace after typing over a selection says the character typed, not the one it replaced: the
+	wrapper reports a change as the difference in length, so the replacement of one character by one
+	reaches NVDA as nothing, and that of three by one as a deletion of two."""
+	_start(desktop)
+	_type(desktop, "kot")
+	_step(desktop, "shift+Left", "t selected")
+	_type(desktop, "x")
+	_step(desktop, "BackSpace", "x")
+	_step(desktop, "BackSpace", "o")
+	_type(desktop, "abcd")
+	_step(desktop, "shift+Left", "d selected")
+	_step(desktop, "shift+Left", "c selected")
+	_step(desktop, "shift+Left", "b selected")
+	_type(desktop, "y")
+	_step(desktop, "BackSpace", "y")
+	_step(desktop, "BackSpace", "a")
+	_closeClean(desktop)
+
+
 def _moves(desktop: DesktopSession, key: str, *expected: str) -> None:
 	"""Press a key that moves the caret; NVDA says expected, in order, among what it says."""
 	mark = desktop.mark()
@@ -125,4 +145,18 @@ def test_ideaEditorBackspace(desktop: DesktopSession, tmp_path: Path):
 	_moves(desktop, "Right", "e")
 	_moves(desktop, "Right", "l")
 	_step(desktop, "BackSpace", "e")
+	_closeClean(desktop)
+
+
+@needsIdea
+def test_ideaBackspaceAfterTypingOverASelection(desktop: DesktopSession, tmp_path: Path):
+	"""Backspace in IntelliJ IDEA's editor after typing over a selection says the character typed."""
+	startIdea(desktop, tmp_path)
+	desktop.press("ctrl+End")
+	time.sleep(IDEA_UNANSWERED)
+	_type(desktop, "kot")
+	_step(desktop, "shift+Left", "t selected")
+	_type(desktop, "x")
+	_step(desktop, "BackSpace", "x")
+	_step(desktop, "BackSpace", "o")
 	_closeClean(desktop)

@@ -24,7 +24,7 @@ from linuxPlatform.atspi.roles import ROLES, mapStates
 from locationHelper import RectLTWH
 
 from NVDAObjects import NVDAObject
-from NVDAObjects.AtSpi.deletion import DeletionEcho
+from NVDAObjects.AtSpi.deletion import DeletionEcho, JavaTypedOver
 from NVDAObjects.AtSpi.terminal import VteTerminal
 from NVDAObjects.AtSpi.textInfo import AtspiTextInfo
 from NVDAObjects.behaviors import (
@@ -64,6 +64,8 @@ CHROMIUM = "Chromium"
 #: The classes of the element that holds the caret of Monaco, VS Code's editor: an element with an
 #: edit context in VS Code's recent versions, a hidden text area in older ones and in Monaco on a page.
 MONACO_INPUT_CLASSES = frozenset({"native-edit-context", "inputarea"})
+#: Java's Swing, through the Java ATK wrapper, as in JetBrains' IDEs.
+JAVA = "J2SE-access-bridge"
 
 #: Roles whose number comes from the Value interface.
 VALUE_ROLES = frozenset({Role.SLIDER, Role.SPINBUTTON, Role.SCROLLBAR, Role.PROGRESSBAR, Role.DIAL})
@@ -276,6 +278,8 @@ class AtSpi(NVDAObject):
 				clsList.append(RichTextEditor)
 			elif self._isMonacoEditor:
 				clsList.append(MonacoEditor)
+			if self.toolkit == JAVA:
+				clsList.append(JavaTypedOver)
 			clsList.append(DeletionEcho)
 			clsList.append(EditableTextWithAutoSelectDetection)
 		elif role == Role.TERMINAL and "Text" in ifaces:
