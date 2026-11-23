@@ -2079,12 +2079,20 @@ def test_theEnvironmentChoosesTheSink(tmp_path: Path):
 		class StandIn:
 			kind = "pipewire"
 
+		class PulseStandIn:
+			kind = "pulse"
+
 		standIn = types.ModuleType("linuxPlatform.audioOutput.pipewireSink")
 		standIn.PipewireSink = StandIn
 		sys.modules[standIn.__name__] = standIn
+
+		pulseStandIn = types.ModuleType("linuxPlatform.audioOutput.pulseSink")
+		pulseStandIn.PulseSink = PulseStandIn
+		sys.modules[pulseStandIn.__name__] = pulseStandIn
+
 		captureDir = {str(captureDir)!r}
 		chosen = {{}}
-		for sinkName in (None, "", "null", "capture", "pipewire", "alsa", "Null"):
+		for sinkName in (None, "", "null", "capture", "pipewire", "pulse", "alsa", "Null"):
 			for directory in (None, captureDir):
 				for name, value in (("LINDA_AUDIO_SINK", sinkName), ("LINDA_AUDIO_CAPTURE_DIR", directory)):
 					if value is None:
@@ -2126,7 +2134,7 @@ def test_theEnvironmentChoosesTheSink(tmp_path: Path):
 	def unknown(name: str) -> list:
 		return [
 			"OSError",
-			f"[Errno 22] LINDA_AUDIO_SINK must be null, capture or pipewire, not {name!r}",
+			f"[Errno 22] LINDA_AUDIO_SINK must be null, capture, pipewire or pulse, not {name!r}",
 		]
 
 	assert done.value["chosen"] == {
@@ -2140,6 +2148,8 @@ def test_theEnvironmentChoosesTheSink(tmp_path: Path):
 		"capture with directory": capture,
 		"pipewire without directory": ["StandIn", "pipewire", None],
 		"pipewire with directory": ["StandIn", "pipewire", None],
+		"pulse without directory": ["PulseStandIn", "pulse", None],
+		"pulse with directory": ["PulseStandIn", "pulse", None],
 		"alsa without directory": unknown("alsa"),
 		"alsa with directory": unknown("alsa"),
 		"Null without directory": unknown("Null"),
@@ -2148,8 +2158,41 @@ def test_theEnvironmentChoosesTheSink(tmp_path: Path):
 	assert done.value["startup"] == [
 		"WindowsError",
 		-2147467259,
-		"[Errno 22] LINDA_AUDIO_SINK must be null, capture or pipewire, not 'alsa'",
+		"[Errno 22] LINDA_AUDIO_SINK must be null, capture, pipewire or pulse, not 'alsa'",
 	]
+
+
+def test_pulseAudioFallbackWhenPipewireNotRunning(tmp_path: Path):
+	"""When installation specifies pipewire but no PipeWire daemon is running, getSink falls back
+	to PulseAudio sink."""
+	done = harness.runChild(
+		tmp_path,
+		"""
+		import types
+		import sys
+		from linuxPlatform import audioOutput, installSettings
+
+		class PulseStandIn:
+			kind = "pulse"
+
+		pulseStandIn = types.ModuleType("linuxPlatform.audioOutput.pulseSink")
+		pulseStandIn.PulseSink = PulseStandIn
+		sys.modules[pulseStandIn.__name__] = pulseStandIn
+
+		# Fake installSettings having pipewire as fixed by installation
+		installSettings._installed["LINDA_AUDIO_SINK"] = "pipewire"
+		audioOutput._sink = None
+		# Ensure isPipewireRunning is False
+		audioOutput.isPipewireRunning = lambda: False
+
+		sink = audioOutput.getSink()
+		result = {"kind": sink.kind}
+		""",
+		prepare="bootstrap",
+		env={"LINDA_AUDIO_SINK": None, "LINDA_AUDIO_CAPTURE_DIR": None},
+	)
+	done.assertClean()
+	assert done.value["kind"] == "pulse"
 
 
 def test_captureSinkKeepsAudioAtTheProcessGain(tmp_path: Path):

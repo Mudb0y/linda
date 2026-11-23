@@ -6,14 +6,16 @@ consume frames the way a sound device does and say how far it has got, much as W
 IAudioClient, IAudioRenderClient and IAudioClock do for upstream's player.
 
 Which sink is used is decided once per process, by the environment or else by what the installation
-fixed (linuxPlatform.installSettings). LINDA_AUDIO_SINK names it: null, capture or pipewire. Unset or empty, the capture sink is used when
+fixed (linuxPlatform.installSettings). LINDA_AUDIO_SINK names it: null, capture, pipewire or pulse. Unset or empty, the capture sink is used when
 LINDA_AUDIO_CAPTURE_DIR names a directory, and the null sink otherwise. The capture sink writes
 what was played to that directory; neither it nor the null sink opens a sound device or loads a
-sound library. There is no fallback from one sink to another: a sink that cannot be used fails.
+sound library. On PipeWire systems, PipeWire is the default. When no PipeWire daemon is running,
+Linda automatically falls back to PulseAudio.
 """
 
 import errno
 import os
+import socket
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -21,7 +23,7 @@ from dataclasses import dataclass
 
 from linuxPlatform import installSettings
 
-#: Names the sink: null, capture or pipewire.
+#: Names the sink: null, capture, pipewire or pulse.
 SINK_VARIABLE = "LINDA_AUDIO_SINK"
 #: Names the directory the capture sink writes to.
 CAPTURE_DIR_VARIABLE = "LINDA_AUDIO_CAPTURE_DIR"
@@ -245,6 +247,24 @@ def getSink() -> Sink:
 		return _sink
 
 
+def isPipewireRunning() -> bool:
+	"""Whether a PipeWire daemon is running and answering on its UNIX domain socket."""
+	runtimeDir = os.environ.get("PIPEWIRE_RUNTIME_DIR") or os.environ.get("XDG_RUNTIME_DIR")
+	if not runtimeDir:
+		return False
+	socketPath = os.path.join(runtimeDir, "pipewire-0")
+	if not os.path.exists(socketPath):
+		return False
+	try:
+		s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+		s.settimeout(0.05)
+		s.connect(socketPath)
+		s.close()
+		return True
+	except OSError:
+		return False
+
+
 def _selectSink() -> Sink:
 	kind = installSettings.get(SINK_VARIABLE) or ""
 	captureDir = os.environ.get(CAPTURE_DIR_VARIABLE, "")
@@ -263,8 +283,38 @@ def _selectSink() -> Sink:
 		from .captureSink import CaptureSink
 
 		return CaptureSink(captureDir)
-	if kind == "pipewire":
-		from .pipewireSink import PipewireSink
+	if kind in ("pulse", "pulseaudio"):
+		from .pulseSink import PulseSink
 
-		return PipewireSink()
-	raise OSError(errno.EINVAL, f"{SINK_VARIABLE} must be null, capture or pipewire, not {kind!r}")
+		return PulseSink()
+	if kind == "pipewire":
+		explicit = os.environ.get(SINK_VARIABLE) == "pipewire"
+		if explicit or isPipewireRunning():
+			from .pipewireSink import PipewireSink
+
+			return PipewireSink()
+		# PipeWire was preferred by default installation settings, but PipeWire daemon is not running.
+		try:
+			from .pulseSink import PulseSink
+
+			sink = PulseSink()
+			try:
+				from logHandler import log
+
+				log.info("PipeWire daemon is not running; falling back to PulseAudio sink")
+			except (ImportError, AttributeError):
+				pass
+			return sink
+		except OSError:
+			from .pipewireSink import PipewireSink
+
+			return PipewireSink()
+	if kind == "auto":
+		if isPipewireRunning():
+			from .pipewireSink import PipewireSink
+
+			return PipewireSink()
+		from .pulseSink import PulseSink
+
+		return PulseSink()
+	raise OSError(errno.EINVAL, f"{SINK_VARIABLE} must be null, capture, pipewire or pulse, not {kind!r}")

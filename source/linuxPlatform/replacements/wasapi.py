@@ -596,6 +596,12 @@ def _player(handle: Any) -> _Player:
 def wasPlay_startup() -> None:
 	sink: Sink = audioOutput.getSink()
 	log.info(f"Audio output: {sink.description}")
+	try:
+		devs = sink.devices()
+		endpointName = devs[0][1] if devs else "Default output device"
+	except (OSError, IndexError):
+		endpointName = "Default output device"
+	log.info(f"Active audio endpoint: {endpointName}")
 
 
 @_entryPoint

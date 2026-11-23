@@ -309,6 +309,8 @@
         # rig.
         LINDA_PIPEWIRE_BIN = "${lib.getBin pkgs.pipewire}/bin";
         LINDA_WIREPLUMBER_BIN = "${lib.getBin pkgs.wireplumber}/bin";
+        LINDA_PULSEAUDIO_BIN = "${lib.getBin pkgs.pulseaudio}/bin";
+        LINDA_PULSE_LIB = "${pkgs.pulseaudio}/lib/libpulse.so.0";
         # The library the PipeWire sink loads, the same file the package's wrappers name, and the
         # recorder its tests listen with. The shell does not choose the sink: a run that wants
         # PipeWire sets LINDA_AUDIO_SINK itself.

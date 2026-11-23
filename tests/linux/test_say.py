@@ -48,7 +48,7 @@ LAUNCHER_LOGS = {"nvda.log": "the launcher's last log\n", "nvda-old.log": "the l
 SPOKE = re.compile(
 	r"linda say: spoke with (?P<synth>\S+), voice (?P<voice>[^,]+), "
 	r"(?:(?P<null>into the null sink, which plays nothing)\. Speech"
-	r"|(?P<output>into the capture sink|through PipeWire)\. "
+	r"|(?P<output>into the capture sink|through PipeWire|through PulseAudio)\. "
 	r"The first audio came (?P<firstAudio>\d+) milliseconds? after asking, and speech)"
 	r" finished after (?P<finished>\d+(?:\.\d)?) seconds?\.\n",
 )
@@ -478,8 +478,8 @@ def test_nullSinkWithoutCheckIsRefused(home: Home):
 		(
 			{"LINDA_AUDIO_SINK": "bogus"},
 			(
-				"the audio output could not be set up, [Errno 22] LINDA_AUDIO_SINK must be null, capture "
-				"or pipewire, not 'bogus'"
+				"the audio output could not be set up, [Errno 22] LINDA_AUDIO_SINK must be null, capture, "
+				"pipewire or pulse, not 'bogus'"
 			),
 		),
 	],
