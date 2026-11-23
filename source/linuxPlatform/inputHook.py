@@ -334,7 +334,8 @@ def _findBound() -> None:
 		return
 	plugins = list(globalPluginHandler.runningPlugins)
 	signature = (
-		tuple((id(plugin), len(getattr(plugin, "_gestureMap", ()))) for plugin in plugins),
+		# The bindings themselves, not their count: a plugin may swap one key for another.
+		tuple((id(plugin), tuple(getattr(plugin, "_gestureMap", ()))) for plugin in plugins),
 		config.conf["keyboard"]["keyboardLayout"],
 		repr(manager.userGestureMap._map),
 		id(manager.localeGestureMap),
