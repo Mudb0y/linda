@@ -548,11 +548,29 @@ def captureSet(
 			keycode = translator.keycodeFor(ord(letter), False)
 			if keycode is not None:
 				wanted.setdefault(keycode, set()).add(X.ControlMask)
+	_addGestures(translator, gestureKeys, wanted)
+	return wanted
+
+
+def boundSet(translator: keyMap.Translator, gestureKeys: frozenset[GestureKey]) -> dict[int, set[int]]:
+	"""Key code: the modifier masks, without the locks, of the keys bound to NVDA's scripts in every
+	program, as a global plugin binds F12, in the layout translator has. They are NVDA's wherever the
+	focus is, a document or not, apart from the NVDA keys and the numpad review keys, which are grabbed
+	whatever the modifiers and stay theirs."""
+	wanted: dict[int, set[int]] = {}
+	_addGestures(translator, gestureKeys, wanted)
+	for evdev in (INSERT_KEY, NUMPAD_INSERT_KEY, CAPS_LOCK_KEY, *NUMPAD_REVIEW_KEYS):
+		wanted.pop(evdev + 8, None)
+	return wanted
+
+
+def _addGestures(
+	translator: keyMap.Translator, gestureKeys: frozenset[GestureKey], wanted: dict[int, set[int]]
+) -> None:
 	for names, vk, extended in gestureKeys:
 		keycode = translator.keycodeFor(vk, extended)
 		if keycode is not None and names <= GESTURE_MASKS.keys():
 			wanted.setdefault(keycode, set()).add(sum(GESTURE_MASKS[name] for name in names))
-	return wanted
 
 
 def _logError(message: str) -> None:
@@ -721,7 +739,15 @@ class X11KeySource:
 		self._xkbEvent: int | None = None
 		#: Key code: grab modifiers, for every key grabbed now; None means any modifiers.
 		self._grabbed: dict[int, list[int] | None] = {}
-		#: The window the NVDA keys and the numpad review keys are grabbed on.
+		#: (modifier names, virtual-key code, extended) of the keys bound to NVDA's scripts in every
+		#: program, and their key codes: the modifier masks they are captured with, without the locks, in
+		#: the layout there is, replaced whole on the X thread and read by the decider.
+		self._boundKeys: frozenset[GestureKey] = frozenset()
+		self._boundSet: dict[int, set[int]] = {}
+		#: Key code: the masks, the lock combinations among them, those keys are grabbed with now, on the
+		#: window the NVDA keys are, which follows the focus: captured in every window, a document's or not.
+		self._boundGrabbed: dict[int, set[int]] = {}
+		#: The window the NVDA keys, the numpad review keys and the bound keys are grabbed on.
 		self._keysWindow = None
 		#: The key whose press makes or made a grab of this source active, which lasts until it is
 		#: released or a press under it is replayed, as the keyboard's own events tell it, and so ahead
@@ -838,6 +864,12 @@ class X11KeySource:
 
 	def setCaptureGestures(self, browse: frozenset[GestureKey], focus: frozenset[GestureKey]) -> None:
 		self._post(lambda: self._setGestures(browse, focus))
+
+	def setBoundKeys(self, keys: frozenset[GestureKey]) -> None:
+		"""Capture these in every program, a document or not: the keys bound to NVDA's scripts wherever
+		the focus is, as a global plugin binds F12. Each press of one waits for NVDA's answer, as a
+		document's key does, and reaches the program only if NVDA passes it."""
+		self._post(lambda: self._setBound(keys))
 
 	def holdKeyboard(self, hold: bool) -> None:
 		self._post(lambda: self._hold(hold))
@@ -994,6 +1026,7 @@ class X11KeySource:
 			pass
 		self._display = None
 		self._grabbed = {}
+		self._boundGrabbed = {}
 		self._keysWindow = None
 		self._captured = {}
 		self._captureWindow = None
@@ -1401,6 +1434,9 @@ class X11KeySource:
 			self._rulesNames = names
 		self._modeSets = {}
 		log.debug(f"Keyboard layout {layout or 'us'} {variant}".rstrip())
+		if self._boundKeys:
+			# Which key codes they are is the layout's.
+			self._makeBoundSet()
 		if self._captureMode != "off":
 			# Which keys type characters, and which modifier AltGr is, are the layout's.
 			self._applyCapture(self._captureMode)
@@ -1540,6 +1576,7 @@ class X11KeySource:
 			self._grabKey is None
 			and not self._captureFocused
 			and not self._grabMatches(keycode, event.state & 0xFF)
+			and not self._boundMatches(keycode, event.state & 0xFF)
 		):
 			# A grab of a document's keys that took a key with the focus not in the document: with the
 			# focus on the root window or PointerRoot, a grab on the window under the pointer takes keys
@@ -1593,7 +1630,9 @@ class X11KeySource:
 			kind=kind,
 			grab=self._grabKey,
 			effective=effective,
-			documentPending=kind == CAPTURE_GRAB and self._documentPending is not None,
+			documentPending=kind == CAPTURE_GRAB
+			and self._documentPending is not None
+			and not self._isBound(keycode, effective),
 		)
 		self._tickets.append(ticket)
 		return ticket
@@ -1677,7 +1716,10 @@ class X11KeySource:
 			# waited for, the press would reach NVDA CAPTURE_EXPIRY late, and every key after it.
 			and self._otherGrab is None
 			and (
-				underGrab or self._grabMatches(keycode, effective) or self._captureMatches(keycode, effective)
+				underGrab
+				or self._grabMatches(keycode, effective)
+				or self._captureMatches(keycode, effective)
+				or self._boundMatches(keycode, effective)
 			)
 		):
 			ticket = self._ticket(keycode, effective, arrival)
@@ -1808,6 +1850,7 @@ class X11KeySource:
 		# The one request lets go of every grab of this source on the window.
 		window.ungrab_key(X.AnyKey, X.AnyModifier, onerror=error.CatchError(error.BadWindow))
 		self._grabbed = {}
+		self._boundGrabbed = {}
 		self._grabKeys(window)
 		self._topGrabsLost(window)
 		if self._captureWindow is not None and self._captureWindow.id == window.id:
@@ -1823,8 +1866,10 @@ class X11KeySource:
 		self._grabKey = None
 		while self._tickets and not self._tickets[0].frozen:
 			ticket = self._tickets[0]
-			if self._grabMatches(ticket.keycode, ticket.effective) or self._captureMatches(
-				ticket.keycode, ticket.effective
+			if (
+				self._grabMatches(ticket.keycode, ticket.effective)
+				or self._captureMatches(ticket.keycode, ticket.effective)
+				or self._boundMatches(ticket.keycode, ticket.effective)
 			):
 				self._grabKey = ticket.keycode
 				self._grabKind = (
@@ -1842,7 +1887,7 @@ class X11KeySource:
 		if self._guardInput is None:
 			return None
 		# Every grab of this source holds the keyboard on its key, the NVDA keys' among them.
-		guarding = bool(self._grabbed) or bool(self._captured) or self._held
+		guarding = bool(self._grabbed) or bool(self._captured) or bool(self._boundGrabbed) or self._held
 		windows = " ".join(
 			str(window.id if window is not None else 0)
 			for window in (self._keysWindow, self._captureWindow, self._captureTop)
@@ -1924,6 +1969,15 @@ class X11KeySource:
 		masks = (self._topGrabbed if self._captureOnTop else self._captured).get(keycode)
 		return masks is not None and effective & 0xFF in masks
 
+	def _boundMatches(self, keycode: int, effective: int) -> bool:
+		masks = self._boundGrabbed.get(keycode)
+		return masks is not None and effective & 0xFF in masks
+
+	def _isBound(self, keycode: int, modifiers: int) -> bool:
+		"""Whether the key with these modifiers is bound to NVDA's scripts in every program."""
+		masks = self._boundSet.get(keycode)
+		return masks is not None and modifiers & 0xFF & ~(X.LockMask | NUM_LOCK_MASK) in masks
+
 	def _applyGrabs(self, nvdaModifierKeys: int, numpadReview: bool) -> None:
 		self._consumedWanted = (nvdaModifierKeys, numpadReview)
 		self._modeSets = {}
@@ -1958,12 +2012,18 @@ class X11KeySource:
 			wanted.extend((evdev + 8, numpadMods, "numpad review keys") for evdev in NUMPAD_REVIEW_KEYS)
 		return wanted
 
-	def _ungrabKeys(self, window=None, grabbed: dict[int, list[int] | None] | None = None) -> None:
-		""":param window: The window the keys were grabbed on, with grabbed what was grabbed there, when
-		they are no longer this source's NVDA key grabs; by default those."""
+	def _ungrabKeys(
+		self,
+		window=None,
+		grabbed: dict[int, list[int] | None] | None = None,
+		bound: dict[int, set[int]] | None = None,
+	) -> None:
+		""":param window: The window the keys were grabbed on, with grabbed and bound what was grabbed
+		there, when they are no longer this source's NVDA key grabs; by default those."""
 		if grabbed is None:
 			window, self._keysWindow = self._keysWindow, None
 			grabbed, self._grabbed = self._grabbed, {}
+			bound, self._boundGrabbed = self._boundGrabbed, {}
 		if window is None:
 			return
 		# The window may have gone, and its grabs with it.
@@ -1971,6 +2031,9 @@ class X11KeySource:
 		for keycode, modifiers in grabbed.items():
 			for mod in modifiers or [X.AnyModifier]:
 				window.ungrab_key(keycode, mod, onerror=gone)
+		for keycode, masks in (bound or {}).items():
+			for mask in masks:
+				window.ungrab_key(keycode, mask, onerror=gone)
 		if self._chordKey is not None:
 			# A chord does not follow the focus to another window.
 			self._chordKey = None
@@ -2013,6 +2076,75 @@ class X11KeySource:
 				f"NVDA could not take the {label}, which another program holds; "
 				"is another screen reader running?",
 			)
+		self._grabBound(window)
+
+	def _grabBound(self, window) -> None:
+		"""Grab the keys bound in every program on window, where the NVDA keys are: as those, they follow
+		the focus to each window, a document's or not, and are never left behind on one it has left."""
+		catchers: list[tuple[int, int, error.CatchError]] = []
+		for keycode, bases in self._boundSet.items():
+			for base in bases:
+				for lock in LOCK_COMBINATIONS:
+					catcher = error.CatchError(error.BadAccess, error.BadWindow)
+					window.grab_key(
+						keycode, base | lock, False, X.GrabModeAsync, X.GrabModeSync, onerror=catcher
+					)
+					catchers.append((keycode, base | lock, catcher))
+		if not catchers:
+			return
+		self._display.sync()
+		refused = 0
+		for keycode, mask, catcher in catchers:
+			if catcher.get_error():
+				refused += 1
+			else:
+				self._boundGrabbed.setdefault(keycode, set()).add(mask)
+		if refused:
+			# Asked again on every window the focus reaches, where another program's grab of a key it
+			# makes a shortcut of its own refuses NVDA's: the record is not worth a warning each time.
+			log.debugWarning(f"{refused} combinations of keys bound to scripts are held by another program")
+
+	def _setBound(self, keys: frozenset[GestureKey]) -> None:
+		if keys == self._boundKeys:
+			return
+		self._boundKeys = keys
+		self._makeBoundSet()
+		if self._captureWindow is not None and self._captureFocused and self._captureMode != "off":
+			# A key no longer bound is the document's again.
+			self._applyCapture(self._captureMode)
+
+	def _makeBoundSet(self) -> None:
+		"""Work out the bound keys' key codes in the layout there is, and grab them again where the NVDA
+		keys are."""
+		self._boundSet = boundSet(self._translator, self._boundKeys) if self._translator is not None else {}
+		self._modeSets = {}
+		window = self._keysWindow
+		if window is None:
+			return
+		bound, self._boundGrabbed = self._boundGrabbed, {}
+		gone = error.CatchError(error.BadWindow)
+		for keycode, masks in bound.items():
+			for mask in masks:
+				window.ungrab_key(keycode, mask, onerror=gone)
+		self._yieldToBound()
+		self._grabBound(window)
+
+	def _yieldToBound(self) -> None:
+		"""Let go of a document's grabs of keys now bound in every program, which its grabs leave out
+		from then on. Made on the window the bound keys are grabbed on, or on one the focus comes back
+		to, a grab of the same key would be taken over by theirs, and let go of with the document's."""
+		gone = error.CatchError(error.BadWindow)
+		kept: list[dict[int, set[int]]] = []
+		for window, grabbed in ((self._captureWindow, self._captured), (self._captureTop, self._topGrabbed)):
+			left: dict[int, set[int]] = {}
+			for keycode, masks in grabbed.items():
+				for mask in masks:
+					if not self._isBound(keycode, mask):
+						left.setdefault(keycode, set()).add(mask)
+					elif window is not None:
+						window.ungrab_key(keycode, mask, onerror=gone)
+			kept.append(left)
+		self._captured, self._topGrabbed = kept
 
 	def _followFocus(self) -> None:
 		"""Move the NVDA keys' grabs to the window that has the focus now, if it is another."""
@@ -2021,13 +2153,14 @@ class X11KeySource:
 		window = self._focusWindow() or self._display.screen().root
 		if self._keysWindow is not None and window.id == self._keysWindow.id:
 			return
-		old, oldGrabbed = self._keysWindow, self._grabbed
+		old, oldGrabbed, oldBound = self._keysWindow, self._grabbed, self._boundGrabbed
 		self._grabbed = {}
+		self._boundGrabbed = {}
 		# Whatever grab took the focus from the old window, a press on the new one is waited for again.
 		self._otherGrab = None
 		# Taken on the new window before they are let go of on the old, which may hold the new one.
 		self._grabKeys(window)
-		self._ungrabKeys(old, oldGrabbed)
+		self._ungrabKeys(old, oldGrabbed, oldBound)
 
 	def _captureSet(self, mode: CaptureMode) -> dict[int, set[int]]:
 		"""Key code: the modifier masks, without the locks, it is captured with in mode."""
@@ -2039,6 +2172,12 @@ class X11KeySource:
 		for keycode in self._grabbed:
 			# The NVDA keys' own grabs, on the same window, would be taken over.
 			wanted.pop(keycode, None)
+		for keycode, bases in self._boundSet.items():
+			# And so would the bound keys', which take them in a document too.
+			if keycode in wanted:
+				wanted[keycode] -= bases
+				if not wanted[keycode]:
+					del wanted[keycode]
 		self._modeSets[mode] = wanted
 		return wanted
 
@@ -2068,6 +2207,9 @@ class X11KeySource:
 		:param waitUntil: Until when to wait for NVDA's focus to reach a document, for a key typed in a
 			window that held one, before NVDA's focus has followed the window.
 		"""
+		if self._isBound(keycode, modifiers):
+			# NVDA's in every mode, and outside a document.
+			return True
 		mode = self._askMode()
 		while mode == "off" and waitUntil is not None and time.monotonic() < waitUntil:
 			time.sleep(0.01)

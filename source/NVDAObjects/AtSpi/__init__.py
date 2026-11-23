@@ -24,7 +24,7 @@ from linuxPlatform.atspi.roles import ROLES, mapStates
 from locationHelper import RectLTWH
 
 from NVDAObjects import NVDAObject
-from NVDAObjects.AtSpi.deletion import DeletionEcho
+from NVDAObjects.AtSpi.deletion import DeletionEcho, JavaTypedOver
 from NVDAObjects.AtSpi.terminal import VteTerminal
 from NVDAObjects.AtSpi.textInfo import AtspiTextInfo
 from NVDAObjects.behaviors import (
@@ -60,6 +60,12 @@ GTK3 = "gtk"
 GTK4 = "GTK"
 QT = "Qt"
 GECKO = "Gecko"
+CHROMIUM = "Chromium"
+#: The classes of the element that holds the caret of Monaco, VS Code's editor: an element with an
+#: edit context in VS Code's recent versions, a hidden text area in older ones and in Monaco on a page.
+MONACO_INPUT_CLASSES = frozenset({"native-edit-context", "inputarea"})
+#: Java's Swing, through the Java ATK wrapper, as in JetBrains' IDEs.
+JAVA = "J2SE-access-bridge"
 
 #: Roles whose number comes from the Value interface.
 VALUE_ROLES = frozenset({Role.SLIDER, Role.SPINBUTTON, Role.SCROLLBAR, Role.PROGRESSBAR, Role.DIAL})
@@ -270,6 +276,10 @@ class AtSpi(NVDAObject):
 		elif "Text" in ifaces and ("editable" in states or role == Role.EDITABLETEXT):
 			if self._isRichTextEditor:
 				clsList.append(RichTextEditor)
+			elif self._isMonacoEditor:
+				clsList.append(MonacoEditor)
+			if self.toolkit == JAVA:
+				clsList.append(JavaTypedOver)
 			clsList.append(DeletionEcho)
 			clsList.append(EditableTextWithAutoSelectDetection)
 		elif role == Role.TERMINAL and "Text" in ifaces:
@@ -308,6 +318,11 @@ class AtSpi(NVDAObject):
 			and "focusable" in states
 			and "Hypertext" in self.atspiInterfaces
 			and self.atspiAttributes.get("tag") not in ("textarea", "input")
+		)
+
+	def _get__isMonacoEditor(self) -> bool:
+		return self.toolkit == CHROMIUM and not MONACO_INPUT_CLASSES.isdisjoint(
+			self.atspiAttributes.get("class", "").split(),
 		)
 
 	def event_caret(self):
@@ -1131,6 +1146,17 @@ class RichTextEditor(AtSpi):
 		from NVDAObjects.AtSpi.compoundText import AtspiCompoundTextInfo
 
 		return AtspiCompoundTextInfo
+
+
+class MonacoEditor(AtSpi):
+	"""The editor of VS Code and the programs built from it."""
+
+	def _get_caretMovementDetectionUsesEvents(self) -> bool:
+		# Its caret can be read at its new place before its caret event comes, and the status bar's
+		# line and column change after that: still pending when the next arrow's script starts, either
+		# would pass for that arrow's move, and the character the caret has not left yet would be read
+		# again.
+		return False
 
 
 class TopLevelWindow(AtSpi):

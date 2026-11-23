@@ -98,7 +98,11 @@ class KeySource(Protocol):
 
 	def setCaptureGestures(self, browse: frozenset[GestureKey], focus: frozenset[GestureKey]) -> None:
 		"""Capture these too, beyond the keys each mode always captures: the gestures the gesture maps
-		bind in each mode."""
+		bind in each mode.
+
+		The keys bound in every program, as a global plugin binds F12, go to the X display's sources
+		through setBoundKeys, which only they have: those are captured in every window, a document's or
+		not, apart from a document's keys, whose grabs stay with its window while the focus is away."""
 
 	def setConsumed(self, nvdaModifierKeys: int, numpadReview: bool) -> None:
 		"""Take these keys from the applications.

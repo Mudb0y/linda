@@ -114,6 +114,7 @@ class RoutedKeySource:
 		self._from = threading.local()
 		self._consumed: tuple[int, bool] | None = None
 		self._gestures: tuple[frozenset[GestureKey], frozenset[GestureKey]] | None = None
+		self._bound: frozenset[GestureKey] = frozenset()
 		self._capture: tuple[CaptureMode, int | None] = ("off", None)
 		self._hold = False
 		self._wake = threading.Event()
@@ -244,6 +245,13 @@ class RoutedKeySource:
 			self._gestures = (browse, focus)
 			for source in self._both():
 				source.setCaptureGestures(browse, focus)
+
+	def setBoundKeys(self, keys: frozenset[GestureKey]) -> None:
+		"""Capture these in every program, a document or not, as X11KeySource.setBoundKeys does."""
+		with self._lock:
+			self._bound = keys
+			for source in self._both():
+				source.setBoundKeys(keys)
 
 	def holdKeyboard(self, hold: bool) -> None:
 		with self._lock:
@@ -416,6 +424,8 @@ class RoutedKeySource:
 				source.setConsumed(*self._consumed)
 			if self._gestures is not None:
 				source.setCaptureGestures(*self._gestures)
+			if self._bound:
+				source.setBoundKeys(self._bound)
 			if self._capture[0] != "off":
 				source.setCapture(*self._capture)
 			if self._hold:

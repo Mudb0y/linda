@@ -1,7 +1,7 @@
 """The questions AtspiTextInfo asks of an accessible's Text interface, each one round trip through the
 AT-SPI client.
 
-Offsets are the toolkit's own: GTK counts code points and Qt UTF-16 units, which unitFor tells
+Offsets are the toolkit's own: GTK counts code points and Qt and Java UTF-16 units, which unitFor tells
 apart, so that the TextInfo can tell NVDA which. Nothing here keeps anything between calls; a mirror
 of the text can later stand behind the same methods without the TextInfo changing.
 
@@ -33,10 +33,10 @@ GRANULARITIES = {
 def unitFor(toolkit: str | None) -> Unit:
 	"""What one offset counts in text from toolkit, as the application's ToolkitName gives it.
 
-	Qt counts UTF-16 units; GTK 3 ("gtk"), GTK 4 ("GTK") and wx count code points, and so does any
-	toolkit not measured yet.
+	Qt and Java, through the Java ATK wrapper, count UTF-16 units; GTK 3 ("gtk"), GTK 4 ("GTK") and wx
+	count code points, and so does any toolkit not measured yet.
 	"""
-	if toolkit and toolkit.lower().startswith("qt"):
+	if toolkit and (toolkit.lower().startswith("qt") or toolkit == "J2SE-access-bridge"):
 		return "utf16"
 	return "codepoints"
 

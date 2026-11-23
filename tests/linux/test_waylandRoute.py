@@ -63,11 +63,15 @@ TURNED_AWAY = (
 	"It reads the screen meanwhile."
 )
 UNHEARD = "NVDA cannot hear one of the keyboards, so its keys reach programs without NVDA."
+NO_KEYBOARD = (
+	"NVDA has no keys in this Wayland session, as linda-keyd leaves alone a keyboard that is also a "
+	"pointing device. NVDA still reads the screen."
+)
 NO_SENDER = "NVDA cannot type into programs here."
 US_NOTICE = "NVDA cannot find this desktop's keyboard layout, so it reads keys as US English."
 #: GOODBYE's and DEVICE's numbers, as protocol.rs gives them.
 GOODBYE_VERSION, GOODBYE_NOT_IN_FRONT, GOODBYE_NOT_AUTHORIZED, GOODBYE_BUSY, GOODBYE_REPLACED = 1, 2, 3, 4, 9
-DEVICE_BUSY, DEVICE_IGNORED = 3, 5
+DEVICE_WAITING, DEVICE_BUSY, DEVICE_IGNORED = 2, 3, 5
 
 #: The route in a child, built by createSource, its NVDA keeping every captured press and recording each
 #: event. The keys package may not open the X display: Display raises when called from it, and records
@@ -555,6 +559,108 @@ def test_anUnheardKeyboardIsSaidOnce(tmp_path: Path):
 		standIn={},
 	)
 	assert value["said"] == [HINT, UNHEARD]
+
+
+#: The stand-in's capture with its own keyboard, device 3, left alone in place of held, as linda-keyd
+#: leaves a keyboard that is also a pointer; with LEFT_ALONE_FIRST, a keyboard 2 is left alone and the
+#: stand-in's own is held just after it, in the one scan.
+LEFT_ALONE_CHILD = r"""
+from keydStandIn import StandIn
+
+_start = threading.Thread.start
+startedByReader = []
+
+
+def recordStart(thread):
+	# The kernel source's reading thread answers keys, and a note it makes may only record and return.
+	if threading.current_thread().name == "KernelKeySource":
+		startedByReader.append(thread.name)
+	_start(thread)
+
+
+threading.Thread.start = recordStart
+
+
+def leftAlone():
+	keyboard._startWaiting = False
+	if LEFT_ALONE_FIRST:
+		keyboard._sendDevice(DEVICE_IGNORED, device=2)
+		# Well inside the settling, so that without it the route would hear of no keyboard held.
+		time.sleep(0.1)
+		StandIn._capture(keyboard)
+	else:
+		keyboard._sendDevice(DEVICE_IGNORED)
+
+
+keyboard._capture = leftAlone
+source = startRoute(waitForKernel=LEFT_ALONE_FIRST)
+wait(lambda: said, 5, "nothing was said of the keyboard left alone")
+time.sleep(1)
+before = {"said": list(said), "kernel": source.isKernel}
+if not LEFT_ALONE_FIRST:
+	# Said again, as at every capture, and a keyboard held at last.
+	with keyboard._lock:
+		keyboard._sendDevice(DEVICE_IGNORED)
+	time.sleep(1)
+	with keyboard._lock:
+		StandIn._capture(keyboard)
+	wait(lambda: source.isKernel, 5, "the route did not take the keyboard held later")
+	time.sleep(0.3)
+source.stop()
+result = {"before": before, "said": said, "startedByReader": startedByReader}
+"""
+
+
+def leftAloneChild(tmp_path: Path, first: bool) -> dict:
+	return runRouteChild(
+		tmp_path,
+		f"DEVICE_IGNORED = {DEVICE_IGNORED}\nLEFT_ALONE_FIRST = {first}\n" + LEFT_ALONE_CHILD,
+		standIn={},
+	)
+
+
+def test_theOnlyKeyboardLeftAloneLeavesNoKeysUntilOneIsHeld(tmp_path: Path):
+	value = leftAloneChild(tmp_path, first=False)
+	assert value["before"] == {"said": [NO_KEYBOARD], "kernel": False}
+	assert value["said"] == [NO_KEYBOARD, HAS_KEYBOARD, HINT]
+	assert value["startedByReader"] == []
+
+
+def test_oneOfTwoKeyboardsLeftAloneIsUnheard(tmp_path: Path):
+	"""Left alone just before the other is held, it is still only one of them that NVDA cannot hear."""
+	value = leftAloneChild(tmp_path, first=True)
+	said = value["said"]
+	assert sorted(said) == sorted([HINT, UNHEARD]), said
+	assert value["before"]["kernel"]
+	assert value["startedByReader"] == []
+
+
+#: The stand-in's capture with a keyboard 2 left alone and its own still waiting for a key to come up.
+WAITING_CHILD = r"""
+def scan():
+	keyboard._startWaiting = False
+	keyboard._sendDevice(DEVICE_IGNORED, device=2)
+	keyboard._sendDevice(DEVICE_WAITING)
+
+
+keyboard._capture = scan
+source = startRoute(waitForKernel=False)
+wait(lambda: said, 5, "nothing was said of the keyboards")
+time.sleep(1)
+result = {"said": said, "kernel": source.isKernel}
+source.stop()
+"""
+
+
+def test_aKeyboardLeftAloneBesideOneWaitingIsUnheard(tmp_path: Path):
+	"""Nothing is held yet, but the keyboard waiting for its keys to come up will be: NVDA is not
+	without keys, it only cannot hear the one left alone."""
+	value = runRouteChild(
+		tmp_path,
+		f"DEVICE_IGNORED, DEVICE_WAITING = {DEVICE_IGNORED}, {DEVICE_WAITING}\n" + WAITING_CHILD,
+		standIn={},
+	)
+	assert value == {"said": [UNHEARD], "kernel": False}
 
 
 MODE_CHILD = r"""

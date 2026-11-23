@@ -58,3 +58,24 @@ class DeletionEcho:
 			return
 		info.expand(unit)
 		speech.speakTextInfo(info, unit=unit, reason=OutputReason.CARET)
+
+
+class JavaTypedOver:
+	"""A Java program's text, whose copy typedChars keeps to know what Backspace removed, read again as a
+	selection ends.
+
+	The Java ATK wrapper reports a change only as how far the character count has moved since its last
+	report, counted when its main loop gets to it rather than when the change is made. Typing over a
+	selection removes and inserts at once, and reaches NVDA as nothing when what is typed is as long as
+	what it replaced, or as an insert or deletion of the difference; the copy would keep what was
+	replaced, and Backspace would say it. Typing over a selection always ends the selection, and the
+	wrapper reports the caret's move after the change."""
+
+	def event_caret(self) -> None:
+		before = getattr(self, "_lastSelectionPos", None)
+		super().event_caret()
+		# NVDA's selection detection, run for the focus alone, leaves the selection it found.
+		after = getattr(self, "_lastSelectionPos", None)
+		ended = after is not None and after is not before and after.isCollapsed
+		if ended and before is not None and not before.isCollapsed:
+			typedChars.keepText(self)
