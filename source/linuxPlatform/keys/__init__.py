@@ -36,8 +36,9 @@ TEST_VIRTUAL_KEYBOARD_VARIABLE = "LINDA_TEST_KEYD_VIRTUAL"
 #: The scan code Windows' hook gives the left Control it reports with AltGr, before right Alt.
 ALTGR_CONTROL_SCAN = 0x21D
 
-#: Which keys are captured: none beyond the NVDA keys, Escape alone for focus mode, or browse mode's.
-CaptureMode = Literal["off", "focus", "browse"]
+#: Which keys are captured: none beyond the NVDA keys, Escape alone for focus mode, browse mode's, or
+#: outside a document only the keys bound there to scripts, as an add-on binds F12.
+CaptureMode = Literal["off", "focus", "browse", "bound"]
 
 
 @dataclass(frozen=True)

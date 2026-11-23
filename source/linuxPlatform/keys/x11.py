@@ -521,8 +521,9 @@ while True:
 def captureSet(
 	translator: keyMap.Translator, mode: CaptureMode, gestureKeys: frozenset[GestureKey]
 ) -> dict[int, set[int]]:
-	"""Key code: the modifier masks, without the locks, it is captured with in mode, browse or focus,
-	in the layout translator has: the mode's own keys, and gestureKeys, those bound in it."""
+	"""Key code: the modifier masks, without the locks, it is captured with in mode, browse, focus or
+	bound, in the layout translator has: the mode's own keys, and gestureKeys, those bound in it. Bound
+	has no keys of its own."""
 	masks = {"": 0, "shift": X.ShiftMask, "control": X.ControlMask, "alt": X.Mod1Mask}
 	levelThree = translator.levelThreeMask()
 	if levelThree:
@@ -537,7 +538,7 @@ def captureSet(
 		return found
 
 	wanted: dict[int, set[int]] = {}
-	keys = dict(FOCUS_KEYS) if mode == "focus" else dict(BROWSE_KEYS)
+	keys = dict(FOCUS_KEYS) if mode == "focus" else dict(BROWSE_KEYS) if mode == "browse" else {}
 	if mode == "browse":
 		for evdev in (*keyMap.LAYOUT, SPACE_KEY):
 			keys[evdev] = tuple(dict.fromkeys(keys.get(evdev, ()) + CHARACTER_COMBINATIONS))
@@ -587,6 +588,8 @@ class CaptureState(NamedTuple):
 	#: The top-level window that window is inside, when it is another, 0 otherwise: the focus reaching
 	#: it from outside is the document's coming back, and its keys are grabbed there while it has it.
 	top: int = 0
+	#: Whether the keys grabbed are those bound outside a document alone, none of a document's.
+	bound: bool = False
 
 
 NO_CAPTURE = CaptureState(0, None, False, "off", None, None, None)
@@ -749,8 +752,14 @@ class X11KeySource:
 		#: The mode NVDA is in at the moment of a key, asked by the decider; None when it cannot say.
 		self._modeNow: Callable[[], CaptureMode | None] | None = None
 		#: (modifier names, virtual-key code, extended) of the gestures bound in browse mode and in
-		#: focus mode beyond the fixed lists, as NVDA's gesture maps have them.
-		self._gestureKeys: dict[str, frozenset[GestureKey]] = {"browse": frozenset(), "focus": frozenset()}
+		#: focus mode beyond the fixed lists, as NVDA's gesture maps have them, and outside a document.
+		self._gestureKeys: dict[str, frozenset[GestureKey]] = {
+			"browse": frozenset(),
+			"focus": frozenset(),
+			"bound": frozenset(),
+		}
+		#: Whether the keys grabbed now are bound mode's alone.
+		self._boundGrabs = False
 		#: Mode: its capture set, made once for each keyboard layout and set of gestures.
 		self._modeSets: dict[str, dict[int, set[int]]] = {}
 		#: Key code: the modifier masks it is captured with now, the lock combinations among them.
@@ -1311,6 +1320,7 @@ class X11KeySource:
 			self._documentPending,
 			self._captureProcess,
 			top.id if window is not None and top is not None else 0,
+			self._boundGrabs,
 		)
 		if state != self._captureState:
 			self._captureState = state
@@ -2042,13 +2052,14 @@ class X11KeySource:
 		self._modeSets[mode] = wanted
 		return wanted
 
-	def _grabSet(self) -> dict[int, set[int]]:
+	def _grabSet(self, mode: CaptureMode) -> dict[int, set[int]]:
 		"""What is grabbed while the focus is in a document in either mode: the keys of both, as which
 		mode is in force is asked at the moment of each key, for the mode can change between a key and
-		the next sooner than a grab could follow."""
+		the next sooner than a grab could follow. Outside a document, bound mode's alone, so that typing
+		there is never grabbed."""
 		grabbed: dict[int, set[int]] = {}
-		for mode in ("browse", "focus"):
-			for keycode, masks in self._captureSet(mode).items():
+		for setMode in ("bound",) if mode == "bound" else ("browse", "focus"):
+			for keycode, masks in self._captureSet(setMode).items():
 				grabbed.setdefault(keycode, set()).update(masks)
 		return grabbed
 
@@ -2078,7 +2089,8 @@ class X11KeySource:
 		return masks is not None and modifiers & 0xFF & ~(X.LockMask | NUM_LOCK_MASK) in masks
 
 	def _setGestures(self, browse: frozenset[GestureKey], focus: frozenset[GestureKey]) -> None:
-		wanted = {"browse": browse, "focus": focus}
+		# Outside a document NVDA gives the keys bound there as focus mode's.
+		wanted = {"browse": browse, "focus": focus, "bound": focus}
 		if wanted == self._gestureKeys:
 			return
 		self._gestureKeys = wanted
@@ -2108,7 +2120,8 @@ class X11KeySource:
 			self._logCapture("off")
 			return
 		if (mode == "off") != (self._captureMode == "off") or (
-			mode != "off" and (window is None or not self._captureFocused)
+			mode != "off"
+			and (window is None or not self._captureFocused or (mode == "bound") != self._boundGrabs)
 		):
 			self._applyCapture(mode)
 		else:
@@ -2312,7 +2325,8 @@ class X11KeySource:
 		self._captureMode = mode
 		d = self._display
 		self._dropCapture()
-		wanted = self._grabSet() if mode != "off" else {}
+		self._boundGrabs = mode == "bound"
+		wanted = self._grabSet(mode) if mode != "off" else {}
 		window = self._focusWindow() if wanted else None
 		if window is None:
 			d.sync()

@@ -503,8 +503,12 @@ class KernelKeySource:
 		# What NVDA asked, each replaced whole, as the thread that answers keys reads them without a lock.
 		self._consumed = (0, False)
 		self._held = False
-		self._gestureKeys: dict[str, frozenset[GestureKey]] = {"browse": frozenset(), "focus": frozenset()}
-		#: Mode: key code: the modifier masks it is captured with; both modes or none.
+		self._gestureKeys: dict[str, frozenset[GestureKey]] = {
+			"browse": frozenset(),
+			"focus": frozenset(),
+			"bound": frozenset(),
+		}
+		#: Mode: key code: the modifier masks it is captured with; every mode or none.
 		self._modeSets: dict[str, dict[int, set[int]]] = {}
 		self._beatCounter = 0
 		self._nextBeat = 0.0
@@ -757,7 +761,8 @@ class KernelKeySource:
 			self._makeModeSets()
 
 	def setCaptureGestures(self, browse: frozenset[GestureKey], focus: frozenset[GestureKey]) -> None:
-		wanted = {"browse": browse, "focus": focus}
+		# As the X source has them: outside a document the keys bound there come as focus mode's.
+		wanted = {"browse": browse, "focus": focus, "bound": focus}
 		if wanted != self._gestureKeys:
 			self._gestureKeys = wanted
 			self._makeModeSets()
@@ -1163,7 +1168,7 @@ class KernelKeySource:
 				return
 			self._modeSets = {
 				mode: x11.captureSet(self._query, mode, self._gestureKeys[mode])
-				for mode in ("browse", "focus")
+				for mode in ("browse", "focus", "bound")
 			}
 
 	def _followLayout(self) -> None:
@@ -1841,17 +1846,19 @@ class KernelKeySource:
 			return NVDA_KIND
 		if numpadReview and keycode in NUMPAD_REVIEW_KEYCODES and not effective & ~NUMPAD_REVIEW_MODS:
 			return NVDA_KIND
-		if self._grabsTake(capture) and self._inCaptureSets(keycode, effective):
+		if self._grabsTake(capture) and self._inCaptureSets(keycode, effective, capture):
 			return CAPTURE_KIND
 		return PASS_KIND
 
-	def _inCaptureSets(self, keycode: int, effective: int) -> bool:
-		"""Whether the X source's grabs of a document's keys are made for this key with these modifiers."""
+	def _inCaptureSets(self, keycode: int, effective: int, capture: x11.CaptureState) -> bool:
+		"""Whether the X source's grabs of a document's keys, or of the keys bound outside one, are made
+		for this key with these modifiers."""
 		modeSets = self._modeSets
 		if not modeSets:
 			self._makeModeSets()
 			modeSets = self._modeSets
-		for masks in (modeSets.get("browse", {}).get(keycode), modeSets.get("focus", {}).get(keycode)):
+		modes = ("bound",) if capture.bound else ("browse", "focus")
+		for masks in (modeSets.get(mode, {}).get(keycode) for mode in modes):
 			if masks is not None and effective & ~LOCK_MODS in masks:
 				return True
 		return False
@@ -1862,7 +1869,7 @@ class KernelKeySource:
 		return (
 			bool(capture.window)
 			and self._grabsTake(capture._replace(focused=True))
-			and (self._inCaptureSets(keycode, effective))
+			and (self._inCaptureSets(keycode, effective, capture))
 		)
 
 	def _documentMayBeComing(
@@ -1876,7 +1883,7 @@ class KernelKeySource:
 		return (
 			capture.mode in ("browse", "focus")
 			and bool(capture.processID)
-			and self._inCaptureSets(keycode, effective)
+			and self._inCaptureSets(keycode, effective, capture)
 			and not self._environmentSettled(now)
 		)
 
