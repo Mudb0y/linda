@@ -215,7 +215,8 @@ def test_bindingAddedWhileRunningIsCaptured(addon: AddonSession):
 	time.sleep(SETTLE)
 	given = addon.press("F9", "late script")
 	assert "pressed F9" not in given
-	assert addon.presses(F9) == [False, True]
+	# The F9 between is the NVDA key's chord's.
+	assert addon.presses(F9) == [False, True, True]
 	addon.quit()
 
 
