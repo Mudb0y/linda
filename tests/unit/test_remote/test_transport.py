@@ -213,6 +213,26 @@ class TestProcessAndParse(unittest.TestCase):
 		dummyInbound.notify.assert_called_once_with(a=1)
 		wx.CallAfter = original_CallAfter
 
+	def test_parseCallsKeyHandlerWithoutMainThread(self):
+		# A key must not wait for the main thread: one busy for seconds with a dialog would hold the
+		# key down, and the display would repeat it into the application (issue #40).
+		dummyInbound = mock.MagicMock()
+		self.transport.inboundHandlers = {RemoteMessageType.KEY: dummyInbound}
+		calls = []
+		original_CallAfter = wx.CallAfter
+		wx.CallAfter = lambda func, *args, **kwargs: calls.append((func, args, kwargs))
+		try:
+			message = self.serializer.serialize(
+				type=RemoteMessageType.KEY, vk_code=40, extended=False, pressed=True, scan_code=116
+			)
+			self.transport.parse(message)
+		finally:
+			wx.CallAfter = original_CallAfter
+		dummyInbound.notify.assert_called_once_with(
+			vk_code=40, extended=False, pressed=True, scan_code=116
+		)
+		self.assertEqual(calls, [])
+
 
 # ---------------------------------------------------------------------------
 # Tests for sendQueue

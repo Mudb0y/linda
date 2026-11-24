@@ -21,7 +21,9 @@ The transport layer handles:
 	* Message routing based on RemoteMessageType enum
 
 All network operations run in background threads, while message handlers
-are called on the main wxPython thread for thread-safety.
+are called on the main wxPython thread for thread-safety, keys excepted:
+they go straight from the reader thread to the keyboard, which a busy main
+thread must never delay.
 """
 
 from abc import ABC, abstractmethod  # noqa: I001
@@ -189,7 +191,8 @@ class Transport(ABC):
 		:param type: The message type to handle
 		:param handler: Callback function to process messages of this type
 		:note: Multiple handlers can be registered for the same type.
-		    Handlers are called asynchronously on wx main thread via CallAfter.
+		    Handlers are called asynchronously on wx main thread via CallAfter,
+		    except key handlers, which are called on the transport's reader thread.
 		    Handler will receive message payload as kwargs.
 		:example:
 		    >>> def handleKeypress(keyCode, pressed):
@@ -542,7 +545,8 @@ class TCPTransport(Transport):
 		:param line: Complete message line to parse
 		:raises ValueError: If message type is invalid
 		:note: Messages require 'type' field matching RemoteMessageType
-		:note: Handlers execute asynchronously on wx main thread
+		:note: Handlers execute asynchronously on wx main thread, except those for
+		    key messages, which run on this reader thread (see below)
 		"""
 		obj = self.serializer.deserialize(line)
 		if configuration._isDebugForRemoteClient():
@@ -562,6 +566,16 @@ class TCPTransport(Transport):
 		extensionPoint = self.inboundHandlers.get(messageType)
 		if not extensionPoint:
 			log.warning(f"Received message with unhandled type: {messageType} {obj!r}")
+			return
+		if messageType is RemoteMessageType.KEY:
+			# A key goes to the keyboard from this reader thread instead of waiting for the main
+			# thread: that one may be busy for seconds with a dialog or a script, and a key it types
+			# stays down all that time. On a Linux follower the X server then repeats it into the
+			# application, and one press of the other computer arrives there many times.
+			# The key source takes keys through its own thread-safe queue, and this thread keeps
+			# them in the order they came. What releases a leader's keys on its leaving is handled
+			# on the main thread, so it still comes after every key that came before it.
+			extensionPoint.notify(**obj)
 			return
 		wx.CallAfter(extensionPoint.notify, **obj)
 
