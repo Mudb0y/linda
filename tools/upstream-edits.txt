@@ -159,7 +159,9 @@ source/NVDAState.py
   addonStoreDir, and with it the downloads, and updateCheckStateFile are
   under XDG_CACHE_HOME/linda while the configuration directory is the
   default one, as the XDG specification keeps caches apart from
-  configuration; a directory given with -c keeps them inside it
+  configuration; a directory given with -c keeps them inside it. mathCATDir
+  is the mathcatAssets directory beside libmathcat_py, where nix/mathcat.nix
+  puts MathCAT's rules, as the tree has no include/nvda-mathcat assets
 source/_magnifier/__init__.py
   Linux runtime: initialize() makes no magnifier, as every magnified view is
   built on Windows' Magnification API and its constructor reads the cursor
@@ -750,12 +752,19 @@ source/louisHelper.py
   import safety: os.add_dll_directory around the louis import only on
   Windows
 source/mathPres/__init__.py
-  every platform: initialize() imports MathCAT inside the try
-  that already turns a MathCAT that cannot start into the warning "MathCAT
-  not available.". On Linux that import fails, as libmathcat_py is not
-  packaged, and core.main calls initialize() at every start. On Windows a
-  MathCAT that fails to import now gives the same warning instead of
-  stopping NVDA's start-up
+  every platform: initialize() imports MathCAT inside the try that reports
+  a MathCAT that cannot start as a warning instead of stopping startup
+source/mathPres/MathCAT/MathCAT.py
+  Linux runtime: the MathML clipboard format registration is Windows-only,
+  and Linux writes MathCAT output through the normal text clipboard.
+  _getHighlightRect gives no rectangle, as it reads IAccessible2's
+  ia2Web.Math
+source/mathPres/MathCAT/_navNodeMapping.py
+  Linux runtime: prepareMathMlForNavigation maps no rectangles, as they come
+  from IAccessible2's ia2Web.Math, which Linux does not have
+source/mathPres/MathCAT/localization.py
+  every platform: find rules with native path separators, even when MathCAT
+  supplies Windows-style regional language codes
 source/monkeyPatches/wxMonkeyPatches.py
   Linux runtime: apply() patches nothing, as wxGTK runs CallAfter callbacks
   inside popup menus and message boxes by itself, and the patch would post a

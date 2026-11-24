@@ -158,22 +158,23 @@ def readWindow(desktop: DesktopSession, last: str) -> list[str]:
 BUTTONS = ["Apply button Alt plus A", "Cancel button Alt plus C", "OK button Alt plus O"]
 
 CATEGORIES = [
-	"General 1 of 16",
-	"Speech 2 of 16",
-	"Braille 3 of 16",
-	"Audio 4 of 16",
-	"Privacy and Security 5 of 16",
-	"Vision 6 of 16",
-	"Keyboard 7 of 16",
-	"Mouse 8 of 16",
-	"Review Cursor 9 of 16",
-	"Object Presentation 10 of 16",
-	"Browse Mode 11 of 16",
-	"Document Formatting 12 of 16",
-	"Document Navigation 13 of 16",
-	"Remote Access 14 of 16",
-	"NVDA Add-on Store 15 of 16",
-	"Advanced 16 of 16",
+	"General 1 of 17",
+	"Speech 2 of 17",
+	"Braille 3 of 17",
+	"Audio 4 of 17",
+	"Privacy and Security 5 of 17",
+	"Vision 6 of 17",
+	"Keyboard 7 of 17",
+	"Mouse 8 of 17",
+	"Review Cursor 9 of 17",
+	"Object Presentation 10 of 17",
+	"Browse Mode 11 of 17",
+	"Document Formatting 12 of 17",
+	"Document Navigation 13 of 17",
+	"Remote Access 14 of 17",
+	"Math 15 of 17",
+	"NVDA Add-on Store 16 of 17",
+	"Advanced 17 of 17",
 ]
 
 #: What Linda+B reads in each panel or group that a feature Linux lacks was taken out of, and would
@@ -211,7 +212,7 @@ def openSettings(desktop: DesktopSession) -> None:
 		"Return",
 		"Linda Settings: General (normal configuration) dialog",
 		"Categories: list",
-		"General 1 of 16",
+		"General 1 of 17",
 	)
 
 
@@ -226,7 +227,7 @@ def test_settingsLeaveOutWhatLinuxLacks(desktop: DesktopSession):
 	nvda = start(desktop)
 	openSettings(desktop)
 	walk(desktop, "Down", CATEGORIES, wraps=False)
-	step(desktop, "Home", "General 1 of 16")
+	step(desktop, "Home", "General 1 of 17")
 
 	assert tabAround(desktop) == [
 		"Linda Language (requires restart): combo box English, en collapsed Alt plus L",
@@ -235,7 +236,7 @@ def test_settingsLeaveOutWhatLinuxLacks(desktop: DesktopSession):
 		"Play sounds when starting or exiting Linda check box not checked Alt plus P",
 		"Start Linda after I sign in check box not checked Alt plus A",
 		*BUTTONS,
-		"Categories: list | General 1 of 16",
+		"Categories: list | General 1 of 17",
 	]
 	general = readWindow(desktop, "separator")
 	assert "Start Linda after I sign in check box not checked Alt plus A" in general
@@ -248,7 +249,7 @@ def test_settingsLeaveOutWhatLinuxLacks(desktop: DesktopSession):
 		"Volume of Linda sounds slider 100",
 		"Time to keep audio device awake after speech (seconds) spin button 30 Alt plus K",
 		*BUTTONS,
-		"Categories: list | Audio 4 of 16",
+		"Categories: list | Audio 4 of 17",
 	]
 	assertNoneRead(readWindow(desktop, "separator"))
 
@@ -278,7 +279,7 @@ def test_settingsLeaveOutWhatLinuxLacks(desktop: DesktopSession):
 	assert browseMode[-5:] == [
 		"Native selection mode combo box Default (Disabled) collapsed Alt plus V",
 		*BUTTONS,
-		"Categories: list | Browse Mode 11 of 16",
+		"Categories: list | Browse Mode 11 of 17",
 	], browseMode
 	assertNoneRead(browseMode)
 	assertNoneRead(readWindow(desktop, "separator"))

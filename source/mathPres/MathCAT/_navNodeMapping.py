@@ -6,6 +6,7 @@
 """Map MathCAT NavNode ids to source MathML rectangles."""
 
 from xml.etree import ElementTree  # noqa: I001
+import sys
 from collections.abc import Generator
 from typing import TYPE_CHECKING
 
@@ -118,7 +119,7 @@ def prepareMathMlForNavigation(
 	sourceObj: "NVDAObject | None",
 ) -> tuple[str, dict[MathMlNodeId, "RectLTRB"]]:
 	"""Add missing ids to MathML and map node ids to IA2 rectangles."""
-	if not sourceObj:
+	if sys.platform != "win32" or not sourceObj:
 		return mathml, {}
 	# Avoid importing ia2Web at startup.
 	from NVDAObjects.IAccessible.ia2Web import Math as Ia2WebMath

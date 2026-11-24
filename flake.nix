@@ -85,7 +85,8 @@
         wxpython_4_3
         xkbcommon
       ];
-      python = pythonInterpreter.withPackages pythonPackages;
+      mathcat = pkgs.callPackage ./nix/mathcat.nix { python = pythonInterpreter; };
+      python = pythonInterpreter.withPackages (ps: pythonPackages ps ++ [ mathcat ]);
 
       louisTables = pkgs.callPackage ./nix/louis-tables.nix { };
       cargoVendorDir = pkgs.rustPlatform.importCargoLock { lockFile = ./engine/Cargo.lock; };
@@ -129,7 +130,8 @@
       # names as well; the program installs them from it, so that a change to the Python tree
       # rebuilds neither them nor the shell.
       libraries = pkgs.callPackage ./nix/linda.nix {
-        inherit python cargoVendorDir;
+        inherit cargoVendorDir;
+        python = pythonInterpreter.withPackages pythonPackages;
         librariesOnly = true;
         keydService = true;
       };

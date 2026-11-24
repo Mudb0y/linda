@@ -297,7 +297,7 @@ def test_startAfterSignInIsOfferedAndSaysWhyThisCopyCannot(desktop: DesktopSessi
 
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
 	step(desktop, "Return", "Settings... S 1 of 4")
-	step(desktop, "Return", "Categories: list", "General 1 of 16")
+	step(desktop, "Return", "Categories: list", "General 1 of 17")
 	for _press in range(12):
 		mark = desktop.mark()
 		desktop.press("Tab")
@@ -423,7 +423,7 @@ def test_brailleViewerOpensAndClosesFromTheToolsMenu(desktop: DesktopSession):
 	assertExitedCleanly(nvda)
 
 
-#: The settings dialog's categories, sixteen, of which its list shows fifteen at a time.
+#: The settings dialog's categories, seventeen, of which its list shows fifteen at a time.
 CATEGORY_NAMES = (
 	"General",
 	"Speech",
@@ -439,6 +439,7 @@ CATEGORY_NAMES = (
 	"Document Formatting",
 	"Document Navigation",
 	"Remote Access",
+	"Math",
 	"NVDA Add-on Store",
 	"Advanced",
 )
@@ -528,7 +529,7 @@ def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSe
 		"Linda Settings: General (normal configuration) dialog",
 		# The list is spoken before the item it has selected, as on Windows.
 		"Categories: list",
-		"General 1 of 16",
+		"General 1 of 17",
 	)
 	time.sleep(SETTLE)
 	assert not [text for text in desktop.spokenSince(mark) if text.startswith("OK button")]
@@ -541,7 +542,7 @@ def test_settingsDialogFromTheMenuChangesTheNvdaKeysAndLayout(desktop: DesktopSe
 
 	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
 	step(desktop, "Return", "Settings... S 1 of 4")
-	step(desktop, "Return", "Categories: list", "General 1 of 16")
+	step(desktop, "Return", "Categories: list", "General 1 of 17")
 	downToKeyboard(desktop)
 	# Applied, and kept although the dialog was then cancelled.
 	step(desktop, "Tab", "Keyboard layout: combo box laptop collapsed Alt plus K")

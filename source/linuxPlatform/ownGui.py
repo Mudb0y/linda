@@ -914,7 +914,7 @@ def install() -> None:
 		cls.onCategoryChange = _ignoredOnceDestroyed(cls.onCategoryChange)
 	categories = settingsDialogs.NVDASettingsDialog.categoryClasses
 	if settingsDialogs.MathSettingsPanel in categories and importlib.util.find_spec("libmathcat_py") is None:
-		# MathCAT's library is built for Windows only, and its panel cannot be made without it: choosing the
+		# A Python without MathCAT's library, which nix/mathcat.nix builds, cannot make its panel: choosing the
 		# category raised and left the previous panel's controls in the tab order.
 		categories.remove(settingsDialogs.MathSettingsPanel)
 	atexit.register(_quietAutoSettingsAtExit)

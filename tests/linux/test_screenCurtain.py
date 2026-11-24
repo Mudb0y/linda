@@ -498,7 +498,7 @@ def test_theSettingsCheckBoxMakesTheScreenBlackAfterTheWarning(desktop: DesktopS
 		"Return",
 		"Linda Settings: General (normal configuration) dialog",
 		"Categories: list",
-		"General 1 of 16",
+		"General 1 of 17",
 	)
 	for category in ("Speech", "Braille", "Audio", "Privacy and Security"):
 		say(desktop, "Down", f"{category}…")

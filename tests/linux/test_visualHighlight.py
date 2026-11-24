@@ -483,7 +483,7 @@ def test_focusAndSpeechAreTheSameWithAndWithoutIt(tmp_path: Path):
 
 
 CATEGORIES = [
-	f"{name} {index} of 16"
+	f"{name} {index} of 17"
 	for index, name in enumerate(
 		(
 			"General",
@@ -500,6 +500,7 @@ CATEGORIES = [
 			"Document Formatting",
 			"Document Navigation",
 			"Remote Access",
+			"Math",
 			"NVDA Add-on Store",
 			"Advanced",
 		),
