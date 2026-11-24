@@ -1,8 +1,9 @@
-"""Asking the running copy to take the keyboard back from outside it, as linda --take-keyboard does.
+"""Asking the running copy to take the keyboard back or install an add-on from outside it.
 
 After the emergency chord NVDA has no keys, so none of its own commands can be pressed to ask. The
 running copy listens on a Unix socket beside each of its locks and answers from the main loop, so a
 copy whose main loop is stuck never answers, and the caller says so instead of reporting success.
+Add-ons opened from file managers are also dispatched through this socket to the running copy.
 Nothing is ever signalled: a copy from before this socket existed would end on any signal it does
 not catch.
 
@@ -19,9 +20,13 @@ from typing import NoReturn
 
 #: What a caller sends, and what the running copy answers once it has acted.
 REQUEST = b"take-keyboard\n"
-REPLY = b"taken\n"
-#: What the running copy answers when taking the keyboard back raised.
+REPLY_TAKEN = b"taken\n"
+REPLY_OK = b"ok\n"
+#: For backwards compatibility with take-keyboard callers
+REPLY = REPLY_TAKEN
+#: What the running copy answers when a request failed or was rejected.
 FAILED_REPLY = b"failed\n"
+ACCEPTED_REPLIES = (REPLY_TAKEN, REPLY_OK)
 #: Seconds the caller waits for the answer, from its first attempt to connect.
 ANSWER_TIMEOUT = 2.0
 #: Seconds a connection that has not sent the whole request is kept.
@@ -36,6 +41,39 @@ _UCRED = struct.Struct("iII")
 _lockPaths: list[str] = []
 _listeners: list["_Listener"] = []
 _connections: set["_Connection"] = set()
+_pendingAddons: list[str] = []
+_installingAddon = False
+
+
+def queueAddonInstall(path: str) -> None:
+	"""Queue an add-on installation sequentially to prevent modal dialog collisions."""
+	from logHandler import log
+
+	log.info("Requesting installation of add-on from %s", path)
+	_pendingAddons.append(path)
+	_processNextAddon()
+
+
+def _processNextAddon() -> None:
+	global _installingAddon
+	if _installingAddon or not _pendingAddons:
+		return
+	_installingAddon = True
+	path = _pendingAddons.pop(0)
+	try:
+		from gui import addonGui
+
+		addonGui.handleRemoteAddonInstall(path)
+	except Exception:
+		from logHandler import log
+
+		log.exception("Error handling add-on installation for %s", path)
+	finally:
+		_installingAddon = False
+		if _pendingAddons:
+			import wx
+
+			wx.CallAfter(_processNextAddon)
 
 
 def socketPath(lockPath: str) -> str:
@@ -157,16 +195,22 @@ class _Connection:
 	def _onReadable(self, fd: int, condition: int) -> bool:
 		from gi.repository import GLib
 
+		if self.hasRequest():
+			self._answer()
+			self._watch = None
+			self.close()
+			return GLib.SOURCE_REMOVE
+
 		try:
-			data = self._socket.recv(len(REQUEST) - len(self._received))
+			data = self._socket.recv(4096)
 		except BlockingIOError:
 			return GLib.SOURCE_CONTINUE
 		except OSError:
 			data = b""
 		self._received += data
-		if data and self._received != REQUEST and REQUEST.startswith(self._received):
+		if data and b"\n" not in self._received and len(self._received) < 4096:
 			return GLib.SOURCE_CONTINUE
-		if self._received == REQUEST:
+		if self.hasRequest():
 			self._answer()
 		self._watch = None
 		self.close()
@@ -182,6 +226,18 @@ class _Connection:
 	def hasRequest(self) -> bool:
 		"""Whether the whole request has come, reading what is there without waiting for more."""
 		try:
+			self._received += self._socket.recv(4096)
+		except OSError:
+			pass
+		return self._received == REQUEST or (
+			self._received.startswith(b"install-addon ") and self._received.endswith(b"\n")
+		)
+
+	def hasTakeKeyboardRequest(self) -> bool:
+		"""Whether this connection has received the take-keyboard request."""
+		if not REQUEST.startswith(self._received):
+			return False
+		try:
 			self._received += self._socket.recv(len(REQUEST) - len(self._received))
 		except OSError:
 			pass
@@ -190,7 +246,36 @@ class _Connection:
 	def _answer(self) -> None:
 		from logHandler import log
 
-		from . import inputHook
+		if self._received.startswith(b"install-addon "):
+			rawPath = self._received.removeprefix(b"install-addon ").rstrip(b"\r\n")
+			try:
+				path = rawPath.decode("utf-8")
+			except UnicodeDecodeError:
+				path = os.fsdecode(rawPath)
+			path = os.path.abspath(path)
+			from utils.security import isLockScreenModeActive, isRunningOnSecureDesktop
+
+			if (
+				"\n" in path
+				or "\r" in path
+				or isRunningOnSecureDesktop()
+				or isLockScreenModeActive()
+				or not os.path.isfile(path)
+			):
+				log.debugWarning(f"Add-on installation rejected for {path}")
+				reply = FAILED_REPLY
+			else:
+				import wx
+
+				wx.CallAfter(queueAddonInstall, path)
+				reply = REPLY_OK
+			try:
+				self._socket.send(reply)
+			except OSError:
+				pass
+			return
+
+		from . import displayServer, inputHook
 
 		# Requests that queued up behind this one while this copy could not answer, as a caller run again
 		# and again against a stopped copy leaves them: one taking back answers them all, and is said once.
@@ -200,18 +285,24 @@ class _Connection:
 		queued = [
 			connection
 			for connection in list(_connections)
-			if connection is not self and connection.hasRequest()
+			if connection is not self and connection.hasTakeKeyboardRequest()
 		]
 		log.info("Asked from outside NVDA, through the control socket, to take the keyboard back")
-		if queued:
-			log.debug(f"{len(queued)} more requests that queued up are answered by the same")
-		try:
-			inputHook.takeKeyboardBack()
-		except Exception:
-			log.exception("Taking the keyboard back when asked from outside NVDA")
+		if displayServer.kind() == "x11" or not inputHook.canTakeKeyboardBack():
+			log.warning(
+				"Taking the keyboard back was requested, but X11 sessions do not take the keyboard back through the control socket"
+			)
 			reply = FAILED_REPLY
 		else:
-			reply = REPLY
+			if queued:
+				log.debug(f"{len(queued)} more requests that queued up are answered by the same")
+			try:
+				inputHook.takeKeyboardBack()
+			except Exception:
+				log.exception("Taking the keyboard back when asked from outside NVDA")
+				reply = FAILED_REPLY
+			else:
+				reply = REPLY
 		for connection in (self, *queued):
 			try:
 				connection._socket.send(reply)
@@ -255,13 +346,14 @@ _SAID = {
 }
 
 
-def ask(paths: list[str], timeout: float = ANSWER_TIMEOUT) -> str:
-	"""Ask the copy listening at the first of paths that takes a connection to take the keyboard back.
+def ask(paths: list[str], timeout: float = ANSWER_TIMEOUT, request: bytes = REQUEST) -> str:
+	"""Ask the copy listening at the first of paths that takes a connection to carry out request.
 
 	:return: ANSWERED or FAILED as it answered; NO_ANSWER when a copy took the connection but did not
 		answer within timeout; UNREACHABLE when no path took a connection.
 	"""
 	deadline = time.monotonic() + timeout
+	maxReplyLen = max(len(r) for r in (*ACCEPTED_REPLIES, FAILED_REPLY))
 	for path in paths:
 		if (remaining := deadline - time.monotonic()) <= 0:
 			return NO_ANSWER
@@ -279,19 +371,19 @@ def ask(paths: list[str], timeout: float = ANSWER_TIMEOUT) -> str:
 				continue
 			reply = b""
 			try:
-				caller.sendall(REQUEST)
-				while not reply.endswith(b"\n") and len(reply) <= len(FAILED_REPLY):
+				caller.sendall(request)
+				while not reply.endswith(b"\n") and len(reply) <= maxReplyLen:
 					remaining = deadline - time.monotonic()
 					if remaining <= 0:
 						return NO_ANSWER
 					caller.settimeout(remaining)
-					chunk = caller.recv(len(FAILED_REPLY))
+					chunk = caller.recv(maxReplyLen)
 					if not chunk:
 						break
 					reply += chunk
 			except OSError:
 				return NO_ANSWER
-			if reply == REPLY:
+			if reply in ACCEPTED_REPLIES:
 				return ANSWERED
 			return FAILED if reply == FAILED_REPLY else NO_ANSWER
 		finally:

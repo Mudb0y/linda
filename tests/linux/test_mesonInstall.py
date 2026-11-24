@@ -130,6 +130,7 @@ def test_installsTheLayoutAndNothingElse(installed: Installed):
 		f"{PREFIX}/share/linda/copying.txt",
 		f"{PREFIX}/share/licenses/linda/copying.txt",
 		f"{PREFIX}/share/applications/linda.desktop",
+		f"{PREFIX}/share/mime/packages/linda-mime.xml",
 		f"{PREFIX}/share/metainfo/io.github.mudb0y.linda.metainfo.xml",
 		f"{PREFIX}/share/man/man1/linda.1",
 		f"{PREFIX}/share/man/man1/linda-say.1",
@@ -447,7 +448,13 @@ def test_desktopEntryAndMetadataSayWhatLindaIs(installed: Installed):
 	assert re.search(r"^Ok:\s+2\s*$", done.stdout, re.MULTILINE), done.stdout
 	entry = installed.path(f"{PREFIX}/share/applications/linda.desktop").read_text(encoding="utf-8")
 	lines = entry.splitlines()
-	for line in ("Type=Application", "Name=Linda", "Exec=linda", "Categories=Utility;Accessibility;"):
+	for line in (
+		"Type=Application",
+		"Name=Linda",
+		"Exec=linda %F",
+		"Categories=Utility;Accessibility;",
+		"MimeType=application/x-nvda-addon;",
+	):
 		assert line in lines, entry
 	assert any(line.startswith("Comment=") for line in lines), entry
 	assert not any(line.startswith("Icon=") for line in lines), entry

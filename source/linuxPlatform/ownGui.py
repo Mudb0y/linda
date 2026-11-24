@@ -568,6 +568,8 @@ def presentAgain(window: wx.TopLevelWindow) -> None:
 
 
 def _raiseOrPresentAgain(self) -> None:
+	if _isGone(self):
+		return
 	if isWaylandDisplay() and _needsPresentingAgain(self):
 		presentAgain(self)
 		return

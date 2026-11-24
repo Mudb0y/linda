@@ -282,6 +282,13 @@ def _createNVDAArgParser() -> NoConsoleOptionParser:
 		from linuxPlatform import desktopRegistration
 
 		desktopRegistration.addOptions(parser)
+		parser.add_argument(
+			"--install-addon",
+			action="append",
+			dest="installAddons",
+			metavar="PATH",
+			help="Install an NVDA add-on package into Linda",
+		)
 	return parser
 
 

@@ -69,6 +69,29 @@ def _handOverToOutsideOption(option: str) -> NoReturn:
 	controlSocket.takeKeyboard()
 
 
+_startupAddonHandlers: list[object] = []
+
+
+def _normalizeAddonPath(pathOrUri: str, cwd: str) -> str:
+	import urllib.parse
+
+	if pathOrUri.startswith("file://"):
+		parsed = urllib.parse.urlparse(pathOrUri)
+		path = urllib.parse.unquote(parsed.path)
+	else:
+		path = pathOrUri
+	if not os.path.isabs(path):
+		path = os.path.normpath(os.path.join(cwd, path))
+	return path
+
+
+def _installAddon(path: str) -> None:
+	import wx
+	from linuxPlatform import controlSocket
+
+	wx.CallAfter(controlSocket.queueAddonInstall, path)
+
+
 def main() -> NoReturn:
 	# Before NVDA's parser, which takes any argument it does not know and starts the screen reader anyway.
 	if sys.argv[1:2] == [SAY_COMMAND]:
@@ -108,6 +131,7 @@ def main() -> NoReturn:
 
 	# nvda.pyw also checks for its virtual environment here. The Nix development shell provides
 	# NVDA's dependencies instead, and bootstrap.install() has checked the one it cannot start without.
+	originalCwd = os.getcwd()
 	os.chdir(appDir)
 	globalVars.appDir = appDir
 	globalVars.appPid = os.getpid()
@@ -133,6 +157,22 @@ def main() -> NoReturn:
 		if isinstance(value, str):
 			setattr(globalVars.appArgs, name, os.path.abspath(value))
 	appArgs = globalVars.appArgs
+
+	installAddons: list[str] = []
+	if appArgs.installAddons:
+		for arg in appArgs.installAddons:
+			installAddons.append(_normalizeAddonPath(arg, originalCwd))
+	remainingUnknownArgs = []
+	for arg in globalVars.unknownAppArgs:
+		normalized = _normalizeAddonPath(arg, originalCwd)
+		if normalized.lower().endswith(".nvda-addon"):
+			installAddons.append(normalized)
+		else:
+			remainingUnknownArgs.append(arg)
+	globalVars.unknownAppArgs = remainingUnknownArgs
+	if installAddons and (appArgs.quit or appArgs.check_running):
+		option = "--quit" if appArgs.quit else "--check-running"
+		_fail(f"{option} cannot be combined with add-on installation")
 	if appArgs.launcher:
 		# The dialog it shows offers to install NVDA or make a portable copy, both through Windows' installer.
 		_fail("--launcher is how NVDA's Windows installer starts it, and Linux has no such installer")
@@ -168,6 +208,28 @@ def main() -> NoReturn:
 			_fail(f"there is no display to start on, as the session kind is {displayServer.reason()}")
 		# wx would fail later with a line that names only X.
 		_fail("neither WAYLAND_DISPLAY nor DISPLAY names a display")
+	if installAddons:
+		for path in installAddons:
+			if "\n" in path or "\r" in path:
+				_fail(f"add-on path cannot contain newline: {path!r}")
+			if not os.path.isfile(path):
+				_fail(f"add-on package not found: {path}")
+		if isAlreadyRunning:
+			import time
+
+			socketPaths = [controlSocket.socketPath(p) for p in ownLockPaths]
+			deadline = time.monotonic() + singleInstance.START_TIMEOUT
+			for path in installAddons:
+				absPath = os.path.abspath(path)
+				outcome = controlSocket.UNREACHABLE
+				while time.monotonic() < deadline:
+					outcome = controlSocket.ask(socketPaths, request=f"install-addon {absPath}\n".encode())
+					if outcome != controlSocket.UNREACHABLE:
+						break
+					time.sleep(singleInstance._POLL_INTERVAL)
+				if outcome != controlSocket.ANSWERED:
+					_fail(f"could not install {absPath} in running Linda ({outcome})")
+			sys.exit(0)
 	if isAlreadyRunning and not appArgs.easeOfAccess:
 		if appArgs.check_running:
 			sys.exit(0)
@@ -255,14 +317,20 @@ def main() -> NoReturn:
 		# From then on this copy acts on SIGTERM at once, so a copy replacing it need wait no longer.
 		for lock in instanceLocks:
 			core.postNvdaStartup.register(lock.markReady)
-		# Once there is a keyboard to take back, from the main loop that answers. Only in a Wayland session:
-		# in an X one NVDA reads keys from the X display after the emergency chord, so its own command
-		# takes the keyboard back.
-		if sessionKind == "wayland":
+		# Once there is a keyboard to take back or an add-on to install, from the main loop that answers.
+		if sessionKind != "none":
 			controlSocket.prepare(ownLockPaths)
 			core.postNvdaStartup.register(controlSocket.start)
 		# Once NVDA can speak, so that a session manager waiting for it goes on as soon as it is up.
 		core.postNvdaStartup.register(sessionClient.start)
+		if installAddons:
+
+			def _installStartupAddons() -> None:
+				for path in installAddons:
+					_installAddon(os.path.abspath(path))
+
+			_startupAddonHandlers.append(_installStartupAddons)
+			core.postNvdaStartup.register(_installStartupAddons)
 		core.main()
 	except BaseException as e:
 		# As nvda.pyw does, SystemExit included: wx raises it when there is no display to open.
