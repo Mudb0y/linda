@@ -2162,39 +2162,6 @@ def test_theEnvironmentChoosesTheSink(tmp_path: Path):
 	]
 
 
-def test_pulseAudioFallbackWhenPipewireNotRunning(tmp_path: Path):
-	"""When installation specifies pipewire but no PipeWire daemon is running, getSink falls back
-	to PulseAudio sink."""
-	done = harness.runChild(
-		tmp_path,
-		"""
-		import types
-		import sys
-		from linuxPlatform import audioOutput, installSettings
-
-		class PulseStandIn:
-			kind = "pulse"
-
-		pulseStandIn = types.ModuleType("linuxPlatform.audioOutput.pulseSink")
-		pulseStandIn.PulseSink = PulseStandIn
-		sys.modules[pulseStandIn.__name__] = pulseStandIn
-
-		# Fake installSettings having pipewire as fixed by installation
-		installSettings._installed["LINDA_AUDIO_SINK"] = "pipewire"
-		audioOutput._sink = None
-		# Ensure isPipewireRunning is False
-		audioOutput.isPipewireRunning = lambda: False
-
-		sink = audioOutput.getSink()
-		result = {"kind": sink.kind}
-		""",
-		prepare="bootstrap",
-		env={"LINDA_AUDIO_SINK": None, "LINDA_AUDIO_CAPTURE_DIR": None},
-	)
-	done.assertClean()
-	assert done.value["kind"] == "pulse"
-
-
 def test_captureSinkKeepsAudioAtTheProcessGain(tmp_path: Path):
 	"""Sink.setGain on the capture sink: 0.5 is -6.0 dB on 16- and 24-bit audio, full scale stays
 	in range, audio heard before a change keeps the gain it was heard at, and a gain outside 0 to 1

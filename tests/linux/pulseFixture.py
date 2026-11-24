@@ -178,6 +178,20 @@ class PulseFixture:
 		self._monitors.append(monitor)
 		return monitor
 
+	def killDaemon(self) -> None:
+		"""SIGKILL to the daemon."""
+		if self.daemon is not None and self.daemon.poll() is None:
+			self.daemon.kill()
+			self.daemon.wait(3)
+		self.daemon = None
+		self.socket.unlink(missing_ok=True)
+
+	def restartDaemon(self) -> None:
+		"""The daemon started again, as after a crash or pulseaudio -k."""
+		if self.daemon is not None:
+			self.killDaemon()
+		self.start()
+
 	def stop(self) -> None:
 		for m in self._monitors:
 			m.close()

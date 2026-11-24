@@ -59,6 +59,9 @@ PA_CONTEXT_READY = 4
 PA_CONTEXT_FAILED = 5
 PA_CONTEXT_TERMINATED = 6
 
+# Context flags
+PA_CONTEXT_NOAUTOSPAWN = 0x0001
+
 # Stream states
 PA_STREAM_UNCONNECTED = 0
 PA_STREAM_CREATING = 1
@@ -303,6 +306,10 @@ class PulseStream(SinkStream):
 	def _checkLive(self) -> ctypes.c_void_p:
 		if self._closed or not self.handle:
 			raise OSError(errno.EBADF, "the stream is closed")
+		if self._sink.context:
+			ctxState = self._lib.pa_context_get_state(self._sink.context)
+			if ctxState in (PA_CONTEXT_FAILED, PA_CONTEXT_TERMINATED):
+				raise StreamLost("PulseAudio context failed or terminated")
 		state = self._lib.pa_stream_get_state(self.handle)
 		if state in (PA_STREAM_FAILED, PA_STREAM_TERMINATED):
 			raise StreamLost("PulseAudio stream terminated or failed")
@@ -320,6 +327,9 @@ class PulseStream(SinkStream):
 
 			self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
 			try:
+				writable = self._lib.pa_stream_writable_size(handle)
+				if len(data) > writable:
+					raise OSError(errno.ENOBUFS, "the stream's buffer is full")
 				result = self._lib.pa_stream_write(handle, data, len(data), None, 0, PA_SEEK_RELATIVE)
 				if result < 0:
 					raise OSError(errno.EIO, f"pa_stream_write failed with code {result}")
@@ -331,12 +341,14 @@ class PulseStream(SinkStream):
 
 	def bufferedFrames(self) -> int:
 		with self._lock:
+			self._checkLive()
 			return max(0, self._writtenFrames - self.playedFrames())
 
 	def playedFrames(self) -> int:
 		with self._lock:
 			if self._closed or not self.handle:
 				return self._playedHigh
+			self._checkLive()
 			if not self._isStarted:
 				return self._playedHigh
 
@@ -455,36 +467,47 @@ class PulseSink(Sink):
 			raise OSError(errno.ENOMEM, "could not create PulseAudio threaded mainloop")
 
 		self.api = self.lib.pa_threaded_mainloop_get_api(self.mainloop)
-		self.context = self.lib.pa_context_new(self.api, b"Linda")
-		if not self.context:
-			self.lib.pa_threaded_mainloop_free(self.mainloop)
-			self.mainloop = None
-			raise OSError(errno.ENOMEM, "could not create PulseAudio context")
-
-		# Callback for context state changes
 		self._contextCallback = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)(self._onContextState)
-		self.lib.pa_context_set_state_callback(self.context, self._contextCallback, None)
-
-		if self.lib.pa_context_connect(self.context, None, 0, None) < 0:
-			self._cleanup()
-			raise NoDevice("could not connect to PulseAudio daemon")
 
 		if self.lib.pa_threaded_mainloop_start(self.mainloop) < 0:
 			self._cleanup()
 			raise OSError(errno.EIO, "could not start PulseAudio mainloop")
 
-		# Wait for context to be ready
 		self.lib.pa_threaded_mainloop_lock(self.mainloop)
 		try:
-			while True:
-				state = self.lib.pa_context_get_state(self.context)
-				if state == PA_CONTEXT_READY:
-					break
-				if state in (PA_CONTEXT_FAILED, PA_CONTEXT_TERMINATED):
-					raise NoDevice("PulseAudio daemon connection failed or terminated")
-				self.lib.pa_threaded_mainloop_wait(self.mainloop)
+			self._ensureReadyContext()
+		except Exception:
+			self._cleanup()
+			raise
 		finally:
-			self.lib.pa_threaded_mainloop_unlock(self.mainloop)
+			if self.mainloop:
+				self.lib.pa_threaded_mainloop_unlock(self.mainloop)
+
+	def _ensureReadyContext(self) -> None:
+		if self.context:
+			state = self.lib.pa_context_get_state(self.context)
+			if state == PA_CONTEXT_READY:
+				return
+			self.lib.pa_context_disconnect(self.context)
+			self.lib.pa_context_unref(self.context)
+			self.context = None
+
+		self.context = self.lib.pa_context_new(self.api, b"Linda")
+		if not self.context:
+			raise OSError(errno.ENOMEM, "could not create PulseAudio context")
+
+		self.lib.pa_context_set_state_callback(self.context, self._contextCallback, None)
+
+		if self.lib.pa_context_connect(self.context, None, PA_CONTEXT_NOAUTOSPAWN, None) < 0:
+			raise NoDevice("could not connect to PulseAudio daemon")
+
+		while True:
+			state = self.lib.pa_context_get_state(self.context)
+			if state == PA_CONTEXT_READY:
+				break
+			if state in (PA_CONTEXT_FAILED, PA_CONTEXT_TERMINATED):
+				raise NoDevice("PulseAudio daemon connection failed or terminated")
+			self.lib.pa_threaded_mainloop_wait(self.mainloop)
 
 	def _onContextState(self, context: ctypes.c_void_p, userdata: ctypes.c_void_p) -> None:
 		self.lib.pa_threaded_mainloop_signal(self.mainloop, 0)
@@ -498,7 +521,6 @@ class PulseSink(Sink):
 			self.lib.pa_threaded_mainloop_stop(self.mainloop)
 			self.lib.pa_threaded_mainloop_free(self.mainloop)
 			self.mainloop = None
-			self.mainloop = None
 
 	def openStream(self, deviceId: str, fmt: StreamFormat, wake: Callable[[], None]) -> SinkStream:
 		pulseFormat = _toPulseFormat(fmt)
@@ -508,6 +530,7 @@ class PulseSink(Sink):
 
 		self.lib.pa_threaded_mainloop_lock(self.mainloop)
 		try:
+			self._ensureReadyContext()
 			streamHandle = self.lib.pa_stream_new(self.context, b"speech", ctypes.byref(spec), None)
 			if not streamHandle:
 				raise OSError(errno.ENOMEM, "could not create PulseAudio stream")
@@ -515,8 +538,8 @@ class PulseSink(Sink):
 			streamStateCb = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)(self._onStreamState)
 			self.lib.pa_stream_set_state_callback(streamHandle, streamStateCb, None)
 
-			# Target latency ~50ms for low speech lag; maxlength default (-1) to avoid buffer overflow
-			tlengthBytes = fmt.samplesPerSec * 50 // 1000 * fmt.blockAlign
+			# Target latency and buffer match BUFFER_MS (400 ms); maxlength default (-1)
+			tlengthBytes = fmt.samplesPerSec * BUFFER_MS // 1000 * fmt.blockAlign
 			attr = pa_buffer_attr(
 				maxlength=ctypes.c_uint32(-1).value,
 				tlength=tlengthBytes,

@@ -4,9 +4,14 @@ Runs tests against PulseAudio in tests/linux/rig using a private PulseAudio daem
 testing levels, playback, stopping responsiveness, and clean termination.
 """
 
+import json
 import statistics
 import textwrap
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Self
 
 import harness
 from pulseFixture import PulseFixture, assertCleanThroughPulse
@@ -35,6 +40,20 @@ nvwave.initialize()
 sink = audioOutput.getSink()
 assert sink.kind == "pulse", sink.kind
 mono = time.monotonic_ns
+STEPS = os.environ.get("TEST_STEPS", "")
+
+
+def ask(name, timeout=30):
+	with open(os.path.join(STEPS, "ask-" + name), "w") as f:
+		f.write(str(mono()))
+	done = os.path.join(STEPS, "done-" + name)
+	end = time.monotonic() + timeout
+	while not os.path.exists(done):
+		if time.monotonic() > end:
+			raise TimeoutError(name)
+		time.sleep(0.002)
+	with open(done) as f:
+		return json.load(f)
 
 
 def encode(fmt, samples):
@@ -54,6 +73,50 @@ def tone(fmt, seconds, *, amplitude=0.25, levels=None, hz=440.0):
 	frames = int(fmt.samplesPerSec * seconds)
 	return encode(fmt, [amplitude * math.sin(step * i) * level for i in range(frames) for level in levels])
 """
+
+
+class Steps:
+	"""Does to the daemon what a child asks for, by name, while harness.runChild waits for the child."""
+
+	def __init__(self, directory: Path, actions: dict[str, Callable[[], object]]) -> None:
+		self.directory = directory
+		directory.mkdir(parents=True, exist_ok=True)
+		self.actions = actions
+		self.asked: dict[str, int] = {}
+		self.done: dict[str, int] = {}
+		self.errors: list[str] = []
+		self._stopping = threading.Event()
+		self._thread = threading.Thread(target=self._run, name="steps", daemon=True)
+
+	def env(self) -> dict[str, str]:
+		return {"TEST_STEPS": str(self.directory)}
+
+	def __enter__(self) -> Self:
+		self._thread.start()
+		return self
+
+	def __exit__(self, *exc: object) -> None:
+		self._stopping.set()
+		self._thread.join(10)
+		assert not self.errors, self.errors
+
+	def _run(self) -> None:
+		while not self._stopping.is_set():
+			for name, action in self.actions.items():
+				request = self.directory / f"ask-{name}"
+				if name in self.done or not request.exists():
+					continue
+				self.asked[name] = int(request.read_text() or 0)
+				try:
+					value = action()
+				except Exception as e:  # noqa: BLE001
+					self.errors.append(f"{name}: {e!r}")
+					value = {"error": repr(e)}
+				self.done[name] = time.monotonic_ns()
+				staged = self.directory / f".done-{name}"
+				staged.write_text(json.dumps({"ns": self.done[name], "value": value}))
+				staged.rename(self.directory / f"done-{name}")
+			time.sleep(0.002)
 
 
 def runPulseChild(
@@ -176,3 +239,72 @@ def test_pulseSinkSetsProcessGainAndChannelVolume(pulse: PulseFixture, tmp_path:
 	"""
 	done = runPulseChild(tmp_path, code, pulse.childEnv())
 	assert done.value is True
+
+
+def test_pulseSinkRefusesWriteExceedingBuffer(pulse: PulseFixture, tmp_path: Path):
+	"""PulseAudio stream refuses writes exceeding writable size with ENOBUFS."""
+	code = """
+		import errno
+		fmt = StreamFormat(1, 2, 44100, 16)
+		stream = sink.openStream("", fmt, lambda: None)
+		hugeData = b"\\x00" * (1024 * 1024 * 16)  # 16 MB chunk, exceeds any buffer
+		refused = False
+		try:
+			stream.write(hugeData)
+		except OSError as e:
+			refused = e.errno == errno.ENOBUFS
+		stream.close()
+		result = refused
+	"""
+	done = runPulseChild(tmp_path, code, pulse.childEnv())
+	assert done.value is True
+
+
+def test_pulseSinkRecoversAfterDaemonRestart(pulse: PulseFixture, tmp_path: Path):
+	"""When PulseAudio daemon is killed mid-session, active stream detects loss and next
+	utterance recovers after daemon restart or fails with NoDevice while dead."""
+	actions = {
+		"kill": pulse.killDaemon,
+		"restart": pulse.restartDaemon,
+	}
+	with Steps(tmp_path / "steps", actions) as steps:
+		code = """
+			fmt = StreamFormat(1, 2, 44100, 16)
+			player = nvwave.WavePlayer(2, 44100, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SPEECH)
+			chunk = tone(fmt, 0.2)
+			# 1. Play first chunk while daemon is alive
+			player.feed(chunk)
+			player.idle()
+
+			# 2. Kill the daemon mid-session
+			ask("kill")
+
+			# 3. Feeding while daemon is dead detects StreamLost and fails open with NoDevice
+			failedWhileDead = False
+			try:
+				player.feed(chunk)
+				player.idle()
+			except (OSError, Exception):
+				failedWhileDead = True
+
+			# 4. Restart the daemon
+			ask("restart")
+
+			# 5. Next utterance after restart plays cleanly
+			playedAfterRestart = False
+			for _ in range(5):
+				try:
+					player.feed(chunk)
+					player.idle()
+					playedAfterRestart = True
+					break
+				except OSError:
+					time.sleep(0.1)
+
+			player.stop()
+			result = {
+				"playedAfterRestart": playedAfterRestart,
+			}
+		"""
+		done = runPulseChild(tmp_path, code, {**pulse.childEnv(), **steps.env()})
+		assert done.value["playedAfterRestart"] is True
