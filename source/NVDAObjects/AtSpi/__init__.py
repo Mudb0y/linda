@@ -460,7 +460,7 @@ class AtSpi(NVDAObject):
 		if raw == "menu":
 			# Java's model, inherited by GTK: a menu is the item that opens a submenu.
 			parentRole = self.atspiParentRole
-			if parentRole in ("menu bar", "menu") or "selectable" in self.atspiStates:
+			if parentRole in ("menu bar", "menu", "popup menu") or "selectable" in self.atspiStates:
 				return Role.MENUITEM
 			return Role.POPUPMENU
 		if (

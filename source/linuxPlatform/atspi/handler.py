@@ -131,6 +131,9 @@ JAVA_MENU_RETURN_LOOKS = 3
 #: The menu each Java popup menu was opened from, by the popup menu's key, as NVDA's focus went from the
 #: one to an item of the other.
 _javaSubmenus: dict[tuple[str, str], Node] = {}
+#: Java menu items most recently reported selected via object:state-changed:selected, by node key: a
+#: JetBrains IDE's context-menu submenus keep that state instead of armed/focused when highlighted.
+_javaSelectedMenus: set[tuple[str, str]] = set()
 #: Containers whose focus belongs to the item within them that has it.
 _ITEM_CONTAINERS = frozenset(
 	{"list", "list box", "page tab list", "tree", "tree table", "table", "layered pane"},
@@ -813,6 +816,7 @@ def terminate() -> None:
 	_switcherEventsWhileHung.clear()
 	_switcherHandedBack.clear()
 	_javaSubmenus.clear()
+	_javaSelectedMenus.clear()
 	_rescansExtended = False
 	_setForeground(None)
 	_settleStartedAt = None
@@ -908,14 +912,22 @@ def _focusCandidate(event) -> Node | None:
 		return None
 	if "focused" not in states and not _isSelectedGtk2MenuItem(source):
 		# GTK 3 menu items and notebook tabs announce focus but carry only "selected", and the Java ATK
-		# wrapper's menu items only _JAVA_HIGHLIGHT_STATES; a later loss of focus in the same batch has
-		# already ruled stale events out.
-		if not states & _JAVA_HIGHLIGHT_STATES or c.role(source) not in SELECTED_AS_FOCUS_ROLES:
+		# wrapper's menu items only _JAVA_HIGHLIGHT_STATES (or checked/selected on a submenu item); a later
+		# loss of focus in the same batch has already ruled stale events out.
+		role = c.role(source)
+		if role not in SELECTED_AS_FOCUS_ROLES:
 			return None
 		toolkit = c.toolkit(source)
-		if toolkit != JAVA_TOOLKIT and ("selected" not in states or toolkit.lower() != "gtk"):
+		if toolkit == JAVA_TOOLKIT:
+			if not (
+				states & _JAVA_HIGHLIGHT_STATES
+				or (role == "menu" and ("checked" in states or source.key in _javaSelectedMenus))
+			):
+				return None
+		elif "selected" not in states or toolkit.lower() != "gtk":
 			return None
-	role = c.role(source)
+	else:
+		role = c.role(source)
 	if role == "root pane" and c.toolkit(source) == JAVA_TOOLKIT:
 		# Swing gives the keyboard focus to the window's root pane while one of its menus is open, as
 		# the menu opens, before any item in it is highlighted; that is no control to report.
@@ -1813,6 +1825,17 @@ def pumpAll() -> None:
 	events = [converted for event in events if (converted := _asWindowEvent(event)) is not None]
 	events = [_asMenuItemFocus(event) for event in events]
 	events = [converted for event in events if (converted := _asJavaMenuReturn(event)) is not None]
+	for eventType, source, detail1, _d2, _anyData in events:
+		if (
+			eventType == "object:state-changed:selected"
+			and _clientModule.knownToolkit(source.busName) == JAVA_TOOLKIT
+		):
+			if detail1:
+				if len(_javaSelectedMenus) > MAX_QUEUED:
+					_javaSelectedMenus.clear()
+				_javaSelectedMenus.add(source.key)
+			else:
+				_javaSelectedMenus.discard(source.key)
 	found = _probeShown(events, now) if _probesShown else []
 	resumed = []
 	for busName, (event, since) in list(_focusWhileHung.items()):

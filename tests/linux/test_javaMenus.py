@@ -230,14 +230,20 @@ def test_submenuOfPopupItems(desktop: DesktopSession, popups: str):
 
 
 @pytest.mark.parametrize("popups", ["lightweight", "heavyweight"])
-def test_popupMenu(desktop: DesktopSession, popups: str):
+@pytest.mark.parametrize("popupItems", [False, True], ids=["menuItems", "popupItems"])
+def test_popupMenu(desktop: DesktopSession, popups: str, popupItems: bool):
 	"""Shift+F10 opens the button's popup menu, which Swing opens with no item highlighted, and says
-	nothing of the root pane the keyboard focus goes to; the arrows go through its items."""
-	_start(desktop, popups)
+	nothing of the root pane the keyboard focus goes to; the arrows go through its items, into its
+	submenu and back out again (issue 13)."""
+	_start(desktop, popups, *(["popupItems"] if popupItems else []))
 	_step(desktop, "shift+F10")
-	_step(desktop, "Down", "Alpha 1 of 3")
-	_step(desktop, "Down", "Beta 2 of 3")
-	_step(desktop, "Up", "Alpha 1 of 3")
+	_step(desktop, "Down", "Alpha 1 of 4")
+	_step(desktop, "Down", "Beta 2 of 4")
+	_step(desktop, "Down", "More checked sub Menu 3 of 4")
+	_step(desktop, "Right", "One 1 of 2")
+	_step(desktop, "Left", "More checked sub Menu 3 of 4")
+	_step(desktop, "Down", "Gamma 4 of 4")
+	_step(desktop, "Up", "More checked sub Menu 3 of 4")
 	_step(desktop, "Escape", *_back(popups))
 	_closeClean(desktop)
 
@@ -245,7 +251,7 @@ def test_popupMenu(desktop: DesktopSession, popups: str):
 @needsIdea
 def test_ideaMenus(desktop: DesktopSession, tmp_path: Path):
 	"""IntelliJ IDEA's File menu, its New submenu and the editor's context menu (issue 13): Left and
-	Escape close New's submenu and say New again, and the context menu's items are read."""
+	Escape close New's submenu and say New again, and the context menu's items and submenus are read."""
 	startIdea(desktop, tmp_path)
 	_says(desktop, "alt+f", "New sub Menu…")
 	_says(desktop, "Right", "Project... 1 of…")
@@ -262,5 +268,22 @@ def test_ideaMenus(desktop: DesktopSession, tmp_path: Path):
 	_waitForQuiet(desktop)
 	spoken = desktop.spokenSince(mark)
 	assert any(re.search(r" \d+ of \d+$", text) for text in spoken), spoken
+	submenuText = None
+	for _ in range(25):
+		if any(" sub Menu " in text for text in spoken):
+			submenuText = next(text for text in spoken if " sub Menu " in text)
+			break
+		mark = desktop.mark()
+		desktop.press("Down")
+		_waitForQuiet(desktop)
+		spoken = desktop.spokenSince(mark)
+	assert submenuText is not None, desktop.spokenSince(0)[-30:]
+	submenuName = submenuText.split(" sub Menu ")[0]
+	mark = desktop.mark()
+	desktop.press("Right")
+	_waitForQuiet(desktop)
+	subSpoken = desktop.spokenSince(mark)
+	assert any(re.search(r" \d+ of \d+$", text) for text in subSpoken), subSpoken
+	_says(desktop, "Left", f"{submenuName} sub Menu…")
 	_says(desktop, "Escape", IDEA_EDITOR)
 	_closeClean(desktop)

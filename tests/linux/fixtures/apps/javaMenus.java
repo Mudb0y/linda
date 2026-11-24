@@ -96,9 +96,14 @@ public class JavaMenus {
 
 		JButton button = new JButton("Press me");
 		JPopupMenu popup = new JPopupMenu();
-		for (String name : new String[] {"Alpha", "Beta", "Gamma"}) {
-			popup.add(new JMenuItem(name));
-		}
+		popup.add(new JMenuItem("Alpha"));
+		popup.add(new JMenuItem("Beta"));
+		popup.add(
+			popupItems
+				? popupItemsMenu("More", "One", "Two")
+				: menu("More", "One", "Two")
+		);
+		popup.add(new JMenuItem("Gamma"));
 		button.setComponentPopupMenu(popup);
 		// Swing opens a component's popup with the pointer alone; a keyboard user opens it with the
 		// keys GTK and Windows use.
