@@ -738,6 +738,67 @@ result = status._chromiumMainProcesses()
 	assert [processID for processID in done.value if processID in started] == [main.pid]
 
 
+#: Starts the program its environment names, with the arguments there, and waits, so that the program is
+#: its child while its own command line holds none of them. The program's input is a pipe that closes
+#: as this exits, which ends a shell reading it.
+CARRIER_STARTER = """
+import json, os, subprocess, time
+subprocess.Popen(json.loads(os.environ["CARRIER"]), stdin=subprocess.PIPE)
+time.sleep(60)
+"""
+
+
+def test_flatpaksSandboxIsNotAProgram(tmp_path: Path):
+	"""Flatpak's bubblewrap carries the command line of the zygote it starts in the sandbox of an app
+	such as Discord, and was started by the app's own bubblewrap or by flatpak-portal: neither may be
+	named as a Chromium program that cannot be read, as both were for Discord. A zygote's own parent
+	still is."""
+	carriers = {}
+	for name in ("bwrap", "chromium"):
+		carriers[name] = str(tmp_path / name)
+		shutil.copy(os.path.realpath(shutil.which("bash") or "/bin/bash"), carriers[name])
+	(tmp_path / "starter.py").write_text(CARRIER_STARTER, encoding="utf-8")
+	done = harness.runChild(
+		tmp_path,
+		START
+		+ f"""
+import json, os, sys, time
+from linuxPlatform.atspi import status
+
+# What is started here starts after NVDA, and only what started before NVDA is named, so NVDA is
+# taken to have started later still.
+_stat = status._stat
+def startedLate(processID):
+	fields = _stat(processID)
+	if processID == "self":
+		fields[status.STARTTIME_FIELD] = b"999999999999999"
+	return fields
+status._stat = startedLate
+
+# The carrier the starter started, once it runs as the copy of bash it is.
+def zygoteOf(starter):
+	with open(f"/proc/{{starter.pid}}/task/{{starter.pid}}/children") as f:
+		for child in f.read().split():
+			if b"--type=zygote" in status._commandLine(child):
+				return child
+	return None
+
+starters = {{}}
+carriers = {carriers!r}
+for name in ("bwrap", "chromium"):
+	os.environ["CARRIER"] = json.dumps([carriers[name], "-c", "read -t 60", name, "--type=zygote"])
+	starters[name] = start(sys.executable, {str(tmp_path / "starter.py")!r})
+deadline = time.monotonic() + 30
+while not all(zygoteOf(starter) for starter in starters.values()) and time.monotonic() < deadline:
+	time.sleep(0.05)
+found = status._chromiumMainProcesses()
+result = {{name: [zygoteOf(starter) is not None, starter.pid in found] for name, starter in starters.items()}}
+""",
+	)
+	done.assertClean()
+	assert done.value == {"bwrap": [True, False], "chromium": [True, True]}
+
+
 #: Starts a program that runs three threads besides its main one, as an app's main process does,
 #: unlike the helpers beside it.
 THREADED = """

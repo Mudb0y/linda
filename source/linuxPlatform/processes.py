@@ -347,7 +347,7 @@ def getAppName(processID: int | None) -> str:
 DBUS_PROXY = "xdg-dbus-proxy"
 #: The sandbox's own programs, which Flatpak runs in an app's scope beside the app: bubblewrap, which
 #: starts the app and the proxy, and the proxy.
-_SANDBOX_PROGRAMS = frozenset({"bwrap", DBUS_PROXY})
+SANDBOX_PROGRAMS = frozenset({"bwrap", DBUS_PROXY})
 #: The systemd scope Flatpak runs an instance of an app in, named for the app's ID and the instance.
 _flatpakScope = re.compile(r"app-flatpak-(?P<app>.+)-\d+\.scope")
 #: Where the kernel shows the unified cgroup hierarchy.
@@ -397,7 +397,7 @@ def findFlatpakApp(processID: int, applicationName: str = "") -> int | None:
 	for member in members:
 		executable = findExecutablePath(member)
 		fields = _readStat(member)
-		if executable is None or fields is None or os.path.basename(executable) in _SANDBOX_PROGRAMS:
+		if executable is None or fields is None or os.path.basename(executable) in SANDBOX_PROGRAMS:
 			continue
 		names = {getAppName(member), _unwrap(os.path.basename(executable)).lower()}
 		candidates.append(
