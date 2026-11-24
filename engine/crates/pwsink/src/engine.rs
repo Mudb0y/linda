@@ -4,8 +4,16 @@
 //! real-time callback, runs on that loop's thread: making the context and connecting, giving
 //! each stream a pw_stream, activating and deactivating them, and tearing it all down when the
 //! daemon goes and connecting again a second later. The threads that call in from Python never
-//! take the loop's lock and never wait for the daemon. They hand work over through a mutex that
-//! the loop thread holds only to copy a list, and wake it through an eventfd.
+//! take the loop's lock, and wait for the daemon only to list the devices (below). They hand
+//! work over through a mutex that the loop thread holds only to copy a list, and wake it through
+//! an eventfd.
+//!
+//! The loop thread also keeps the list of sinks from the registry, behind a mutex of its own that
+//! it holds only to change the list, and a caller only to copy it. Listing the devices is the one
+//! call that may wait, for a bounded time, until the first roundtrip after connecting has told the
+//! library of every sink there is: just after connecting, or for the whole bound when the daemon
+//! never answers the roundtrip. It is made from NVDA's settings, never on the way to playing a
+//! sound.
 
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
@@ -14,12 +22,14 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::ptr;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 
 use pipewire as pw;
 use pw::spa;
 use pw::spa::spa_interface_call_method;
 use pw::sys as pws;
+use pwsink_core::devices::{Device, Devices};
 use pwsink_core::format::Format;
 use pwsink_core::stream::{NS, Stream};
 use spa::sys as spas;
@@ -64,6 +74,15 @@ struct Shared {
     doomed: Vec<Arc<Stream>>,
 }
 
+/// The sinks the registry has announced on the current connection.
+struct Sinks {
+    devices: Devices,
+    /// The sequence number of the roundtrip made on connecting, until its reply comes.
+    roundtrip: Option<c_int>,
+    /// Whether that reply has come, and with it every sink present when the library connected.
+    complete: bool,
+}
+
 struct LoopState {
     context: *mut pws::pw_context,
     core: *mut pws::pw_core,
@@ -71,6 +90,8 @@ struct LoopState {
     core_events: pws::pw_core_events,
     core_lost: bool,
     registry: *mut pws::pw_registry,
+    registry_hook: spas::spa_hook,
+    registry_events: pws::pw_registry_events,
     next_connect_ns: u64,
     timer: *mut spas::spa_source,
     #[allow(
@@ -84,6 +105,9 @@ pub(crate) struct Engine {
     thread_loop: *mut pws::pw_thread_loop,
     wake: OwnedFd,
     shared: Mutex<Shared>,
+    sinks: Mutex<Sinks>,
+    /// Notified when the sinks' list becomes complete, or when the daemon is found to be away.
+    sinks_settled: Condvar,
     keep_awake_until: AtomicU64,
     connected: AtomicBool,
     /// Set once an attempt to connect has failed or the connection was lost, until the next
@@ -142,6 +166,12 @@ impl Engine {
                     pool: VecDeque::new(),
                     doomed: Vec::new(),
                 }),
+                sinks: Mutex::new(Sinks {
+                    devices: Devices::default(),
+                    roundtrip: None,
+                    complete: false,
+                }),
+                sinks_settled: Condvar::new(),
                 keep_awake_until: AtomicU64::new(0),
                 connected: AtomicBool::new(false),
                 absent: AtomicBool::new(false),
@@ -158,6 +188,8 @@ impl Engine {
                     core_events: std::mem::zeroed(),
                     core_lost: false,
                     registry: ptr::null_mut(),
+                    registry_hook: std::mem::zeroed(),
+                    registry_events: std::mem::zeroed(),
                     next_connect_ns: 0,
                     timer: ptr::null_mut(),
                     links: Vec::new(),
@@ -211,6 +243,20 @@ impl Engine {
     fn shared(&self) -> MutexGuard<'_, Shared> {
         // Nothing panics while holding it, but a poisoned list is still a usable list.
         self.shared.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn sinks(&self) -> MutexGuard<'_, Sinks> {
+        // As shared.
+        self.sinks.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Records that the daemon is away, and tells anyone waiting for the sinks' list that it will
+    /// not come. The store is made before the lock is taken, so that a waiter either sees it when it
+    /// looks under the lock or is already waiting when the notification comes.
+    fn mark_absent(&self) {
+        self.absent.store(true, Relaxed);
+        let _sinks = self.sinks();
+        self.sinks_settled.notify_all();
     }
 
     // Called from Python threads. None of these waits for the loop thread or the daemon.
@@ -287,6 +333,22 @@ impl Engine {
         self.pool_size.load(Relaxed)
     }
 
+    // Called from Python for NVDA's audio settings, and the one call that may wait.
+
+    /// The sinks present. Until the first roundtrip on a connection has completed, the list may
+    /// lack some, so this waits up to wait_ns for it, unless the daemon is known to be away, in
+    /// which case there are none.
+    pub(crate) fn devices(&self, wait_ns: u64) -> Vec<Device> {
+        let sinks = self.sinks();
+        let (sinks, _) = self
+            .sinks_settled
+            .wait_timeout_while(sinks, Duration::from_nanos(wait_ns), |s| {
+                !s.complete && !self.absent()
+            })
+            .unwrap_or_else(|e| e.into_inner());
+        sinks.devices.list()
+    }
+
     // The loop thread.
 
     /// Brings everything up to date: reconnects, wakes and deactivates streams, detaches,
@@ -333,7 +395,7 @@ impl Engine {
             }
             if lp.context.is_null() {
                 lp.next_connect_ns = now + RECONNECT_NS;
-                self.absent.store(true, Relaxed);
+                self.mark_absent();
             } else {
                 unsafe { self.connect(lp, now) };
             }
@@ -388,11 +450,12 @@ impl Engine {
             let core = pws::pw_context_connect(lp.context, ptr::null_mut(), 0);
             if core.is_null() {
                 lp.next_connect_ns = now + RECONNECT_NS;
-                self.absent.store(true, Relaxed);
+                self.mark_absent();
                 return;
             }
             lp.core_events = std::mem::zeroed();
             lp.core_events.version = pws::PW_VERSION_CORE_EVENTS;
+            lp.core_events.done = Some(on_core_done);
             lp.core_events.error = Some(on_core_error);
             lp.core_hook = std::mem::zeroed();
             spa_interface_call_method!(
@@ -410,6 +473,26 @@ impl Engine {
                 pws::PW_VERSION_REGISTRY,
                 0
             );
+            if !lp.registry.is_null() {
+                lp.registry_events = std::mem::zeroed();
+                lp.registry_events.version = pws::PW_VERSION_REGISTRY_EVENTS;
+                lp.registry_events.global = Some(on_global);
+                lp.registry_events.global_remove = Some(on_global_remove);
+                lp.registry_hook = std::mem::zeroed();
+                spa_interface_call_method!(
+                    lp.registry,
+                    pws::pw_registry_methods,
+                    add_listener,
+                    &mut lp.registry_hook,
+                    &lp.registry_events,
+                    self as *const Engine as *mut c_void
+                );
+            }
+            // The daemon answers a sync only after everything asked before it, so its reply comes
+            // after the registry has announced every global present.
+            let seq =
+                spa_interface_call_method!(core, pws::pw_core_methods, sync, pws::PW_ID_CORE, 0);
+            self.sinks().roundtrip = Some(seq);
             lp.core = core;
             lp.core_lost = false;
         }
@@ -428,6 +511,8 @@ impl Engine {
             // SAFETY: on the loop thread; the registry and hook were made in connect.
             unsafe {
                 if !lp.registry.is_null() {
+                    spa::utils::hook::remove(lp.registry_hook);
+                    lp.registry_hook = std::mem::zeroed();
                     pws::pw_proxy_destroy(lp.registry as *mut pws::pw_proxy);
                     lp.registry = ptr::null_mut();
                 }
@@ -439,7 +524,13 @@ impl Engine {
         }
         lp.core_lost = false;
         self.connected.store(false, Relaxed);
-        self.absent.store(true, Relaxed);
+        {
+            let mut sinks = self.sinks();
+            sinks.devices.clear();
+            sinks.roundtrip = None;
+            sinks.complete = false;
+        }
+        self.mark_absent();
     }
 
     unsafe fn attach(&self, lp: &mut LoopState, s: &Arc<Stream>, now: u64) {
@@ -728,6 +819,54 @@ unsafe extern "C" fn on_wake(data: *mut c_void, fd: c_int, _mask: u32) {
 unsafe extern "C" fn on_timer(data: *mut c_void, _expirations: u64) {
     // SAFETY: as on_wake.
     unsafe { (*(data as *const Engine)).service() };
+}
+
+unsafe extern "C" fn on_core_done(data: *mut c_void, id: u32, seq: c_int) {
+    // SAFETY: data is the leaked engine.
+    let engine = unsafe { &*(data as *const Engine) };
+    let mut sinks = engine.sinks();
+    if id == pws::PW_ID_CORE && sinks.roundtrip == Some(seq) {
+        sinks.roundtrip = None;
+        sinks.complete = true;
+        engine.sinks_settled.notify_all();
+    }
+}
+
+/// Keeps every sink the registry announces. The properties are the global's, which PipeWire gives
+/// for nodes with their name, description and media class among them.
+unsafe extern "C" fn on_global(
+    data: *mut c_void,
+    id: u32,
+    _permissions: u32,
+    type_: *const c_char,
+    _version: u32,
+    props: *const spas::spa_dict,
+) {
+    if type_.is_null() || props.is_null() {
+        return;
+    }
+    // SAFETY: PipeWire's type and properties for the duration of the call; DictRef is a
+    // transparent wrapper of spa_dict.
+    let (type_, props) = unsafe {
+        (
+            std::ffi::CStr::from_ptr(type_),
+            &*(props as *const spa::utils::dict::DictRef),
+        )
+    };
+    if type_.to_bytes_with_nul() != pws::PW_TYPE_INTERFACE_Node {
+        return;
+    }
+    if let Some(device) = Device::from_properties(|key| props.get(key)) {
+        // SAFETY: data is the leaked engine.
+        let engine = unsafe { &*(data as *const Engine) };
+        engine.sinks().devices.add(id, device);
+    }
+}
+
+unsafe extern "C" fn on_global_remove(data: *mut c_void, id: u32) {
+    // SAFETY: data is the leaked engine.
+    let engine = unsafe { &*(data as *const Engine) };
+    engine.sinks().devices.remove(id);
 }
 
 unsafe extern "C" fn on_core_error(

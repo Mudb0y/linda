@@ -5,7 +5,9 @@
 //! callback on PipeWire's data thread drains, applying channel and process gains as it copies.
 //! No Python runs on a PipeWire thread, and no call made from Python waits for PipeWire, its
 //! daemon or the thread that runs the connection, so stopping speech is one atomic store that
-//! the callback obeys from its next cycle.
+//! the callback obeys from its next cycle. The one exception is pwsink_devices, which is never on
+//! the way to playing a sound, and waits a bounded time only until the first roundtrip after the
+//! library connects has been answered.
 //!
 //! The library keeps time by the wall clock whenever the graph stops consuming a stream that holds
 //! audio, and it reconnects by itself when the daemon goes and comes back. A player in front of
@@ -18,6 +20,15 @@
 //! same handle, each other included, though never at the same time as pwsink_close. Each is one
 //! atomic store, with no lock, no wake and no allocation, so it never blocks and can be called
 //! without letting go of Python's GIL.
+//!
+//! The library also lists the sinks there are to play to, for NVDA's choice of output device. A
+//! stream opened with no target follows the default sink, which WirePlumber moves it to whenever
+//! the default changes. One opened with a target that is absent, or that goes away while it plays,
+//! is linked to the default sink by WirePlumber, and moved back once the target is there again:
+//! the library sets nothing, such as node.dont-fallback or node.dont-reconnect, that would leave
+//! the stream unlinked instead. That is WirePlumber's policy, and so is one more rule of it: a
+//! stream linked to its target while the target is the default sink follows the default from then
+//! on, as PulseAudio's streams do, unless linking.follow-default-target is turned off.
 
 mod engine;
 
@@ -240,6 +251,68 @@ pub extern "C" fn pwsink_delivered() -> u64 {
 pub extern "C" fn pwsink_keep_awake(ms: u64) {
     if let Ok(engine) = engine() {
         engine.keep_awake(ms, mono_ns());
+    }
+}
+
+/// One sink, as pwsink_devices lists it. Both strings are UTF-8 and NUL-terminated.
+#[repr(C)]
+pub struct PwsinkDevice {
+    /// The sink's node.name, which pwsink_open takes as its target.
+    pub name: *mut c_char,
+    /// What to show for it: its node.description, or its node.name when it has none.
+    pub description: *mut c_char,
+}
+
+/// The sinks present, in the order PipeWire announced them, as an array of *count devices, or
+/// null with *count 0 when there are none. The array and its strings belong to the library: they
+/// stay valid, and unchanged, until the array is passed to pwsink_free_devices, which must be done
+/// once for each array that is not null, and must not be done with any other pointer.
+///
+/// The library learns of the sinks from PipeWire's registry once it has connected. Until the first
+/// roundtrip on a connection completes, which on a local daemon takes milliseconds, the list may
+/// lack some, so this waits for it for up to wait_ms milliseconds. It does not wait while the
+/// daemon is known to be away, when there are no sinks to list.
+///
+/// # Safety
+/// count is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pwsink_devices(wait_ms: u64, count: *mut usize) -> *mut PwsinkDevice {
+    let devices = match engine() {
+        Ok(engine) => engine.devices(wait_ms.saturating_mul(1_000_000)),
+        Err(_) => Vec::new(),
+    };
+    // SAFETY: count is writable.
+    unsafe { *count = devices.len() };
+    if devices.is_empty() {
+        return std::ptr::null_mut();
+    }
+    let listed: Box<[PwsinkDevice]> = devices
+        .into_iter()
+        .map(|d| PwsinkDevice {
+            name: d.name.into_raw(),
+            description: d.description.into_raw(),
+        })
+        .collect();
+    Box::into_raw(listed) as *mut PwsinkDevice
+}
+
+/// Frees an array pwsink_devices returned, with the count it gave. Does nothing for null.
+///
+/// # Safety
+/// devices is null, or an array from pwsink_devices, with its count, not yet freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pwsink_free_devices(devices: *mut PwsinkDevice, count: usize) {
+    if devices.is_null() {
+        return;
+    }
+    // SAFETY: the array and its strings were made by Box::into_raw and CString::into_raw in
+    // pwsink_devices, with this length, and are freed only here.
+    unsafe {
+        let listed = Box::from_raw(std::ptr::slice_from_raw_parts_mut(devices, count));
+        for d in listed.iter() {
+            drop(CString::from_raw(d.name));
+            drop(CString::from_raw(d.description));
+        }
     }
 }
 

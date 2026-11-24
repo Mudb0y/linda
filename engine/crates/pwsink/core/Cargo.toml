@@ -5,9 +5,9 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# What libpwsink does without PipeWire: the formats, the ring, the position and the clock. Kept
-# apart so that its tests run without libpipewire, which a test binary of libpwsink itself would
-# load.
+# What libpwsink does without PipeWire: the formats, the ring, the position, the clock and the
+# list of output devices. Kept apart so that its tests run without libpipewire, which a test binary
+# of libpwsink itself would load.
 [lib]
 name = "pwsink_core"
 
