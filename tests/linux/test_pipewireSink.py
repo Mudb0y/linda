@@ -32,7 +32,7 @@ from typing import Self
 
 import harness
 import pytest
-from pipewireFixture import RATE, PipewireFixture, assertCleanThroughPipewire
+from pipewireFixture import RATE, Monitor, PipewireFixture, assertCleanThroughPipewire
 
 CRATE = harness.ROOT / "engine" / "crates" / "pwsink"
 WAVES = harness.SOURCE / "waves"
@@ -954,6 +954,56 @@ def test_withNoDaemonAStreamOpensKeepsTimeAndIsHeardOnceOneStarts(tmp_path: Path
 	assert value["deliveredAfter"] > 0
 
 
+def test_withNoDaemonThereAreNoDevicesAtOnceAndTheSinksAreListedOnceOneStarts(tmp_path: Path):
+	"""With no daemon the device list is empty without waiting out its bound; once a daemon starts the
+	sinks are listed, and once it goes they are gone again."""
+	fixture = PipewireFixture(tmp_path / "pipewire")
+
+	def startDaemon() -> None:
+		fixture.startDaemon()
+		fixture.startSessionManager()
+
+	try:
+		with Steps(tmp_path / "steps", {"daemon": startDaemon, "kill": fixture.killDaemon}) as steps:
+			value = runPipewireChild(
+				tmp_path,
+				"""
+				from linuxPlatform.audioOutput import pipewireSink
+
+				start = mono()
+				first = sink.devices()
+				firstMs = (mono() - start) / 1e6
+
+				def listed(count):
+					end = time.monotonic() + 5
+					while len(devices := sink.devices()) != count:
+						assert time.monotonic() < end, devices
+						time.sleep(0.01)
+					return devices
+
+				ask("daemon")
+				started = listed(2)
+				ask("kill")
+				result = dict(
+					first=first,
+					firstMs=firstMs,
+					bound=pipewireSink.DEVICES_WAIT_MS,
+					started=started,
+					gone=listed(0),
+				)
+				""",
+				{**fixture.childEnv(), **steps.env()},
+				timeout=40,
+			)
+	finally:
+		fixture.stop()
+	report("device list with no daemon, ms", round(value["firstMs"], 1))
+	assert value["first"] == []
+	assert value["firstMs"] < value["bound"] / 2
+	assert value["started"] == [["rig-sink-a", "Rig sink A"], ["rig-sink-b", "Rig sink B"]]
+	assert value["gone"] == []
+
+
 def test_aStreamNobodyLinksWaitsForLinkingOnlyOnce(tmp_path: Path):
 	"""With no session manager, a new stream waits once, for as long as linking may take, before the
 	clock takes over; every utterance after that, started anew after a stop as nvwave does between
@@ -1099,6 +1149,225 @@ def test_aPooledStreamIsReusedOnlyForItsOwnDevice(pipewire: PipewireFixture, tmp
 			f"a player asking for rig-sink-{sinkName} was heard on the other sink"
 		)
 	assert [play["pool"] for play in value] == [1, 2, 2, 2]
+
+
+def test_theDevicesAreTheSinksNamedAsTargetsWithTheirDescriptions(pipewire: PipewireFixture, tmp_path: Path):
+	"""The sink lists every PipeWire sink by node.name, which a stream takes as its target, with its
+	node.description, or its name when it has none, from the first call after it starts. Sinks
+	added and removed later come and go from the list, and the audio settings list the same."""
+	# The first call straight after the library starts, before anything else in the process has
+	# given it time to connect, so that the list waits for the registry's first roundtrip.
+	fresh = harness.runChild(
+		tmp_path,
+		textwrap.dedent(
+			"""
+		import time
+
+		from linuxPlatform.audioOutput.pipewireSink import PipewireSink
+
+		sink = PipewireSink()
+		start = time.monotonic_ns()
+		result = dict(devices=sink.devices(), ms=(time.monotonic_ns() - start) / 1e6)
+		""",
+		),
+		env=pipewire.childEnv(),
+	)
+	assertCleanThroughPipewire(fresh)
+	report("device list just after starting, ms", round(fresh.value["ms"], 1))
+
+	def add() -> None:
+		pipewire.createSink("rig-headset", description="Rig headset")
+		pipewire.createSink("rig-plain", description="")
+
+	actions = {"add": add, "remove": lambda: pipewire.removeSink("rig-sink-b")}
+	with Steps(tmp_path / "steps", actions) as steps:
+		value = runPipewireChild(
+			tmp_path,
+			"""
+			from utils import mmdevice
+
+			start = mono()
+			first = sink.devices()
+			firstMs = (mono() - start) / 1e6
+
+			def listed(count):
+				end = time.monotonic() + 5
+				while len(devices := sink.devices()) != count:
+					assert time.monotonic() < end, devices
+					time.sleep(0.01)
+				return devices
+
+			ask("add")
+			added = listed(4)
+			ask("remove")
+			removed = listed(3)
+			result = dict(
+				first=first,
+				firstMs=firstMs,
+				added=added,
+				removed=removed,
+				settings=[list(device) for device in mmdevice.getOutputDevices()],
+			)
+			""",
+			{**pipewire.childEnv(), **steps.env()},
+		)
+	report("first device list, ms", round(value["firstMs"], 1))
+	a, b = ["rig-sink-a", "Rig sink A"], ["rig-sink-b", "Rig sink B"]
+	headset, plain = ["rig-headset", "Rig headset"], ["rig-plain", "rig-plain"]
+	assert fresh.value["devices"] == [a, b]
+	assert value["first"] == [a, b]
+	assert value["added"] == [a, b, headset, plain]
+	assert value["removed"] == [a, headset, plain]
+	assert value["settings"] == value["removed"]
+
+
+#: Plays 0.3 s tones to a player on the device PARAMS["device"], in the phases PARAMS["phases"]
+#: names, asking the test to act between them, and says when each phase began and what fired.
+PLAY_IN_PHASES = """
+player = nvwave.WavePlayer(
+	1, 22050, 16, outputDevice=PARAMS["device"], wantDucking=False, purpose=nvwave.AudioPurpose.SOUNDS
+)
+chunk = tone(SPEECH, 0.3)
+fired = []
+marks = {}
+stream = None
+for phase, count, step in PARAMS["phases"]:
+	if step:
+		marks[phase] = ask(step)["value"]
+	else:
+		marks[phase] = mono()
+	for i in range(count):
+		player.feed(chunk, onDone=lambda phase=phase: fired.append(phase))
+		stream = stream or wasapi._players[player._player]._stream
+player.idle()
+marks["end"] = mono()
+sameStream = wasapi._players[player._player]._stream is stream
+del player, stream
+gc.collect()
+result = dict(marks=marks, fired=fired, sameStream=sameStream, deviceError=nvwave.WavePlayer.audioDeviceError_static)
+"""
+
+
+def _silentBetween(monitor: Monitor, start: int, end: int) -> bool:
+	left, right = monitor.samples(start, end)
+	return max((abs(x) for x in (*left, *right)), default=0.0) < 0.001
+
+
+def test_aChosenDeviceThatGoesFallsBackToTheDefaultAndIsUsedAgainWhenItReturns(
+	pipewire: PipewireFixture,
+	tmp_path: Path,
+):
+	"""A player on a chosen sink is heard there alone. When that sink goes while it plays, as a
+	headset unplugged, WirePlumber links the same stream to the default sink, where it is heard
+	within half a second, with nothing reopened, every callback fired and no device error; when the
+	sink comes back, the stream is moved back to it."""
+	pipewire.createSink("rig-headset", description="Rig headset")
+	monitorA = pipewire.monitor()
+	monitors = {"headset": pipewire.monitor("rig-headset")}
+
+	def unplug() -> int:
+		pipewire.removeSink("rig-headset")
+		return time.monotonic_ns()
+
+	def replug() -> int:
+		pipewire.createSink("rig-headset", description="Rig headset")
+		replugged = time.monotonic_ns()
+		monitors["back"] = pipewire.monitor("rig-headset")
+		return replugged
+
+	with Steps(tmp_path / "steps", {"unplug": unplug, "replug": replug}) as steps:
+		value = runPipewireChild(
+			tmp_path,
+			PLAY_IN_PHASES,
+			{**pipewire.childEnv(), **steps.env()},
+			params={
+				"device": "rig-headset",
+				"phases": [["before", 4, None], ["during", 8, "unplug"], ["after", 8, "replug"]],
+			},
+			timeout=40,
+		)
+	marks = value["marks"]
+	assert value["fired"] == ["before"] * 4 + ["during"] * 8 + ["after"] * 8
+	assert value["sameStream"] and not value["deviceError"]
+	assert monitors["headset"].soundAfter(marks["before"]) < marks["during"]
+	assert _silentBetween(monitorA, marks["before"], marks["during"]), (
+		"the chosen sink's audio reached the default"
+	)
+	fallback = (monitorA.soundAfter(marks["during"]) - marks["during"]) / MS
+	back = monitors["back"].soundAfter(marks["after"], timeout=5)
+	report(
+		"chosen device removed and restored, ms",
+		{"heardOnDefault": round(fallback, 1), "heardBackOnDevice": round((back - marks["after"]) / MS, 1)},
+	)
+	assert fallback < 500
+	assert back < marks["end"]
+	assert _silentBetween(monitorA, back + 100 * MS, marks["end"]), "the stream stayed on the default sink"
+
+
+def test_aChosenDeviceThatIsAbsentPlaysToTheDefaultUntilItAppears(pipewire: PipewireFixture, tmp_path: Path):
+	"""A player opened on a sink that is not there is heard on the default sink, and moves to that
+	sink once it appears."""
+	monitorA = pipewire.monitor()
+	monitors = {}
+
+	def plug() -> int:
+		pipewire.createSink("rig-headset", description="Rig headset")
+		plugged = time.monotonic_ns()
+		monitors["headset"] = pipewire.monitor("rig-headset")
+		return plugged
+
+	with Steps(tmp_path / "steps", {"plug": plug}) as steps:
+		value = runPipewireChild(
+			tmp_path,
+			PLAY_IN_PHASES,
+			{**pipewire.childEnv(), **steps.env()},
+			params={"device": "rig-headset", "phases": [["absent", 4, None], ["present", 8, "plug"]]},
+			timeout=40,
+		)
+	marks = value["marks"]
+	assert value["fired"] == ["absent"] * 4 + ["present"] * 8
+	assert value["sameStream"] and not value["deviceError"]
+	assert monitorA.soundAfter(marks["absent"]) < marks["present"]
+	arrived = monitors["headset"].soundAfter(marks["present"], timeout=5)
+	assert arrived < marks["end"]
+	assert _silentBetween(monitorA, arrived + 100 * MS, marks["end"]), "the stream stayed on the default sink"
+
+
+def test_theDefaultDeviceFollowsTheSystemDefault(pipewire: PipewireFixture, tmp_path: Path):
+	"""A player on the default device has no target of its own, so when the default sink changes
+	WirePlumber moves the same stream to the new one."""
+	monitorA = pipewire.monitor()
+	monitorB = pipewire.monitor("rig-sink-b")
+	monitors = {}
+
+	def switch() -> int:
+		pipewire.setDefaultSink("rig-sink-b")
+		switched = time.monotonic_ns()
+		# The first monitor of rig-sink-a was linked to it as the default, so WirePlumber has moved
+		# that one to rig-sink-b as well; one made now stays on rig-sink-a.
+		monitors["oldDefault"] = pipewire.monitor()
+		return switched
+
+	with Steps(tmp_path / "steps", {"switch": switch}) as steps:
+		value = runPipewireChild(
+			tmp_path,
+			PLAY_IN_PHASES,
+			{**pipewire.childEnv(), **steps.env()},
+			params={"device": "default", "phases": [["first", 4, None], ["second", 8, "switch"]]},
+			timeout=40,
+		)
+	marks = value["marks"]
+	assert value["fired"] == ["first"] * 4 + ["second"] * 8
+	assert value["sameStream"] and not value["deviceError"]
+	assert monitorA.soundAfter(marks["first"]) < marks["second"]
+	assert _silentBetween(monitorB, marks["first"], marks["second"]), "heard on B before it was the default"
+	moved = monitorB.soundAfter(marks["second"], timeout=5)
+	report("default changed, heard on the new default after, ms", round((moved - marks["second"]) / MS, 1))
+	assert moved < marks["end"]
+	oldDefault = monitors["oldDefault"]
+	listening = oldDefault.waitFor("start")["graph_ns"]
+	assert listening < marks["end"] - 1000 * MS
+	assert _silentBetween(oldDefault, listening, marks["end"]), "the stream stayed on the old default"
 
 
 def test_streamsStayActiveUntilTheKeepAwakeDeadlineAndWakeAtOnce(pipewire: PipewireFixture, tmp_path: Path):

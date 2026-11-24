@@ -276,6 +276,20 @@ class PipewireFixture:
 			"WirePlumber choosing a default sink",
 		)
 
+	def setDefaultSink(self, name: str) -> None:
+		"""Makes a sink the default, as a desktop's sound settings do, and waits for WirePlumber to
+		follow."""
+		self.tool(
+			"pw-metadata",
+			"-n",
+			"default",
+			"0",
+			"default.configured.audio.sink",
+			json.dumps({"name": name}),
+			"Spa:String:JSON",
+		)
+		self.waitForDefaultSink(name)
+
 	def _waitFor(self, condition: Callable[[], bool], what: str, timeout: float = 5) -> None:
 		end = time.monotonic() + timeout
 		while not condition():
@@ -297,12 +311,17 @@ class PipewireFixture:
 	def nodesNamed(self, name: str) -> list[dict]:
 		return [n for n in self.nodes() if n["info"]["props"].get("node.name") == name]
 
-	def createSink(self, name: str) -> None:
+	def createSink(self, name: str, *, description: str | None = None) -> None:
+		"""A null sink described as description, by its name when that is None, or not at all when
+		it is empty."""
+		if description is None:
+			description = name
+		described = f"node.description = {json.dumps(description)} " if description else ""
 		self.tool(
 			"pw-cli",
 			"create-node",
 			"adapter",
-			f"{{ factory.name = support.null-audio-sink node.name = {name} node.description = {name} "
+			f"{{ factory.name = support.null-audio-sink node.name = {name} {described}"
 			"media.class = Audio/Sink audio.position = [ FL FR ] monitor.channel-volumes = true "
 			"monitor.passthrough = true node.driver = false object.linger = true }",
 		)

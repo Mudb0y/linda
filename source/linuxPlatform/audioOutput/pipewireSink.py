@@ -2,7 +2,8 @@
 
 libpwsink keeps one PipeWire connection for the process and gives each player a stream, which its
 real-time callback fills from a ring on PipeWire's own thread; no Python ever runs there. Nothing
-called from here waits for PipeWire, its daemon or the library's own thread, so a player's stop
+called from here on the way to playing a sound waits for PipeWire, its daemon or the library's own
+thread (the device list, below, is the one call that can), so a player's stop
 silences it within one graph cycle even while another thread is blocked in a feed, and opening a
 stream returns at once, from a pool of closed streams when one of the same format is waiting.
 
@@ -13,6 +14,13 @@ audio would have, and every completion callback fires. It also connects again by
 second, while the daemon is away. A missing daemon is therefore never a missing device: nvwave
 drops the callbacks of a feed that fails, and a stranded end-of-utterance callback stalls speech.
 deliveredFrames is how a caller tells audio heard from audio only timed.
+
+The devices listed are PipeWire's sinks, named by node.name, which a stream is opened to as its
+target.object. WirePlumber links a stream whose target is absent, or goes away while it plays, to
+the default sink, and moves it back when the target is there again, so a chosen device that is
+unplugged never leaves speech silent. Listing them is the one call here that can wait, for at most
+DEVICES_WAIT_MS and only just after the library connects; it is made from the audio settings, never
+on the way to playing a sound.
 """
 
 import ctypes
@@ -26,6 +34,16 @@ from . import BUFFER_MS, Sink, SinkStream, StreamFormat, checkGain
 
 #: Names the libpwsink the sink loads.
 LIBRARY_VARIABLE = "LINDA_PWSINK_LIB"
+#: The longest the device list waits for the library to learn of every sink after connecting, which
+#: on a local daemon takes milliseconds. Without the wait, a list asked for in that moment could
+#: lack the configured device, and the audio settings would show the default in its place.
+DEVICES_WAIT_MS = 500
+
+
+class _Device(ctypes.Structure):
+	"""libpwsink's PwsinkDevice."""
+
+	_fields_ = [("name", ctypes.c_char_p), ("description", ctypes.c_char_p)]
 
 
 class _Silencers:
@@ -85,6 +103,10 @@ def _load() -> tuple[ctypes.CDLL, _Silencers]:
 	lib.pwsink_set_pool_limits.argtypes = [ctypes.c_uint64, ctypes.c_uint64]
 	lib.pwsink_block_loop.restype = None
 	lib.pwsink_block_loop.argtypes = [ctypes.c_uint64]
+	lib.pwsink_devices.restype = ctypes.POINTER(_Device)
+	lib.pwsink_devices.argtypes = [ctypes.c_uint64, ctypes.POINTER(ctypes.c_size_t)]
+	lib.pwsink_free_devices.restype = None
+	lib.pwsink_free_devices.argtypes = [ctypes.POINTER(_Device), ctypes.c_size_t]
 	return lib, _Silencers(lib)
 
 
@@ -166,9 +188,13 @@ class PipewireSink(Sink):
 		return PipewireStream(self.lib, self._silencers, handle, fmt)
 
 	def devices(self) -> list[tuple[str, str]]:
-		# Only the default device, which nvwave lists itself. WirePlumber moves the streams when the
-		# default changes.
-		return []
+		count = ctypes.c_size_t(0)
+		listed = self.lib.pwsink_devices(DEVICES_WAIT_MS, ctypes.byref(count))
+		try:
+			# The library gives UTF-8 only, and the strings are copied out before the array is freed.
+			return [(listed[i].name.decode(), listed[i].description.decode()) for i in range(count.value)]
+		finally:
+			self.lib.pwsink_free_devices(listed, count.value)
 
 	def keepAwakeFor(self, deviceId: str, ms: int, noiseVolume: float) -> None:
 		if noiseVolume > 0 and not self._noiseNoted:
