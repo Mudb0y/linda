@@ -280,8 +280,10 @@ def test_altTabSpeaksTitleAndFocusOnce(desktop: DesktopSession, tmp_path: Path):
 		desktop.expect(title, PRESS_ME_ANY, since=mark)
 		_waitForQuiet(desktop)
 		spoken = desktop.spokenSince(mark)
-		assert len(spoken) == 2 and spoken[0] == title, spoken
-		assert spoken[1].startswith(PRESS_ME_ANY[:-1]), spoken
+		# On a fast machine xdotool's alt+Tab can still have Alt down when marco handles Tab, so
+		# marco's switcher popup speaks the window title before the window activates.
+		assert spoken[:-1] in ([title], [title, title]), spoken
+		assert spoken[-1].startswith(PRESS_ME_ANY[:-1]), spoken
 	probe.close()
 	_closeClean(desktop, nvda)
 
