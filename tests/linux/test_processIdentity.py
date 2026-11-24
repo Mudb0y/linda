@@ -1,7 +1,8 @@
 """App modules find their application from the process on Linux, through /proc and pidfd.
 
-Flatpak apps are not covered: they reach the accessibility bus through xdg-dbus-proxy, so the
-process ID the bus reports for one of their objects is the proxy's, not the app's.
+A Flatpak app reaches the accessibility bus through xdg-dbus-proxy, so the process ID the bus
+reports for one of its objects is the proxy's; the app is found beside the proxy in the systemd scope
+Flatpak runs the two in, which the tests stand in for with a cgroup tree of their own.
 
 nix develop . -c tests/linux/rig python3 -m pytest -p no:cacheprovider tests/linux/test_processIdentity.py
 """
@@ -735,3 +736,104 @@ result = status._chromiumMainProcesses()
 		main.wait()
 	done.assertClean()
 	assert [processID for processID in done.value if processID in started] == [main.pid]
+
+
+#: Starts a program that runs three threads besides its main one, as an app's main process does,
+#: unlike the helpers beside it.
+THREADED = """
+import threading, time
+for _thread in range(3):
+	threading.Thread(target=time.sleep, args=(60,), daemon=True).start()
+time.sleep(60)
+"""
+#: The systemd scope of a Flatpak app's instance, as its processes' cgroup.
+DISCORD_SCOPE = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-flatpak-com.discordapp.Discord-2469158399.scope"
+TOOL_SCOPE = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-flatpak-org.example.Tool-17.scope"
+
+
+def test_flatpakAppIsFoundBehindItsProxy(tmp_path: Path):
+	"""Discord's Flatpak: bubblewrap, the proxy, the shell running the launch script, a helper the
+	script starts first, and Discord itself, in the order Flatpak starts them. Every object of Discord
+	is the proxy's by the bus, which must not keep Discord from its app module."""
+	programs = {
+		name: copyAs(tmp_path, name) for name in ("bwrap", "xdg-dbus-proxy", "bash", "socat", "Discord")
+	}
+	(tmp_path / "toolmain.py").write_text(THREADED, encoding="utf-8")
+	done = harness.runChild(
+		tmp_path,
+		START
+		+ f"""
+import os, sys, time
+from linuxPlatform import processes
+from linuxPlatform.atspi import handler
+from linuxPlatform.atspi.client import Node
+import appModuleHandler
+
+cgroups = {str(tmp_path / "cgroup")!r}
+scopes = {{}}
+
+def inScope(scope, *processes_):
+	os.makedirs(cgroups + scope, exist_ok=True)
+	with open(cgroups + scope + "/cgroup.procs", "a") as f:
+		for process in processes_:
+			f.write(f"{{process.pid}}\\n")
+			scopes[process.pid] = scope
+
+started = {{}}
+for name, path in {programs!r}.items():
+	started[name] = start(path, "60", argv0="sleep")
+	# Each a clock tick after the one before, as Flatpak's start one after another.
+	time.sleep(0.02)
+inScope({DISCORD_SCOPE!r}, *started.values())
+proxy = started["xdg-dbus-proxy"].pid
+discord = started["Discord"].pid
+
+# A proxy that no Flatpak scope holds, run by something else.
+stray = start({programs["xdg-dbus-proxy"]!r}, "60", argv0="sleep")
+inScope("/user.slice/user-1000.slice/session-2.scope", stray)
+
+# An app named for neither its ID nor what it calls itself, started by a shell beside a helper.
+toolShell = start({programs["bash"]!r}, "60", argv0="sleep")
+toolHelper = start({programs["socat"]!r}, "60", argv0="sleep")
+toolMain = start(sys.executable, {str(tmp_path / "toolmain.py")!r})
+toolProxy = start({programs["xdg-dbus-proxy"]!r}, "60", argv0="sleep")
+inScope({TOOL_SCOPE!r}, toolShell, toolHelper, toolMain, toolProxy)
+
+processes.cgroupRoot = cgroups
+processes._cgroupOf = lambda processID: scopes.get(processID)
+
+class Bus:
+	def processID(self, node):
+		return {{":1.7": proxy, ":1.8": discord, ":1.9": stray.pid}}[node.busName]
+
+handler.client = lambda: Bus()
+handler._applicationName = lambda busName: "Discord"
+
+def name(processID):
+	return appModuleHandler.getAppNameFromProcessID(processID) if processID else None
+
+result = {{
+	"by its name on the bus": name(processes.findFlatpakApp(proxy, "Discord")),
+	"by its app ID": name(processes.findFlatpakApp(proxy)),
+	"by its threads": name(processes.findFlatpakApp(toolProxy.pid, "tool window")),
+	"not a proxy": processes.findFlatpakApp(discord, "Discord"),
+	"a proxy outside Flatpak": processes.findFlatpakApp(stray.pid, "Discord"),
+	"the handler's process": name(handler.processIDOf(Node(":1.7", "/org/a11y/atspi/accessible/root", None))),
+	"the handler's process, again": handler.processIDOf(Node(":1.7", "/org/a11y/atspi/accessible/1", None)) == discord,
+	"an app outside Flatpak": handler.processIDOf(Node(":1.8", "/org/a11y/atspi/accessible/root", None)) == discord,
+	"the stray proxy": name(handler.processIDOf(Node(":1.9", "/org/a11y/atspi/accessible/root", None))),
+}}
+""",
+	)
+	done.assertClean()
+	assert done.value == {
+		"by its name on the bus": "discord",
+		"by its app ID": "discord",
+		"by its threads": "toolmain",
+		"not a proxy": None,
+		"a proxy outside Flatpak": None,
+		"the handler's process": "discord",
+		"the handler's process, again": True,
+		"an app outside Flatpak": True,
+		"the stray proxy": "xdg-dbus-proxy",
+	}
