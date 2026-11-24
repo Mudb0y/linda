@@ -284,3 +284,104 @@ def test_thereAndBackSaysOnlyWhereItEnds(desktop: DesktopSession, tmp_path: Path
 		assert len(spoken) == last + 2 and spoken[last + 1].startswith(PRESS_ME[:-1]), spoken
 		assert desktopSession.activeTopLevelNames() == [GTK_TITLE]
 	quitClean(desktop, nvda, probe)
+
+
+def test_nativeDialogInSecondaryTreeIsTopLevelAndShadowGroupingIsIgnored(tmp_path: Path):
+	"""Native GTK dialogs under a secondary AT-SPI application (such as Electron's save dialog) count
+	as top-level windows instead of being dropped with Firefox's shadow GTK frame/grouping."""
+	code = textwrap.dedent(
+		"""\
+		import NVDAHelper  # noqa: F401
+		from linuxPlatform.atspi import client as atspiClient
+		from linuxPlatform.atspi import handler
+
+		secApp = atspiClient.Node(":1.99", "/org/a11y/atspi/accessible/10", None)
+		frame = atspiClient.Node(":1.99", "/org/a11y/atspi/accessible/11", None)
+		grouping = atspiClient.Node(":1.99", "/org/a11y/atspi/accessible/12", None)
+		dialog = atspiClient.Node(":1.99", "/org/a11y/atspi/accessible/20", None)
+		button = atspiClient.Node(":1.99", "/org/a11y/atspi/accessible/21", None)
+		alert = atspiClient.Node(":1.99", "/org/a11y/atspi/accessible/30", None)
+		chooser = atspiClient.Node(":1.99", "/org/a11y/atspi/accessible/40", None)
+		parents = {
+			secApp.key: None,
+			frame.key: secApp,
+			grouping.key: frame,
+			dialog.key: secApp,
+			button.key: dialog,
+			alert.key: secApp,
+			chooser.key: secApp,
+		}
+		roles = {
+			secApp.key: "application",
+			frame.key: "frame",
+			grouping.key: "grouping",
+			dialog.key: "dialog",
+			button.key: "push button",
+			alert.key: "alert",
+			chooser.key: "file chooser",
+		}
+
+		class FakeClient:
+			def parent(self, node):
+				return parents.get(node.key)
+
+			def role(self, node):
+				return roles[node.key]
+
+			topLevel = atspiClient.Client.topLevel
+
+		oldClient = atspiClient.client
+		atspiClient.client = FakeClient()
+		handler._underRoot.clear()
+		handler._topLevels.clear()
+		try:
+			realClient = atspiClient.client
+			result = {
+				"shadowGrouping": handler._inShadowTree(grouping),
+				"shadowFrame": handler._inShadowTree(frame),
+				"topFrame": handler._isTopLevel(frame),
+				"topOfGrouping": top.key if (top := handler._topLevelOf(grouping)) else None,
+				"clientTopGrouping": top.key if (top := realClient.topLevel(grouping)) else None,
+				"shadowDialog": handler._inShadowTree(dialog),
+				"shadowButton": handler._inShadowTree(button),
+				"shadowAlert": handler._inShadowTree(alert),
+				"shadowChooser": handler._inShadowTree(chooser),
+				"topDialog": handler._isTopLevel(dialog),
+				"topAlert": handler._isTopLevel(alert),
+				"topChooser": handler._isTopLevel(chooser),
+				"topButton": handler._isTopLevel(button),
+				"topOfButton": list(top.key) if (top := handler._topLevelOf(button)) else None,
+				"clientTopButton": list(top.key) if (top := realClient.topLevel(button)) else None,
+				"winDialog": (
+					ev[0]
+					if (ev := handler._asWindowEvent(("object:state-changed:active", dialog, 1, 0, None)))
+					else None
+				),
+				"winFrame": handler._asWindowEvent(("object:state-changed:active", frame, 1, 0, None)),
+			}
+		finally:
+			handler._underRoot.clear()
+			handler._topLevels.clear()
+			atspiClient.client = oldClient
+		"""
+	)
+	done = harness.runChild(tmp_path, code, timeout=60)
+	assert done.error is None, f"{done.error}\n{done.stderr[-4000:]}"
+	v = done.value
+	assert v["shadowGrouping"] is True
+	assert v["shadowFrame"] is True
+	assert v["topFrame"] is False
+	assert v["topOfGrouping"] is None
+	assert v["clientTopGrouping"] is None
+	assert v["shadowDialog"] is False
+	assert v["shadowButton"] is False
+	assert v["shadowAlert"] is False
+	assert v["shadowChooser"] is False
+	assert v["topDialog"] is True
+	assert v["topAlert"] is True
+	assert v["topChooser"] is True
+	assert v["topButton"] is False
+	assert v["topOfButton"] == [":1.99", "/org/a11y/atspi/accessible/20"]
+	assert v["clientTopButton"] == v["topOfButton"]
+	assert v["winDialog"] == "window:activate"
+	assert v["winFrame"] is None

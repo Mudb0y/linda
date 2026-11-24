@@ -831,7 +831,12 @@ class AtSpi(NVDAObject):
 
 	def _get_parent(self):
 		parent = self.atspiParentNode
-		if parent is None or parent == desktopNode() or isApplication(parent):
+		if (
+			parent is None
+			or parent == desktopNode()
+			or isApplication(parent)
+			or self.atspiParentRole == "application"
+		):
 			return api.getDesktopObject()
 		return handler.getObject(parent)
 

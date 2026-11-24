@@ -52,6 +52,8 @@ WALK_LIMIT = 500
 _INIT_NO_BUS = 2
 #: The desktop's bus name, which libatspi gives the desktop it returns.
 REGISTRY_BUS_NAME = "org.a11y.atspi.Registry"
+#: Native GTK dialogs under a secondary AT-SPI application tree count as top-level windows.
+_NATIVE_DIALOG_ROLES = frozenset({"alert", "dialog", "file chooser"})
 #: Toolkits still asked for SCREEN positions in a Wayland session. Chromium's SCREEN is measured from
 #: its window's corner there, and is the one space its objects, its text and its hit tests agree in:
 #: its text's WINDOW is the page's, not the window's, and it answers -1 for the offset at any WINDOW
@@ -422,6 +424,8 @@ class Client:
 				return None
 			if parent.path == ROOT_PATH:
 				return None if current.path == ROOT_PATH else current
+			if self.role(current) in _NATIVE_DIALOG_ROLES and self.role(parent) == "application":
+				return current
 			current = parent
 		return None
 

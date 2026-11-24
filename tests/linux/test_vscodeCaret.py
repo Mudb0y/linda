@@ -124,6 +124,52 @@ def test_eachCharacterIsSaidOnceInOrder(session: Session, key: str, delay: int):
 	assert positions == sorted(set(positions)), f"not each once, in order: {spoken}"
 
 
+def test_saveDialogIsRead(session: Session):
+	"""Closing an unsaved buffer opens Electron's native GTK confirmation dialog, which Linda reads
+	instead of dropping as a secondary GTK application tree (issue 34)."""
+	desktop = session.desktop
+	step(session, "ctrl+n", "Untitled-1 edit…")
+	mark = desktop.mark()
+	desktop.typeText("hello")
+	desktop.expect("o", since=mark)
+	time.sleep(SETTLE)
+	mark = desktop.mark()
+	desktop.press("ctrl+w")
+	desktop.expect(
+		"Warning dialog Do you want to save the changes you made to hello?…",
+		"Save button Alt plus S",
+		since=mark,
+		timeout=STEP_BOUND,
+	)
+	time.sleep(SETTLE)
+	tabbed: list[str] = []
+	for _ in range(3):
+		mark = desktop.mark()
+		desktop.press("Tab")
+		deadline = time.monotonic() + STEP_BOUND
+		while not desktop.spokenSince(mark) and time.monotonic() < deadline:
+			time.sleep(0.05)
+		time.sleep(SETTLE)
+		tabbed.extend(desktop.spokenSince(mark))
+	assert any("Cancel button" in text for text in tabbed), tabbed
+	assert any("Don't Save button" in text for text in tabbed), tabbed
+	# Dismiss without saving so focus returns cleanly to digits.txt.
+	for _ in range(4):
+		if desktop.spokenSince(0)[-1].startswith("Don't Save button"):
+			break
+		mark = desktop.mark()
+		desktop.press("Tab")
+		deadline = time.monotonic() + STEP_BOUND
+		while not desktop.spokenSince(mark) and time.monotonic() < deadline:
+			time.sleep(0.05)
+		time.sleep(SETTLE)
+	assert desktop.spokenSince(0)[-1].startswith("Don't Save button"), desktop.spokenSince(0)[-5:]
+	mark = desktop.mark()
+	desktop.press("space")
+	desktop.expect(f"{FILE_NAME.replace('.', ' dot ')} edit…", since=mark, timeout=STEP_BOUND)
+	time.sleep(SETTLE)
+
+
 def test_exitIsClean(session: Session):
 	step(session, "Insert+q", "Exit Linda…")
 	session.desktop.press("Return")

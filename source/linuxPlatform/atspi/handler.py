@@ -141,6 +141,9 @@ _SELECTION_CONTAINERS = frozenset({"layered pane"})
 #: Roles whose selected state is NVDA's focus and never said as a state: GTK marks the highlighted menu
 #: item selected, which is how its focus is known, not a change to announce.
 _SELECTED_NOT_A_STATE_ROLES = frozenset({"menu", "menu item", "check menu item", "radio menu item"})
+#: Native GTK dialogs live directly under an application accessible even when a process (Firefox,
+#: Electron) exposes them in a secondary GTK tree beside its primary ROOT_PATH tree.
+_NATIVE_DIALOG_ROLES = frozenset({"alert", "dialog", "file chooser"})
 
 _queue: collections.deque = collections.deque(maxlen=MAX_QUEUED)
 _queueLock = threading.Lock()
@@ -400,6 +403,12 @@ def activeWindow() -> Node | None:
 	return _foreground
 
 
+def _isTopLevelUnderParent(c: Client, node: Node, parent: Node) -> bool:
+	return parent.path == ROOT_PATH or (
+		c.role(node) in _NATIVE_DIALOG_ROLES and c.role(parent) == "application"
+	)
+
+
 def _topLevelOf(node: Node) -> Node | None:
 	c = client()
 	current = node
@@ -407,7 +416,7 @@ def _topLevelOf(node: Node) -> Node | None:
 		parent = c.parent(current)
 		if parent is None:
 			return None
-		if parent.path == ROOT_PATH:
+		if _isTopLevelUnderParent(c, current, parent):
 			return current
 		current = parent
 	return None
@@ -444,6 +453,8 @@ def _inShadowTree(node: Node) -> bool:
 		if parent.path == ROOT_PATH or parent.key in _underRoot:
 			break
 		if c.role(parent) == "application":
+			if c.role(current) in _NATIVE_DIALOG_ROLES:
+				break
 			return True
 		current = parent
 	else:
@@ -1398,15 +1409,7 @@ def _asWindowEvent(event) -> tuple | None:
 	eventType, source, detail1, detail2, anyData = event
 	if eventType != "object:state-changed:active":
 		return event
-	topLevel = _topLevels.get(source.key)
-	if topLevel is None:
-		try:
-			parent = client().parent(source)
-		except NodeGone:
-			return None
-		topLevel = parent is not None and parent.path == ROOT_PATH
-		_noteTopLevel(source.key, topLevel)
-	if not topLevel:
+	if not _isTopLevel(source):
 		return None
 	# GTK can give a window back the focus, when a dialog over it closes, with only this.
 	return ("window:activate" if detail1 else "window:deactivate", source, detail1, detail2, anyData)
@@ -1672,11 +1675,12 @@ def _isTopLevel(node: Node) -> bool | None:
 	"""Whether node is a top-level window; None while it cannot be read."""
 	topLevel = _topLevels.get(node.key)
 	if topLevel is None:
+		c = client()
 		try:
-			parent = client().parent(node)
+			parent = c.parent(node)
+			topLevel = parent is not None and _isTopLevelUnderParent(c, node, parent)
 		except NodeGone:
 			return None
-		topLevel = parent is not None and parent.path == ROOT_PATH
 		_noteTopLevel(node.key, topLevel)
 	return topLevel
 
