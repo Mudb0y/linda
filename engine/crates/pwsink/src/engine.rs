@@ -9,7 +9,7 @@
 
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CString, c_char, c_int, c_void};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::ptr;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -47,20 +47,12 @@ pub(crate) static DELIVERED: AtomicU64 = AtomicU64::new(0);
 /// keeps the addresses of the hooks and event tables.
 struct Link {
     stream: Arc<Stream>,
-    /// The target node name currently asked of WirePlumber, or None for the default sink.
-    effective_target: Option<CString>,
     hook: spas::spa_hook,
     events: pws::pw_stream_events,
     /// The stream's node, bound to learn when the daemon has it running.
     node: *mut pws::pw_proxy,
     node_hook: spas::spa_hook,
     node_events: pws::pw_node_events,
-}
-
-struct SinkEntry {
-    id: u32,
-    name: String,
-    description: String,
 }
 
 struct Shared {
@@ -70,8 +62,6 @@ struct Shared {
     pool: VecDeque<(Arc<Stream>, u64)>,
     /// Streams to destroy.
     doomed: Vec<Arc<Stream>>,
-    /// Current Audio/Sink nodes: (node.name, node.description).
-    devices: Vec<(String, String)>,
 }
 
 struct LoopState {
@@ -81,11 +71,6 @@ struct LoopState {
     core_events: pws::pw_core_events,
     core_lost: bool,
     registry: *mut pws::pw_registry,
-    registry_hook: spas::spa_hook,
-    registry_events: pws::pw_registry_events,
-    sinks: Vec<SinkEntry>,
-    sync_seq: c_int,
-    sinks_synced: bool,
     next_connect_ns: u64,
     timer: *mut spas::spa_source,
     #[allow(
@@ -93,15 +78,6 @@ struct LoopState {
         reason = "PipeWire keeps the addresses of each link's hooks, which must not move as the list grows"
     )]
     links: Vec<Box<Link>>,
-}
-
-impl LoopState {
-    fn has_sink(&self, target: &CStr) -> bool {
-        target
-            .to_str()
-            .ok()
-            .is_some_and(|name| self.sinks.iter().any(|s| s.name == name))
-    }
 }
 
 pub(crate) struct Engine {
@@ -165,7 +141,6 @@ impl Engine {
                     streams: Vec::new(),
                     pool: VecDeque::new(),
                     doomed: Vec::new(),
-                    devices: Vec::new(),
                 }),
                 keep_awake_until: AtomicU64::new(0),
                 connected: AtomicBool::new(false),
@@ -183,11 +158,6 @@ impl Engine {
                     core_events: std::mem::zeroed(),
                     core_lost: false,
                     registry: ptr::null_mut(),
-                    registry_hook: std::mem::zeroed(),
-                    registry_events: std::mem::zeroed(),
-                    sinks: Vec::new(),
-                    sync_seq: 0,
-                    sinks_synced: false,
                     next_connect_ns: 0,
                     timer: ptr::null_mut(),
                     links: Vec::new(),
@@ -317,19 +287,6 @@ impl Engine {
         self.pool_size.load(Relaxed)
     }
 
-    pub(crate) fn devices(&self) -> Vec<(String, String)> {
-        self.shared().devices.clone()
-    }
-
-    fn sync_devices(&self, lp: &LoopState) {
-        let devices: Vec<(String, String)> = lp
-            .sinks
-            .iter()
-            .map(|s| (s.name.clone(), s.description.clone()))
-            .collect();
-        self.shared().devices = devices;
-    }
-
     // The loop thread.
 
     /// Brings everything up to date: reconnects, wakes and deactivates streams, detaches,
@@ -389,25 +346,8 @@ impl Engine {
                 continue;
             }
             if s.take_broken() {
-                let prev_target = lp
-                    .links
-                    .iter()
-                    .find(|l| Arc::ptr_eq(&l.stream, s))
-                    .and_then(|l| l.effective_target.clone());
                 unsafe { self.detach(lp, s) };
-                let switching = lp.sinks_synced && effective_target(lp, &s.target) != prev_target;
-                s.set_retry_ns(if switching { 0 } else { now + RECONNECT_NS });
-            }
-            if s.is_attached() && lp.sinks_synced && s.target.is_some() {
-                let desired = effective_target(lp, &s.target);
-                if lp
-                    .links
-                    .iter()
-                    .any(|l| Arc::ptr_eq(&l.stream, s) && l.effective_target != desired)
-                {
-                    unsafe { self.detach(lp, s) };
-                    s.set_retry_ns(0);
-                }
+                s.set_retry_ns(now + RECONNECT_NS);
             }
             if !s.is_attached() {
                 if s.retry_ns() <= now {
@@ -453,7 +393,6 @@ impl Engine {
             }
             lp.core_events = std::mem::zeroed();
             lp.core_events.version = pws::PW_VERSION_CORE_EVENTS;
-            lp.core_events.done = Some(on_core_done);
             lp.core_events.error = Some(on_core_error);
             lp.core_hook = std::mem::zeroed();
             spa_interface_call_method!(
@@ -464,9 +403,6 @@ impl Engine {
                 &lp.core_events,
                 self as *const Engine as *mut c_void
             );
-            lp.sinks.clear();
-            lp.sinks_synced = false;
-            self.sync_devices(lp);
             lp.registry = spa_interface_call_method!(
                 core,
                 pws::pw_core_methods,
@@ -474,28 +410,6 @@ impl Engine {
                 pws::PW_VERSION_REGISTRY,
                 0
             );
-            if !lp.registry.is_null() {
-                lp.registry_events = std::mem::zeroed();
-                lp.registry_events.version = pws::PW_VERSION_REGISTRY_EVENTS;
-                lp.registry_events.global = Some(on_registry_global);
-                lp.registry_events.global_remove = Some(on_registry_global_remove);
-                lp.registry_hook = std::mem::zeroed();
-                spa_interface_call_method!(
-                    lp.registry,
-                    pws::pw_registry_methods,
-                    add_listener,
-                    &mut lp.registry_hook,
-                    &lp.registry_events,
-                    self as *const Engine as *mut c_void
-                );
-                lp.sync_seq = spa_interface_call_method!(
-                    core,
-                    pws::pw_core_methods,
-                    sync,
-                    pws::PW_ID_CORE,
-                    0
-                );
-            }
             lp.core = core;
             lp.core_lost = false;
         }
@@ -510,15 +424,10 @@ impl Engine {
         for s in &streams {
             unsafe { self.detach(lp, s) };
         }
-        lp.sinks.clear();
-        lp.sinks_synced = false;
-        self.sync_devices(lp);
         if !lp.core.is_null() {
             // SAFETY: on the loop thread; the registry and hook were made in connect.
             unsafe {
                 if !lp.registry.is_null() {
-                    spa::utils::hook::remove(lp.registry_hook);
-                    lp.registry_hook = std::mem::zeroed();
                     pws::pw_proxy_destroy(lp.registry as *mut pws::pw_proxy);
                     lp.registry = ptr::null_mut();
                 }
@@ -538,8 +447,7 @@ impl Engine {
         // PipeWire, and lp.links keeps it, and the stream the callbacks are given, alive until
         // detach has removed them.
         unsafe {
-            let effective = effective_target(lp, &s.target);
-            let props = stream_properties(&effective);
+            let props = stream_properties(&s.target);
             let stream = pws::pw_stream_new(lp.core, c"Linda".as_ptr(), props);
             if stream.is_null() {
                 s.set_retry_ns(now + RECONNECT_NS);
@@ -549,7 +457,6 @@ impl Engine {
             s.set_pw(stream as *mut c_void);
             let mut link = Box::new(Link {
                 stream: s.clone(),
-                effective_target: effective,
                 hook: std::mem::zeroed(),
                 events: std::mem::zeroed(),
                 node: ptr::null_mut(),
@@ -821,96 +728,6 @@ unsafe extern "C" fn on_wake(data: *mut c_void, fd: c_int, _mask: u32) {
 unsafe extern "C" fn on_timer(data: *mut c_void, _expirations: u64) {
     // SAFETY: as on_wake.
     unsafe { (*(data as *const Engine)).service() };
-}
-
-fn effective_target(lp: &LoopState, target: &Option<CString>) -> Option<CString> {
-    match target {
-        Some(t) if !lp.sinks_synced || lp.has_sink(t) => Some(t.clone()),
-        _ => None,
-    }
-}
-
-unsafe fn dict_get<'a>(props: *const spas::spa_dict, key: &CStr) -> Option<&'a str> {
-    if props.is_null() {
-        return None;
-    }
-    // SAFETY: PipeWire passes a valid spa_dict with n_items entries for the duration of the callback.
-    unsafe {
-        let dict = &*props;
-        if dict.items.is_null() || dict.n_items == 0 {
-            return None;
-        }
-        let items = std::slice::from_raw_parts(dict.items, dict.n_items as usize);
-        for item in items {
-            if !item.key.is_null() && !item.value.is_null() && CStr::from_ptr(item.key) == key {
-                return CStr::from_ptr(item.value).to_str().ok();
-            }
-        }
-    }
-    None
-}
-
-unsafe extern "C" fn on_core_done(data: *mut c_void, id: u32, seq: c_int) {
-    // SAFETY: data is the leaked engine, and this runs on the loop thread.
-    let engine = unsafe { &*(data as *const Engine) };
-    let lp = unsafe { &mut *engine.state.get() };
-    if id == pws::PW_ID_CORE && seq == lp.sync_seq {
-        lp.sinks_synced = true;
-        engine.signal();
-    }
-}
-
-unsafe extern "C" fn on_registry_global(
-    data: *mut c_void,
-    id: u32,
-    _permissions: u32,
-    type_: *const c_char,
-    _version: u32,
-    props: *const spas::spa_dict,
-) {
-    if type_.is_null() {
-        return;
-    }
-    // SAFETY: type_ is a NUL-terminated PipeWire interface name; data is the leaked engine.
-    let is_node =
-        unsafe { CStr::from_ptr(type_).to_bytes_with_nul() } == pws::PW_TYPE_INTERFACE_Node;
-    if !is_node || unsafe { dict_get(props, c"media.class") } != Some("Audio/Sink") {
-        return;
-    }
-    let Some(name) = (unsafe { dict_get(props, c"node.name") }).filter(|s| !s.is_empty()) else {
-        return;
-    };
-    let description = unsafe { dict_get(props, c"node.description") }
-        .filter(|s| !s.is_empty())
-        .or_else(|| unsafe { dict_get(props, c"node.nick") }.filter(|s| !s.is_empty()))
-        .unwrap_or(name);
-    let entry = SinkEntry {
-        id,
-        name: name.to_owned(),
-        description: description.to_owned(),
-    };
-    // SAFETY: runs on the loop thread where lp lives uniquely.
-    let engine = unsafe { &*(data as *const Engine) };
-    let lp = unsafe { &mut *engine.state.get() };
-    if let Some(existing) = lp.sinks.iter_mut().find(|s| s.id == id) {
-        *existing = entry;
-    } else {
-        lp.sinks.push(entry);
-    }
-    engine.sync_devices(lp);
-    engine.signal();
-}
-
-unsafe extern "C" fn on_registry_global_remove(data: *mut c_void, id: u32) {
-    // SAFETY: runs on the loop thread where lp lives uniquely.
-    let engine = unsafe { &*(data as *const Engine) };
-    let lp = unsafe { &mut *engine.state.get() };
-    let before = lp.sinks.len();
-    lp.sinks.retain(|s| s.id != id);
-    if lp.sinks.len() != before {
-        engine.sync_devices(lp);
-        engine.signal();
-    }
 }
 
 unsafe extern "C" fn on_core_error(
