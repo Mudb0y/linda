@@ -124,11 +124,46 @@ def test_eachCharacterIsSaidOnceInOrder(session: Session, key: str, delay: int):
 	assert positions == sorted(set(positions)), f"not each once, in order: {spoken}"
 
 
+def _waitForSpeech(desktop: DesktopSession, mark: int) -> list[str]:
+	deadline = time.monotonic() + STEP_BOUND
+	while not desktop.spokenSince(mark) and time.monotonic() < deadline:
+		time.sleep(0.05)
+	time.sleep(SETTLE)
+	return desktop.spokenSince(mark)
+
+
+def _clickDontSave(desktop: DesktopSession) -> None:
+	"""Tab to the dialog's Don't Save button and activate it so focus returns to digits.txt."""
+	for _ in range(4):
+		if desktop.spokenSince(0)[-1].startswith("Don't Save button"):
+			break
+		mark = desktop.mark()
+		desktop.press("Tab")
+		_waitForSpeech(desktop, mark)
+	assert desktop.spokenSince(0)[-1].startswith("Don't Save button"), desktop.spokenSince(0)[-5:]
+	mark = desktop.mark()
+	desktop.press("space")
+	desktop.expect(f"{FILE_NAME.replace('.', ' dot ')} edit…", since=mark, timeout=STEP_BOUND)
+	time.sleep(SETTLE)
+
+
+def _openSaveDialog(desktop: DesktopSession) -> None:
+	mark = desktop.mark()
+	desktop.press("ctrl+w")
+	desktop.expect(
+		"Warning dialog…",
+		"Save button Alt plus S",
+		since=mark,
+		timeout=STEP_BOUND,
+	)
+	time.sleep(SETTLE)
+
+
 def test_saveDialogIsRead(session: Session):
 	"""Closing an unsaved buffer opens Electron's native GTK confirmation dialog, which Linda reads
 	instead of dropping as a secondary GTK application tree (issue 34)."""
 	desktop = session.desktop
-	step(session, "ctrl+n", "Untitled-1 edit…")
+	step(session, "ctrl+n", "Untitled-…")
 	mark = desktop.mark()
 	desktop.typeText("hello")
 	desktop.expect("o", since=mark)
@@ -146,28 +181,32 @@ def test_saveDialogIsRead(session: Session):
 	for _ in range(3):
 		mark = desktop.mark()
 		desktop.press("Tab")
-		deadline = time.monotonic() + STEP_BOUND
-		while not desktop.spokenSince(mark) and time.monotonic() < deadline:
-			time.sleep(0.05)
-		time.sleep(SETTLE)
-		tabbed.extend(desktop.spokenSince(mark))
+		tabbed.extend(_waitForSpeech(desktop, mark))
 	assert any("Cancel button" in text for text in tabbed), tabbed
 	assert any("Don't Save button" in text for text in tabbed), tabbed
-	# Dismiss without saving so focus returns cleanly to digits.txt.
-	for _ in range(4):
-		if desktop.spokenSince(0)[-1].startswith("Don't Save button"):
-			break
-		mark = desktop.mark()
-		desktop.press("Tab")
-		deadline = time.monotonic() + STEP_BOUND
-		while not desktop.spokenSince(mark) and time.monotonic() < deadline:
-			time.sleep(0.05)
-		time.sleep(SETTLE)
-	assert desktop.spokenSince(0)[-1].startswith("Don't Save button"), desktop.spokenSince(0)[-5:]
+	_clickDontSave(desktop)
+
+
+def test_wordsWithSeparators(session: Session):
+	"""Ctrl+Right and Ctrl+Left across path separators in VS Code speak each segment's word rather
+	than the punctuation alone (issue 8)."""
+	desktop = session.desktop
+	step(session, "ctrl+n", "Untitled-…")
 	mark = desktop.mark()
-	desktop.press("space")
-	desktop.expect(f"{FILE_NAME.replace('.', ' dot ')} edit…", since=mark, timeout=STEP_BOUND)
+	desktop.typeText("/usr/bin/bash")
+	desktop.expect("h", since=mark)
 	time.sleep(SETTLE)
+	desktop.press("Home")
+	time.sleep(SETTLE)
+	forward = []
+	for _ in range(4):
+		mark = desktop.mark()
+		desktop.press("ctrl+Right")
+		forward.append(_waitForSpeech(desktop, mark)[-1])
+	assert any("usr" in text for text in forward) and any("bin" in text for text in forward), forward
+	assert not any(text == "slash" for text in forward), forward
+	_openSaveDialog(desktop)
+	_clickDontSave(desktop)
 
 
 def test_exitIsClean(session: Session):

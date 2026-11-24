@@ -1,5 +1,5 @@
-"""Moving by word in MATE Terminal reads the word the shell's caret lands on, each part of a path
-included (GitHub issue 8), and moving by word in a GTK entry reads as it did before.
+"""Moving by word in MATE Terminal and across AT-SPI text controls reads the word the caret
+lands on, each part of a path or hyphenated identifier included (GitHub issue 8).
 
 nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_terminalWords.py
 """
@@ -38,16 +38,15 @@ TERMINAL_WORDS = (
 	),
 	("one two three", ["one", "two", "three"], ["three", "two", "one"]),
 )
-#: The same in a GTK entry, as Linda read it before the terminal's words changed: GTK also stops at
-#: the end of a word, and the end of the entry is blank.
+#: The same in a GTK entry: GTK also stops at the end of a word, and the end of the entry is blank.
 ENTRY_WORDS = (
-	("/usr/bin/bash", ["slash", "slash", "blank"], ["bash", "bin", "usr"]),
+	("/usr/bin/bash", ["usr slash", "bin slash", "blank"], ["bash", "bin slash", "usr slash"]),
 	(
 		"foo.bar.baz",
 		["foo dot bar dot baz", "foo dot bar dot baz", "blank"],
 		["foo dot bar dot baz"] * 3,
 	),
-	("foo-bar-baz", ["dash", "dash", "blank"], ["baz", "bar", "foo"]),
+	("foo-bar-baz", ["foo-", "bar-", "blank"], ["baz", "bar-", "foo-"]),
 	("one two three", ["one", "two", "blank"], ["three", "two", "one"]),
 )
 
@@ -72,14 +71,14 @@ PARTITIONED_LINES = (
 #: The words of a path, which the shell's word movement stops between.
 PATH_WORDS = ["/", "usr/", "bin/", "bash\n"]
 
-#: Run under harness.runChild with LINES set: for each line, the word VteTextInfo gives each offset,
+#: Run under harness.runChild with LINES set: for each line, the word AtspiTextInfo gives each offset,
 #: and where moving by word from the start stops.
 WORDS_CHILD = r"""
 # Enters NVDA's import cycle where core.main does.
 import NVDAHelper  # noqa: F401
 import textInfos
 from textInfos.offsets import Offsets
-from NVDAObjects.AtSpi.terminal import VteTextInfo
+from NVDAObjects.AtSpi.textInfo import AtspiTextInfo
 
 
 class LineSource:
@@ -99,22 +98,20 @@ class LineSource:
 		return (0, len(self.line), self.line)
 
 
-class Terminal:
+class TextObject:
 	isProtected = False
-
-	def _drawnCaretOffset(self):
-		return None
 
 
 result = []
 for line in LINES:
 
-	class LineInfo(VteTextInfo):
+	class LineInfo(AtspiTextInfo):
 		def _get_textSource(self):
 			return LineSource(line)
 
-	words = [list(LineInfo(Terminal(), Offsets(offset, offset))._getWordOffsets(offset)) for offset in range(len(line))]
-	info = LineInfo(Terminal(), Offsets(0, 0))
+	target = TextObject()
+	words = [list(LineInfo(target, Offsets(offset, offset))._getWordOffsets(offset)) for offset in range(len(line))]
+	info = LineInfo(target, Offsets(0, 0))
 	stops = []
 	while info.move(textInfos.UNIT_WORD, 1) and len(stops) < len(line):
 		stops.append(info._startOffset)
@@ -189,7 +186,7 @@ def test_terminalWordsAtTheShellsCaret(desktop: DesktopSession):
 	assert nvda.process.returncode == 0, nvda.describe()
 
 
-def test_entryWordsUnchanged(desktop: DesktopSession):
+def test_entryWordsAtTheCaret(desktop: DesktopSession):
 	title = "TextFixture"
 	desktop.startApp(desktop.fixture("textapp", "gtk3"), title=title)
 	desktopSession.activate(title)
