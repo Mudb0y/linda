@@ -345,7 +345,13 @@ if sys.platform == "linux":
 			if obj.role == controlTypes.Role.LANDMARK:
 				clsList.insert(0, WebLandmark)
 			elif (
-				obj.role == controlTypes.Role.EDITABLETEXT
+				# One with no role, as YouTube's comment box is, is a section, and one made a combo box, as
+				# Discord's search box is, keeps its text in a paragraph as well: as on Windows, every
+				# editable element that takes the focus is an editor, whatever its role.
+				(
+					obj.role == controlTypes.Role.EDITABLETEXT
+					or ("focusable" in obj.atspiStates and obj.role != controlTypes.Role.DOCUMENT)
+				)
 				and controlTypes.State.MULTILINE in obj.states
 				and "editable" in obj.atspiStates
 				and "Text" in obj.atspiInterfaces
