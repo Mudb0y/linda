@@ -47,6 +47,9 @@ _installingAddon = False
 
 def queueAddonInstall(path: str) -> None:
 	"""Queue an add-on installation sequentially to prevent modal dialog collisions."""
+	from logHandler import log
+
+	log.info("Requesting installation of add-on from %s", path)
 	_pendingAddons.append(path)
 	_processNextAddon()
 
@@ -192,6 +195,12 @@ class _Connection:
 	def _onReadable(self, fd: int, condition: int) -> bool:
 		from gi.repository import GLib
 
+		if self.hasRequest():
+			self._answer()
+			self._watch = None
+			self.close()
+			return GLib.SOURCE_REMOVE
+
 		try:
 			data = self._socket.recv(4096)
 		except BlockingIOError:
@@ -224,21 +233,40 @@ class _Connection:
 			self._received.startswith(b"install-addon ") and self._received.endswith(b"\n")
 		)
 
+	def hasTakeKeyboardRequest(self) -> bool:
+		"""Whether this connection has received the take-keyboard request."""
+		if not REQUEST.startswith(self._received):
+			return False
+		try:
+			self._received += self._socket.recv(len(REQUEST) - len(self._received))
+		except OSError:
+			pass
+		return self._received == REQUEST
+
 	def _answer(self) -> None:
 		from logHandler import log
 
 		if self._received.startswith(b"install-addon "):
-			path = self._received.removeprefix(b"install-addon ").rstrip(b"\r\n").decode("utf-8", errors="replace")
+			rawPath = self._received.removeprefix(b"install-addon ").rstrip(b"\r\n")
+			try:
+				path = rawPath.decode("utf-8")
+			except UnicodeDecodeError:
+				path = os.fsdecode(rawPath)
 			path = os.path.abspath(path)
 			from utils.security import isLockScreenModeActive, isRunningOnSecureDesktop
 
-			if isRunningOnSecureDesktop() or isLockScreenModeActive() or not os.path.isfile(path):
+			if (
+				"\n" in path
+				or "\r" in path
+				or isRunningOnSecureDesktop()
+				or isLockScreenModeActive()
+				or not os.path.isfile(path)
+			):
 				log.debugWarning(f"Add-on installation rejected for {path}")
 				reply = FAILED_REPLY
 			else:
 				import wx
 
-				log.info("Requesting installation of add-on from %s", path)
 				wx.CallAfter(queueAddonInstall, path)
 				reply = REPLY_OK
 			try:
@@ -246,9 +274,8 @@ class _Connection:
 			except OSError:
 				pass
 			return
-		from logHandler import log
 
-		from . import inputHook
+		from . import displayServer, inputHook
 
 		# Requests that queued up behind this one while this copy could not answer, as a caller run again
 		# and again against a stopped copy leaves them: one taking back answers them all, and is said once.
@@ -258,18 +285,24 @@ class _Connection:
 		queued = [
 			connection
 			for connection in list(_connections)
-			if connection is not self and connection.hasRequest()
+			if connection is not self and connection.hasTakeKeyboardRequest()
 		]
 		log.info("Asked from outside NVDA, through the control socket, to take the keyboard back")
-		if queued:
-			log.debug(f"{len(queued)} more requests that queued up are answered by the same")
-		try:
-			inputHook.takeKeyboardBack()
-		except Exception:
-			log.exception("Taking the keyboard back when asked from outside NVDA")
+		if displayServer.kind() == "x11" or not inputHook.canTakeKeyboardBack():
+			log.warning(
+				"Taking the keyboard back was requested, but X11 sessions do not take the keyboard back through the control socket"
+			)
 			reply = FAILED_REPLY
 		else:
-			reply = REPLY
+			if queued:
+				log.debug(f"{len(queued)} more requests that queued up are answered by the same")
+			try:
+				inputHook.takeKeyboardBack()
+			except Exception:
+				log.exception("Taking the keyboard back when asked from outside NVDA")
+				reply = FAILED_REPLY
+			else:
+				reply = REPLY
 		for connection in (self, *queued):
 			try:
 				connection._socket.send(reply)

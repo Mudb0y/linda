@@ -156,6 +156,11 @@ def _announce(message: str) -> None:
 	queueHandler.queueFunction(queueHandler.eventQueue, ui.message, message)
 
 
+def canTakeKeyboardBack() -> bool:
+	"""Whether the current key source can take the keyboard back."""
+	return getattr(_source, "takeBack", None) is not None
+
+
 def takeKeyboardBack() -> None:
 	"""Take keys from the kernel again after the emergency chord let them go, saying how it went."""
 	takeBack = getattr(_source, "takeBack", None)

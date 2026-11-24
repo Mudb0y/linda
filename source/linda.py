@@ -69,6 +69,22 @@ def _handOverToOutsideOption(option: str) -> NoReturn:
 	controlSocket.takeKeyboard()
 
 
+_startupAddonHandlers: list[object] = []
+
+
+def _normalizeAddonPath(pathOrUri: str, cwd: str) -> str:
+	import urllib.parse
+
+	if pathOrUri.startswith("file://"):
+		parsed = urllib.parse.urlparse(pathOrUri)
+		path = urllib.parse.unquote(parsed.path)
+	else:
+		path = pathOrUri
+	if not os.path.isabs(path):
+		path = os.path.normpath(os.path.join(cwd, path))
+	return path
+
+
 def _installAddon(path: str) -> None:
 	import wx
 	from linuxPlatform import controlSocket
@@ -115,6 +131,7 @@ def main() -> NoReturn:
 
 	# nvda.pyw also checks for its virtual environment here. The Nix development shell provides
 	# NVDA's dependencies instead, and bootstrap.install() has checked the one it cannot start without.
+	originalCwd = os.getcwd()
 	os.chdir(appDir)
 	globalVars.appDir = appDir
 	globalVars.appPid = os.getpid()
@@ -141,14 +158,21 @@ def main() -> NoReturn:
 			setattr(globalVars.appArgs, name, os.path.abspath(value))
 	appArgs = globalVars.appArgs
 
-	installAddons = list(appArgs.installAddons or [])
+	installAddons: list[str] = []
+	if appArgs.installAddons:
+		for arg in appArgs.installAddons:
+			installAddons.append(_normalizeAddonPath(arg, originalCwd))
 	remainingUnknownArgs = []
 	for arg in globalVars.unknownAppArgs:
-		if arg.lower().endswith(".nvda-addon"):
-			installAddons.append(arg)
+		normalized = _normalizeAddonPath(arg, originalCwd)
+		if normalized.lower().endswith(".nvda-addon"):
+			installAddons.append(normalized)
 		else:
 			remainingUnknownArgs.append(arg)
 	globalVars.unknownAppArgs = remainingUnknownArgs
+	if installAddons and (appArgs.quit or appArgs.check_running):
+		option = "--quit" if appArgs.quit else "--check-running"
+		_fail(f"{option} cannot be combined with add-on installation")
 	if appArgs.launcher:
 		# The dialog it shows offers to install NVDA or make a portable copy, both through Windows' installer.
 		_fail("--launcher is how NVDA's Windows installer starts it, and Linux has no such installer")
@@ -186,6 +210,8 @@ def main() -> NoReturn:
 		_fail("neither WAYLAND_DISPLAY nor DISPLAY names a display")
 	if installAddons:
 		for path in installAddons:
+			if "\n" in path or "\r" in path:
+				_fail(f"add-on path cannot contain newline: {path!r}")
 			if not os.path.isfile(path):
 				_fail(f"add-on package not found: {path}")
 		if isAlreadyRunning:
@@ -298,10 +324,13 @@ def main() -> NoReturn:
 		# Once NVDA can speak, so that a session manager waiting for it goes on as soon as it is up.
 		core.postNvdaStartup.register(sessionClient.start)
 		if installAddons:
-			import functools
 
-			for path in installAddons:
-				core.postNvdaStartup.register(functools.partial(_installAddon, os.path.abspath(path)))
+			def _installStartupAddons() -> None:
+				for path in installAddons:
+					_installAddon(os.path.abspath(path))
+
+			_startupAddonHandlers.append(_installStartupAddons)
+			core.postNvdaStartup.register(_installStartupAddons)
 		core.main()
 	except BaseException as e:
 		# As nvda.pyw does, SystemExit included: wx raises it when there is no display to open.
