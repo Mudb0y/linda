@@ -30,6 +30,9 @@ from .textInfo import AtspiTextInfo
 #: How deep the objects of an editor nest before the walk down gives up: paragraphs, lists, their items,
 #: links and formatting inside them.
 MAX_DEPTH = 32
+#: How many of an object's embedded objects are asked whether they hold the caret, when the one the
+#: object's own caret points at says it does not.
+MAX_CARET_SEARCH = 500
 
 
 def _hasText(obj) -> bool:
@@ -48,6 +51,31 @@ def _characterCount(obj) -> int:
 		return handler.client().characterCount(obj.node)
 	except NodeGone:
 		return 0
+
+
+def _embeddedHoldingCaret(obj):
+	"""The object with text that an embedded object character in obj's text stands for and that holds
+	the caret, and the caret's offset in it; None when none does."""
+	if "Hypertext" not in obj.atspiInterfaces:
+		return None
+	client = handler.client()
+	node = obj.node
+	try:
+		count = call(node, Atspi.Hypertext.get_n_links)
+		for index in range(min(count, MAX_CARET_SEARCH)):
+			hyperlink = call(node, Atspi.Hypertext.get_link, index)
+			if hyperlink is None:
+				continue
+			child = client.node(call(node, lambda link=hyperlink: link.get_object(0)))
+			if child is None or "Text" not in client.interfaces(child):
+				continue
+			offset = client.caretOffset(child)
+			if offset >= 0:
+				embedded = handler.getObject(child)
+				return (embedded, offset) if embedded is not None else None
+	except NodeGone:
+		return None
+	return None
 
 
 def _getEmbedded(obj, offset: int):
@@ -230,6 +258,13 @@ class AtspiCompoundTextInfo(CompoundTextInfo):
 				offset = self._offsetFor(obj, position)
 			except NodeGone:
 				offset = None
+			if offset is None and found is not None and position == textInfos.POSITION_CARET:
+				# On a page as busy as YouTube, Firefox can still point an editor's caret at the paragraph an
+				# arrow is leaving after that paragraph has said it no longer holds it: the caret is in
+				# another of the parent's objects by then, and NVDA would read the line being left.
+				holder = _embeddedHoldingCaret(found[0])
+				if holder is not None:
+					obj, offset = holder
 			if offset is None:
 				break
 			found = (obj, offset)
