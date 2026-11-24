@@ -281,11 +281,14 @@ def test_pulseSinkRecoversAfterDaemonRestart(pulse: PulseFixture, tmp_path: Path
 
 			# 3. Feeding while daemon is dead detects StreamLost and fails open with NoDevice
 			failedWhileDead = False
-			try:
-				player.feed(chunk)
-				player.idle()
-			except (OSError, Exception):
-				failedWhileDead = True
+			for _ in range(10):
+				try:
+					player.feed(chunk)
+					player.idle()
+					time.sleep(0.05)
+				except (OSError, Exception):
+					failedWhileDead = True
+					break
 
 			# 4. Restart the daemon
 			ask("restart")
@@ -303,8 +306,10 @@ def test_pulseSinkRecoversAfterDaemonRestart(pulse: PulseFixture, tmp_path: Path
 
 			player.stop()
 			result = {
+				"failedWhileDead": failedWhileDead,
 				"playedAfterRestart": playedAfterRestart,
 			}
 		"""
 		done = runPulseChild(tmp_path, code, {**pulse.childEnv(), **steps.env()})
+		assert done.value["failedWhileDead"] is True
 		assert done.value["playedAfterRestart"] is True

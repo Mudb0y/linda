@@ -1,8 +1,8 @@
 """A sink that plays through PulseAudio, by way of libpulse.so.0.
 
 Provides an audio output sink for systems running PulseAudio (such as Ubuntu 22.04 LTS),
-either selected via LINDA_AUDIO_SINK=pulse or chosen as an automatic fallback when no
-PipeWire daemon is running.
+selected explicitly via LINDA_AUDIO_SINK=pulse (or pulseaudio) or configured via
+installation settings.
 
 Stopping speech is immediate: abort() flushes queued audio on the sound server and corks
 playback so that no tail of speech lingers after a key press.
@@ -98,11 +98,12 @@ class pa_buffer_attr(ctypes.Structure):
 
 
 class _Silencers:
-	"""pa_stream_cork and pa_stream_flush called through PyDLL without letting go of the GIL.
+	"""pa_stream_cork and pa_stream_flush called through CDLL, releasing the GIL.
 
-	Like pwsink's silencers, keeping the GIL ensures the thread silencing speech never has to fight
-	other Python threads to reacquire the GIL. Sending cork and flush to the PulseAudio daemon
-	over a UNIX socket takes sub-millisecond time.
+	Releasing the GIL while taking pa_threaded_mainloop_lock is essential: holding the GIL
+	here would deadlock against Python callbacks (CFUNCTYPE) running on the PulseAudio
+	thread that must acquire the GIL while the mainloop lock is held. Sending cork and flush
+	to the PulseAudio daemon takes sub-millisecond time.
 	"""
 
 	def __init__(self, lib: ctypes.CDLL) -> None:
@@ -123,7 +124,7 @@ class _Silencers:
 		self.op_unref.argtypes = [ctypes.c_void_p]
 
 	def stop(self, mainloop: ctypes.c_void_p, stream: ctypes.c_void_p) -> None:
-		if not stream:
+		if not stream or not mainloop:
 			return
 		self.lock(mainloop)
 		try:
@@ -134,7 +135,7 @@ class _Silencers:
 			self.unlock(mainloop)
 
 	def abort(self, mainloop: ctypes.c_void_p, stream: ctypes.c_void_p) -> None:
-		if not stream:
+		if not stream or not mainloop:
 			return
 		self.lock(mainloop)
 		try:
@@ -301,126 +302,132 @@ class PulseStream(SinkStream):
 		self._isAborted = False
 		self._startTime: float | None = None
 		self._closed = False
-		self._lock = threading.RLock()
 
 	def _checkLive(self) -> ctypes.c_void_p:
 		if self._closed or not self.handle:
 			raise OSError(errno.EBADF, "the stream is closed")
-		if self._sink.context:
-			ctxState = self._lib.pa_context_get_state(self._sink.context)
-			if ctxState in (PA_CONTEXT_FAILED, PA_CONTEXT_TERMINATED):
-				raise StreamLost("PulseAudio context failed or terminated")
-		state = self._lib.pa_stream_get_state(self.handle)
-		if state in (PA_STREAM_FAILED, PA_STREAM_TERMINATED):
-			raise StreamLost("PulseAudio stream terminated or failed")
+		if not self._sink.mainloop:
+			raise StreamLost("PulseAudio mainloop is not running")
+		self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
+		try:
+			if self._sink.context:
+				ctxState = self._lib.pa_context_get_state(self._sink.context)
+				if ctxState in (PA_CONTEXT_FAILED, PA_CONTEXT_TERMINATED):
+					raise StreamLost("PulseAudio context failed or terminated")
+			state = self._lib.pa_stream_get_state(self.handle)
+			if state in (PA_STREAM_FAILED, PA_STREAM_TERMINATED):
+				raise StreamLost("PulseAudio stream terminated or failed")
+		finally:
+			self._lib.pa_threaded_mainloop_unlock(self._sink.mainloop)
 		return self.handle
 
 	def write(self, data: bytes) -> None:
-		with self._lock:
-			handle = self._checkLive()
+		handle = self._checkLive()
+		if self._isAborted:
+			return
+		frames = len(data) // self.format.blockAlign
+		# Scale channel volumes and process gain
+		effectiveVolumes = [v * self._sink.gain for v in self.volumes]
+		data = pcm.applyGain(self.format, data, effectiveVolumes)
+
+		self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
+		try:
 			if self._isAborted:
 				return
-			frames = len(data) // self.format.blockAlign
-			# Scale channel volumes and process gain
-			effectiveVolumes = [v * self._sink.gain for v in self.volumes]
-			data = pcm.applyGain(self.format, data, effectiveVolumes)
+			writable = self._lib.pa_stream_writable_size(handle)
+			if writable == ctypes.c_size_t(-1).value:
+				raise StreamLost("PulseAudio stream is disconnected or failed")
+			if len(data) > writable:
+				raise OSError(errno.ENOBUFS, "the stream's buffer is full")
+			result = self._lib.pa_stream_write(handle, data, len(data), None, 0, PA_SEEK_RELATIVE)
+			if result < 0:
+				raise StreamLost(f"pa_stream_write failed with code {result}")
+		finally:
+			self._lib.pa_threaded_mainloop_unlock(self._sink.mainloop)
 
-			self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
-			try:
-				writable = self._lib.pa_stream_writable_size(handle)
-				if len(data) > writable:
-					raise OSError(errno.ENOBUFS, "the stream's buffer is full")
-				result = self._lib.pa_stream_write(handle, data, len(data), None, 0, PA_SEEK_RELATIVE)
-				if result < 0:
-					raise OSError(errno.EIO, f"pa_stream_write failed with code {result}")
-			finally:
-				self._lib.pa_threaded_mainloop_unlock(self._sink.mainloop)
-
-			self._writtenFrames += frames
-			self._sink._noteDelivered(frames)
+		self._writtenFrames += frames
+		self._sink._noteDelivered(frames)
 
 	def bufferedFrames(self) -> int:
-		with self._lock:
-			self._checkLive()
-			return max(0, self._writtenFrames - self.playedFrames())
+		self._checkLive()
+		return max(0, self._writtenFrames - self.playedFrames())
 
 	def playedFrames(self) -> int:
-		with self._lock:
-			if self._closed or not self.handle:
-				return self._playedHigh
-			self._checkLive()
-			if not self._isStarted:
-				return self._playedHigh
-
-			usec = ctypes.c_uint64(0)
-			self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
-			try:
-				res = self._lib.pa_stream_get_time(self.handle, ctypes.byref(usec))
-			finally:
-				self._lib.pa_threaded_mainloop_unlock(self._sink.mainloop)
-
-			if res == 0:
-				if self._playBaseUsec is None:
-					if self._startTime is not None:
-						elapsedSec = time.monotonic() - self._startTime
-						self._playBaseUsec = max(0, usec.value - int(elapsedSec * 1_000_000))
-					else:
-						self._playBaseUsec = usec.value
-				elapsedUsec = max(0, usec.value - self._playBaseUsec)
-				frames = int(elapsedUsec * self.format.samplesPerSec / 1_000_000)
-				self._playedHigh = min(self._writtenFrames, max(self._playedHigh, frames))
-			elif self._startTime is not None:
-				# Interpolate by monotonic clock if time query is still settling
-				elapsed = time.monotonic() - self._startTime
-				elapsedFrames = int(elapsed * self.format.samplesPerSec)
-				self._playedHigh = min(self._writtenFrames, max(self._playedHigh, elapsedFrames))
-
+		if self._closed or not self.handle:
+			return self._playedHigh
+		self._checkLive()
+		if not self._isStarted:
 			return self._playedHigh
 
-	def start(self) -> None:
-		with self._lock:
-			handle = self._checkLive()
-			if self._isAborted or self._isStarted:
-				return
-			self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
-			try:
-				op = self._lib.pa_stream_cork(handle, 0, None, None)
-				if op:
-					self._lib.pa_operation_unref(op)
-				usec = ctypes.c_uint64(0)
-				if self._lib.pa_stream_get_time(handle, ctypes.byref(usec)) == 0:
-					self._playBaseUsec = usec.value
-				else:
-					self._playBaseUsec = None
-			finally:
-				self._lib.pa_threaded_mainloop_unlock(self._sink.mainloop)
+		usec = ctypes.c_uint64(0)
+		self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
+		try:
+			res = self._lib.pa_stream_get_time(self.handle, ctypes.byref(usec))
+		finally:
+			self._lib.pa_threaded_mainloop_unlock(self._sink.mainloop)
 
+		if res == 0:
+			if self._playBaseUsec is None:
+				if self._startTime is not None:
+					elapsedSec = time.monotonic() - self._startTime
+					self._playBaseUsec = max(0, usec.value - int(elapsedSec * 1_000_000))
+				else:
+					self._playBaseUsec = usec.value
+			elapsedUsec = max(0, usec.value - self._playBaseUsec)
+			frames = int(elapsedUsec * self.format.samplesPerSec / 1_000_000)
+			self._playedHigh = min(self._writtenFrames, max(self._playedHigh, frames))
+		elif self._startTime is not None:
+			# Interpolate by monotonic clock if time query is still settling
+			elapsed = time.monotonic() - self._startTime
+			elapsedFrames = int(elapsed * self.format.samplesPerSec)
+			self._playedHigh = min(self._writtenFrames, max(self._playedHigh, elapsedFrames))
+
+		return self._playedHigh
+
+	def start(self) -> None:
+		handle = self._checkLive()
+		if self._isAborted or self._isStarted:
+			return
+		self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
+		try:
+			if self._isAborted:
+				return
+			op = self._lib.pa_stream_cork(handle, 0, None, None)
+			if op:
+				self._lib.pa_operation_unref(op)
+			usec = ctypes.c_uint64(0)
+			if self._lib.pa_stream_get_time(handle, ctypes.byref(usec)) == 0:
+				self._playBaseUsec = usec.value
+			else:
+				self._playBaseUsec = None
 			self._isStarted = True
 			self._startTime = time.monotonic()
+		finally:
+			self._lib.pa_threaded_mainloop_unlock(self._sink.mainloop)
 
 	def stop(self) -> None:
-		with self._lock:
-			self._isStarted = False
-			if self.handle and not self._closed:
-				self._silencers.stop(self._sink.mainloop, self.handle)
+		self._isStarted = False
+		handle = self.handle
+		if handle and not self._closed and self._sink.mainloop:
+			self._silencers.stop(self._sink.mainloop, handle)
 
 	def abort(self) -> None:
-		with self._lock:
-			self._isAborted = True
-			self._isStarted = False
-			if self.handle and not self._closed:
-				self._silencers.abort(self._sink.mainloop, self.handle)
+		self._isAborted = True
+		self._isStarted = False
+		handle = self.handle
+		if handle and not self._closed and self._sink.mainloop:
+			self._silencers.abort(self._sink.mainloop, handle)
 
 	def reset(self) -> None:
-		with self._lock:
-			if self.handle and not self._closed:
-				self._silencers.abort(self._sink.mainloop, self.handle)
-			self._isAborted = False
-			self._isStarted = False
-			self._writtenFrames = 0
-			self._playedHigh = 0
-			self._playBaseUsec = None
-			self._startTime = None
+		handle = self.handle
+		if handle and not self._closed and self._sink.mainloop:
+			self._silencers.abort(self._sink.mainloop, handle)
+		self._isAborted = False
+		self._isStarted = False
+		self._writtenFrames = 0
+		self._playedHigh = 0
+		self._playBaseUsec = None
+		self._startTime = None
 
 	def setChannelVolume(self, channel: int, level: float) -> None:
 		if not 0 <= channel < len(self.volumes):
@@ -428,20 +435,19 @@ class PulseStream(SinkStream):
 		self.volumes[channel] = level
 
 	def close(self) -> None:
-		with self._lock:
-			if self._closed:
-				return
-			self._closed = True
-			handle, self.handle = self.handle, None
-			if handle:
-				self._silencers.abort(self._sink.mainloop, handle)
-				self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
-				try:
-					self._lib.pa_stream_set_state_callback(handle, None, None)
-					self._lib.pa_stream_disconnect(handle)
-					self._lib.pa_stream_unref(handle)
-				finally:
-					self._lib.pa_threaded_mainloop_unlock(self._sink.mainloop)
+		if self._closed:
+			return
+		self._closed = True
+		handle, self.handle = self.handle, None
+		if handle and self._sink.mainloop:
+			self._silencers.abort(self._sink.mainloop, handle)
+			self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
+			try:
+				self._lib.pa_stream_set_state_callback(handle, None, None)
+				self._lib.pa_stream_disconnect(handle)
+				self._lib.pa_stream_unref(handle)
+			finally:
+				self._lib.pa_threaded_mainloop_unlock(self._sink.mainloop)
 
 
 class PulseSink(Sink):
@@ -476,18 +482,18 @@ class PulseSink(Sink):
 		self.lib.pa_threaded_mainloop_lock(self.mainloop)
 		try:
 			self._ensureReadyContext()
-		except Exception:
+		except BaseException:
+			self.lib.pa_threaded_mainloop_unlock(self.mainloop)
 			self._cleanup()
 			raise
-		finally:
-			if self.mainloop:
-				self.lib.pa_threaded_mainloop_unlock(self.mainloop)
+		self.lib.pa_threaded_mainloop_unlock(self.mainloop)
 
 	def _ensureReadyContext(self) -> None:
 		if self.context:
 			state = self.lib.pa_context_get_state(self.context)
 			if state == PA_CONTEXT_READY:
 				return
+			self.lib.pa_context_set_state_callback(self.context, None, None)
 			self.lib.pa_context_disconnect(self.context)
 			self.lib.pa_context_unref(self.context)
 			self.context = None
@@ -499,6 +505,9 @@ class PulseSink(Sink):
 		self.lib.pa_context_set_state_callback(self.context, self._contextCallback, None)
 
 		if self.lib.pa_context_connect(self.context, None, PA_CONTEXT_NOAUTOSPAWN, None) < 0:
+			self.lib.pa_context_set_state_callback(self.context, None, None)
+			self.lib.pa_context_unref(self.context)
+			self.context = None
 			raise NoDevice("could not connect to PulseAudio daemon")
 
 		while True:
@@ -506,6 +515,10 @@ class PulseSink(Sink):
 			if state == PA_CONTEXT_READY:
 				break
 			if state in (PA_CONTEXT_FAILED, PA_CONTEXT_TERMINATED):
+				self.lib.pa_context_set_state_callback(self.context, None, None)
+				self.lib.pa_context_disconnect(self.context)
+				self.lib.pa_context_unref(self.context)
+				self.context = None
 				raise NoDevice("PulseAudio daemon connection failed or terminated")
 			self.lib.pa_threaded_mainloop_wait(self.mainloop)
 
@@ -513,14 +526,24 @@ class PulseSink(Sink):
 		self.lib.pa_threaded_mainloop_signal(self.mainloop, 0)
 
 	def _cleanup(self) -> None:
-		if getattr(self, "context", None) and self.lib:
-			self.lib.pa_context_disconnect(self.context)
-			self.lib.pa_context_unref(self.context)
-			self.context = None
 		if getattr(self, "mainloop", None) and self.lib:
+			if getattr(self, "context", None):
+				self.lib.pa_threaded_mainloop_lock(self.mainloop)
+				try:
+					self.lib.pa_context_set_state_callback(self.context, None, None)
+					self.lib.pa_context_disconnect(self.context)
+					self.lib.pa_context_unref(self.context)
+					self.context = None
+				finally:
+					self.lib.pa_threaded_mainloop_unlock(self.mainloop)
 			self.lib.pa_threaded_mainloop_stop(self.mainloop)
 			self.lib.pa_threaded_mainloop_free(self.mainloop)
 			self.mainloop = None
+		elif getattr(self, "context", None) and self.lib:
+			self.lib.pa_context_set_state_callback(self.context, None, None)
+			self.lib.pa_context_disconnect(self.context)
+			self.lib.pa_context_unref(self.context)
+			self.context = None
 
 	def openStream(self, deviceId: str, fmt: StreamFormat, wake: Callable[[], None]) -> SinkStream:
 		pulseFormat = _toPulseFormat(fmt)
@@ -528,6 +551,7 @@ class PulseSink(Sink):
 
 		targetSink = deviceId.encode() if deviceId else None
 
+		streamHandle = None
 		self.lib.pa_threaded_mainloop_lock(self.mainloop)
 		try:
 			self._ensureReadyContext()
@@ -559,7 +583,6 @@ class PulseSink(Sink):
 				streamHandle, targetSink, ctypes.byref(attr), flags, None, None
 			)
 			if res < 0:
-				self.lib.pa_stream_unref(streamHandle)
 				raise OSError(errno.EIO, f"PulseAudio connect playback failed: {res}")
 
 			while True:
@@ -567,9 +590,14 @@ class PulseSink(Sink):
 				if state == PA_STREAM_READY:
 					break
 				if state in (PA_STREAM_FAILED, PA_STREAM_TERMINATED):
-					self.lib.pa_stream_unref(streamHandle)
 					raise NoDevice("PulseAudio stream failed to initialize")
 				self.lib.pa_threaded_mainloop_wait(self.mainloop)
+		except BaseException:
+			if streamHandle:
+				self.lib.pa_stream_set_state_callback(streamHandle, None, None)
+				self.lib.pa_stream_disconnect(streamHandle)
+				self.lib.pa_stream_unref(streamHandle)
+			raise
 		finally:
 			self.lib.pa_threaded_mainloop_unlock(self.mainloop)
 
