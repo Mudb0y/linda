@@ -425,11 +425,19 @@ def _terminate() -> None:
 
 
 def _outputName(kind: str) -> str:
-	return "PipeWire" if kind == "pipewire" else f"the {kind} sink"
+	if kind == "pipewire":
+		return "PipeWire"
+	if kind == "pulse":
+		return "PulseAudio"
+	return f"the {kind} sink"
 
 
 def _outputPhrase(kind: str) -> str:
-	return "through PipeWire" if kind == "pipewire" else f"into the {kind} sink"
+	if kind == "pipewire":
+		return "through PipeWire"
+	if kind == "pulse":
+		return "through PulseAudio"
+	return f"into the {kind} sink"
 
 
 def _speak(run: _Run, arguments: list[str]) -> tuple[int, str | None]:

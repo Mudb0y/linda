@@ -156,6 +156,14 @@ def _wireplumberBin(value: str) -> None:
 	_program(_directory(value), "wireplumber")
 
 
+def _pulseaudioBin(value: str) -> None:
+	_program(_directory(value), "pulseaudio")
+
+
+def _pulseLib(value: str) -> None:
+	assert _elfFile(value).name == "libpulse.so.0", value
+
+
 def _qt6PluginPath(value: str) -> None:
 	# Without the xcb platform plugin a Qt program aborts before it opens a window.
 	_holds(_directory(value), "platforms/libqxcb.so")
@@ -307,6 +315,8 @@ SHELL_VARIABLES: dict[str, Callable[[str], None]] = {
 	"LINDA_OPENEVV_DRIVER_DIR": _openevvDriverDir,
 	"LINDA_PIPEWIRE_BIN": _pipewireBin,
 	"LINDA_WIREPLUMBER_BIN": _wireplumberBin,
+	"LINDA_PULSEAUDIO_BIN": _pulseaudioBin,
+	"LINDA_PULSE_LIB": _pulseLib,
 	"LINDA_PWSINK_LIB": _pwsinkLib,
 	"LINDA_PWMON": _pwmon,
 	"LINDA_VBUF_LIB": _vbufLib,
@@ -391,7 +401,7 @@ def test_noPipewireOrWireplumberProgramIsOnPath(searchPath: str):
 	]
 	assert not fromSoundPackages, f"on {searchPath}: {fromSoundPackages}"
 	programs = set(OTHER_SOUND_PROGRAMS)
-	for variable in ("LINDA_PIPEWIRE_BIN", "LINDA_WIREPLUMBER_BIN"):
+	for variable in ("LINDA_PIPEWIRE_BIN", "LINDA_WIREPLUMBER_BIN", "LINDA_PULSEAUDIO_BIN"):
 		programs.update(os.listdir(os.environ[variable]))
 	found = {
 		name: where for name in sorted(programs) if (where := shutil.which(name, path=os.environ[searchPath]))

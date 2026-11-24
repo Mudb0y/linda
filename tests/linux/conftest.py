@@ -11,6 +11,7 @@ import harness
 import network
 import pytest
 from pipewireFixture import runningPipewire  # noqa: F401
+from pulseFixture import runningPulse  # noqa: F401
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:

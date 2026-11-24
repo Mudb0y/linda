@@ -1,0 +1,5 @@
+# PulseAudio configuration for Linda test rig
+load-module module-native-protocol-unix auth-anonymous=1 socket=@SOCKET@
+load-module module-null-sink sink_name=rig-sink-a sink_properties=device.description=rig-sink-a
+load-module module-null-sink sink_name=rig-sink-b sink_properties=device.description=rig-sink-b
+set-default-sink rig-sink-a
