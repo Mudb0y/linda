@@ -20,9 +20,13 @@ from typing import NoReturn
 
 #: What a caller sends, and what the running copy answers once it has acted.
 REQUEST = b"take-keyboard\n"
-REPLY = b"taken\n"
-#: What the running copy answers when taking the keyboard back raised.
+REPLY_TAKEN = b"taken\n"
+REPLY_OK = b"ok\n"
+#: For backwards compatibility with take-keyboard callers
+REPLY = REPLY_TAKEN
+#: What the running copy answers when a request failed or was rejected.
 FAILED_REPLY = b"failed\n"
+ACCEPTED_REPLIES = (REPLY_TAKEN, REPLY_OK)
 #: Seconds the caller waits for the answer, from its first attempt to connect.
 ANSWER_TIMEOUT = 2.0
 #: Seconds a connection that has not sent the whole request is kept.
@@ -37,6 +41,36 @@ _UCRED = struct.Struct("iII")
 _lockPaths: list[str] = []
 _listeners: list["_Listener"] = []
 _connections: set["_Connection"] = set()
+_pendingAddons: list[str] = []
+_installingAddon = False
+
+
+def queueAddonInstall(path: str) -> None:
+	"""Queue an add-on installation sequentially to prevent modal dialog collisions."""
+	_pendingAddons.append(path)
+	_processNextAddon()
+
+
+def _processNextAddon() -> None:
+	global _installingAddon
+	if _installingAddon or not _pendingAddons:
+		return
+	_installingAddon = True
+	path = _pendingAddons.pop(0)
+	try:
+		from gui import addonGui
+
+		addonGui.handleRemoteAddonInstall(path)
+	except Exception:
+		from logHandler import log
+
+		log.exception("Error handling add-on installation for %s", path)
+	finally:
+		_installingAddon = False
+		if _pendingAddons:
+			import wx
+
+			wx.CallAfter(_processNextAddon)
 
 
 def socketPath(lockPath: str) -> str:
@@ -195,18 +229,18 @@ class _Connection:
 
 		if self._received.startswith(b"install-addon "):
 			path = self._received.removeprefix(b"install-addon ").rstrip(b"\r\n").decode("utf-8", errors="replace")
+			path = os.path.abspath(path)
 			from utils.security import isLockScreenModeActive, isRunningOnSecureDesktop
 
-			if isRunningOnSecureDesktop() or isLockScreenModeActive():
-				log.debugWarning("Add-on installation rejected: secure desktop or lock screen active")
+			if isRunningOnSecureDesktop() or isLockScreenModeActive() or not os.path.isfile(path):
+				log.debugWarning(f"Add-on installation rejected for {path}")
 				reply = FAILED_REPLY
 			else:
 				import wx
-				from gui import addonGui
 
 				log.info("Requesting installation of add-on from %s", path)
-				wx.CallAfter(addonGui.handleRemoteAddonInstall, path)
-				reply = REPLY
+				wx.CallAfter(queueAddonInstall, path)
+				reply = REPLY_OK
 			try:
 				self._socket.send(reply)
 			except OSError:
@@ -286,7 +320,7 @@ def ask(paths: list[str], timeout: float = ANSWER_TIMEOUT, request: bytes = REQU
 		answer within timeout; UNREACHABLE when no path took a connection.
 	"""
 	deadline = time.monotonic() + timeout
-	maxReplyLen = max(len(REPLY), len(FAILED_REPLY))
+	maxReplyLen = max(len(r) for r in (*ACCEPTED_REPLIES, FAILED_REPLY))
 	for path in paths:
 		if (remaining := deadline - time.monotonic()) <= 0:
 			return NO_ANSWER
@@ -316,7 +350,7 @@ def ask(paths: list[str], timeout: float = ANSWER_TIMEOUT, request: bytes = REQU
 					reply += chunk
 			except OSError:
 				return NO_ANSWER
-			if reply == REPLY:
+			if reply in ACCEPTED_REPLIES:
 				return ANSWERED
 			return FAILED if reply == FAILED_REPLY else NO_ANSWER
 		finally:

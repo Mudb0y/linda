@@ -39,44 +39,45 @@ class TestAddonMimeAndDesktop(unittest.TestCase):
 		self.assertIn("MimeType=application/x-nvda-addon;", lines)
 
 
-class TestCliNormalization(unittest.TestCase):
+class TestAddonArgExtraction(unittest.TestCase):
 	@staticmethod
-	def _normalize(argv: list[str]) -> list[str]:
-		normalized = [argv[0]]
-		for i, arg in enumerate(argv[1:], start=1):
-			if arg.lower().endswith(".nvda-addon") and argv[i - 1] != "--install-addon":
-				normalized.extend(["--install-addon", arg])
+	def _extractAddons(
+		appArgsInstallAddons: list[str] | None, unknownArgs: list[str]
+	) -> tuple[list[str], list[str]]:
+		installAddons = list(appArgsInstallAddons or [])
+		remainingUnknown = []
+		for arg in unknownArgs:
+			if arg.lower().endswith(".nvda-addon"):
+				installAddons.append(arg)
 			else:
-				normalized.append(arg)
-		return normalized
+				remainingUnknown.append(arg)
+		return installAddons, remainingUnknown
 
 	def test_singlePositionalAddon(self):
-		argv = ["linda", "/home/user/myaddon.nvda-addon"]
-		self.assertEqual(self._normalize(argv), ["linda", "--install-addon", "/home/user/myaddon.nvda-addon"])
+		addons, remaining = self._extractAddons(None, ["/home/user/myaddon.nvda-addon"])
+		self.assertEqual(addons, ["/home/user/myaddon.nvda-addon"])
+		self.assertEqual(remaining, [])
 
 	def test_alreadyOptionPrefixed(self):
-		argv = ["linda", "--install-addon", "/home/user/myaddon.nvda-addon"]
-		self.assertEqual(self._normalize(argv), argv)
+		addons, remaining = self._extractAddons(["/home/user/myaddon.nvda-addon"], [])
+		self.assertEqual(addons, ["/home/user/myaddon.nvda-addon"])
+		self.assertEqual(remaining, [])
 
-	def test_multipleAddons(self):
-		argv = ["linda", "a.nvda-addon", "b.NVDA-ADDON"]
-		self.assertEqual(
-			self._normalize(argv),
-			["linda", "--install-addon", "a.nvda-addon", "--install-addon", "b.NVDA-ADDON"],
+	def test_multipleAddonsMixed(self):
+		addons, remaining = self._extractAddons(
+			["flagged.nvda-addon"],
+			["positional1.nvda-addon", "--other-unknown", "positional2.NVDA-ADDON"],
 		)
-
-	def test_mixedArguments(self):
-		argv = ["linda", "--debug-logging", "-c", "/etc/linda", "pack.nvda-addon"]
 		self.assertEqual(
-			self._normalize(argv),
-			["linda", "--debug-logging", "-c", "/etc/linda", "--install-addon", "pack.nvda-addon"],
+			addons,
+			["flagged.nvda-addon", "positional1.nvda-addon", "positional2.NVDA-ADDON"],
 		)
+		self.assertEqual(remaining, ["--other-unknown"])
 
-	def test_normalLaunchWithoutAddon(self):
-		argv = ["linda"]
-		self.assertEqual(self._normalize(argv), ["linda"])
-		argvWithFlags = ["linda", "-r"]
-		self.assertEqual(self._normalize(argvWithFlags), ["linda", "-r"])
+	def test_noAddonsLeavesUnknownUntouched(self):
+		addons, remaining = self._extractAddons(None, ["--some-flag", "some-value"])
+		self.assertEqual(addons, [])
+		self.assertEqual(remaining, ["--some-flag", "some-value"])
 
 
 class TestArgsParsing(unittest.TestCase):
@@ -143,24 +144,54 @@ class TestControlSocketAddonIpc(unittest.TestCase):
 		conn._received = f"install-addon {addonPath}\n".encode()
 
 		mockWx = MagicMock()
-		mockGui = MagicMock()
 		mockSecurity = MagicMock()
 		mockSecurity.isLockScreenModeActive.return_value = False
 		mockSecurity.isRunningOnSecureDesktop.return_value = False
 
-		with patch.dict(
-			"sys.modules",
-			{
-				"logHandler": MagicMock(),
-				"wx": mockWx,
-				"gui": mockGui,
-				"utils": MagicMock(),
-				"utils.security": mockSecurity,
-			},
+		with (
+			patch.dict(
+				"sys.modules",
+				{
+					"logHandler": MagicMock(),
+					"wx": mockWx,
+					"utils": MagicMock(),
+					"utils.security": mockSecurity,
+				},
+			),
+			patch("os.path.isfile", return_value=True),
 		):
 			conn._answer()
-			conn._socket.send.assert_called_once_with(controlSocket.REPLY)
-			mockWx.CallAfter.assert_called_once_with(mockGui.addonGui.handleRemoteAddonInstall, addonPath)
+			conn._socket.send.assert_called_once_with(controlSocket.REPLY_OK)
+			mockWx.CallAfter.assert_called_once_with(
+				controlSocket.queueAddonInstall, os.path.abspath(addonPath)
+			)
+
+	def test_answerRejectsNonexistentFile(self):
+		from linuxPlatform import controlSocket
+
+		conn = controlSocket._Connection.__new__(controlSocket._Connection)
+		conn._socket = MagicMock()
+		conn._socket.recv.return_value = b""
+		addonPath = "/nonexistent/addon.nvda-addon"
+		conn._received = f"install-addon {addonPath}\n".encode()
+
+		mockSecurity = MagicMock()
+		mockSecurity.isLockScreenModeActive.return_value = False
+		mockSecurity.isRunningOnSecureDesktop.return_value = False
+
+		with (
+			patch.dict(
+				"sys.modules",
+				{
+					"logHandler": MagicMock(),
+					"utils": MagicMock(),
+					"utils.security": mockSecurity,
+				},
+			),
+			patch("os.path.isfile", return_value=False),
+		):
+			conn._answer()
+			conn._socket.send.assert_called_once_with(controlSocket.FAILED_REPLY)
 
 	def test_answerRejectsUnderLockScreen(self):
 		from linuxPlatform import controlSocket
@@ -168,22 +199,79 @@ class TestControlSocketAddonIpc(unittest.TestCase):
 		conn = controlSocket._Connection.__new__(controlSocket._Connection)
 		conn._socket = MagicMock()
 		conn._socket.recv.return_value = b""
+		addonPath = "/tmp/sample.nvda-addon"
 		conn._received = b"install-addon /tmp/sample.nvda-addon\n"
 
 		mockSecurity = MagicMock()
 		mockSecurity.isLockScreenModeActive.return_value = True
 		mockSecurity.isRunningOnSecureDesktop.return_value = False
 
-		with patch.dict(
-			"sys.modules",
-			{
-				"logHandler": MagicMock(),
-				"utils": MagicMock(),
-				"utils.security": mockSecurity,
-			},
+		with (
+			patch.dict(
+				"sys.modules",
+				{
+					"logHandler": MagicMock(),
+					"utils": MagicMock(),
+					"utils.security": mockSecurity,
+				},
+			),
+			patch("os.path.isfile", return_value=True),
 		):
 			conn._answer()
 			conn._socket.send.assert_called_once_with(controlSocket.FAILED_REPLY)
+
+	def test_queueAddonInstallSequential(self):
+		from linuxPlatform import controlSocket
+
+		controlSocket._pendingAddons.clear()
+		controlSocket._installingAddon = False
+
+		calls = []
+		mockWx = MagicMock()
+		mockAddonGui = MagicMock()
+
+		def fakeHandleInstall(path):
+			calls.append(path)
+			# While the first install is running, simulate another queueAddonInstall call
+			if path == "/tmp/1.nvda-addon":
+				controlSocket.queueAddonInstall("/tmp/2.nvda-addon")
+
+		mockAddonGui.handleRemoteAddonInstall.side_effect = fakeHandleInstall
+
+		with patch.dict(
+			"sys.modules",
+			{
+				"wx": mockWx,
+				"gui": MagicMock(addonGui=mockAddonGui),
+				"gui.addonGui": mockAddonGui,
+			},
+		):
+			controlSocket.queueAddonInstall("/tmp/1.nvda-addon")
+			self.assertEqual(calls, ["/tmp/1.nvda-addon"])
+			# The second add-on should be queued in _pendingAddons and wx.CallAfter should be requested
+			self.assertEqual(controlSocket._pendingAddons, ["/tmp/2.nvda-addon"])
+			mockWx.CallAfter.assert_called_with(controlSocket._processNextAddon)
+
+			# Process the next add-on
+			controlSocket._processNextAddon()
+			self.assertEqual(calls, ["/tmp/1.nvda-addon", "/tmp/2.nvda-addon"])
+			self.assertEqual(controlSocket._pendingAddons, [])
+
+	def test_askAcceptsAcceptedReplies(self):
+		import socket
+		from linuxPlatform import controlSocket
+
+		for reply in (controlSocket.REPLY_TAKEN, controlSocket.REPLY_OK):
+			mockSocket = MagicMock()
+			mockSocket.recv.side_effect = [reply, b""]
+			with (
+				patch.object(socket, "AF_UNIX", 1, create=True),
+				patch.object(socket, "SOCK_CLOEXEC", 0, create=True),
+				patch("socket.socket", return_value=mockSocket),
+				patch("time.monotonic", side_effect=[0.0, 0.1, 0.2, 0.3]),
+			):
+				outcome = controlSocket.ask(["/dummy.socket"])
+				self.assertEqual(outcome, controlSocket.ANSWERED)
 
 
 if __name__ == "__main__":
