@@ -589,3 +589,49 @@ def test_controlledComputerTypesKeysThatArriveTogether(desktop: DesktopSession, 
 	finally:
 		launch = controlled.close()
 	launch.assertClean(logNames=("nvda.log",))
+
+
+def test_parseCallsKeyHandlerWithoutMainThread(tmp_path: Path):
+	"""TCPTransport.parse dispatches RemoteMessageType.KEY directly on its reader thread rather
+	than queuing through wx.CallAfter, while other message types still use wx.CallAfter (issue 40)."""
+	code = """
+import NVDAHelper  # noqa: F401
+import wx
+from _remoteClient.protocol import RemoteMessageType
+from _remoteClient.serializer import JSONSerializer
+from _remoteClient.transport import TCPTransport
+
+serializer = JSONSerializer()
+transport = TCPTransport(serializer=serializer, address=("127.0.0.1", 0))
+receivedKeys = []
+receivedOther = []
+queued = []
+# extensionPoints.Action holds handlers weakly, so keep local references alive for parse().
+onKey = lambda **kw: receivedKeys.append(kw)
+onOther = lambda **kw: receivedOther.append(kw)
+transport.registerInbound(RemoteMessageType.KEY, onKey)
+transport.registerInbound(RemoteMessageType.PROTOCOL_VERSION, onOther)
+
+originalCallAfter = wx.CallAfter
+wx.CallAfter = lambda fn, *args, **kwargs: queued.append((fn, args, kwargs))
+try:
+	transport.parse(
+		serializer.serialize(
+			type=RemoteMessageType.KEY, vk_code=40, extended=False, pressed=True, scan_code=116
+		)
+	)
+	transport.parse(serializer.serialize(type=RemoteMessageType.PROTOCOL_VERSION, version=2))
+finally:
+	wx.CallAfter = originalCallAfter
+
+result = {
+	"keys": receivedKeys,
+	"other": receivedOther,
+	"queuedCount": len(queued),
+}
+"""
+	done = harness.runChild(tmp_path, code, timeout=60)
+	assert done.error is None, f"{done.error}\n{done.stderr[-4000:]}"
+	assert done.value["keys"] == [{"vk_code": 40, "extended": False, "pressed": True, "scan_code": 116}]
+	assert done.value["other"] == []
+	assert done.value["queuedCount"] == 1

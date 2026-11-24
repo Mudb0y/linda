@@ -563,6 +563,16 @@ class TCPTransport(Transport):
 		if not extensionPoint:
 			log.warning(f"Received message with unhandled type: {messageType} {obj!r}")
 			return
+		if sys.platform != "win32" and messageType is RemoteMessageType.KEY:
+			# A key goes to the keyboard from this reader thread instead of waiting for the main
+			# thread: that one may be busy for seconds with a dialog or a script, and a key it types
+			# stays down all that time. On a Linux follower the X server then repeats it into the
+			# application, and one press of the other computer arrives there many times.
+			# The key source takes keys through its own thread-safe queue, and this thread keeps
+			# them in the order they came. What releases a leader's keys on its leaving is handled
+			# on the main thread, so it still comes after every key that came before it.
+			extensionPoint.notify(**obj)
+			return
 		wx.CallAfter(extensionPoint.notify, **obj)
 
 	def sendQueue(self) -> None:

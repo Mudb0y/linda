@@ -213,7 +213,9 @@ source/_remoteClient/transport.py
   Linux runtime: an outbound connection gets the same TCP keep-alive as on
   Windows, on with the first probe after 60 s idle, then every 2 s, and 10
   probes, through setsockopt, as socket.ioctl and SIO_KEEPALIVE_VALS exist
-  only on Windows
+  only on Windows. TCPTransport.parse calls RemoteMessageType.KEY handlers
+  directly on its reader thread so a busy main thread does not delay key
+  releases into XKB autorepeat
 source/_remoteClient/urlHandler.py
   every platform: winreg comes from linuxPlatform.windowsOnly. The one
   annotation that names winreg.HKEYType is quoted, as the stand-in refuses
