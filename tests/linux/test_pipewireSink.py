@@ -1956,3 +1956,134 @@ def test_nvdasSoundsAreHeardAtTheirLevelAndARepeatStartsAtOnce(pipewire: Pipewir
 	starts = [(monitor.soundAfter(start) - start - leadNs) / MS for start in value["repeats"]]
 	report("repeated error.wav, call to sound, ms", summary(starts[1:]))
 	assert max(starts[1:]) < quantumMs(512) + 5
+
+
+def _hasSoundBetween(monitor, start: int, end: int) -> bool:
+	return any(start <= e["graph_ns"] <= end for e in monitor.eventsOf("sound"))
+
+
+def test_devicesListsAudioSinksAndFollowsHotplug(pipewire: PipewireFixture, tmp_path: Path):
+	"""PipewireSink.devices lists Audio/Sink nodes by node.name and node.description, mmdevice
+	presents them beside NVDA's default output device, and sinks added or removed appear and leave
+	the list (issue 31)."""
+	actions = {
+		"create": lambda: pipewire.createSink("rig-sink-c"),
+		"remove": lambda: pipewire.removeSink("rig-sink-c"),
+	}
+	with Steps(tmp_path / "steps", actions) as steps:
+		value = runPipewireChild(
+			tmp_path,
+			"""
+			from utils import mmdevice
+
+			def waitDevices(predicate):
+				deadline = time.monotonic() + 5
+				while time.monotonic() < deadline:
+					devs = sink.devices()
+					if predicate({devId for devId, _ in devs}):
+						return devs
+					time.sleep(0.02)
+				raise AssertionError(f"devices never matched predicate: {sink.devices()!r}")
+
+			initial = waitDevices(lambda ids: {"rig-sink-a", "rig-sink-b"} <= ids)
+			listed = [(d.id, d.friendlyName) for d in mmdevice.getOutputDevices(includeDefault=True)]
+			ask("create")
+			added = waitDevices(lambda ids: "rig-sink-c" in ids)
+			ask("remove")
+			removed = waitDevices(lambda ids: "rig-sink-c" not in ids)
+			result = dict(initial=initial, listed=listed, added=added, removed=removed)
+			""",
+			{**pipewire.childEnv(), **steps.env()},
+		)
+	initial = dict(value["initial"])
+	assert "rig-sink-a" in initial and "rig-sink-b" in initial, value["initial"]
+	assert all(devId and name for devId, name in value["initial"]), value["initial"]
+	assert value["listed"][0][0] == "default", value["listed"]
+	assert [list(pair) for pair in value["initial"]] == value["listed"][1:], value["listed"]
+	assert ("rig-sink-c", "rig-sink-c") in [tuple(p) for p in value["added"]], value["added"]
+	assert "rig-sink-c" not in dict(value["removed"]), value["removed"]
+
+
+def test_chosenDeviceFallsBackToDefaultWhenRemovedAndReturnsWhenReplugged(
+	pipewire: PipewireFixture,
+	tmp_path: Path,
+):
+	"""A stream opened for a chosen sink plays there while present, falls back to the default sink
+	when that device disappears without silencing speech, and returns to it if it comes back
+	(issue 31)."""
+	pipewire.setQuantum(512)
+	monitorA = pipewire.monitor()
+	monitorB = pipewire.monitor("rig-sink-b")
+	monitors = {"beforeB": monitorB}
+
+	def remove() -> None:
+		pipewire.removeSink("rig-sink-b")
+
+	def replug() -> None:
+		pipewire.createSink("rig-sink-b")
+		monitors["afterB"] = pipewire.monitor("rig-sink-b")
+
+	actions = {"remove": remove, "replug": replug}
+	with Steps(tmp_path / "steps", actions) as steps:
+		value = runPipewireChild(
+			tmp_path,
+			"""
+			data = tone(SPEECH, 0.25)
+
+			def waitPresence(present):
+				deadline = time.monotonic() + 5
+				while time.monotonic() < deadline:
+					ids = {devId for devId, _ in sink.devices()}
+					if ("rig-sink-b" in ids) == present:
+						# Give the loop thread and WirePlumber a moment to attach the new link.
+						time.sleep(0.15)
+						return
+					time.sleep(0.02)
+				raise AssertionError(f"rig-sink-b presence != {present}: {sink.devices()!r}")
+
+			def play(s):
+				start = mono()
+				s.write(data)
+				s.start()
+				waitPlayed(s, len(data) // SPEECH.blockAlign)
+				s.stop()
+				end = mono()
+				time.sleep(0.15)
+				return dict(start=start, end=end)
+
+			stream = sink.openStream("rig-sink-b", SPEECH, lambda: None)
+			before = play(stream)
+
+			ask("remove")
+			waitPresence(False)
+			stream.reset()
+			fallbackSame = play(stream)
+			fresh = sink.openStream("rig-sink-b", SPEECH, lambda: None)
+			fallbackNew = play(fresh)
+			fresh.close()
+
+			ask("replug")
+			waitPresence(True)
+			stream.reset()
+			replugged = play(stream)
+			stream.close()
+			result = dict(
+				before=before,
+				fallbackSame=fallbackSame,
+				fallbackNew=fallbackNew,
+				replugged=replugged,
+			)
+			""",
+			{**pipewire.childEnv(), **steps.env()},
+		)
+	assert monitors["beforeB"].soundAfter(value["before"]["start"]) < value["before"]["end"], (
+		"not heard on rig-sink-b before removal"
+	)
+	assert not _hasSoundBetween(monitorA, value["before"]["start"], value["before"]["end"])
+	for label in ("fallbackSame", "fallbackNew"):
+		span = value[label]
+		assert monitorA.soundAfter(span["start"]) < span["end"], f"{label} did not fall back to default"
+	assert monitors["afterB"].soundAfter(value["replugged"]["start"]) < value["replugged"]["end"], (
+		"not heard back on rig-sink-b after replug"
+	)
+	assert not _hasSoundBetween(monitorA, value["replugged"]["start"], value["replugged"]["end"])

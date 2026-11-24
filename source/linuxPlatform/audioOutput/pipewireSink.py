@@ -28,6 +28,10 @@ from . import BUFFER_MS, Sink, SinkStream, StreamFormat, checkGain
 LIBRARY_VARIABLE = "LINDA_PWSINK_LIB"
 
 
+class _PwsinkDevice(ctypes.Structure):
+	_fields_ = [("id", ctypes.c_char_p), ("name", ctypes.c_char_p)]
+
+
 class _Silencers:
 	"""pwsink_stop and pwsink_abort, called without letting go of the GIL.
 
@@ -85,6 +89,10 @@ def _load() -> tuple[ctypes.CDLL, _Silencers]:
 	lib.pwsink_set_pool_limits.argtypes = [ctypes.c_uint64, ctypes.c_uint64]
 	lib.pwsink_block_loop.restype = None
 	lib.pwsink_block_loop.argtypes = [ctypes.c_uint64]
+	lib.pwsink_devices.restype = ctypes.POINTER(_PwsinkDevice)
+	lib.pwsink_devices.argtypes = [ctypes.POINTER(ctypes.c_size_t)]
+	lib.pwsink_free_devices.restype = None
+	lib.pwsink_free_devices.argtypes = [ctypes.POINTER(_PwsinkDevice), ctypes.c_size_t]
 	return lib, _Silencers(lib)
 
 
@@ -166,9 +174,18 @@ class PipewireSink(Sink):
 		return PipewireStream(self.lib, self._silencers, handle, fmt)
 
 	def devices(self) -> list[tuple[str, str]]:
-		# Only the default device, which nvwave lists itself. WirePlumber moves the streams when the
-		# default changes.
-		return []
+		count = ctypes.c_size_t(0)
+		entries = self.lib.pwsink_devices(ctypes.byref(count))
+		if not entries:
+			return []
+		try:
+			return [
+				(entries[i].id.decode("utf-8", "replace"), entries[i].name.decode("utf-8", "replace"))
+				for i in range(count.value)
+				if entries[i].id and entries[i].name
+			]
+		finally:
+			self.lib.pwsink_free_devices(entries, count.value)
 
 	def keepAwakeFor(self, deviceId: str, ms: int, noiseVolume: float) -> None:
 		if noiseVolume > 0 and not self._noiseNoted:

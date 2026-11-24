@@ -320,3 +320,68 @@ pub extern "C" fn pwsink_block_loop(ms: u64) {
         engine.block_loop(ms);
     }
 }
+
+/// An output sink known to PipeWire, with heap-allocated strings freed by pwsink_free_devices.
+#[repr(C)]
+pub struct PwsinkDevice {
+    pub id: *mut c_char,
+    pub name: *mut c_char,
+}
+
+/// PipeWire's current output sinks, as an array of *count PwsinkDevice entries whose strings and
+/// array must be freed with pwsink_free_devices. Returns null when empty, offline or count is
+/// null, without waiting for PipeWire or the connection thread.
+///
+/// # Safety
+/// count must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pwsink_devices(count: *mut usize) -> *mut PwsinkDevice {
+    if count.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: caller guarantees count is writable.
+    unsafe { *count = 0 };
+    let Ok(engine) = engine() else {
+        return std::ptr::null_mut();
+    };
+    let entries: Vec<PwsinkDevice> = engine
+        .devices()
+        .into_iter()
+        .filter_map(|(id, name)| {
+            Some(PwsinkDevice {
+                id: CString::new(id).ok()?.into_raw(),
+                name: CString::new(name).ok()?.into_raw(),
+            })
+        })
+        .collect();
+    if entries.is_empty() {
+        return std::ptr::null_mut();
+    }
+    let boxed = entries.into_boxed_slice();
+    // SAFETY: caller guarantees count is writable.
+    unsafe { *count = boxed.len() };
+    Box::into_raw(boxed) as *mut PwsinkDevice
+}
+
+/// Frees an array returned by pwsink_devices.
+///
+/// # Safety
+/// devices and count must come from one pwsink_devices call and must not already have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pwsink_free_devices(devices: *mut PwsinkDevice, count: usize) {
+    if devices.is_null() || count == 0 {
+        return;
+    }
+    // SAFETY: boxed slice and CStrings were allocated in pwsink_devices with this length.
+    unsafe {
+        let boxed = Box::from_raw(std::ptr::slice_from_raw_parts_mut(devices, count));
+        for entry in boxed.iter() {
+            if !entry.id.is_null() {
+                drop(CString::from_raw(entry.id));
+            }
+            if !entry.name.is_null() {
+                drop(CString::from_raw(entry.name));
+            }
+        }
+    }
+}
