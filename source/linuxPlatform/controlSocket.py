@@ -1,8 +1,9 @@
-"""Asking the running copy to take the keyboard back from outside it, as linda --take-keyboard does.
+"""Asking the running copy to take the keyboard back or install an add-on from outside it.
 
 After the emergency chord NVDA has no keys, so none of its own commands can be pressed to ask. The
 running copy listens on a Unix socket beside each of its locks and answers from the main loop, so a
 copy whose main loop is stuck never answers, and the caller says so instead of reporting success.
+Add-ons opened from file managers are also dispatched through this socket to the running copy.
 Nothing is ever signalled: a copy from before this socket existed would end on any signal it does
 not catch.
 
@@ -158,15 +159,15 @@ class _Connection:
 		from gi.repository import GLib
 
 		try:
-			data = self._socket.recv(len(REQUEST) - len(self._received))
+			data = self._socket.recv(4096)
 		except BlockingIOError:
 			return GLib.SOURCE_CONTINUE
 		except OSError:
 			data = b""
 		self._received += data
-		if data and self._received != REQUEST and REQUEST.startswith(self._received):
+		if data and b"\n" not in self._received and len(self._received) < 4096:
 			return GLib.SOURCE_CONTINUE
-		if self._received == REQUEST:
+		if self.hasRequest():
 			self._answer()
 		self._watch = None
 		self.close()
@@ -182,12 +183,35 @@ class _Connection:
 	def hasRequest(self) -> bool:
 		"""Whether the whole request has come, reading what is there without waiting for more."""
 		try:
-			self._received += self._socket.recv(len(REQUEST) - len(self._received))
+			self._received += self._socket.recv(4096)
 		except OSError:
 			pass
-		return self._received == REQUEST
+		return self._received == REQUEST or (
+			self._received.startswith(b"install-addon ") and self._received.endswith(b"\n")
+		)
 
 	def _answer(self) -> None:
+		from logHandler import log
+
+		if self._received.startswith(b"install-addon "):
+			path = self._received.removeprefix(b"install-addon ").rstrip(b"\r\n").decode("utf-8", errors="replace")
+			from utils.security import isLockScreenModeActive, isRunningOnSecureDesktop
+
+			if isRunningOnSecureDesktop() or isLockScreenModeActive():
+				log.debugWarning("Add-on installation rejected: secure desktop or lock screen active")
+				reply = FAILED_REPLY
+			else:
+				import wx
+				from gui import addonGui
+
+				log.info("Requesting installation of add-on from %s", path)
+				wx.CallAfter(addonGui.handleRemoteAddonInstall, path)
+				reply = REPLY
+			try:
+				self._socket.send(reply)
+			except OSError:
+				pass
+			return
 		from logHandler import log
 
 		from . import inputHook
@@ -255,13 +279,14 @@ _SAID = {
 }
 
 
-def ask(paths: list[str], timeout: float = ANSWER_TIMEOUT) -> str:
-	"""Ask the copy listening at the first of paths that takes a connection to take the keyboard back.
+def ask(paths: list[str], timeout: float = ANSWER_TIMEOUT, request: bytes = REQUEST) -> str:
+	"""Ask the copy listening at the first of paths that takes a connection to carry out request.
 
 	:return: ANSWERED or FAILED as it answered; NO_ANSWER when a copy took the connection but did not
 		answer within timeout; UNREACHABLE when no path took a connection.
 	"""
 	deadline = time.monotonic() + timeout
+	maxReplyLen = max(len(REPLY), len(FAILED_REPLY))
 	for path in paths:
 		if (remaining := deadline - time.monotonic()) <= 0:
 			return NO_ANSWER
@@ -279,13 +304,13 @@ def ask(paths: list[str], timeout: float = ANSWER_TIMEOUT) -> str:
 				continue
 			reply = b""
 			try:
-				caller.sendall(REQUEST)
-				while not reply.endswith(b"\n") and len(reply) <= len(FAILED_REPLY):
+				caller.sendall(request)
+				while not reply.endswith(b"\n") and len(reply) <= maxReplyLen:
 					remaining = deadline - time.monotonic()
 					if remaining <= 0:
 						return NO_ANSWER
 					caller.settimeout(remaining)
-					chunk = caller.recv(len(FAILED_REPLY))
+					chunk = caller.recv(maxReplyLen)
 					if not chunk:
 						break
 					reply += chunk

@@ -85,6 +85,11 @@ GNOME always starts Orca, so there is nothing to register there.
 .B \-\-unregister\-desktop
 Put MATE's choice of screen reader back to its defaults, Orca and off, say what was changed, and
 exit.
+.TP
+.BR \-\-install\-addon " \fIPATH\fR"
+Install the NVDA add-on package (.nvda-addon) at PATH into Linda.
+If Linda is already running, the installation request is sent to the running copy without replacing it.
+Positional arguments naming .nvda-addon files are accepted as well.
 .PP
 The options \-\-install, \-\-install\-silent, \-\-create\-portable, \-\-create\-portable\-silent,
 \-\-portable\-path, \-\-launcher, \-\-enable\-start\-on\-logon, \-\-copy\-portable\-config and

@@ -69,6 +69,13 @@ def _handOverToOutsideOption(option: str) -> NoReturn:
 	controlSocket.takeKeyboard()
 
 
+def _installAddon(path: str) -> None:
+	import wx
+	from gui import addonGui
+
+	wx.CallAfter(addonGui.handleRemoteAddonInstall, path)
+
+
 def main() -> NoReturn:
 	# Before NVDA's parser, which takes any argument it does not know and starts the screen reader anyway.
 	if sys.argv[1:2] == [SAY_COMMAND]:
@@ -126,6 +133,14 @@ def main() -> NoReturn:
 	# nvda.pyw refuses Windows versions older than 10 here. On Linux winVersion reports 0.0.0, and
 	# bootstrap.install() has already refused every platform but Linux.
 
+	normalizedArgv = [sys.argv[0]]
+	for i, arg in enumerate(sys.argv[1:], start=1):
+		if arg.lower().endswith(".nvda-addon") and sys.argv[i - 1] != "--install-addon":
+			normalizedArgv.extend(["--install-addon", arg])
+		else:
+			normalizedArgv.append(arg)
+	sys.argv = normalizedArgv
+
 	(globalVars.appArgs, globalVars.unknownAppArgs) = getParser().parse_known_args()
 	# Absolute, so that a later change of directory cannot move them.
 	for name in ("configPath", "logFileName", "portablePath"):
@@ -168,6 +183,18 @@ def main() -> NoReturn:
 			_fail(f"there is no display to start on, as the session kind is {displayServer.reason()}")
 		# wx would fail later with a line that names only X.
 		_fail("neither WAYLAND_DISPLAY nor DISPLAY names a display")
+	if appArgs.installAddons:
+		for path in appArgs.installAddons:
+			if not os.path.isfile(path):
+				_fail(f"add-on package not found: {path}")
+		if isAlreadyRunning:
+			socketPaths = [controlSocket.socketPath(p) for p in ownLockPaths]
+			for path in appArgs.installAddons:
+				absPath = os.path.abspath(path)
+				outcome = controlSocket.ask(socketPaths, request=f"install-addon {absPath}\n".encode())
+				if outcome != controlSocket.ANSWERED:
+					_fail(f"could not install {absPath} in running Linda ({outcome})")
+			sys.exit(0)
 	if isAlreadyRunning and not appArgs.easeOfAccess:
 		if appArgs.check_running:
 			sys.exit(0)
@@ -255,14 +282,15 @@ def main() -> NoReturn:
 		# From then on this copy acts on SIGTERM at once, so a copy replacing it need wait no longer.
 		for lock in instanceLocks:
 			core.postNvdaStartup.register(lock.markReady)
-		# Once there is a keyboard to take back, from the main loop that answers. Only in a Wayland session:
-		# in an X one NVDA reads keys from the X display after the emergency chord, so its own command
-		# takes the keyboard back.
-		if sessionKind == "wayland":
+		# Once there is a keyboard to take back or an add-on to install, from the main loop that answers.
+		if sessionKind != "none":
 			controlSocket.prepare(ownLockPaths)
 			core.postNvdaStartup.register(controlSocket.start)
 		# Once NVDA can speak, so that a session manager waiting for it goes on as soon as it is up.
 		core.postNvdaStartup.register(sessionClient.start)
+		if appArgs.installAddons:
+			for path in appArgs.installAddons:
+				core.postNvdaStartup.register(lambda p=os.path.abspath(path): _installAddon(p))
 		core.main()
 	except BaseException as e:
 		# As nvda.pyw does, SystemExit included: wx raises it when there is no display to open.

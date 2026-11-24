@@ -369,7 +369,8 @@ source/argsParsing.py
   where logHandler puts it on Linux, instead of %TEMP%; the help, which is
   English and never translated, says Linda where upstream's says NVDA; the
   parser also knows --register-desktop and --unregister-desktop, so that the
-  help lists them, though linda.py acts on them before parsing
+  help lists them, though linda.py acts on them before parsing; --install-addon
+  installs an add-on package
 source/audio/soundSplit.py
   Linux runtime: sound split sets other applications' volumes through
   Windows' audio session manager, and linuxPlatform implements no

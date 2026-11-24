@@ -253,6 +253,7 @@ print("; ".join(missing))
   install_data('copying.txt', install_dir: get_option('datadir') / 'linda')
   install_data('copying.txt', install_dir: get_option('datadir') / 'licenses' / 'linda')
   install_data('linux/linda.desktop', install_dir: get_option('datadir') / 'applications')
+  install_data('linux/linda-mime.xml', install_dir: get_option('datadir') / 'mime' / 'packages')
   install_data('linux/io.github.mudb0y.linda.metainfo.xml', install_dir: get_option('datadir') / 'metainfo')
   install_man('linux/linda.1', 'linux/linda-say.1')
 

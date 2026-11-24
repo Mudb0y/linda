@@ -196,16 +196,13 @@ def test_requestsQueuedWhileStoppedAreActedOnOnce(launches, tmp_path: Path, wayl
 	_quit(nvda)
 
 
-@pytest.mark.parametrize("callerDisplays", ["both", "x11Only"])
-def test_copyInAnXSessionHasNoSocket(launches, tmp_path: Path, wayland: dict[str, str], callerDisplays: str):
+def test_copyInAnXSessionHasSocket(launches, tmp_path: Path):
 	nvda = _startCopy(launches, tmp_path, "x11", {"WAYLAND_DISPLAY": None})
-	assert sorted(path.name for path in Path(_rigLockPath()).parent.glob("*.socket")) == []
-	# Whichever displays the caller was given, it hears that the copy cannot be asked, and sends nothing.
-	status, stdout, stderr, _seconds = _takeKeyboard(env=wayland if callerDisplays == "both" else None)
-	assert (status, stdout, stderr) == (1, controlSocket._SAID[controlSocket.UNREACHABLE] + "\n", "")
+	assert Path(controlSocket.socketPath(_rigLockPath())).is_socket()
+	status, stdout, stderr, _seconds = _takeKeyboard(env={"WAYLAND_DISPLAY": None})
+	assert (status, stdout, stderr) == (0, controlSocket._SAID[controlSocket.ANSWERED] + "\n", "")
 	time.sleep(0.5)
 	assert nvda.process.poll() is None
-	assert "take the keyboard back" not in nvda.text("nvda.log"), nvda.describe()
 	_quit(nvda)
 
 
