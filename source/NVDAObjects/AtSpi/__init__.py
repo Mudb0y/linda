@@ -569,17 +569,25 @@ class AtSpi(NVDAObject):
 		return super().roleText
 
 	def _get__labelText(self) -> str:
-		"""The names of the objects this one is labelled by."""
+		"""The names of the objects this one is labelled by, or their text when unnamed."""
 		c = _client()
 		labels = []
 		groups = []
 		for node in self.atspiRelations.get("labelled-by", []):
 			try:
 				name = c.name(node)
+				if not name and "Text" in c.interfaces(node):
+					# GTK 4 labels inside a GtkPopoverMenu keep their wording in AtspiText with an empty
+					# accessible name.
+					name = " ".join(c.text(node).replace("\ufffc", " ").split())
 				if name:
+					try:
+						isGroup = c.role(node) in ("panel", "filler", "grouping")
+					except NodeGone:
+						isGroup = False
 					# Qt labels each control in a group box by the box too, which NVDA already says as
 					# the focus's ancestor.
-					(groups if c.role(node) in ("panel", "filler", "grouping") else labels).append(name)
+					(groups if isGroup else labels).append(name)
 			except NodeGone:
 				continue
 		return " ".join(labels or groups)

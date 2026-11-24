@@ -414,3 +414,21 @@ def test_gtk4StatusBarAndListItems(desktop: DesktopSession, tmp_path: Path):
 	nvda.step(_press(desktop, "Down"), "Item 2 2 of 5")
 	nvda.step(lambda: nvda.gesture("NVDA+end"), "Ready")
 	nvda.exitCleanly()
+
+
+def test_gtk4ContextMenu(desktop: DesktopSession, tmp_path: Path):
+	"""GTK 4's GtkPopoverMenu items leave their accessible names empty and keep their text in
+	labelled-by labels; Linda reads the item names rather than bare menu items (issue 36)."""
+	app = _startApp(desktop, "gtk4", "GTK4 fixture")
+	nvda = Reader(desktop, tmp_path)
+	nvda.command("ready")
+	app.stdin.write("focus list\n")
+	app.stdin.flush()
+	desktop.expect("GTK 4 fixture", "Items: list Alt plus I", since=0, timeout=STARTUP_TIMEOUT)
+	nvda.settle(0)
+	nvda.step(_press(desktop, "Down"), "Item 1 1 of 5")
+	nvda.step(_press(desktop, "shift+F10"), "Cut 1 of 3")
+	nvda.step(_press(desktop, "Down"), "Copy 2 of 3")
+	nvda.step(_press(desktop, "Down"), "Paste 3 of 3")
+	nvda.step(_press(desktop, "Escape"), "Item 1 1 of 5")
+	nvda.exitCleanly()
