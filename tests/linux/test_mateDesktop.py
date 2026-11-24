@@ -279,6 +279,10 @@ def startPluma(desktop: DesktopSession, *paths: Path) -> str:
 
 
 def test_pluma(desktop: DesktopSession):
+	# Pluma's File menu lists the files Pluma has opened, which GTK keeps in the home, and the home is the
+	# whole run's: another test may have opened Pluma on a file of its own.
+	dataHome = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+	(dataHome / "recently-used.xbel").unlink(missing_ok=True)
 	folder = makeFolder(Path.home() / "pluma")
 	document = folder / "a.txt"
 	document.write_text("first line\nsecond line here\nthird\n")
@@ -467,7 +471,10 @@ def test_altTabNamesTheChoiceWithoutWaitingOnABusyProgram(tmp_path: Path):
 	try:
 		assert busy.stdout.readline() == "ready\n"
 		with DesktopSession(tmp_path / "desktop") as desktop:
-			desktop.startApp(desktop.fixture("gtkFixture"), title="Fixture window")
+			# A fixture asks for the keyboard as it says it is ready, so the terminal is started after
+			# that, or the fixture can take the keyboard back from it.
+			fixture = desktop.startApp(desktop.fixture("gtkFixture"), title="Fixture window")
+			assert fixture.stdout.readline() == "ready\n"
 			desktop.startApp(desktop.fixture("terminal"), title=TERMINAL, timeout=WINDOW_TIMEOUT)
 			desktopSession.activate(TERMINAL)
 			nvda = startNVDA(desktop, TERMINAL)

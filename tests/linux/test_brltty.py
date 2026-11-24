@@ -474,6 +474,13 @@ def test_unpluggedDisplayComesBackWithoutNvdaNoticing(
 	# BRLTTY keeps its clients while it looks for the display again, and shows what NVDA last wrote
 	# once it has found it and its own message has gone.
 	display.unplug()
+	# It finds that a serial display has gone only when a write to it fails, as reading a line that has
+	# hung up gives nothing rather than an error; so NVDA writes while the display is away.
+	desktop.press("Insert+t")
+	deadline = time.monotonic() + BRLTTY_BOUND
+	while "Write error" not in brltty.log():
+		assert time.monotonic() < deadline, f"BRLTTY did not find the display gone\n{brltty.log()[-3000:]}"
+		time.sleep(0.05)
 	time.sleep(1)
 	display.plug()
 	waitUntilShown(nvda, display, timeout=BRLTTY_BOUND)

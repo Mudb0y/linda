@@ -117,8 +117,7 @@ def assertExitedCleanly(nvda: harness.Launch, *logNames: str) -> None:
 
 def test_addonStoreWarningClosesAndTheStoreIsReadAndCloses(desktop: DesktopSession, tmp_path: Path):
 	nvda = start(desktop, storeOnConfig(tmp_path / "config"))
-	mark = openAddonStore(desktop, WARNING, WARNING_CHECK_BOX)
-	answerFetchFailure(desktop, mark)
+	openAddonStoreWarning(desktop)
 	# The warning waits for an answer, as on Windows.
 	step(desktop, "Insert+q", REFUSED)
 	# Enter on its check box presses OK, as on Windows.
@@ -126,15 +125,16 @@ def test_addonStoreWarningClosesAndTheStoreIsReadAndCloses(desktop: DesktopSessi
 	step(desktop, "control+Tab", "Installed incompatible add-ons tab selected 4 of 4")
 	step(desktop, "Escape", *AT_START)
 
-	mark = openAddonStore(desktop, WARNING, WARNING_CHECK_BOX)
-	answerFetchFailure(desktop, mark)
+	openAddonStoreWarning(desktop)
 	step(desktop, "space", "checked")
 	step(desktop, "alt+o", STORE)
 	# The store's tabs share one page on Windows, which crashed NVDA as the store was closed.
 	step(desktop, "alt+F4", *AT_START)
 
-	# Not shown again once its check box was ticked.
-	mark = openAddonStore(desktop, STORE)
+	# Not shown again once its check box was ticked. The failure box can come before the store here too.
+	mark = openAddonStore(desktop)
+	answerFetchFailure(desktop, mark)
+	desktop.expect(STORE, since=mark)
 	time.sleep(SETTLE)
 	assert not [text for text in desktop.spokenSince(mark) if text.startswith("Add-on Store Warning")]
 	desktop.close()
@@ -163,8 +163,12 @@ def test_exitDialogOverAModalDialogRestartsNVDA(desktop: DesktopSession):
 
 
 def openAddonStoreWarning(desktop: DesktopSession) -> None:
-	mark = openAddonStore(desktop, WARNING, WARNING_CHECK_BOX)
+	"""Open the store, answer its failure box and wait for the warning. The store starts its download
+	before it builds the dialog that shows the warning, so the box can come first, and the warning is
+	then spoken only once the box is answered."""
+	mark = openAddonStore(desktop)
 	answerFetchFailure(desktop, mark)
+	desktop.expect(WARNING, WARNING_CHECK_BOX, since=mark)
 
 
 def openUnsavedSettings(desktop: DesktopSession) -> None:

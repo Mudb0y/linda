@@ -393,7 +393,9 @@ source = startSource(waitForKernel=False)
 time.sleep(0.2)
 mark = len(delivered)
 keyboard.press("Insert+t")
-time.sleep(0.3)
+# Looked at as soon as NVDA has both presses: the helper holds the keyboard a second after it was asked,
+# which a fixed wait here, on top of the others, came too close to.
+keyboard.waitFor(lambda: len([e for e in delivered[mark:] if not e["up"]]) >= 2)
 before = {"kernel": source.isKernel, "events": [[e["vk"], e["nvda"]] for e in delivered[mark:] if not e["up"]]}
 windowKeys()
 delivered.clear()
