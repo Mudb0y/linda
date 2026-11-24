@@ -25,7 +25,13 @@
 //!   on the console the kernel had in front when logind first named it, and leaves the front
 //!   whenever the kernel puts another there: logind, knowing of no consoles, never says it has.
 //! - The emergency chord is looked for on each key as it is read, before the key goes anywhere.
-//! - A keyboard that vanishes has a release put in line for every key it held down.
+//! - The axes and buttons of a consumer control collection (see [`crate::keys::CONSUMER_RELS`]) on
+//!   a keyboard taken are passed on, never told to the client nor counted towards the chord. What
+//!   a keyboard reported together goes out together, in line with its keys, so that none of it
+//!   goes out before a press read before it is decided. A button down on the virtual keyboard is
+//!   released as a key is: by letting go, by its keyboard vanishing, and when the kernel says after
+//!   a loss of events that it is up.
+//! - A keyboard that vanishes has a release put in line for every key and button it held down.
 //! - A virtual keyboard that fails is destroyed, and the kernel releases what it held.
 //! - A key the client types goes out only while the helper captures for it in front, and letting go
 //!   drops every typed key still in line instead of putting it out. One it types to be decided waits
@@ -43,7 +49,7 @@ use crate::device::{Devices, Found, GrabError, InputEvent, Keyboard, ReadError, 
 use crate::keys::{
     Assessment, CHORD, EV_KEY, EV_SYN, KEY_CAPSLOCK, KEY_CNT, KEY_KP0, KEY_LEFTALT, KEY_RIGHTALT,
     KEY_SYSRQ, KeySet, LED_COMPOSE, LED_NUML, LEDS, MODIFIERS, READER_MODIFIERS, SYN_DROPPED,
-    is_virtual_key, modifies, typeable,
+    SYN_REPORT, is_consumer_control, is_virtual_key, modifies, typeable,
 };
 use crate::protocol::*;
 
@@ -165,6 +171,10 @@ struct Kbd<K> {
     /// The kernel dropped events: the rest of what was read with the loss is not dealt with, and
     /// the kernel is asked which keys are down once it has all been read.
     resync_due: bool,
+    /// The consumer control buttons whose press has been read, and whose release has not.
+    buttons: KeySet,
+    /// The consumer controls read since the last report, which go in line together at the next.
+    frame: Vec<InputEvent>,
 }
 
 /// A press or release in line for the virtual keyboard.
@@ -183,6 +193,8 @@ struct Entry {
     made_up: bool,
     /// A key the client typed, with the tag of its TYPE, of the device TYPED_DEVICE.
     tag: Option<u32>,
+    /// Not a key but a frame of consumer controls, by its number in `frames`.
+    frame: Option<u64>,
 }
 
 impl Entry {
@@ -283,6 +295,9 @@ pub struct Core<D: Devices> {
     capturing: bool,
     rescan_at: Option<Instant>,
     line: VecDeque<Entry>,
+    /// The events of each frame of consumer controls in line, by its number.
+    frames: HashMap<u64, Vec<InputEvent>>,
+    next_frame: u64,
     /// What became of each decided press until its release: true when it was passed on.
     passed: HashMap<(u32, u16), bool>,
     /// Modifiers the helper made up after a loss of events and the client passed, which are not
@@ -357,6 +372,8 @@ impl<D: Devices> Core<D> {
             capturing: false,
             rescan_at: None,
             line: VecDeque::new(),
+            frames: HashMap::new(),
+            next_frame: 0,
             passed: HashMap::new(),
             held_back: Vec::new(),
             told: VecDeque::new(),
@@ -1187,6 +1204,7 @@ impl<D: Devices> Core<D> {
             waited: false,
             made_up: false,
             tag: Some(tag),
+            frame: None,
         });
         self.advance(now);
     }
@@ -1669,6 +1687,8 @@ impl<D: Devices> Core<D> {
                         down: KeySet::new(),
                         unseen: KeySet::new(),
                         resync_due: false,
+                        buttons: KeySet::new(),
+                        frame: Vec::new(),
                     },
                 );
                 self.try_grab(f.number, now);
@@ -1828,15 +1848,18 @@ impl<D: Devices> Core<D> {
         }
     }
 
-    /// Forgets a keyboard that is gone, with a release put in line for each key it held down.
+    /// Forgets a keyboard that is gone, with a release put in line for each key and button it held
+    /// down, after the consumer controls it had reported since its last report.
     fn vanish(&mut self, n: u32, now: Instant) {
-        let Some(kbd) = self.keyboards.remove(&n) else {
+        let Some(mut kbd) = self.keyboards.remove(&n) else {
             return;
         };
         self.known.remove(&n);
+        self.enter_frame(n, std::mem::take(&mut kbd.frame), now);
         for code in kbd.down.iter() {
             self.enter(n, code, KEY_RELEASE, KEY_SYNTHETIC, now);
         }
+        self.enter_frame(n, releases(&kbd.buttons), now);
         log!("keyboard {n} ({}) is gone", kbd.name);
         let name = kbd.name.clone();
         drop(kbd);
@@ -1855,9 +1878,47 @@ impl<D: Devices> Core<D> {
         };
         match ev.kind {
             EV_SYN if ev.code == SYN_DROPPED => kbd.resync_due = true,
+            EV_SYN if ev.code == SYN_REPORT => {
+                let events = std::mem::take(&mut kbd.frame);
+                self.enter_frame(n, events, now);
+            }
+            _ if is_consumer_control(ev.kind, ev.code) => {
+                // A button as a key: a press while it is up, a release while it is down. Its
+                // repeats go nowhere, the virtual keyboard repeating what it holds by itself.
+                if ev.kind == EV_KEY {
+                    match ev.value {
+                        1 if !kbd.buttons.contains(ev.code) => kbd.buttons.insert(ev.code),
+                        0 if kbd.buttons.contains(ev.code) => kbd.buttons.remove(ev.code),
+                        _ => return,
+                    }
+                }
+                kbd.frame.push(ev);
+            }
             EV_KEY => self.key(n, ev.code, ev.value, now),
             _ => {}
         }
+    }
+
+    /// Puts a frame of consumer controls in line, behind every key read before it.
+    fn enter_frame(&mut self, device: u32, events: Vec<InputEvent>, now: Instant) {
+        if events.is_empty() {
+            return;
+        }
+        let id = self.next_frame;
+        self.next_frame += 1;
+        self.frames.insert(id, events);
+        self.line.push_back(Entry {
+            seq: 0,
+            device,
+            code: 0,
+            press: false,
+            arrival: now,
+            verdict: None,
+            waited: false,
+            made_up: false,
+            tag: None,
+            frame: Some(id),
+        });
     }
 
     /// After the kernel dropped events, as libevdev does: what was read after the loss has been
@@ -1879,6 +1940,9 @@ impl<D: Devices> Core<D> {
     /// out of a helper that fell behind. From the answer on every key is read in order again, so
     /// whatever counts as down when a key is told really is, and was. A key tapped wholly within the
     /// loss, or after it in the same batch, is lost, at a moment when keys are lost anyway.
+    /// The consumer controls read before the loss go in line first, being older than any of it. A
+    /// button the kernel has up that was put in line down gets its release with the keys' releases;
+    /// one it has down that was not is left alone, its release going nowhere, as an unseen key's.
     fn resync(&mut self, n: u32, now: Instant) {
         let Some(kbd) = self.keyboards.get_mut(&n) else {
             return;
@@ -1906,13 +1970,20 @@ impl<D: Devices> Core<D> {
             }
         }
         kbd.unseen = unseen;
+        let pending = std::mem::take(&mut kbd.frame);
+        let lifted: KeySet = kbd.buttons.iter().filter(|b| !down.contains(*b)).collect();
+        for b in lifted.iter() {
+            kbd.buttons.remove(b);
+        }
         let lost: Vec<u16> = kbd.down.iter().filter(|c| !down.contains(*c)).collect();
+        self.enter_frame(n, pending, now);
         for code in lost {
             if let Some(kbd) = self.keyboards.get_mut(&n) {
                 kbd.down.remove(code);
             }
             self.enter(n, code, KEY_RELEASE, KEY_SYNTHETIC, now);
         }
+        self.enter_frame(n, releases(&lifted), now);
         for code in found {
             if let Some(kbd) = self.keyboards.get_mut(&n) {
                 kbd.down.insert(code);
@@ -2006,6 +2077,7 @@ impl<D: Devices> Core<D> {
                 waited: false,
                 made_up: value == KEY_PRESS && flags & KEY_SYNTHETIC != 0,
                 tag: None,
+                frame: None,
             });
         }
         self.send_client(ToClient::Key(Key {
@@ -2021,6 +2093,13 @@ impl<D: Devices> Core<D> {
     fn advance(&mut self, now: Instant) {
         let mut give_up = false;
         while let Some(&e) = self.line.front() {
+            if let Some(id) = e.frame {
+                self.line.pop_front();
+                if let Some(events) = self.frames.remove(&id) {
+                    self.put_frame(&events);
+                }
+                continue;
+            }
             // A release, or an injected press: already passed, so no answer of the client's, and
             // nothing of the run of unanswered presses, since injecting keys must not keep a client
             // that answers nothing. A press to be decided is decided below as any press is.
@@ -2121,7 +2200,28 @@ impl<D: Devices> Core<D> {
         while i < self.line.len() {
             let e = self.line[i];
             let key = (e.device, e.code);
-            if e.press {
+            if let Some(id) = e.frame {
+                // A frame of buttons' releases alone goes as a key's release does; the presses of a
+                // frame wait as a key's do, and anything else in it keeps its place.
+                let events = self.frames.get(&id).map(Vec::as_slice).unwrap_or_default();
+                let lifts = events.iter().all(|b| b.kind == EV_KEY && b.value == 0)
+                    && events
+                        .iter()
+                        .all(|b| !waiting.contains(&(e.device, b.code)));
+                if lifts {
+                    self.line.remove(i);
+                    if let Some(events) = self.frames.remove(&id) {
+                        self.put_frame(&events);
+                    }
+                    continue;
+                }
+                waiting.extend(
+                    events
+                        .iter()
+                        .filter(|b| b.kind == EV_KEY && b.value == 1)
+                        .map(|b| (e.device, b.code)),
+                );
+            } else if e.press {
                 waiting.push(key);
             } else if !waiting.contains(&key)
                 && !MODIFIERS.contains(&e.code)
@@ -2195,8 +2295,54 @@ impl<D: Devices> Core<D> {
         true
     }
 
+    /// Puts a frame of consumer controls on the virtual keyboard as one, its buttons counted as
+    /// keys are: a button goes down there with the first keyboard and up with the last. The wheel,
+    /// volume and a button's press go out under the modifiers held back, after them, as a key's
+    /// press does; buttons' releases alone do not bring them out, as a key's release does not.
+    fn put_frame(&mut self, events: &[InputEvent]) {
+        if !matches!(self.virt, Virt::Ready(_)) {
+            return;
+        }
+        if events.iter().any(|e| e.kind != EV_KEY || e.value == 1) {
+            for (_, m) in std::mem::take(&mut self.held_back) {
+                self.put_down(m);
+            }
+        }
+        let mut out = Vec::with_capacity(events.len());
+        for e in events {
+            if e.kind != EV_KEY {
+                out.push(*e);
+                continue;
+            }
+            let held = &mut self.pressed[usize::from(e.code)];
+            match e.value {
+                1 => {
+                    *held += 1;
+                    if *held == 1 {
+                        out.push(*e);
+                    }
+                }
+                0 if *held > 0 => {
+                    *held -= 1;
+                    if *held == 0 {
+                        out.push(*e);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !out.is_empty()
+            && let Virt::Ready(v) = &mut self.virt
+            && let Err(e) = v.emit_frame(&out)
+        {
+            log!("the virtual keyboard did not take a consumer control: {e}");
+            self.virtual_broken = true;
+        }
+    }
+
     /// Lets go of every keyboard. The line is settled as if no more verdicts were coming, every
-    /// press undecided passed on, or with `drop_undecided` thrown away, and every key the virtual
+    /// press undecided passed on, or with `drop_undecided` thrown away with all that is in line
+    /// behind the first of them, and every key the virtual
     /// keyboard holds down is released at once, before any ungrab, each of which waits in the
     /// kernel for milliseconds while the desktop would go on repeating a key held. Then what is
     /// left of the batch being dealt with, when the emergency chord came in the middle of it, is
@@ -2217,7 +2363,17 @@ impl<D: Devices> Core<D> {
         }
         self.lose_typed();
         if drop_undecided {
-            self.line.clear();
+            // What is ahead of the first press undecided, read in the batch the chord came in, goes
+            // out as it would have: a release, or a frame of consumer controls.
+            if let Some(first) = self
+                .line
+                .iter()
+                .position(|e| e.press && e.verdict.is_none())
+            {
+                self.line.truncate(first);
+            }
+            self.advance(now);
+            self.frames.clear();
         } else {
             for e in &mut self.line {
                 if e.press && e.verdict.is_none() {
@@ -2242,18 +2398,20 @@ impl<D: Devices> Core<D> {
         self.held_back.clear();
         let mut keyboards = std::mem::take(&mut self.keyboards);
         let rest: Vec<InputEvent> = self.batch.drain(..).collect();
-        let mut gone = KeySet::new();
-        let down = match keyboards.get_mut(&self.batch_from) {
-            Some(kbd) => &mut kbd.down,
-            None => &mut gone,
+        let (mut gone, mut gone_frame) = (KeySet::new(), Vec::new());
+        let (down, frame) = match keyboards.get_mut(&self.batch_from) {
+            Some(kbd) => (&mut kbd.down, &mut kbd.frame),
+            None => (&mut gone, &mut gone_frame),
         };
-        self.tap(self.batch_from, down, &rest);
+        self.tap(self.batch_from, down, frame, &rest);
+        self.tap_frame(&mut gone_frame);
         for (n, kbd) in &mut keyboards {
             let mut events = Vec::new();
             if kbd.state == KState::Held {
                 let _ = kbd.k.read(&mut events);
             }
-            self.tap(*n, &mut kbd.down, &events);
+            self.tap(*n, &mut kbd.down, &mut kbd.frame, &events);
+            self.tap_frame(&mut kbd.frame);
             kbd.k.ungrab();
         }
         drop(keyboards);
@@ -2285,8 +2443,16 @@ impl<D: Devices> Core<D> {
     /// so that no key is told down twice. What follows a loss of events is left alone, as ever.
     /// Each read is of what the kernel keeps for a reader, a few dozen events, so a client not
     /// reading is sent a few dozen messages a keyboard at most, and is dropped, not waited for,
-    /// once more wait for it than its outbox takes.
-    fn tap(&mut self, device: u32, down: &mut KeySet, events: &[InputEvent]) {
+    /// once more wait for it than its outbox takes. Consumer controls go out a frame at a time, as
+    /// they do while the helper holds the keyboard, `frame` being what the keyboard reported since
+    /// its last report; see [`Core::tap_frame`].
+    fn tap(
+        &mut self,
+        device: u32,
+        down: &mut KeySet,
+        frame: &mut Vec<InputEvent>,
+        events: &[InputEvent],
+    ) {
         // Let go of because its session is no longer in front, the client must not learn what
         // went to the session that is.
         let tell = self
@@ -2296,6 +2462,14 @@ impl<D: Devices> Core<D> {
         for e in events {
             if e.kind == EV_SYN && e.code == SYN_DROPPED {
                 return;
+            }
+            if e.kind == EV_SYN && e.code == SYN_REPORT {
+                self.tap_frame(frame);
+                continue;
+            }
+            if is_consumer_control(e.kind, e.code) {
+                frame.push(*e);
+                continue;
             }
             if e.kind != EV_KEY || !is_virtual_key(e.code) || e.value == KEY_REPEAT.into() {
                 continue;
@@ -2318,6 +2492,24 @@ impl<D: Devices> Core<D> {
         }
     }
 
+    /// Puts out a frame of consumer controls read as the helper lets go, its buttons as taps: the
+    /// frame with their presses, then one with their releases. Their releases and repeats read go
+    /// nowhere, every button having been released already.
+    fn tap_frame(&mut self, frame: &mut Vec<InputEvent>) {
+        let events = std::mem::take(frame);
+        let out: Vec<InputEvent> = events
+            .into_iter()
+            .filter(|e| e.kind != EV_KEY || e.value == 1)
+            .collect();
+        let lifted: Vec<InputEvent> = out
+            .iter()
+            .filter(|e| e.kind == EV_KEY)
+            .map(|e| InputEvent { value: 0, ..*e })
+            .collect();
+        self.put_frame(&out);
+        self.put_frame(&lifted);
+    }
+
     /// Tells the client of a key that is not put in line, with no flags.
     fn tell(&mut self, device: u32, code: u16, value: u8) {
         let seq = self.next_seq;
@@ -2330,6 +2522,18 @@ impl<D: Devices> Core<D> {
             flags: 0,
         }));
     }
+}
+
+/// A frame releasing each of these buttons.
+fn releases(buttons: &KeySet) -> Vec<InputEvent> {
+    buttons
+        .iter()
+        .map(|code| InputEvent {
+            kind: EV_KEY,
+            code,
+            value: 0,
+        })
+        .collect()
 }
 
 fn name(m: &FromClient) -> &'static str {

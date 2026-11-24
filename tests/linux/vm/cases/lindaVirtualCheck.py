@@ -4,8 +4,10 @@ Linda both answering as they should. Disabled or floated under a running Linda, 
 makes Linda give the helper up within a bound, say once that keys come from the X display, and stay
 there without asking the helper again, which would take the keyboard each time; enabled or attached
 again, Linda takes the kernel route back by itself and says nothing. Asked to take the keyboard back
-while it is disabled, Linda never stays on the kernel route. Typing reaches the program throughout,
-but for the moment of each change.
+while it is disabled, Linda never stays on the kernel route. The X server makes a slave pointer of
+the virtual keyboard too, of the same name, for the wheel of the consumer controls it carries; that
+half disabled, Linda stays on the kernel route. Typing reaches the program throughout, but for the
+moment of each change.
 
 How long the X server takes to have the virtual keyboard once the helper has made it goes to the log.
 """
@@ -24,6 +26,14 @@ FELL_BACK = "Linda now reads keys from the X display"
 #: Seconds from the X server's change to Linda's word that it reads keys from the X display: the half
 #: second Linda allows the X server, and Linda's own turn.
 FALL_BACK_BOUND = 1.5
+
+
+def half(ground: "Ground", kind: str = "keyboard") -> str:
+	"""The X server's number for the virtual keyboard's keyboard half, or its pointer half, found while
+	that half is attached and kept for changing it after."""
+	device = ground.xinputDevice(VIRTUAL_KEYBOARD, kind)
+	assert device is not None, kind
+	return device
 
 
 def lindaKeyWorks(ground: "Ground", keyboard: "FakeKeyboard") -> None:
@@ -101,21 +111,24 @@ def run(ground: "Ground") -> None:
 		lindaKeyWorks(ground, keyboard)
 
 	with ground.subtest("disabled under a running Linda, then enabled again"):
-		fallsBack(ground, ["disable", VIRTUAL_KEYBOARD], routes=2)
+		keyboardHalf = half(ground)
+		fallsBack(ground, ["disable", keyboardHalf], routes=2)
 		staysOnX(ground, keyboard, kernelRoutes=1)
-		comesBack(ground, ["enable", VIRTUAL_KEYBOARD], kernelRoutes=2)
+		comesBack(ground, ["enable", keyboardHalf], kernelRoutes=2)
 		typingReaches(ground, keyboard, "KEY_B", "b", VIRTUAL_KEYBOARD)
 		lindaKeyWorks(ground, keyboard)
 
 	with ground.subtest("floated under a running Linda, then attached again"):
-		fallsBack(ground, ["float", VIRTUAL_KEYBOARD], routes=3)
+		keyboardHalf = half(ground)
+		fallsBack(ground, ["float", keyboardHalf], routes=3)
 		staysOnX(ground, keyboard, kernelRoutes=2)
-		comesBack(ground, ["reattach", VIRTUAL_KEYBOARD, "Virtual core keyboard"], kernelRoutes=3)
+		comesBack(ground, ["reattach", keyboardHalf, "Virtual core keyboard"], kernelRoutes=3)
 		typingReaches(ground, keyboard, "KEY_C", "c", VIRTUAL_KEYBOARD)
 		lindaKeyWorks(ground, keyboard)
 
 	with ground.subtest("asked to take the keyboard back while it is disabled, Linda stays on X"):
-		fallsBack(ground, ["disable", VIRTUAL_KEYBOARD], routes=4)
+		keyboardHalf = half(ground)
+		fallsBack(ground, ["disable", keyboardHalf], routes=4)
 		ground.settle(APART)
 		mark = ground.mark()
 		keyboard.chord("KEY_INSERT", "KEY_LEFTSHIFT", "KEY_F12")
@@ -125,5 +138,21 @@ def run(ground: "Ground") -> None:
 		ground.settle(1)
 		assert len(ground.lindaLogRecords(KERNEL_ROUTE)) == 3
 		staysOnX(ground, keyboard, kernelRoutes=3)
-		comesBack(ground, ["enable", VIRTUAL_KEYBOARD], kernelRoutes=4)
+		comesBack(ground, ["enable", keyboardHalf], kernelRoutes=4)
 		typingReaches(ground, keyboard, "KEY_D", "d", VIRTUAL_KEYBOARD)
+
+	with ground.subtest("its pointer half disabled under a running Linda, Linda stays on the kernel route"):
+		pointerHalf = half(ground, "pointer")
+		mark = ground.mark()
+		routes = len(ground.lindaLogRecords(X_ROUTE)), len(ground.lindaLogRecords(KERNEL_ROUTE))
+		result = ground.run(["xinput", "disable", pointerHalf])
+		assert result.returncode == 0, result.stderr
+		ground.settle(FALL_BACK_BOUND)
+		assert FELL_BACK not in [text for _t, text in ground.speech(mark)], ground.speech(mark)
+		assert (len(ground.lindaLogRecords(X_ROUTE)), len(ground.lindaLogRecords(KERNEL_ROUTE))) == routes
+		let = [line for _t, line in ground.helperLog(mark) if "let go of every keyboard" in line]
+		assert not let, let
+		typingReaches(ground, keyboard, "KEY_E", "e", VIRTUAL_KEYBOARD)
+		lindaKeyWorks(ground, keyboard)
+		result = ground.run(["xinput", "enable", pointerHalf])
+		assert result.returncode == 0, result.stderr

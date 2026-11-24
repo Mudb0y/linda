@@ -5,7 +5,7 @@ monitor's timing. This keyboard is for what that cannot do: a second keyboard be
 that vanishes with keys held, and keys at exact intervals, since a whole sequence runs here in the
 guest and not over the test framework's shell.
 
-	fakeKeyboard.py serve NAME [uinput|uhid]
+	fakeKeyboard.py serve NAME [uinput|uhid|uhidConsumer]
 	fakeKeyboard.py call NAME JSON
 
 A uinput keyboard is made through /dev/uinput, as a remapper makes its own: the kernel gives it no
@@ -13,12 +13,15 @@ parent device, and the key capture helper never takes it. A uhid keyboard is a H
 through /dev/uhid, as BlueZ makes a Bluetooth keyboard: the kernel's HID layer reads its reports, so
 it is a keyboard with a parent like any plugged in, which the helper takes. It keeps up to six keys
 and the eight modifiers down at once, and records what the kernel sets its lights to as records with
-"leds", bit n the kernel's LED code n.
+"leds", bit n the kernel's LED code n. A uhidConsumer keyboard is a uhid one that also has a consumer
+control collection as many USB keyboards do: one 16-bit usage of the consumer page, any of 0 to
+0xFFF, which the kernel's HID layer puts on the keyboard's own node.
 
 serve makes the keyboard, writes its event node to DIRECTORY/NAME.ready, and takes requests on
 DIRECTORY/NAME.sock. A request is a list of steps, run in order: {"press": KEY}, {"release": KEY},
 {"tap": KEY, "hold": SECONDS}, {"chord": [KEY, ...], "hold": SECONDS}, which presses the keys in
-order and releases them in reverse, {"sleep": SECONDS}, {"signal": [PID, NAME]}, which sends a
+order and releases them in reverse, {"consumer": USAGE, "hold": SECONDS}, which presses and releases
+a consumer usage on a uhidConsumer keyboard, {"sleep": SECONDS}, {"signal": [PID, NAME]}, which sends a
 process a signal by its name, as SIGSTOP, between two keys, and {"vanish": true}, which destroys the
 keyboard at once, with whatever it holds down, and ends serve. KEY is an evdev name such as KEY_T.
 The answer lists every event written, with the monotonic time it was written at, and each one is
@@ -69,6 +72,17 @@ BOOT_KEYBOARD = bytes.fromhex(
 	"05010906a101050719e029e71500250175019508810295017508810195057501"
 	"050819012905910295017503910195067508150025650507190029658100c0"
 )
+#: The boot keyboard as report 1, then a consumer control collection as report 2: an array of one
+#: 16-bit usage from 0 to 0xFFF, as a Keychron Q6 Ultra 8K has, which the kernel's HID layer keeps
+#: on the keyboard's node (hidinput_match_application in drivers/hid/hid-input.c).
+CONSUMER_KEYBOARD = (
+	BOOT_KEYBOARD[:6]
+	+ bytes.fromhex("8501")
+	+ BOOT_KEYBOARD[6:]
+	+ bytes.fromhex("050c0901a101850219002aff0f150026ff0f751095018100c0")
+)
+KEYBOARD_REPORT = 1
+CONSUMER_REPORT = 2
 #: The kernel's hid_keyboard table from drivers/hid/hid-input.c, usages 0 to 101: the key code of
 #: each usage.
 HID_KEYBOARD = [
@@ -118,6 +132,16 @@ class Keyboard:
 	def destroy(self) -> None:
 		raise NotImplementedError
 
+	def sendConsumer(self, usage: int) -> None:
+		raise ValueError(f"{self.name} has no consumer control collection")
+
+	def consume(self, usage: int, value: int, written: list[dict]) -> None:
+		"""Press a consumer usage, the only one down, or with value 0 let it go."""
+		record = {"t": time.monotonic(), "usage": usage, "value": value}
+		self.sendConsumer(usage if value else 0)
+		self.record(record)
+		written.append(record)
+
 	def write(self, code: int, value: int, written: list[dict]) -> None:
 		# The moment it is handed to the kernel, which stamps it during the write.
 		record = {"t": time.monotonic(), "code": code, "key": keyName(code), "value": value}
@@ -146,6 +170,11 @@ class Keyboard:
 				for code in reversed(codes):
 					self.write(code, 0, written)
 					time.sleep(0.01)
+			elif "consumer" in step:
+				usage = step["consumer"]
+				self.consume(usage, 1, written)
+				time.sleep(step.get("hold", DEFAULT_HOLD))
+				self.consume(usage, 0, written)
 			elif "sleep" in step:
 				time.sleep(step["sleep"])
 			elif "signal" in step:
@@ -186,26 +215,28 @@ class UinputKeyboard(Keyboard):
 
 
 class UhidKeyboard(Keyboard):
-	def __init__(self, name: str) -> None:
+	def __init__(self, name: str, consumer: bool = False) -> None:
 		super().__init__(name)
 		self.phys = f"ground/{name}/hid0"
 		self.fd = os.open("/dev/uhid", os.O_RDWR | os.O_CLOEXEC)
 		self.modifiers = 0
 		self.down: list[int] = []
+		self.consumer = consumer
+		descriptor = CONSUMER_KEYBOARD if consumer else BOOT_KEYBOARD
 		request = struct.pack(
 			"<I128s64s64sHHIIII",
 			UHID_CREATE2,
 			name.encode(),
 			self.phys.encode(),
 			b"",
-			len(BOOT_KEYBOARD),
+			len(descriptor),
 			BUSTYPE,
 			VENDOR,
 			PRODUCT,
 			1,
 			0,
 		)
-		os.write(self.fd, request + BOOT_KEYBOARD)
+		os.write(self.fd, request + descriptor)
 		threading.Thread(target=self.serveKernel, daemon=True).start()
 		self.eventNode = self.findNode()
 
@@ -234,8 +265,10 @@ class UhidKeyboard(Keyboard):
 			if kind == UHID_OUTPUT:
 				data = event[4 : 4 + 4096]
 				size = struct.unpack_from("<H", event, 4 + 4096)[0]
-				if size:
-					self.record({"t": time.monotonic(), "leds": data[0]})
+				# With reports numbered, the number comes first.
+				lights = 1 if self.consumer else 0
+				if size > lights:
+					self.record({"t": time.monotonic(), "leds": data[lights]})
 			elif kind == UHID_GET_REPORT:
 				request = struct.unpack_from("<I", event, 4)[0]
 				os.write(self.fd, struct.pack("<IIHH", UHID_GET_REPORT_REPLY, request, 5, 0))
@@ -260,6 +293,14 @@ class UhidKeyboard(Keyboard):
 			self.down.remove(code)
 		usages = [USAGES[c] for c in self.down] + [0] * (6 - len(self.down))
 		report = bytes([self.modifiers, 0, *usages])
+		self.input(bytes([KEYBOARD_REPORT]) + report if self.consumer else report)
+
+	def sendConsumer(self, usage: int) -> None:
+		if not self.consumer:
+			super().sendConsumer(usage)
+		self.input(bytes([CONSUMER_REPORT]) + struct.pack("<H", usage))
+
+	def input(self, report: bytes) -> None:
 		os.write(self.fd, struct.pack("<IH", UHID_INPUT2, len(report)) + report)
 
 	def destroy(self) -> None:
@@ -269,7 +310,9 @@ class UhidKeyboard(Keyboard):
 
 def make(name: str, kind: str) -> Keyboard:
 	os.makedirs(DIRECTORY, exist_ok=True)
-	return (UhidKeyboard if kind == "uhid" else UinputKeyboard)(name)
+	if kind == "uinput":
+		return UinputKeyboard(name)
+	return UhidKeyboard(name, consumer=kind == "uhidConsumer")
 
 
 def serve(keyboard: Keyboard) -> None:
@@ -311,9 +354,13 @@ def call(name: str, text: str) -> int:
 
 
 if __name__ == "__main__":
-	if sys.argv[1:2] == ["serve"] and len(sys.argv) in (3, 4) and sys.argv[3:] in ([], ["uinput"], ["uhid"]):
+	if (
+		sys.argv[1:2] == ["serve"]
+		and len(sys.argv) in (3, 4)
+		and sys.argv[3:] in ([], ["uinput"], ["uhid"], ["uhidConsumer"])
+	):
 		serve(make(sys.argv[2], (sys.argv[3:] or ["uinput"])[0]))
 	elif sys.argv[1:2] == ["call"] and len(sys.argv) == 4:
 		sys.exit(call(sys.argv[2], sys.argv[3]))
 	else:
-		sys.exit("usage: fakeKeyboard.py serve NAME [uinput|uhid] | call NAME JSON")
+		sys.exit("usage: fakeKeyboard.py serve NAME [uinput|uhid|uhidConsumer] | call NAME JSON")

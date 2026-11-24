@@ -402,6 +402,15 @@ class Ground:
 		answer = self.session({"op": "run", "argv": list(argv), "timeout": timeout})
 		return subprocess.CompletedProcess(argv, answer["returncode"], answer["stdout"], answer["stderr"])
 
+	def xinputDevice(self, name: str, kind: str = "keyboard") -> str | None:
+		"""The X server's number for its slave keyboard, or with kind "pointer" its slave pointer, named
+		name; None when it has none attached to a master. The virtual keyboard is both once it carries the
+		wheel of consumer controls, under one name, which xinput refuses; its "keyboard:" and "pointer:"
+		prefixes tell them apart, but find only a device attached to a master, and query-state takes no
+		prefix at all, so the number is what xinput is given."""
+		result = self.run(["xinput", "list", "--id-only", f"{kind}:{name}"])
+		return result.stdout.strip() if result.returncode == 0 else None
+
 	def running(self, name: str) -> bool:
 		return self.session({"op": "status", "name": name})["returncode"] is None
 

@@ -18,6 +18,18 @@ pub const EV_MAX: u16 = 0x1f;
 pub const SYN_REPORT: u16 = 0;
 pub const SYN_DROPPED: u16 = 3;
 
+pub const REL_X: u16 = 0x00;
+pub const REL_Y: u16 = 0x01;
+pub const REL_HWHEEL: u16 = 0x06;
+pub const REL_WHEEL: u16 = 0x08;
+pub const REL_HWHEEL_HI_RES: u16 = 0x0c;
+
+pub const ABS_X: u16 = 0x00;
+pub const ABS_Y: u16 = 0x01;
+pub const ABS_VOLUME: u16 = 0x20;
+pub const ABS_MT_POSITION_X: u16 = 0x35;
+pub const ABS_MT_POSITION_Y: u16 = 0x36;
+
 pub const KEY_ESC: u16 = 1;
 pub const KEY_BACKSPACE: u16 = 14;
 pub const KEY_ENTER: u16 = 28;
@@ -37,6 +49,11 @@ pub const KEY_POWER2: u16 = 0x164;
 pub const KEY_RESTART: u16 = 0x198;
 pub const KEY_MAX: u16 = 0x2ff;
 pub const KEY_CNT: usize = KEY_MAX as usize + 1;
+
+pub const BTN_0: u16 = 0x100;
+pub const BTN_1: u16 = 0x101;
+pub const BTN_LEFT: u16 = 0x110;
+pub const BTN_TOUCH: u16 = 0x14a;
 
 pub const LED_NUML: u16 = 0;
 pub const LED_CAPSL: u16 = 1;
@@ -79,11 +96,53 @@ pub const CHORD: [&[u16]; 3] = [&[KEY_BACKSPACE], &[KEY_ESC], &[KEY_ENTER, KEY_K
 /// it.
 pub const KEYBOARD_KEYS: std::ops::RangeInclusive<u16> = 1..=31;
 
-/// Whether the virtual keyboard can send this code: every key code but the buttons of mice,
-/// joysticks, gamepads, tablets and wheels, which would make udev take the virtual keyboard for
-/// one of those.
+/// Whether the virtual keyboard has this code as a key, one that goes to the client and may be
+/// typed: every key code but the buttons of mice, joysticks, gamepads, tablets and wheels, which
+/// would make udev take the virtual keyboard for one of those. Of the buttons it has only
+/// [`CONSUMER_BUTTONS`], which are passed on and nothing more.
 pub fn is_virtual_key(code: u16) -> bool {
     matches!(code, 1..=0xff | 0x160..=0x21f | 0x224..=0x2bf | 0x2e8..=KEY_MAX)
+}
+
+/// What the kernel's hid-input makes of a HID consumer control collection besides keys, which many
+/// keyboards have on the same node as their keys, since hid-input keeps a consumer control
+/// application with the keyboard of the same device (hidinput_match_application): AC Pan is the
+/// horizontal wheel with its high-resolution twin, Volume is ABS_VOLUME, and Function Buttons is
+/// BTN_0 (hidinput_configure_usage). The virtual keyboard has them all, and passes them on from a
+/// keyboard it takes; nothing else that is not a key. BTN_1 to BTN_9, which Button usages outside
+/// a pointer or joystick collection become, are left out: with BTN_0, BTN_1 and a wheel, udev takes
+/// a device for a tablet pad (has_pad_buttons in udev-builtin-input_id.c, since systemd 253), and
+/// libinput then reads no key of it.
+pub const CONSUMER_RELS: [u16; 2] = [REL_HWHEEL, REL_HWHEEL_HI_RES];
+pub const CONSUMER_ABS: [u16; 1] = [ABS_VOLUME];
+pub const CONSUMER_BUTTONS: [u16; 1] = [BTN_0];
+
+/// Whether an event of this type and code is one of the consumer controls above.
+pub fn is_consumer_control(kind: u16, code: u16) -> bool {
+    match kind {
+        EV_REL => CONSUMER_RELS.contains(&code),
+        EV_ABS => CONSUMER_ABS.contains(&code),
+        EV_KEY => CONSUMER_BUTTONS.contains(&code),
+        _ => false,
+    }
+}
+
+/// The top of the range of ABS_VOLUME on the virtual keyboard, whose bottom is 0: fine enough that
+/// no step of a control of up to sixteen bits is lost.
+pub const VOLUME_MAX: i32 = 0xffff;
+
+/// A keyboard's ABS_VOLUME, from its own range, `min` to `max`, as the kernel has it for that
+/// keyboard, into the virtual keyboard's: the one virtual keyboard has one range for every keyboard
+/// it passes on. Linear, a value outside the range taken as its nearer end, rounded half up; a
+/// range with nothing in it gives the bottom.
+pub fn rescale_volume(value: i32, min: i32, max: i32) -> i32 {
+    if max <= min {
+        return 0;
+    }
+    let (value, min, max) = (i64::from(value), i64::from(min), i64::from(max));
+    let span = max - min;
+    let scaled = ((value.clamp(min, max) - min) * 2 * i64::from(VOLUME_MAX) + span) / (2 * span);
+    scaled as i32
 }
 
 /// The codes the client may type with TYPE, in rising order: those the FIXED, NUMPAD and LAYOUT
@@ -203,6 +262,10 @@ pub struct Description {
     /// Bit n set when the device sends events of type n.
     pub types: u32,
     pub keys: KeySet,
+    /// Bit n set when the device has relative axis n.
+    pub rel: u64,
+    /// Bit n set when the device has absolute axis n.
+    pub abs: u64,
     /// The device has no parent device: it was made by a program through uinput.
     pub parentless: bool,
     /// The udev property ID_SEAT, absent for seat0.
@@ -236,7 +299,10 @@ pub enum Assessment {
 /// - only devices of seat0, the seat the helper serves;
 /// - nothing that is also a pointer or touch device (relative or absolute axes), has switches, or
 ///   has mouse, joystick or tablet buttons, whose events the virtual keyboard cannot carry and the
-///   grab would swallow.
+///   grab would swallow. The axes and buttons of a consumer control collection (see
+///   [`CONSUMER_RELS`]) are not of these: the virtual keyboard carries them. udev's ID_INPUT_*
+///   properties are not relied on for this, so that the helper never holds a device it cannot pass
+///   on whole.
 pub fn assess(d: &Description) -> Assessment {
     let has = |t: u16| d.types & (1 << t) != 0;
     if d.ours || !has(EV_KEY) || !KEYBOARD_KEYS.clone().all(|c| d.keys.contains(c)) {
@@ -248,13 +314,18 @@ pub fn assess(d: &Description) -> Assessment {
     if d.seat.as_deref().is_some_and(|s| s != "seat0") {
         return Assessment::Ignored(Ignored::OtherSeat);
     }
-    if has(EV_REL) || has(EV_ABS) {
+    let axes =
+        |kind: u16, mask: u64| (0..64).any(|c| mask & 1 << c != 0 && !is_consumer_control(kind, c));
+    if axes(EV_REL, d.rel) || axes(EV_ABS, d.abs) {
         return Assessment::Ignored(Ignored::Pointer);
     }
     if has(EV_SW) {
         return Assessment::Ignored(Ignored::Switches);
     }
-    if d.keys.iter().any(|c| !is_virtual_key(c)) {
+    if d.keys
+        .iter()
+        .any(|c| !is_virtual_key(c) && !is_consumer_control(EV_KEY, c))
+    {
         return Assessment::Ignored(Ignored::Buttons);
     }
     Assessment::Keyboard
@@ -273,6 +344,8 @@ pub mod tests {
             name: name.into(),
             types: types.iter().fold(0, |t, b| t | 1 << b),
             keys,
+            rel: 0,
+            abs: 0,
             parentless: false,
             seat: None,
             ours: false,
@@ -341,14 +414,27 @@ pub mod tests {
         assert_eq!(assess(&d), Assessment::NotKeyboard);
     }
 
+    /// A keyboard with the axes and buttons of a consumer control collection on its node, as
+    /// hid-input gives them.
+    pub fn consumer_keyboard(name: &str) -> Description {
+        let mut d = keyboard(name);
+        d.types |= 1 << EV_REL | 1 << EV_ABS;
+        d.rel = 1 << REL_HWHEEL | 1 << REL_HWHEEL_HI_RES;
+        d.abs = 1 << ABS_VOLUME;
+        d.keys.insert(BTN_0);
+        d
+    }
+
     #[test]
     fn keyboard_like_devices_that_cannot_be_passed_on_whole_are_left_alone() {
         let mut remapper = keyboard("keyd virtual keyboard");
         remapper.parentless = true;
         let mut touchpad = keyboard("Logitech K400");
         touchpad.types |= 1 << EV_REL;
+        touchpad.rel = 1 << REL_X | 1 << REL_Y;
         let mut tablet = keyboard("Tablet keyboard");
         tablet.types |= 1 << EV_ABS;
+        tablet.abs = 1 << ABS_X | 1 << ABS_Y;
         let mut switches = keyboard("Convertible keyboard");
         switches.types |= 1 << EV_SW;
         let mut buttons = keyboard("Keyboard with a mouse button");
@@ -368,10 +454,115 @@ pub mod tests {
     }
 
     #[test]
-    fn the_virtual_keyboard_declares_no_buttons() {
+    fn a_keyboard_with_a_consumer_control_collection_is_taken() {
+        // A Keychron Q6 Ultra 8K's keyboard node, as /proc/bus/input/devices has it: EV=12001f,
+        // REL=1040, ABS=100000000, and its key bitmap, with BTN_0 among some 280 keys.
+        let keys = KeySet::from_sysfs(
+            "3f00733fff 0 0 483ffff17aff32d bfd4444600000000 1 130ff38b17d007 \
+             ffff7bfad9415fff ffbeffdfffefffff fffffffffffffffe",
+            64,
+        )
+        .unwrap();
+        assert!(keys.contains(BTN_0) && keys.contains(0x265));
+        let mut d = description(
+            "Keychron Keychron Q6 Ultra 8K",
+            &[EV_SYN, EV_KEY, EV_REL, EV_ABS, EV_MSC, EV_LED, EV_REP],
+            keys,
+        );
+        d.rel = 0x1040;
+        d.abs = 0x1_0000_0000;
+        assert_eq!(d.types, 0x12001f);
+        assert_eq!(assess(&d), Assessment::Keyboard);
+        assert_eq!(
+            assess(&consumer_keyboard("USB keyboard")),
+            Assessment::Keyboard
+        );
+        // Each part of the collection alone.
+        for (rel, abs, button) in [
+            (1 << REL_HWHEEL, 0, None),
+            (0, 1 << ABS_VOLUME, None),
+            (0, 0, Some(BTN_0)),
+        ] {
+            let mut d = keyboard("USB keyboard");
+            d.rel = rel;
+            d.abs = abs;
+            if let Some(b) = button {
+                d.keys.insert(b);
+            }
+            assert_eq!(
+                assess(&d),
+                Assessment::Keyboard,
+                "{rel:#x} {abs:#x} {button:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_consumer_control_collection_does_not_let_in_a_pointer() {
+        let mut cases = Vec::new();
+        for (name, rel, abs) in [
+            ("relative pointer", 1 << REL_X | 1 << REL_Y, 0),
+            ("vertical wheel", 1 << REL_WHEEL, 0),
+            ("absolute pointer", 0, 1 << ABS_X | 1 << ABS_Y),
+            ("touch", 0, 1 << ABS_MT_POSITION_X | 1 << ABS_MT_POSITION_Y),
+        ] {
+            let mut d = consumer_keyboard(name);
+            d.rel |= rel;
+            d.abs |= abs;
+            cases.push((d, Ignored::Pointer));
+        }
+        for (name, button) in [
+            ("mouse button", BTN_LEFT),
+            ("touch", BTN_TOUCH),
+            ("BTN_1", BTN_1),
+        ] {
+            let mut d = consumer_keyboard(name);
+            d.keys.insert(button);
+            cases.push((d, Ignored::Buttons));
+        }
+        let mut switches = consumer_keyboard("switches");
+        switches.types |= 1 << EV_SW;
+        cases.push((switches, Ignored::Switches));
+        for (d, why) in cases {
+            assert_eq!(assess(&d), Assessment::Ignored(why), "{}", d.name);
+        }
+    }
+
+    #[test]
+    fn volume_is_rescaled_into_the_virtual_keyboards_range() {
+        assert_eq!(rescale_volume(0, 0, 4095), 0);
+        assert_eq!(rescale_volume(4095, 0, 4095), VOLUME_MAX);
+        // 65535 / 4095 is 16.0037, and half of it 8.0018.
+        assert_eq!(rescale_volume(1, 0, 4095), 16);
+        assert_eq!(rescale_volume(2047, 0, 4095), 32759);
+        assert_eq!(rescale_volume(-1, -1, 1), 0);
+        assert_eq!(rescale_volume(0, -1, 1), 32768, "half up");
+        assert_eq!(rescale_volume(1, -1, 1), VOLUME_MAX);
+        // Outside the range, the nearer end; no range at all, the bottom.
+        assert_eq!(rescale_volume(5000, 0, 4095), VOLUME_MAX);
+        assert_eq!(rescale_volume(-5, 0, 4095), 0);
+        assert_eq!(rescale_volume(i32::MAX, i32::MIN, i32::MAX), VOLUME_MAX);
+        assert_eq!(rescale_volume(i32::MIN, i32::MIN, i32::MAX), 0);
+        assert_eq!(rescale_volume(7, 7, 7), 0);
+        assert_eq!(rescale_volume(7, 9, 2), 0);
+    }
+
+    #[test]
+    fn the_virtual_keyboard_declares_no_buttons_but_that_of_consumer_controls() {
         for code in 0x100..=0x15f {
             assert!(!is_virtual_key(code), "{code:#x}");
+            assert_eq!(
+                is_consumer_control(EV_KEY, code),
+                code == BTN_0,
+                "{code:#x}"
+            );
         }
+        // Not a tablet pad to udev.
+        assert!(
+            !(CONSUMER_BUTTONS.contains(&BTN_0) && CONSUMER_BUTTONS.contains(&BTN_1)),
+            "BTN_0 and BTN_1 with a wheel make a tablet pad"
+        );
+        assert!(!CONSUMER_RELS.contains(&REL_X) && !CONSUMER_ABS.contains(&ABS_X));
         for code in [0x220, 0x223, 0x2c0, 0x2e7, 0, 0x300] {
             assert!(!is_virtual_key(code), "{code:#x}");
         }
@@ -411,6 +602,7 @@ pub mod tests {
             KEY_RESTART,
             0,
             0x110,
+            BTN_0,
         ] {
             assert!(!typeable(code), "{code:#x}");
         }

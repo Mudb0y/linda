@@ -27,8 +27,9 @@ use crate::device::{
     Devices, Found, GrabError, Guard, InputEvent, Keyboard, Lights, ReadError, VirtualKeyboard,
 };
 use crate::keys::{
-    self, Assessment, Description, EV_KEY, EV_LED, EV_MAX, EV_REP, EV_SYN, KEY_CNT, KEY_MAX,
-    KeySet, LEDS, SYN_REPORT, is_virtual_key,
+    self, ABS_VOLUME, Assessment, CONSUMER_ABS, CONSUMER_BUTTONS, CONSUMER_RELS, Description,
+    EV_ABS, EV_KEY, EV_LED, EV_MAX, EV_REL, EV_REP, EV_SYN, KEY_CNT, KEY_MAX, KeySet, LEDS,
+    SYN_REPORT, VOLUME_MAX, is_virtual_key, rescale_volume,
 };
 
 const DEV_INPUT: &str = "/dev/input";
@@ -56,8 +57,10 @@ const EVIOCREVOKE: Opcode = opcode::write::<c_int>(b'E', 0x91);
 const UI_DEV_CREATE: Opcode = opcode::none(b'U', 1);
 const UI_DEV_DESTROY: Opcode = opcode::none(b'U', 2);
 const UI_DEV_SETUP: Opcode = opcode::write::<libc::uinput_setup>(b'U', 3);
+const UI_ABS_SETUP: Opcode = opcode::write::<libc::uinput_abs_setup>(b'U', 4);
 const UI_SET_EVBIT: Opcode = opcode::write::<c_int>(b'U', 100);
 const UI_SET_KEYBIT: Opcode = opcode::write::<c_int>(b'U', 101);
+const UI_SET_RELBIT: Opcode = opcode::write::<c_int>(b'U', 102);
 const UI_SET_LEDBIT: Opcode = opcode::write::<c_int>(b'U', 105);
 
 const fn read_op(group: u8, number: u8, len: usize) -> Opcode {
@@ -78,6 +81,10 @@ fn eviocgled(len: usize) -> Opcode {
 
 fn eviocgbit(ev: u16, len: usize) -> Opcode {
     read_op(b'E', 0x20 + ev as u8, len)
+}
+
+fn eviocgabs(abs: u16) -> Opcode {
+    read_op(b'E', 0x40 + abs as u8, size_of::<libc::input_absinfo>())
 }
 
 fn ui_get_sysname(len: usize) -> Opcode {
@@ -413,6 +420,8 @@ fn describe_sysfs(event_dir: &Path, own: Option<u32>) -> io::Result<(u32, Descri
         .iter()
         .filter(|t| *t <= EV_MAX)
         .fold(0u32, |a, t| a | 1 << t);
+    let rel = bits64(&caps("rel")?);
+    let abs = bits64(&caps("abs")?);
     let seat = parse_dev(&fs::read_to_string(event_dir.join("dev"))?)
         .and_then(|(major, minor)| udev_seat(major, minor));
     Ok((
@@ -421,6 +430,8 @@ fn describe_sysfs(event_dir: &Path, own: Option<u32>) -> io::Result<(u32, Descri
             name: read("name")?.trim_end().to_owned(),
             types,
             keys: caps("key")?,
+            rel,
+            abs,
             parentless: is_parentless(&dir),
             seat,
             ours: own == Some(number),
@@ -445,6 +456,11 @@ fn describe_fd(
         .fold(0u32, |a, t| a | 1 << t);
     let mut keys = [0u8; KEY_CNT / 8];
     ioctl_read(fd, eviocgbit(EV_KEY, keys.len()), &mut keys)?;
+    // REL_CNT and ABS_CNT bits, sixteen and sixty-four, both within eight bytes.
+    let mut rel = [0u8; 8];
+    ioctl_read(fd, eviocgbit(EV_REL, rel.len()), &mut rel)?;
+    let mut abs = [0u8; 8];
+    ioctl_read(fd, eviocgbit(EV_ABS, abs.len()), &mut abs)?;
     let mut name = [0u8; 256];
     let len = ioctl_read(fd, eviocgname(name.len()), &mut name)?;
     let name = &name[..usize::try_from(len).unwrap_or(0).min(name.len())];
@@ -453,6 +469,8 @@ fn describe_fd(
         name: String::from_utf8_lossy(name).into_owned(),
         types,
         keys: KeySet::from_longs(&keys),
+        rel: bits64(&KeySet::from_longs(&rel)),
+        abs: bits64(&KeySet::from_longs(&abs)),
         parentless: is_parentless(dir),
         seat,
         ours: own == Some(number),
@@ -514,11 +532,19 @@ impl Devices for Evdev {
         let mut leds = [0u8; size_of::<c_ulong>()];
         ioctl_read(file.as_fd(), eviocgbit(EV_LED, leds.len()), &mut leds)?;
         let leds = bits16(&leds);
+        let volume = if d.abs & 1 << ABS_VOLUME != 0 {
+            let mut info = [0u8; size_of::<libc::input_absinfo>()];
+            ioctl_read(file.as_fd(), eviocgabs(ABS_VOLUME), &mut info)?;
+            Some(abs_range(&info))
+        } else {
+            None
+        };
         Ok(EvKeyboard {
             file: ManuallyDrop::new(file),
             grabs: self.grabs.clone(),
             slot: None,
             leds,
+            volume,
         })
     }
 
@@ -530,14 +556,22 @@ impl Devices for Evdev {
             None => open_uinput()?,
         };
         let fd = file.as_raw_fd();
-        for t in [EV_KEY, EV_LED, EV_REP] {
-            ioctl_value(fd, UI_SET_EVBIT, t.into())?;
+        for (op, code) in virtual_bits() {
+            ioctl_value(fd, op, code.into())?;
         }
-        for code in (1..=KEY_MAX).filter(|c| is_virtual_key(*c)) {
-            ioctl_value(fd, UI_SET_KEYBIT, code.into())?;
-        }
-        for led in LEDS {
-            ioctl_value(fd, UI_SET_LEDBIT, led.into())?;
+        for code in CONSUMER_ABS {
+            let setup = virtual_axis(code);
+            // SAFETY: the request reads one uinput_abs_setup, which this is.
+            if unsafe {
+                libc::ioctl(
+                    fd,
+                    UI_ABS_SETUP as _,
+                    &setup as *const libc::uinput_abs_setup,
+                )
+            } < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
         }
         // SAFETY: uinput_setup is plain data, for which zero is a valid value.
         let mut setup: libc::uinput_setup = unsafe { std::mem::zeroed() };
@@ -622,6 +656,50 @@ impl Devices for Evdev {
     }
 }
 
+/// What the virtual keyboard has, as the UI_SET_*BIT request for each code: its keys, the lights it
+/// copies, repeats, and the consumer controls it passes on, whose absolute axes [`virtual_axis`]
+/// sets up besides.
+fn virtual_bits() -> Vec<(Opcode, u16)> {
+    let mut bits: Vec<(Opcode, u16)> = [EV_KEY, EV_REL, EV_ABS, EV_LED, EV_REP]
+        .into_iter()
+        .map(|t| (UI_SET_EVBIT, t))
+        .collect();
+    bits.extend(
+        (1..=KEY_MAX)
+            .filter(|c| is_virtual_key(*c))
+            .chain(CONSUMER_BUTTONS)
+            .map(|c| (UI_SET_KEYBIT, c)),
+    );
+    bits.extend(CONSUMER_RELS.into_iter().map(|c| (UI_SET_RELBIT, c)));
+    bits.extend(LEDS.into_iter().map(|l| (UI_SET_LEDBIT, l)));
+    bits
+}
+
+/// The virtual keyboard's absolute axis `code`, 0 to VOLUME_MAX: ABS_VOLUME, whatever the range of
+/// the keyboard it comes from (see [`keys::rescale_volume`]). It is left at its last value when
+/// the helper lets go, a keyboard vanishes or events are lost, unlike a button, which is released:
+/// a value to put it back to cannot be known, each keyboard having its own place of rest or none,
+/// and nothing was found that reads the axis back from the virtual keyboard.
+fn virtual_axis(code: u16) -> libc::uinput_abs_setup {
+    // SAFETY: uinput_abs_setup is plain data, for which zero is a valid value.
+    let mut setup: libc::uinput_abs_setup = unsafe { std::mem::zeroed() };
+    setup.code = code;
+    setup.absinfo.maximum = VOLUME_MAX;
+    setup
+}
+
+/// The range in an input_absinfo, as EVIOCGABS fills it: the value, the minimum and the maximum
+/// lead, each a 32-bit integer.
+fn abs_range(info: &[u8]) -> (i32, i32) {
+    let field = |i: usize| i32::from_ne_bytes([info[i], info[i + 1], info[i + 2], info[i + 3]]);
+    (field(4), field(8))
+}
+
+/// The codes below 64 of a set, as bits.
+fn bits64(set: &KeySet) -> u64 {
+    set.iter().filter(|c| *c < 64).fold(0u64, |a, c| a | 1 << c)
+}
+
 fn bits16(longs: &[u8]) -> u16 {
     KeySet::from_longs(longs)
         .iter()
@@ -655,6 +733,18 @@ fn event_bytes(events: &[(u16, u16, i32)]) -> Vec<u8> {
     b
 }
 
+/// Puts each ABS_VOLUME of a keyboard whose range is `volume` into the virtual keyboard's range.
+/// One from a keyboard said to have none, which the kernel does not send, is made the bottom.
+fn rescale(events: &mut [InputEvent], volume: Option<(i32, i32)>) {
+    let (min, max) = volume.unwrap_or((0, 0));
+    for e in events
+        .iter_mut()
+        .filter(|e| e.kind == EV_ABS && e.code == ABS_VOLUME)
+    {
+        e.value = rescale_volume(e.value, min, max);
+    }
+}
+
 /// Reads whole events until there are none, or for READS_PER_TURN reads.
 fn read_events(mut file: &File, out: &mut Vec<InputEvent>) -> Result<(), ReadError> {
     let mut buf = vec![0u8; size_of::<libc::input_event>() * 64];
@@ -679,6 +769,8 @@ pub struct EvKeyboard {
     slot: Option<usize>,
     /// The lock lights it has.
     leds: u16,
+    /// The range of its ABS_VOLUME, when it has one.
+    volume: Option<(i32, i32)>,
 }
 
 impl Keyboard for EvKeyboard {
@@ -687,7 +779,10 @@ impl Keyboard for EvKeyboard {
     }
 
     fn read(&mut self, out: &mut Vec<InputEvent>) -> Result<(), ReadError> {
-        read_events(&self.file, out)
+        let from = out.len();
+        let read = read_events(&self.file, out);
+        rescale(&mut out[from..], self.volume);
+        read
     }
 
     fn keys_down(&self) -> io::Result<KeySet> {
@@ -822,6 +917,28 @@ impl VirtualKeyboard for EvVirtual {
         Ok(())
     }
 
+    fn emit_frame(&mut self, events: &[InputEvent]) -> io::Result<()> {
+        let mut frame: Vec<(u16, u16, i32)> =
+            events.iter().map(|e| (e.kind, e.code, e.value)).collect();
+        frame.push((EV_SYN, SYN_REPORT, 0));
+        let b = event_bytes(&frame);
+        let buttons = || events.iter().filter(|e| e.kind == EV_KEY);
+        for e in buttons() {
+            self.down.writing(&self.grabs, e.code, e.value);
+        }
+        let n = (&self.file).write(&b)?;
+        if n != b.len() {
+            return Err(io::Error::other(format!(
+                "uinput took {n} of {} bytes",
+                b.len()
+            )));
+        }
+        for e in buttons() {
+            self.down.written(&self.grabs, e.code, e.value);
+        }
+        Ok(())
+    }
+
     fn read_leds(&mut self) -> io::Result<Option<u16>> {
         self.take_leds()?;
         Ok(self.leds.read())
@@ -896,6 +1013,78 @@ mod tests {
         assert_eq!(UI_SET_KEYBIT, 0x4004_5565);
         assert_eq!(UI_SET_LEDBIT, 0x4004_5569);
         assert_eq!(ui_get_sysname(64), 0x8040_552c);
+        assert_eq!(UI_SET_RELBIT, 0x4004_5566);
+        assert_eq!(UI_ABS_SETUP, 0x401c_5504);
+        assert_eq!(eviocgabs(ABS_VOLUME), 0x8018_4560);
+        assert_eq!(eviocgbit(EV_REL, 8), 0x8008_4522);
+        assert_eq!(eviocgbit(EV_ABS, 8), 0x8008_4523);
+    }
+
+    #[test]
+    fn the_virtual_keyboard_has_the_consumer_controls_it_passes_on() {
+        let bits = virtual_bits();
+        let has = |op: Opcode, code: u16| bits.contains(&(op, code));
+        for t in [EV_KEY, EV_REL, EV_ABS, EV_LED, EV_REP] {
+            assert!(has(UI_SET_EVBIT, t), "{t}");
+        }
+        assert!(has(UI_SET_KEYBIT, keys::KEY_A) && has(UI_SET_KEYBIT, KEY_MAX));
+        for code in CONSUMER_BUTTONS {
+            assert!(has(UI_SET_KEYBIT, code), "{code:#x}");
+        }
+        for code in CONSUMER_RELS {
+            assert!(has(UI_SET_RELBIT, code), "{code:#x}");
+        }
+        // Nothing that would make it a pointer, a joystick or a tablet pad: no other axis, and of
+        // the buttons only those of consumer controls.
+        assert_eq!(
+            bits.iter().filter(|(op, _)| *op == UI_SET_RELBIT).count(),
+            CONSUMER_RELS.len()
+        );
+        for (op, code) in &bits {
+            if *op == UI_SET_KEYBIT {
+                assert!(
+                    is_virtual_key(*code) || CONSUMER_BUTTONS.contains(code),
+                    "{code:#x}"
+                );
+            }
+        }
+        let volume = virtual_axis(ABS_VOLUME);
+        assert_eq!(
+            (volume.code, volume.absinfo.minimum, volume.absinfo.maximum),
+            (ABS_VOLUME, 0, VOLUME_MAX)
+        );
+        assert_eq!(CONSUMER_ABS, [ABS_VOLUME]);
+    }
+
+    #[test]
+    fn volume_is_read_from_the_keyboards_range() {
+        // An input_absinfo of value 7, minimum -10, maximum 4085.
+        let mut info = Vec::new();
+        for v in [7i32, -10, 4085, 0, 0, 0] {
+            info.extend_from_slice(&v.to_ne_bytes());
+        }
+        assert_eq!(info.len(), size_of::<libc::input_absinfo>());
+        assert_eq!(abs_range(&info), (-10, 4085));
+        let ev = |kind, code, value| InputEvent { kind, code, value };
+        let mut events = [
+            ev(EV_ABS, ABS_VOLUME, 4085),
+            ev(EV_ABS, ABS_VOLUME, -10),
+            ev(EV_KEY, ABS_VOLUME, 4085),
+            ev(EV_REL, keys::REL_HWHEEL, -1),
+        ];
+        rescale(&mut events, Some((-10, 4085)));
+        assert_eq!(
+            events.map(|e| e.value),
+            [VOLUME_MAX, 0, 4085, -1],
+            "only ABS_VOLUME is rescaled"
+        );
+        let mut stray = [ev(EV_ABS, ABS_VOLUME, 99)];
+        rescale(&mut stray, None);
+        assert_eq!(stray[0].value, 0);
+        let s: KeySet = [keys::REL_HWHEEL, keys::REL_HWHEEL_HI_RES, 64, 200]
+            .into_iter()
+            .collect();
+        assert_eq!(bits64(&s), 0x1040);
     }
 
     #[test]
