@@ -246,12 +246,17 @@ def roleOfVanished(node: Node) -> str | None:
 	return role
 
 
-def _switchKeyHeld() -> bool:
-	"""Whether Alt is held down, as it is while a window manager's switcher is open, Alt+Tab or
-	Control+Alt+Tab: the window left says it is inactive as the switcher takes the keyboard, and the
-	window chosen takes it only once Alt is let go."""
+def _keyboardTaken() -> bool:
+	"""Whether the keyboard is taken from the windows for a while, as no window then says it is active:
+	Alt is held, as while a window manager's switcher is open, Alt+Tab or Control+Alt+Tab, whose window
+	chosen takes the keyboard once Alt is let go; or NVDA holds the keyboard itself, for input help, and
+	the window it was in has it back once NVDA lets go."""
 	import winUser
 
+	from linuxPlatform import inputHook
+
+	if inputHook.holdsKeyboard():
+		return True
 	try:
 		return bool(winUser.getKeyState(winUser.VK_MENU) & 0x8000)
 	# Without a key source, as before the keyboard is read or after it is let go, no key is known held.
@@ -1820,9 +1825,10 @@ def pumpAll() -> None:
 				# seconds, and the desktop would have been said before the switcher.
 				_rescansExtended = True
 				_rescans[:] = [now + delay for delay in SHELL_RESCAN_DELAYS_SECONDS]
-			elif not _rescans and _switchKeyHeld():
-				# A switcher is open: the window chosen takes the keyboard once Alt is let go, and until
-				# then no window says it is active, as marco 1.26's switcher does not either.
+			elif not _rescans and _keyboardTaken():
+				# A switcher is open, or input help is on: the window chosen, or the one left, takes the
+				# keyboard once Alt or NVDA lets go, and until then no window says it is active, as marco
+				# 1.26's switcher does not either.
 				_rescans[:] = [now + delay for delay in RESCAN_DELAYS_SECONDS]
 			elif not _rescans:
 				_focusDesktop()

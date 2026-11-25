@@ -5,6 +5,9 @@ so a second after the window left said so Linda found no active window and said 
 in the middle of the switch. fixtures/globalPlugins/quietSwitcher.py makes the rig's marco 1.28, whose
 switcher says it is active, quiet as 1.26's.
 
+Input help does the same: NVDA holds the keyboard itself while it is on, and the window it was in says
+it is inactive until input help is turned off.
+
 nix develop . -c tests/linux/rig python3 -m pytest -q tests/linux/test_altTabKeepsTheWindow.py
 """
 
@@ -64,6 +67,35 @@ def test_noDesktopWhileTheSwitcherIsOpen(tmp_path: Path, switcher: str):
 			mark = altTab(desktop, chosen, held)
 			said.append((chosen, desktop.spokenSince(mark)))
 		assert not [(chosen, spoken) for chosen, spoken in said if DESKTOP in spoken], said
+		desktop.close()
+		assert nvda.process.returncode == 0, nvda.describe()
+		nvda.assertClean(logNames=("nvda.log",))
+
+
+#: What NVDA says as input help is turned on and off.
+INPUT_HELP_ON = "input help on\N{HORIZONTAL ELLIPSIS}"
+INPUT_HELP_OFF = "input help off"
+
+
+def test_noDesktopWhileInputHelpIsOn(tmp_path: Path):
+	with DesktopSession(tmp_path / "desktop") as desktop:
+		gtk3 = desktop.startApp(desktop.fixture("gtkFixture"), title=GTK3)
+		assert gtk3.stdout.readline() == "ready\n"
+		desktopSession.activate(GTK3)
+		nvda = desktop.startNVDA(SESSION_CONFIG)
+		desktop.expect(GTK3, since=0, timeout=STARTUP_BOUND)
+		time.sleep(SETTLE)
+		mark = desktop.mark()
+		desktop.press("Insert+1")
+		desktop.expect(INPUT_HELP_ON, since=mark)
+		time.sleep(HELD + SETTLE)
+		desktop.press("Insert+1")
+		desktop.expect("Linda plus 1", INPUT_HELP_OFF, since=mark)
+		time.sleep(SETTLE)
+		spoken = desktop.spokenSince(mark)
+		assert DESKTOP not in spoken, spoken
+		# The focus never left the window, so nothing more is said as NVDA lets go, as on Windows.
+		assert spoken[-1] == INPUT_HELP_OFF, spoken
 		desktop.close()
 		assert nvda.process.returncode == 0, nvda.describe()
 		nvda.assertClean(logNames=("nvda.log",))

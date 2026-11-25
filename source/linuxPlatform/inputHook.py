@@ -51,6 +51,8 @@ _capsLockBlockedWasOn: bool | None = None
 #: the keys typed here to the computer it controls: the keyboard is held while any says so, as for
 #: input help, since only a held key reaches NVDA alone, as one the Windows hook blocks does.
 keyboardTakers: list[Callable[[], bool]] = []
+#: Whether the keyboard is held now, for input help or for another computer.
+_holding = False
 _watcher: threading.Thread | None = None
 _stopWatching = threading.Event()
 #: Set when NVDA's focus enters or leaves a document or changes its mode, to have the watcher look at
@@ -179,6 +181,7 @@ def _watch(source: KeySource) -> None:
 
 	A thread of its own, so that the keyboard is let go during watchdog recovery even when the main
 	thread is frozen."""
+	global _holding
 	import api
 	import config
 	import inputCore
@@ -210,7 +213,7 @@ def _watch(source: KeySource) -> None:
 			) and not watchdog.isAttemptingRecovery
 			if hold != held:
 				source.holdKeyboard(hold)
-				held = hold
+				held = _holding = hold
 			focus = api.getFocusObject()
 			_findBound()
 			if _captureBound and _bound[1] != bound and (setBound := getattr(source, "setBoundKeys", None)):
@@ -250,6 +253,7 @@ def _watch(source: KeySource) -> None:
 	treeInterceptorHandler.post_browseModeStateChange.unregister(_onBrowseModeStateChange)
 	if held:
 		source.holdKeyboard(False)
+		_holding = False
 	if captured != "off":
 		source.setCapture("off")
 
@@ -285,6 +289,12 @@ def _processOf(focus) -> int | None:
 	except Exception:  # noqa: BLE001
 		return None
 	return getattr(appModule, "processID", None) or None
+
+
+def holdsKeyboard() -> bool:
+	"""Whether NVDA holds the keyboard now, for input help or for another computer: the window that had
+	the keyboard says it is inactive until NVDA lets go."""
+	return _holding
 
 
 def _onBrowseModeStateChange() -> None:
