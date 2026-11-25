@@ -16,6 +16,7 @@ import re
 from typing import ClassVar
 
 import api
+import textInfos
 from controlTypes import Role, State
 from linuxPlatform.atspi import client as atspiClient
 from linuxPlatform.atspi import handler
@@ -698,6 +699,16 @@ class AtSpi(NVDAObject):
 			if role == Role.PROGRESSBAR and maximum > minimum:
 				return f"{round((current - minimum) * 100 / (maximum - minimum))}%"
 			return str(int(current)) if current == int(current) else f"{current:g}"
+		if role == Role.LINK and "Hyperlink" in self.atspiInterfaces:
+			try:
+				return _client().linkUri(self.node) or None
+			except NodeGone:
+				return None
+		return None
+
+	def _get_linkData(self) -> textInfos._LinkData | None:
+		if self.role == Role.LINK:
+			return textInfos._LinkData(displayText=self.name, destination=self.value)
 		return None
 
 	def _get_placeholder(self) -> str | None:

@@ -235,6 +235,7 @@ def test_gtkControlsAreSpokenAsOnWindows(desktop: DesktopSession, tmp_path: Path
 	nvda.step(tab, "Fruit: list", "Apples 1 of 3")
 	nvda.step(tab, "Bold toggle button not pressed Alt plus B")
 	nvda.step(tab, "Example link link")
+	nvda.step(lambda: nvda.gesture("NVDA+k"), "https: slash  slash example dot invalid slash")
 	nvda.step(tab, "edit Search... blank")
 	nvda.step(tab, "tab control", "General tab selected 1 of 2")
 	nvda.step(tab, "Press me button Does nothing Alt plus P")

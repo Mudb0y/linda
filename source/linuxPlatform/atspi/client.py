@@ -506,6 +506,13 @@ class Client:
 			call(node, Atspi.Value.get_text) or "",
 		)
 
+	def linkUri(self, node: Node) -> str:
+		"""The destination URI of an accessible that implements Hyperlink."""
+		hyperlink = call(node, Atspi.Accessible.get_hyperlink)
+		if hyperlink is None:
+			return ""
+		return call(node, lambda: hyperlink.get_uri(0)) or ""
+
 	def actions(self, node: Node) -> list[tuple[str, str]]:
 		return [
 			(
