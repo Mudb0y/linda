@@ -370,6 +370,36 @@ def _cgroupOf(processID: int) -> str | None:
 	return None
 
 
+#: The app found behind each xdg-dbus-proxy, by the proxy's process and when it started: NVDA's handler
+#: and the Wayland capture feed each ask, at different moments, and must have the same answer.
+_flatpakApps: dict[tuple[int, bytes | None], int] = {}
+#: How many of those are kept at most.
+MAX_FLATPAK_APPS = 256
+
+
+def _executableName(processID: int) -> str | None:
+	"""The name of the process's executable; where its link cannot be read, as for a process outside
+	NVDA's user namespace, the name of argv[0], which anyone may read, or comm, as getAppName falls back
+	to. None when the process is gone."""
+	try:
+		return os.path.basename(getExecutablePath(processID))
+	except PermissionError:
+		if args := _readCommandLine(processID):
+			return os.path.basename(_firstArgument(args))
+		try:
+			with open(f"/proc/{processID}/comm", encoding="utf-8", errors="surrogateescape") as f:
+				return f.read().rstrip("\n")
+		except OSError:
+			return None
+	except OSError:
+		return None
+
+
+def isDBusProxy(processID: int) -> bool:
+	"""Whether processID is an xdg-dbus-proxy, which the bus records for every connection made through it."""
+	return _executableName(processID) == DBUS_PROXY
+
+
 def findFlatpakApp(processID: int, applicationName: str = "") -> int | None:
 	"""The process of the Flatpak app whose accessibility bus connection processID holds, when it is
 	the app's xdg-dbus-proxy; None when it is not, or when the app cannot be found.
@@ -380,8 +410,20 @@ def findFlatpakApp(processID: int, applicationName: str = "") -> int | None:
 	Failing that, it is the one with the most threads: the scope's other programs are helpers, such as
 	the shell running the app's launch script.
 	"""
-	if os.path.basename(findExecutablePath(processID) or "") != DBUS_PROXY:
+	if not isDBusProxy(processID):
 		return None
+	key = (processID, _readStartTime(processID))
+	if (known := _flatpakApps.get(key)) is not None:
+		return known
+	found = _findFlatpakApp(processID, applicationName)
+	if found is not None:
+		if len(_flatpakApps) >= MAX_FLATPAK_APPS:
+			_flatpakApps.clear()
+		found = _flatpakApps.setdefault(key, found)
+	return found
+
+
+def _findFlatpakApp(processID: int, applicationName: str) -> int | None:
 	cgroup = _cgroupOf(processID)
 	match = _flatpakScope.fullmatch(os.path.basename(cgroup or ""))
 	if match is None:
@@ -395,11 +437,11 @@ def findFlatpakApp(processID: int, applicationName: str = "") -> int | None:
 		return None
 	candidates = []
 	for member in members:
-		executable = findExecutablePath(member)
+		executable = _executableName(member)
 		fields = _readStat(member)
-		if executable is None or fields is None or os.path.basename(executable) in SANDBOX_PROGRAMS:
+		if executable is None or fields is None or executable in SANDBOX_PROGRAMS:
 			continue
-		names = {getAppName(member), _unwrap(os.path.basename(executable)).lower()}
+		names = {getAppName(member), _unwrap(executable).lower()}
 		candidates.append(
 			(int(fields[_STARTTIME_FIELD]), member, int(fields[_THREADS_FIELD]), not names.isdisjoint(wanted))
 		)
