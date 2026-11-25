@@ -815,6 +815,11 @@ source/speech/sayAll.py
   that it made as it began, which stop never ends, since on Linux the
   request holds an idle inhibitor and the screen would never lock
   every platform: imports sys for that test of the platform
+source/speech/speech.py
+  Linux runtime: BLANK_CHUNK_CHARS also holds the zero-width no-break space,
+  the zero-width space and the word joiner, which rich text editors put in
+  an empty line to keep it from collapsing, as Slate does in Discord, so
+  that the line is read as blank rather than as silence
 source/synthDriverHandler.py
   Linux runtime: getSynthList skips NVDA's own copies of
   the Windows-only driver modules (mssp, oneCore, sapi4_32, sapi5,
