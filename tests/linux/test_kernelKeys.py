@@ -961,6 +961,32 @@ def test_browseModeKeysFollowTheModeNow(tmp_path: Path):
 	assert value["off"] == {"events": [[h, False, True]], "window": [[35, True], [35, False]]}
 
 
+SANDBOXED_CHILD = r"""
+# The window says it is process 2, its process ID in a PID namespace of its own, as a program Flatpak
+# runs says, Discord among them; NVDA has the document as this process's, as this machine numbers it.
+window.change_property(pidAtom, Xatom.CARDINAL, 32, [2])
+app.sync()
+source = startSource()
+mode["now"] = "browse"
+source.setCapture("browse", os.getpid())
+time.sleep(0.1)
+keyboard.press("h")
+keyboard.press("Down")
+time.sleep(0.3)
+result = {"events": [[e["vk"], e["captured"], e["reached"]] for e in presses()], "window": windowKeys()}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_browseModeKeysStayNVDAsInASandboxedProgramsWindow(tmp_path: Path):
+	# Passed on, h and Down reached Discord as well as NVDA: Down moved Discord's focus to the next
+	# message, which browse mode then followed, and h put the focus in the message box and typed there.
+	value = runKernelChild(tmp_path, SANDBOXED_CHILD)
+	h, down = ord("H"), 0x28
+	assert value == {"events": [[h, True, False], [down, True, False]], "window": []}
+
+
 HOLD_CHILD = r"""
 source = startSource()
 source.holdKeyboard(True)
