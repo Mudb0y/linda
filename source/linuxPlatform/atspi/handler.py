@@ -97,6 +97,9 @@ RETRY_DELAY_SECONDS = 0.02
 #: How long after the foreground deactivated, with no window activated since, to look for an active
 #: window again.
 RESCAN_DELAYS_SECONDS = (0.25, 1.0)
+#: Seconds between looks at whether Alt is still held, while the keyboard is taken with no window active:
+#: a look reads the key state alone and asks no application.
+SWITCH_KEY_LOOK_SECONDS = 0.25
 #: The same after a shell's own surface deactivated, in a Wayland session: GNOME Shell lets go of the
 #: keyboard for some 2.3 s while it checks a password typed into its prompts, and takes it back.
 SHELL_RESCAN_DELAYS_SECONDS = (0.25, 1.0, 2.0, 3.0, 4.0)
@@ -170,6 +173,10 @@ _firstSeen: dict[tuple[str, str], float] = {}
 _retries: list[tuple[float, tuple]] = []
 #: When to look again for an active window, after the foreground deactivated and none took its place.
 _rescans: list[float] = []
+#: Whether those looks wait for the keyboard to be given back, as no window says it is active while a
+#: switcher or NVDA holds it; and when a pump is already asked for, to see whether Alt is still held.
+_keyboardWait = False
+_keyboardLookAt: float | None = None
 #: Whether those looks have been made longer once, in a Wayland session, for an application that is busy.
 _rescansExtended = False
 #: Roles of event sources, read once each, to know a password field before keeping what it sent.
@@ -244,6 +251,74 @@ def roleOfVanished(node: Node) -> str | None:
 		role = "status bar"
 		_roles[node.key] = role
 	return role
+
+
+def _keyboardTaken() -> bool:
+	"""Whether the keyboard is taken from the windows for a while, as no window then says it is active:
+	Alt is held, as while a window manager's switcher is open, Alt+Tab or Control+Alt+Tab, whose window
+	chosen takes the keyboard once Alt is let go; or NVDA holds the keyboard itself, for input help, and
+	the window it was in has it back once NVDA lets go."""
+	import winUser
+
+	from linuxPlatform import inputHook
+
+	if inputHook.holdsKeyboard():
+		return True
+	try:
+		return bool(winUser.getKeyState(winUser.VK_MENU) & 0x8000)
+	# Without a key source, as before the keyboard is read or after it is let go, no key is known held.
+	except Exception:  # noqa: BLE001
+		return False
+
+
+def _awaitKeyboard(now: float) -> None:
+	"""Stop looking for an active window while the keyboard is taken: no window says it is active until
+	it is given back, and Remote Access holds it for as long as this computer controls another, over
+	which every application would be asked again and again. NVDA asks for a pump as it lets go; while
+	Alt is held, a pump is asked for every SWITCH_KEY_LOOK_SECONDS, and nothing more."""
+	global _keyboardWait
+	_rescans.clear()
+	_keyboardWait = True
+	_lookAtKeyboardLater(now)
+
+
+def _lookAtKeyboardLater(now: float) -> None:
+	global _keyboardLookAt
+	import core
+
+	from linuxPlatform import inputHook
+
+	if inputHook.holdsKeyboard() or (_keyboardLookAt is not None and _keyboardLookAt > now):
+		return
+	_keyboardLookAt = now + SWITCH_KEY_LOOK_SECONDS
+	core.callLater(round(SWITCH_KEY_LOOK_SECONDS * 1000), _lookAtKeyboard)
+
+
+def _lookAtKeyboard() -> None:
+	"""Look whether Alt is still held, from the pump that core.callLater runs it in, which asking for a
+	pump would follow with another; one only once the looks for an active window start again."""
+	import core
+
+	if not _keyboardWait:
+		return
+	_keyboardBack(time.monotonic())
+	if _rescans:
+		core.requestPump()
+
+
+def _keyboardBack(now: float) -> None:
+	"""While the looks for an active window wait for the keyboard: once a window has said it is active
+	they are over, and once the keyboard is back they start again."""
+	global _keyboardWait, _keyboardLookAt
+	if _keyboardLookAt is not None and now >= _keyboardLookAt:
+		_keyboardLookAt = None
+	if _foregroundActive:
+		_keyboardWait = False
+	elif _keyboardTaken():
+		_lookAtKeyboardLater(now)
+	else:
+		_keyboardWait = False
+		_rescans[:] = [now + delay for delay in RESCAN_DELAYS_SECONDS]
 
 
 def _focusDesktop() -> None:
@@ -782,6 +857,7 @@ def initialize() -> None:
 
 def terminate() -> None:
 	global _listening, _desktopNode, _settleStartedAt, _probePumpAt, _rescansExtended
+	global _keyboardWait, _keyboardLookAt
 	import core
 
 	core.postNvdaStartup.unregister(_onPostNvdaStartup)
@@ -799,6 +875,8 @@ def terminate() -> None:
 	_firstSeen.clear()
 	_retries.clear()
 	_rescans.clear()
+	_keyboardWait = False
+	_keyboardLookAt = None
 	_descendantChanges.clear()
 	_quickChanges.clear()
 	_floodingUntil.clear()
@@ -1787,9 +1865,16 @@ def pumpAll() -> None:
 		return
 	due = [event for at, event in _retries if at <= now]
 	_retries[:] = [(at, event) for at, event in _retries if at > now]
+	if _keyboardWait:
+		_keyboardBack(now)
 	if _rescans and _rescans[0] <= now:
 		del _rescans[0]
-		if not _foregroundActive:
+		if not _foregroundActive and _keyboardTaken():
+			# A switcher is open, or input help or Remote Access is on: the window chosen, or the one
+			# left, takes the keyboard once Alt or NVDA lets go, and until then no window says it is
+			# active, as marco 1.26's switcher does not either.
+			_awaitKeyboard(now)
+		elif not _foregroundActive:
 			left = _foreground
 			window = _scanForActiveWindow()
 			if window is not None and _isSwitcher(window):
