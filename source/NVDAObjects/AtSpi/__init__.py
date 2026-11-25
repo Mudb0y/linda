@@ -312,10 +312,13 @@ class AtSpi(NVDAObject):
 		paragraphs inside it, as NVDA's Editor is on Windows; a field of a form keeps its own."""
 		states = self.atspiStates
 		# Firefox calls an editable element single-line when its textbox role has no aria-multiline, as
-		# WhatsApp Web's message box has, though its text is still in the paragraph inside it.
+		# WhatsApp Web's message box has, though its text is still in the paragraph inside it. One with
+		# no role at all, as YouTube's comment box is, is a section, and gets a paragraph of its own for
+		# each line once Return is pressed in it; as on Windows, every editable element that takes the
+		# focus is an editor, whatever its role. An editable document keeps the reading it had.
 		return (
 			self.toolkit == GECKO
-			and self.role == Role.EDITABLETEXT
+			and (self.role == Role.EDITABLETEXT or ("editable" in states and self.role != Role.DOCUMENT))
 			and "focusable" in states
 			and "Hypertext" in self.atspiInterfaces
 			and self.atspiAttributes.get("tag") not in ("textarea", "input")
@@ -711,8 +714,8 @@ class AtSpi(NVDAObject):
 	def _get_placeholder(self) -> str | None:
 		"""The hint an empty field shows, which NVDA says on focus in place of its text: Firefox gives a
 		page's placeholder as an object attribute, as IAccessible2 gives it on Windows."""
-		# Speech asks every focus for it; a busy GTK application is not asked once more.
-		if self.toolkit != GECKO:
+		# Speech asks every focus for it; non-editable controls are short-circuited without D-Bus calls.
+		if self.role not in (Role.EDITABLETEXT, Role.COMBOBOX) and "editable" not in self.atspiStates:
 			return None
 		return self.atspiAttributes.get("placeholder-text") or None
 

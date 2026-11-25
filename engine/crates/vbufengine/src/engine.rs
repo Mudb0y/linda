@@ -63,6 +63,7 @@ const COALESCE: Duration = Duration::from_millis(100);
 /// The top of a large document is returned once this many objects are complete, or once this much
 /// time has passed, whichever comes first.
 const FIRST_PART_OBJECTS: usize = 2_000;
+const FULL_RELOAD_OBJECTS: usize = FIRST_PART_OBJECTS;
 const FIRST_PART_TIME: Duration = Duration::from_millis(300);
 const MAX_OBJECTS: usize = 500_000;
 const MAX_WALK_TIME: Duration = Duration::from_secs(120);
@@ -137,6 +138,10 @@ struct Pending {
     url_check: bool,
     updating: bool,
     unwatched: bool,
+    /// Document:LoadComplete arrived on this document; the next update walks the whole document
+    /// again and carries "loadComplete" with it, because Chromium withholds children-changed
+    /// signals while a page is still loading.
+    load_complete: bool,
     /// The first few signals behind the next update, for its info.
     why: Vec<String>,
 }
@@ -446,8 +451,18 @@ impl State {
 
     fn load_complete(self: &Rc<Self>, bus: &str, path: &str) {
         if let Some(d) = self.doc(bus, path) {
-            self.lifecycle(&d, "loadComplete");
-            self.check_url(&d);
+            let mut p = d.p.borrow_mut();
+            if p.unwatched {
+                return;
+            }
+            p.load_complete = true;
+            p.url_check = true;
+            if p.why.len() < 8 {
+                p.why.push("load-complete".to_owned());
+            }
+            if !p.walking && !p.updating {
+                p.since.get_or_insert_with(Instant::now);
+            }
             return;
         }
         if self.docs_of(bus).is_empty() {
@@ -498,6 +513,10 @@ impl State {
         for d in self.docs.borrow().values() {
             let p = d.p.borrow();
             if p.walking || p.updating || p.unwatched {
+                continue;
+            }
+            if p.load_complete {
+                ready.push(d.clone());
                 continue;
             }
             let Some(since) = p.since else { continue };
@@ -836,7 +855,7 @@ async fn render_task(
     let still_busy = match busy_now(&client, &root).await {
         Some(b) => b,
         None => busy(&walk.objs, &root),
-    };
+    } || d.p.borrow().load_complete;
     info.insert("busy".into(), still_busy.into());
     let t_render = Instant::now();
     let (out, nodes, marks) = render_whole(&walk.objs, &root, handle, false);
@@ -898,6 +917,27 @@ async fn busy_now(client: &Client, root: &str) -> Option<bool> {
         .map(|s| has(s, mirror::consts::STATE_BUSY))
 }
 
+/// Root and the trailing last-child chain down to the first node whose children were not kept.
+fn trailing_spine(objs: &HashMap<String, Obj>, root: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut cur = Some(root.to_owned());
+    while let Some(path) = cur {
+        if out.len() >= 64 || !seen.insert(path.clone()) {
+            break;
+        }
+        out.push(path.clone());
+        let Some(obj) = objs.get(&path) else {
+            break;
+        };
+        if !obj.child_reuse {
+            break;
+        }
+        cur = obj.children.last().cloned();
+    }
+    out
+}
+
 /// The objects that have to be walked again: each changed one whose ancestors have not changed.
 /// And every changed object with its ancestors, none of which can be kept as it was.
 fn targets(
@@ -957,11 +997,12 @@ fn merge(
 }
 
 async fn update_task(st: Rc<State>, d: Rc<Doc>) {
-    let (invalid, url_check, signals) = {
+    let (load_complete, invalid, url_check, signals) = {
         let mut p = d.p.borrow_mut();
         p.since = None;
         p.updating = true;
         (
+            std::mem::take(&mut p.load_complete),
             std::mem::take(&mut p.invalid),
             std::mem::take(&mut p.url_check),
             std::mem::take(&mut p.why),
@@ -975,31 +1016,25 @@ async fn update_task(st: Rc<State>, d: Rc<Doc>) {
     let mut events: Vec<&str> = Vec::new();
     let mut stream = None;
     let mut info = Map::new();
-    let (targets, dirty) = targets(&d.objs.borrow(), &invalid);
-    if !targets.is_empty() {
-        let outer = Outer {
-            objs: d.objs.clone(),
-            dirty: if d.reuse { dirty } else { HashSet::new() },
-            reuse: d.reuse,
-        };
+    if load_complete && d.objs.borrow().len() <= FULL_RELOAD_OBJECTS {
         let client = app.client();
-        let mut walk = Walk::new(client.clone(), Some(outer), MAX_OBJECTS, MAX_WALK_TIME);
-        for t in &targets {
-            walk.start(t, Vec::new());
+        let mut walk = Walk::new(client.clone(), None, MAX_OBJECTS, MAX_WALK_TIME);
+        if std::env::var("LINDA_VBUF_WALK").as_deref() != Ok("objects") {
+            walk = walk.by_subtrees();
         }
+        walk.start(&d.root, Vec::new());
         while walk.step().await {}
         if d.p.borrow().unwatched || !st.is_current(&d) {
             end_update(&st, &d);
             return;
         }
-        // Merged, what the walk found after its connection went would take the changed parts out of
-        // the buffer; the same changes are walked again over the bus.
         if client.transport == Transport::PeerToPeer
             && let Some(lost) = client.lost()
         {
             let why = format!("its peer-to-peer connection was lost during an update: {lost}");
             if st.fall_back(&app, &client, why).await.is_ok() {
                 let mut p = d.p.borrow_mut();
+                p.load_complete = true;
                 p.invalid.extend(invalid);
                 p.url_check |= url_check;
                 p.why.extend(signals);
@@ -1008,56 +1043,129 @@ async fn update_task(st: Rc<State>, d: Rc<Doc>) {
             end_update(&st, &d);
             return;
         }
-        let gone: HashSet<String> = walk.gone.iter().cloned().collect();
-        let live: Vec<String> = targets
-            .iter()
-            .filter(|t| !gone.contains(*t))
-            .cloned()
-            .collect();
-        let reused = std::mem::take(&mut walk.reused);
-        let found: HashMap<String, Obj> = std::mem::take(&mut walk.objs)
-            .into_iter()
-            .filter(|(p, _)| !gone.contains(p))
-            .collect();
-        {
-            let mut objs = d.objs.borrow_mut();
-            merge(&mut objs, found, &live, &reused);
-        }
-        let (out, marks) = {
-            let objs = d.objs.borrow();
-            let mut r = Renderer::new(&objs, d.handle, &d.root, false, &reused);
-            for t in &live {
-                r.replace(t);
+        events.push("loadComplete");
+        if !walk.gone.contains(&d.root) {
+            let doc_objects = walk.objs.len();
+            let (out, nodes, marks) = render_whole(&walk.objs, &d.root, d.handle, false);
+            {
+                let mut objs = d.objs.borrow_mut();
+                *objs = std::mem::take(&mut walk.objs);
+                apply_marks(&mut objs, marks, true);
             }
-            (r.out, r.marks)
-        };
-        apply_marks(&mut d.objs.borrow_mut(), marks, false);
-        if !out.is_empty() {
-            stream = Some(out);
-        }
-        // A target the application no longer has went with its parent, whose own change says so.
-        for g in gone {
-            let parent = d.objs.borrow().get(&g).and_then(|o| o.parent.clone());
-            if let Some(parent) = parent {
-                st.invalidate(&d.bus, &parent, "gone");
+            if !out.is_empty()
+                && let Some(root_id) = crate::render::id_of(&d.root)
+            {
+                let mut full = vec![b'S' as u16];
+                full.extend(format!("{},{};", d.handle, root_id).encode_utf16());
+                full.extend(out);
+                stream = Some(full);
             }
+            info.insert("objects".into(), nodes.into());
+            info.insert("documentObjects".into(), doc_objects.into());
+            info.insert("targets".into(), json!([&d.root]));
+            info.insert("calls".into(), walk.calls.into());
+            info.insert("walkSeconds".into(), walk.seconds().into());
+            info.insert(
+                "slowestCall".into(),
+                json!([
+                    walk.slowest.0.as_secs_f64(),
+                    format!("{:?}", walk.slowest.1),
+                    walk.slowest.2
+                ]),
+            );
+            info.insert("reused".into(), 0usize.into());
         }
-        info.insert("objects".into(), live.len().into());
-        info.insert(
-            "targets".into(),
-            json!(live.iter().take(16).collect::<Vec<_>>()),
-        );
-        info.insert("calls".into(), walk.calls.into());
-        info.insert("walkSeconds".into(), walk.seconds().into());
-        info.insert(
-            "slowestCall".into(),
-            json!([
-                walk.slowest.0.as_secs_f64(),
-                format!("{:?}", walk.slowest.1),
-                walk.slowest.2
-            ]),
-        );
-        info.insert("reused".into(), reused.len().into());
+    } else {
+        let mut invalid = invalid;
+        if load_complete {
+            events.push("loadComplete");
+            invalid.extend(trailing_spine(&d.objs.borrow(), &d.root));
+        }
+        let (targets, dirty) = targets(&d.objs.borrow(), &invalid);
+        if !targets.is_empty() {
+            let outer = Outer {
+                objs: d.objs.clone(),
+                dirty: if d.reuse { dirty } else { HashSet::new() },
+                reuse: d.reuse,
+            };
+            let client = app.client();
+            let mut walk = Walk::new(client.clone(), Some(outer), MAX_OBJECTS, MAX_WALK_TIME);
+            for t in &targets {
+                walk.start(t, Vec::new());
+            }
+            while walk.step().await {}
+            if d.p.borrow().unwatched || !st.is_current(&d) {
+                end_update(&st, &d);
+                return;
+            }
+            // Merged, what the walk found after its connection went would take the changed parts out of
+            // the buffer; the same changes are walked again over the bus.
+            if client.transport == Transport::PeerToPeer
+                && let Some(lost) = client.lost()
+            {
+                let why = format!("its peer-to-peer connection was lost during an update: {lost}");
+                if st.fall_back(&app, &client, why).await.is_ok() {
+                    let mut p = d.p.borrow_mut();
+                    p.load_complete |= load_complete;
+                    p.invalid.extend(invalid);
+                    p.url_check |= url_check;
+                    p.why.extend(signals);
+                    p.since.get_or_insert_with(Instant::now);
+                }
+                end_update(&st, &d);
+                return;
+            }
+            let gone: HashSet<String> = walk.gone.iter().cloned().collect();
+            let live: Vec<String> = targets
+                .iter()
+                .filter(|t| !gone.contains(*t))
+                .cloned()
+                .collect();
+            let reused = std::mem::take(&mut walk.reused);
+            let found: HashMap<String, Obj> = std::mem::take(&mut walk.objs)
+                .into_iter()
+                .filter(|(p, _)| !gone.contains(p))
+                .collect();
+            {
+                let mut objs = d.objs.borrow_mut();
+                merge(&mut objs, found, &live, &reused);
+            }
+            let (out, marks) = {
+                let objs = d.objs.borrow();
+                let mut r = Renderer::new(&objs, d.handle, &d.root, false, &reused);
+                for t in &live {
+                    r.replace(t);
+                }
+                (r.out, r.marks)
+            };
+            apply_marks(&mut d.objs.borrow_mut(), marks, false);
+            if !out.is_empty() {
+                stream = Some(out);
+            }
+            // A target the application no longer has went with its parent, whose own change says so.
+            for g in gone {
+                let parent = d.objs.borrow().get(&g).and_then(|o| o.parent.clone());
+                if let Some(parent) = parent {
+                    st.invalidate(&d.bus, &parent, "gone");
+                }
+            }
+            info.insert("objects".into(), live.len().into());
+            info.insert(
+                "targets".into(),
+                json!(live.iter().take(16).collect::<Vec<_>>()),
+            );
+            info.insert("calls".into(), walk.calls.into());
+            info.insert("walkSeconds".into(), walk.seconds().into());
+            info.insert(
+                "slowestCall".into(),
+                json!([
+                    walk.slowest.0.as_secs_f64(),
+                    format!("{:?}", walk.slowest.1),
+                    walk.slowest.2
+                ]),
+            );
+            info.insert("reused".into(), reused.len().into());
+        }
     }
     if url_check || stream.is_some() {
         let url = doc_url(&app.client(), &d.root).await;
@@ -1277,6 +1385,79 @@ mod tests {
         assert!(
             objs["/l"].rendered,
             "a kept child stays as the buffer holds it"
+        );
+    }
+
+    #[test]
+    fn load_complete_schedules_an_immediate_walk_once_idle() {
+        let st = Rc::new(State {
+            shared: crate::SHARED.clone(),
+            bus: RefCell::new(None),
+            bus_address: RefCell::new(None),
+            registered: Cell::new(false),
+            apps: RefCell::new(HashMap::new()),
+            docs: RefCell::new(HashMap::new()),
+            new_streams: RefCell::new(Vec::new()),
+            spawned: RefCell::new(Vec::new()),
+        });
+        let d = Rc::new(Doc {
+            bus: ":1.1".to_owned(),
+            root: "/doc".to_owned(),
+            handle: 1,
+            reuse: true,
+            frame: RefCell::new(None),
+            url: RefCell::new(String::new()),
+            objs: Rc::new(RefCell::new(HashMap::new())),
+            p: RefCell::new(Pending {
+                walking: true,
+                ..Pending::default()
+            }),
+        });
+        st.docs
+            .borrow_mut()
+            .insert((":1.1".to_owned(), "/doc".to_owned()), d.clone());
+        st.load_complete(":1.1", "/doc");
+        let now = Instant::now();
+        assert!(d.p.borrow().load_complete);
+        assert!(st.due(now).0.is_empty());
+
+        d.p.borrow_mut().walking = false;
+        assert_eq!(st.due(now).0.len(), 1);
+
+        d.p.borrow_mut().updating = true;
+        assert!(st.due(now).0.is_empty());
+    }
+
+    #[test]
+    fn trailing_spine_follows_reusable_last_children() {
+        let mut objs = HashMap::new();
+        objs.insert(
+            "/doc".to_owned(),
+            Obj {
+                children: vec!["/a".to_owned(), "/b".to_owned()],
+                child_reuse: true,
+                ..Obj::default()
+            },
+        );
+        objs.insert(
+            "/b".to_owned(),
+            Obj {
+                children: vec!["/c".to_owned(), "/d".to_owned()],
+                child_reuse: true,
+                ..Obj::default()
+            },
+        );
+        objs.insert(
+            "/d".to_owned(),
+            Obj {
+                children: vec!["/e".to_owned()],
+                child_reuse: false,
+                ..Obj::default()
+            },
+        );
+        assert_eq!(
+            trailing_spine(&objs, "/doc"),
+            vec!["/doc".to_owned(), "/b".to_owned(), "/d".to_owned()]
         );
     }
 }

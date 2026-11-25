@@ -30,6 +30,11 @@ from .textInfo import AtspiTextInfo
 #: How deep the objects of an editor nest before the walk down gives up: paragraphs, lists, their items,
 #: links and formatting inside them.
 MAX_DEPTH = 32
+#: How many of an object's embedded objects are asked whether they hold the caret, when the one the
+#: object's own caret points at says it does not: those nearest it first, as an arrow key moves to the
+#: next or the previous and a page key a screenful away, and the first and the last after the two beside
+#: it, for the keys that move to the start or the end.
+MAX_CARET_SEARCH = 64
 
 
 def _hasText(obj) -> bool:
@@ -48,6 +53,53 @@ def _characterCount(obj) -> int:
 		return handler.client().characterCount(obj.node)
 	except NodeGone:
 		return 0
+
+
+def _searchOrder(start: int, count: int):
+	"""The indexes from 0 to count, start left out, in the order they are asked whether they hold the
+	caret: the two beside start, the last and the first, then outward from start; MAX_CARET_SEARCH at most.
+	"""
+
+	def nearestFirst():
+		yield from (start + 1, start - 1, count - 1, 0)
+		for distance in range(2, count + 1):
+			yield start + distance
+			yield start - distance
+
+	seen = {start}
+	for index in nearestFirst():
+		if len(seen) > MAX_CARET_SEARCH:
+			return
+		if 0 <= index < count and index not in seen:
+			seen.add(index)
+			yield index
+
+
+def _embeddedHoldingCaret(obj, offset: int):
+	"""The object with text that an embedded object character in obj's text stands for and that holds
+	the caret, and the caret's offset in it; None when none does. obj's own caret is at offset, where the
+	embedded object character of the object the caret has left is: the objects nearest it are asked first.
+	"""
+	if "Hypertext" not in obj.atspiInterfaces:
+		return None
+	client = handler.client()
+	node = obj.node
+	try:
+		count = call(node, Atspi.Hypertext.get_n_links)
+		start = call(node, Atspi.Hypertext.get_link_index, offset)
+		for index in _searchOrder(start, count):
+			hyperlink = call(node, Atspi.Hypertext.get_link, index)
+			if hyperlink is None:
+				continue
+			child = client.node(call(node, lambda link=hyperlink: link.get_object(0)))
+			if child is None or "Text" not in client.interfaces(child):
+				continue
+			if (caret := client.caretOffset(child)) >= 0:
+				embedded = handler.getObject(child)
+				return (embedded, caret) if embedded is not None else None
+	except NodeGone:
+		return None
+	return None
 
 
 def _getEmbedded(obj, offset: int):
@@ -230,6 +282,13 @@ class AtspiCompoundTextInfo(CompoundTextInfo):
 				offset = self._offsetFor(obj, position)
 			except NodeGone:
 				offset = None
+			if offset is None and found is not None and position == textInfos.POSITION_CARET:
+				# On a page as busy as YouTube, Firefox can still point an editor's caret at the paragraph an
+				# arrow is leaving after that paragraph has said it no longer holds it: the caret is in
+				# another of the parent's objects by then, and NVDA would read the line being left.
+				holder = _embeddedHoldingCaret(*found)
+				if holder is not None:
+					obj, offset = holder
 			if offset is None:
 				break
 			found = (obj, offset)

@@ -117,6 +117,10 @@ def build():
 	link = Gtk.LinkButton.new_with_label("https://example.invalid/", "Example link")
 	box.pack_start(link, False, False, 0)
 
+	search = Gtk.Entry()
+	search.set_placeholder_text("Search…")
+	box.pack_start(search, False, False, 0)
+
 	notebook = Gtk.Notebook()
 	notebook.append_page(Gtk.Label(label="First page"), Gtk.Label(label="General"))
 	notebook.append_page(Gtk.Label(label="Second page"), Gtk.Label(label="Advanced"))

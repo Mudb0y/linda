@@ -961,6 +961,126 @@ def test_browseModeKeysFollowTheModeNow(tmp_path: Path):
 	assert value["off"] == {"events": [[h, False, True]], "window": [[35, True], [35, False]]}
 
 
+SANDBOXED_CHILD = r"""
+# The window says it is process 2, its process ID in a PID namespace of its own, as a program Flatpak
+# runs says, Discord among them; NVDA has the document as this process's, as this machine numbers it.
+window.change_property(pidAtom, Xatom.CARDINAL, 32, [2])
+app.sync()
+source = startSource()
+mode["now"] = "browse"
+source.setCapture("browse", os.getpid())
+time.sleep(0.1)
+keyboard.press("h")
+keyboard.press("Down")
+time.sleep(0.3)
+result = {"events": [[e["vk"], e["captured"], e["reached"]] for e in presses()], "window": windowKeys()}
+source.stop()
+keyboard.close()
+"""
+
+
+def test_browseModeKeysStayNVDAsInASandboxedProgramsWindow(tmp_path: Path):
+	# Passed on, h and Down reached Discord as well as NVDA: Down moved Discord's focus to the next
+	# message, which browse mode then followed, and h put the focus in the message box and typed there.
+	value = runKernelChild(tmp_path, SANDBOXED_CHILD)
+	h, down = ord("H"), 0x28
+	assert value == {"events": [[h, True, False], [down, True, False]], "window": []}
+
+
+TWO_SANDBOXED_CHILD = r"""
+import json, subprocess
+
+# A program of its own with one window, which says it is process 2, as every program Flatpak runs says
+# of itself, and reports the keys it gets.
+HELPER = '''
+import json, select, sys
+from Xlib import X, Xatom, display
+d = display.Display()
+root = d.screen().root
+w = root.create_window(0, 0, 200, 200, 0, d.screen().root_depth, event_mask=X.KeyPressMask)
+w.change_property(d.intern_atom("_NET_WM_PID"), Xatom.CARDINAL, 32, [2])
+w.map()
+d.sync()
+print("ready", flush=True)
+keys = []
+while True:
+	while d.pending_events():
+		event = d.next_event()
+		if event.type == X.KeyPress:
+			keys.append(event.detail - 8)
+	ready, _, _ = select.select([sys.stdin, d.fileno()], [], [], 0.05)
+	if sys.stdin in ready:
+		line = sys.stdin.readline().strip()
+		if not line:
+			break
+		if line == "focus":
+			w.set_input_focus(X.RevertToParent, X.CurrentTime)
+			d.sync()
+			print("focused", flush=True)
+		elif line == "keys":
+			d.sync()
+			while d.pending_events():
+				event = d.next_event()
+				if event.type == X.KeyPress:
+					keys.append(event.detail - 8)
+			print(json.dumps(keys), flush=True)
+			keys.clear()
+'''
+
+
+def spawn():
+	helper = subprocess.Popen([sys.executable, "-c", HELPER], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+	assert helper.stdout.readline() == "ready\n"
+	return helper
+
+
+def tell(helper, what):
+	helper.stdin.write(what + "\n")
+	helper.stdin.flush()
+	return helper.stdout.readline()
+
+
+first, second = spawn(), spawn()
+time.sleep(0.3)
+source = startSource("x11")
+tell(first, "focus")
+time.sleep(0.2)
+mode["now"] = "browse"
+source.setCapture("browse", first.pid)
+time.sleep(0.3)
+keyboard.press("h")
+time.sleep(0.3)
+inFirst = {"events": [[e["vk"], e["captured"]] for e in presses()], "keys": json.loads(tell(first, "keys"))}
+delivered.clear()
+# The keyboard goes to the other program; NVDA's focus has yet to follow, so its mode is still the first
+# program's document's, as it says again.
+tell(second, "focus")
+time.sleep(0.2)
+source.setCapture("browse", first.pid)
+time.sleep(0.3)
+keyboard.press("h")
+time.sleep(0.3)
+inSecond = {"events": [[e["vk"], e["captured"]] for e in presses()], "keys": json.loads(tell(second, "keys"))}
+result = {"first": inFirst, "second": inSecond}
+source.stop()
+for helper in (first, second):
+	helper.stdin.close()
+	helper.wait()
+keyboard.close()
+"""
+
+
+def test_browseModeKeysStayInTheirSandboxedProgramsWindow(tmp_path: Path):
+	# Two programs Flatpak runs both say they are process 2: the keys of the first one's document stay
+	# with it as the keyboard goes to the second, which gets h itself, by the X clients that made them.
+	value = runKernelChild(tmp_path, TWO_SANDBOXED_CHILD)
+	h = ord("H")
+	assert value == {
+		"first": {"events": [[h, True]], "keys": []},
+		"second": {"events": [[h, False]], "keys": [35]},
+	}
+
+
 HOLD_CHILD = r"""
 source = startSource()
 source.holdKeyboard(True)

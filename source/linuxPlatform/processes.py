@@ -341,6 +341,120 @@ def getAppName(processID: int | None) -> str:
 	return name
 
 
+#: The program Flatpak puts between an app in its sandbox and the accessibility bus, which then gives
+#: the proxy's process ID for every object of the app, as it gives the connecting process's for any
+#: other program.
+DBUS_PROXY = "xdg-dbus-proxy"
+#: The sandbox's own programs, which Flatpak runs in an app's scope beside the app: bubblewrap, which
+#: starts the app and the proxy, and the proxy.
+SANDBOX_PROGRAMS = frozenset({"bwrap", DBUS_PROXY})
+#: The systemd scope Flatpak runs an instance of an app in, named for the app's ID and the instance.
+_flatpakScope = re.compile(r"app-flatpak-(?P<app>.+)-\d+\.scope")
+#: Where the kernel shows the unified cgroup hierarchy.
+cgroupRoot = "/sys/fs/cgroup"
+#: The field of /proc/PID/stat after comm that holds the process's number of threads.
+_THREADS_FIELD = 17
+#: The field of /proc/PID/stat after comm that holds when the process started.
+_STARTTIME_FIELD = 19
+
+
+def _cgroupOf(processID: int) -> str | None:
+	"""The process's cgroup in the unified hierarchy, as a path under cgroupRoot."""
+	try:
+		with open(f"/proc/{processID}/cgroup", "rb") as f:
+			for line in f:
+				if line.startswith(b"0::"):
+					return os.fsdecode(line[3:].rstrip(b"\n"))
+	except OSError:
+		pass
+	return None
+
+
+#: The app found behind each xdg-dbus-proxy, by the proxy's process and when it started: NVDA's handler
+#: and the Wayland capture feed each ask, at different moments, and must have the same answer.
+_flatpakApps: dict[tuple[int, bytes | None], int] = {}
+#: How many of those are kept at most.
+MAX_FLATPAK_APPS = 256
+
+
+def _executableName(processID: int) -> str | None:
+	"""The name of the process's executable; where its link cannot be read, as for a process outside
+	NVDA's user namespace, the name of argv[0], which anyone may read, or comm, as getAppName falls back
+	to. None when the process is gone."""
+	try:
+		return os.path.basename(getExecutablePath(processID))
+	except PermissionError:
+		if args := _readCommandLine(processID):
+			return os.path.basename(_firstArgument(args))
+		try:
+			with open(f"/proc/{processID}/comm", encoding="utf-8", errors="surrogateescape") as f:
+				return f.read().rstrip("\n")
+		except OSError:
+			return None
+	except OSError:
+		return None
+
+
+def isDBusProxy(processID: int) -> bool:
+	"""Whether processID is an xdg-dbus-proxy, which the bus records for every connection made through it."""
+	return _executableName(processID) == DBUS_PROXY
+
+
+def findFlatpakApp(processID: int, applicationName: str = "") -> int | None:
+	"""The process of the Flatpak app whose accessibility bus connection processID holds, when it is
+	the app's xdg-dbus-proxy; None when it is not, or when the app cannot be found.
+
+	Flatpak runs the proxy in the systemd scope of the app's instance, which is named for the app's ID.
+	Of the other processes there, the app is the first named for the end of that ID or for the name it
+	gives the accessibility bus, applicationName, as /app/discord/Discord is for com.discordapp.Discord.
+	Failing that, it is the one with the most threads: the scope's other programs are helpers, such as
+	the shell running the app's launch script.
+	"""
+	if not isDBusProxy(processID):
+		return None
+	key = (processID, _readStartTime(processID))
+	if (known := _flatpakApps.get(key)) is not None:
+		return known
+	found = _findFlatpakApp(processID, applicationName)
+	if found is not None:
+		if len(_flatpakApps) >= MAX_FLATPAK_APPS:
+			_flatpakApps.clear()
+		found = _flatpakApps.setdefault(key, found)
+	return found
+
+
+def _findFlatpakApp(processID: int, applicationName: str) -> int | None:
+	cgroup = _cgroupOf(processID)
+	match = _flatpakScope.fullmatch(os.path.basename(cgroup or ""))
+	if match is None:
+		return None
+	appID = match.group("app")
+	wanted = {appID.lower(), appID.rsplit(".", 1)[-1].lower(), applicationName.lower()} - {""}
+	try:
+		with open(f"{cgroupRoot}{cgroup}/cgroup.procs", "rb") as f:
+			members = [int(line) for line in f.read().split()]
+	except (OSError, ValueError):
+		return None
+	candidates = []
+	for member in members:
+		executable = _executableName(member)
+		fields = _readStat(member)
+		if executable is None or fields is None or executable in SANDBOX_PROGRAMS:
+			continue
+		names = {getAppName(member), _unwrap(executable).lower()}
+		candidates.append(
+			(int(fields[_STARTTIME_FIELD]), member, int(fields[_THREADS_FIELD]), not names.isdisjoint(wanted))
+		)
+	if not candidates:
+		return None
+	candidates.sort()
+	named = [member for _started, member, _threads, isNamed in candidates if isNamed]
+	if named:
+		return named[0]
+	# The earliest of those with the most threads.
+	return max(candidates, key=lambda candidate: (candidate[2], -candidate[0]))[1]
+
+
 def _readElfHeader(processID: int) -> tuple[int, int] | None:
 	"""The ELF class and machine of the process's executable, or None when it cannot be read."""
 	try:
