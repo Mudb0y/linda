@@ -41,6 +41,7 @@ from collections.abc import Callable
 
 from logHandler import log
 
+from .. import processes
 from . import CaptureMode
 from .x11 import DOCUMENT_GRACE, NO_CAPTURE, CaptureState
 
@@ -489,7 +490,21 @@ class AtspiCaptureFeed:
 		if busName in self._askingProcess:
 			return
 		self._askingProcess.add(busName)
-		self._request("process", busName, lambda process: self._processKnown(busName, process))
+		self._request("process", busName, lambda process: self._processAnswered(busName, process))
+
+	def _processAnswered(self, busName: str, process: int | None) -> None:
+		"""The process the bus records for busName's connection, which for a program Flatpak runs is the
+		xdg-dbus-proxy's between it and the bus. The program behind it is found as NVDA's handler finds
+		it, by the proxy's scope and the name the program gives the bus, asked without waiting, so that
+		the feed and NVDA name the same process."""
+		if process is None or not processes.isDBusProxy(process):
+			self._processKnown(busName, process)
+			return
+
+		def named(name: str | None) -> None:
+			self._processKnown(busName, processes.findFlatpakApp(process, name or "") or process)
+
+		self._request("name", (busName, ROOT_PATH), named)
 
 	def _onWindowEvent(self, key: Key, activated: bool, now: float) -> None:
 		self._noteTopLevel(key, True)
@@ -994,8 +1009,8 @@ class AtspiCaptureFeed:
 
 	def _request(self, kind: str, target, then: Callable) -> None:
 		"""Ask the bus, without waiting, and call then with the answer on the feed's thread, or with None
-		when there is none: "process" of a bus name, "parent" path, "state" or "children" of an object,
-		or a "roundTrip" to the bus itself."""
+		when there is none: "process" of a bus name, "parent" path, "name", "state" or "children" of an
+		object, or a "roundTrip" to the bus itself."""
 		connection = self._connection
 		if connection is None:
 			then(None)
@@ -1006,13 +1021,13 @@ class AtspiCaptureFeed:
 			call = (BUS, BUS_PATH, BUS, "GetConnectionUnixProcessID", GLib.Variant("(s)", (target,)), "(u)")
 		elif kind == "roundTrip":
 			call = (BUS, BUS_PATH, BUS, "GetId", None, "(s)")
-		elif kind == "parent":
+		elif kind in ("parent", "name"):
 			call = (
 				target[0],
 				target[1],
 				"org.freedesktop.DBus.Properties",
 				"Get",
-				GLib.Variant("(ss)", (ACCESSIBLE, "Parent")),
+				GLib.Variant("(ss)", (ACCESSIBLE, "Parent" if kind == "parent" else "Name")),
 				"(v)",
 			)
 		elif kind == "state":
@@ -1033,6 +1048,8 @@ class AtspiCaptureFeed:
 				then(True)
 			elif kind == "parent":
 				then(reply[0][1])
+			elif kind == "name":
+				then(reply[0])
 			elif kind == "state":
 				then(list(reply[0]))
 			else:

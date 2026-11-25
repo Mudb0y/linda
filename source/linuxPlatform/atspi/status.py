@@ -118,6 +118,16 @@ def _commandLine(processID: int | str) -> bytes:
 		return f.read(4096)
 
 
+def _isSandbox(processID: str) -> bool:
+	"""Whether the process is Flatpak's bubblewrap, which holds the command line of a sandboxed zygote it
+	starts for an app such as Discord: neither it nor the process that started it, the app's own
+	bubblewrap or flatpak-portal, is a Chromium program."""
+	from linuxPlatform import processes
+
+	path = processes.findExecutablePath(int(processID))
+	return path is not None and os.path.basename(path) in processes.SANDBOX_PROGRAMS
+
+
 def _chromiumMainProcesses() -> list[int]:
 	"""The main processes of Chromium and of every Electron program that started before NVDA: those
 	that started a zygote, the helper Chromium forks its pages from, whose command line says so. One
@@ -131,7 +141,7 @@ def _chromiumMainProcesses() -> list[int]:
 		if not entry.name.isdecimal():
 			continue
 		try:
-			if ZYGOTE_SWITCH not in _commandLine(entry.name):
+			if ZYGOTE_SWITCH not in _commandLine(entry.name) or _isSandbox(entry.name):
 				continue
 			parent = int(_stat(entry.name)[PARENT_FIELD])
 			if parent <= 1 or parent in mains or int(_stat(parent)[STARTTIME_FIELD]) >= nvdaStarted:

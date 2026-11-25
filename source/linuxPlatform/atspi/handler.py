@@ -1402,6 +1402,10 @@ def processIDOf(node: Node) -> int:
 		except NodeGone:
 			processID = 0
 	if processID:
+		# A Flatpak app reaches the bus through its xdg-dbus-proxy, whose process the bus gives.
+		from linuxPlatform import processes
+
+		processID = processes.findFlatpakApp(processID, _applicationName(node.busName)) or processID
 		_processIDs[node.busName] = processID
 	return processID
 

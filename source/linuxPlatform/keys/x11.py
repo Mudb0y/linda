@@ -48,7 +48,7 @@ from typing import NamedTuple
 from logHandler import log
 from xkbcommon import xkb
 from Xlib import X, display, error
-from Xlib.ext import xinput, xtest
+from Xlib.ext import res, xinput, xtest
 from Xlib.protocol import rq
 
 from . import ALTGR_CONTROL_SCAN, CaptureMode, GestureKey, KeyEvent, keyMap
@@ -605,6 +605,10 @@ class CaptureState(NamedTuple):
 	#: The top-level window that window is inside, when it is another, 0 otherwise: the focus reaching
 	#: it from outside is the document's coming back, and its keys are grabbed there while it has it.
 	top: int = 0
+	#: The process of the X client that made that window, as the X server has it, when it can say: for
+	#: a program in a PID namespace of its own, as Flatpak runs one, the process NVDA has for the
+	#: document, where windowProcess is the program's own number for itself.
+	clientProcess: int | None = None
 
 
 NO_CAPTURE = CaptureState(0, None, False, "off", None, None, None)
@@ -732,6 +736,8 @@ class X11KeySource:
 		self._slaveSeen: deque[tuple[float, int, bool, int]] = deque()
 		self._rulesAtom: int | None = None
 		self._pidAtom: int | None = None
+		#: Whether the X server can name the process of the client that made a window.
+		self._hasRes = False
 		self._wmStateAtom: int | None = None
 		self._activeWindowAtom: int | None = None
 		self._xkbOpcode: int | None = None
@@ -810,6 +816,7 @@ class X11KeySource:
 		self._loggedCapture: CaptureMode = "off"
 		#: The process of the capture window, and the one NVDA last said the document is of.
 		self._captureWindowProcess: int | None = None
+		self._captureClientProcess: int | None = None
 		self._captureProcess: int | None = None
 		self._captureState = NO_CAPTURE
 		#: Presses under a grab not yet answered, in the order they came.
@@ -970,6 +977,8 @@ class X11KeySource:
 			self._rulesAtom = self._display.intern_atom(RULES_NAMES_PROPERTY)
 			self._activeWindowAtom = self._display.intern_atom("_NET_ACTIVE_WINDOW")
 			self._pidAtom = self._display.intern_atom("_NET_WM_PID")
+			# 1.2 is the first to name a client's process.
+			self._hasRes = self._display.has_extension(res.extname) and self._resVersion() >= (1, 2)
 			self._wmStateAtom = self._display.intern_atom("WM_STATE")
 			# Any resource of the connection names it to the X server; the guard needs one.
 			self._guardResource = root.create_pixmap(1, 1, self._display.screen().root_depth).id
@@ -1344,6 +1353,7 @@ class X11KeySource:
 			self._documentPending,
 			self._captureProcess,
 			top.id if window is not None and top is not None else 0,
+			self._captureClientProcess if window is not None else None,
 		)
 		if state != self._captureState:
 			self._captureState = state
@@ -2391,10 +2401,19 @@ class X11KeySource:
 		:param processID: The process of the document NVDA's mode comes from, when known.
 		"""
 		away = self._windowPid(window)
-		if processID and away and processID != away:
+		if processID and away and processID != away and processID != self._clientPid(window):
 			# NVDA's focus has reached another application's document; its window is where the keys go.
 			return False
-		return self._windowPid(self._focusWindow()) != away
+		return self._otherProcess(window, self._focusWindow())
+
+	def _otherProcess(self, window, other) -> bool:
+		"""Whether other is a window of another process than window: by the processes the windows say they
+		are of, or by those of the X clients that made them. Two programs Flatpak runs both say they are
+		process 2 or so, their numbers in PID namespaces of their own; one program's windows are all of
+		one X client, as a rule, and a test can make windows of other programs as one client."""
+		said, saidOther = self._windowPid(window), self._windowPid(other)
+		client, clientOther = self._clientPid(window), self._clientPid(other)
+		return said != saidOther or (client is not None and clientOther is not None and client != clientOther)
 
 	def _windowPid(self, window) -> int | None:
 		"""The process a window belongs to, by its own _NET_WM_PID or its nearest parent's."""
@@ -2412,6 +2431,35 @@ class X11KeySource:
 				window = parent
 		except error.BadWindow:
 			return None
+		return None
+
+	def _resVersion(self) -> tuple[int, int]:
+		try:
+			reply = self._display.res_query_version(res.RES_MAJOR_VERSION, res.RES_MINOR_VERSION)
+		except error.XError:
+			return (0, 0)
+		return (reply.server_major, reply.server_minor)
+
+	def _clientPid(self, window) -> int | None:
+		"""The process of the X client that made window, as the X server has it from the client's
+		connection, as this machine numbers it; None where the server cannot say, as for a client over
+		the network or a server without the X-Resource extension.
+
+		_NET_WM_PID is what the client says of itself: its process ID in its own PID namespace, which for
+		a program Flatpak runs, as Discord, is 5 or so, no process of this machine's, nor the one NVDA
+		has for its document.
+		"""
+		if window is None or not self._hasRes:
+			return None
+		try:
+			reply = self._display.res_query_client_ids(
+				[{"client": window.id, "mask": res.LocalClientPIDMask}]
+			)
+		except error.XError:
+			return None
+		for clientId in reply.ids:
+			if clientId.spec.mask == res.LocalClientPIDMask and len(clientId.value):
+				return int(clientId.value[0])
 		return None
 
 	def _documentExpiry(self, now: float) -> float | None:
@@ -2471,6 +2519,7 @@ class X11KeySource:
 					catchers.append((keycode, base | lock, catcher))
 		self._captureWindow = window
 		self._captureWindowProcess = self._windowPid(window)
+		self._captureClientProcess = self._clientPid(window)
 		self._captureFocused = True
 		self._captureTop = self._topLevel(window)
 		if self._captureTop is not None:

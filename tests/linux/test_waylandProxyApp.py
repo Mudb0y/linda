@@ -78,9 +78,87 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 """
 
 
-def startProxiedBrowser(session: WaylandLinda, program: str) -> webSession.FirefoxProcess:
+#: With LINDA_TEST_FLATPAK_ROOT naming a directory, the test's xdg-dbus-proxy, the sandbox that runs it
+#: and every process that sandbox starts are in the scope of an instance of the app
+#: LINDA_TEST_FLATPAK_APP names, as Flatpak runs an app: the directory stands for the cgroup hierarchy,
+#: in which the scope lists them. The rig has no systemd to make a scope with, and the Linda under test
+#: may read no more of another process than anyone may: its stat, comm and command line.
+FLATPAK_SCOPE = """\
+import os
+
+import globalPluginHandler
+from linuxPlatform import processes
+
+ROOT = os.environ.get("LINDA_TEST_FLATPAK_ROOT")
+#: The proxy sandboxed() starts listens on a socket in a directory named so.
+PROXY_SOCKET = b"a11y-bus-proxy-"
+
+
+def read(processID, name):
+	try:
+		with open(f"/proc/{processID}/{name}", "rb") as file:
+			return file.read()
+	except OSError:
+		return b""
+
+
+def parentOf(processID):
+	fields = read(processID, "stat").rsplit(b")", 1)[-1].split()
+	return int(fields[1]) if len(fields) > 1 else 0
+
+
+def running():
+	return [int(entry) for entry in os.listdir("/proc") if entry.isdecimal()]
+
+
+def sandboxes():
+	\"\"\"The sandboxes the test's proxies were started beside: each proxy's parent.\"\"\"
+	return {
+		parentOf(processID)
+		for processID in running()
+		if read(processID, "comm").strip() == b"xdg-dbus-proxy" and PROXY_SOCKET in read(processID, "cmdline")
+	}
+
+
+def inScope(processID, roots):
+	for _level in range(32):
+		if processID in roots:
+			return True
+		if processID <= 1:
+			return False
+		processID = parentOf(processID)
+	return False
+
+
+class GlobalPlugin(globalPluginHandler.GlobalPlugin):
+	def __init__(self):
+		super().__init__()
+		if not ROOT:
+			return
+		scope = "/app.slice/app-flatpak-" + os.environ["LINDA_TEST_FLATPAK_APP"] + "-1.scope"
+		original = processes._cgroupOf
+
+		def cgroupOf(processID):
+			roots = sandboxes()
+			if not inScope(processID, roots):
+				return original(processID)
+			members = [member for member in running() if inScope(member, roots)]
+			os.makedirs(ROOT + scope, exist_ok=True)
+			with open(ROOT + scope + "/cgroup.procs", "w") as procs:
+				procs.write("".join(f"{member}\\n" for member in members))
+			return scope
+
+		processes._cgroupOf = cgroupOf
+		processes.cgroupRoot = ROOT
+"""
+
+
+def startProxiedBrowser(
+	session: WaylandLinda, program: str, inScope: bool = False
+) -> webSession.FirefoxProcess:
 	"""The browser on the usable page as a Wayland client, its accessibility bus reached only through
-	xdg-dbus-proxy with Flatpak's filter."""
+	xdg-dbus-proxy with Flatpak's filter; with inScope, it and the proxy in a Flatpak app's scope, as
+	FLATPAK_SCOPE has it."""
 	desktop = session.desktop
 	profile = desktop.directory / f"{program}{len(desktop._apps)}"
 	profile.mkdir()
@@ -171,4 +249,46 @@ def test_aProxiedBrowsersProcessIsTheSameToTheFeedAndToNVDA(
 	session.step("Escape", "Browse mode")
 	session.quit()
 	assert os.path.getsize(probe) > 0
+	assert harness.nvdaLogErrorRecords(nvda.text("nvda.log")) == []
+
+
+@pytest.mark.parametrize(
+	("program", "appID"), [("chromium", "org.chromium.Chromium"), ("firefox", "org.mozilla.firefox")]
+)
+def test_aFlatpakBrowsersOwnProcessIsTheSameToTheFeedAndToNVDA(
+	session: WaylandLinda, tmp_path: Path, program: str, appID: str
+):
+	# As Flatpak runs it: its proxy in its app's scope, behind which NVDA and the feed both find the
+	# browser itself, and browse mode's letters are Linda's in the page.
+	probe = tmp_path / "identity.jsonl"
+	chromiumSession.clearAccessibilityStatus()
+	nvda = session.start(
+		browseKeys.browseConfig(tmp_path),
+		plugins={
+			"browseKeysProbe": browseKeys.PROBE_PLUGIN,
+			"identityProbe": IDENTITY_PROBE,
+			"flatpakScope": FLATPAK_SCOPE,
+		},
+		env={
+			"LINDA_IDENTITY_PROBE": str(probe),
+			"LINDA_TEST_FLATPAK_ROOT": str(tmp_path / "cgroup"),
+			"LINDA_TEST_FLATPAK_APP": appID,
+		},
+	)
+	startProxiedBrowser(session, program)
+	nvda.waitForLog("Buffer rendered", browseKeys.BUFFER_BOUND)
+	browseKeys.waitForCapture(nvda, "browse", timeout=browseKeys.BUFFER_BOUND)
+	deadline = time.monotonic() + AGREE_BOUND
+	while not (agreed := [r for r in identities(probe) if r["mode"] == "browse" and r["focused"]]):
+		assert time.monotonic() < deadline, identities(probe)[-5:]
+		time.sleep(0.2)
+	record = agreed[-1]
+	proxies = processNamed("xdg-dbus-proxy")
+	print(f"{sessionName()}: Flatpak scope, {program}: {record}; xdg-dbus-proxy processes {proxies}")
+	assert record["feed"] == record["focus"] == record["appModule"], record
+	assert record["windowProcess"] == record["processID"] == record["feed"], record
+	assert record["feed"] not in proxies, (record, proxies)
+	waitForTheWholePage(session, USABLE_WALK[0])
+	lettersKept(session, USABLE_WALK)
+	session.quit()
 	assert harness.nvdaLogErrorRecords(nvda.text("nvda.log")) == []

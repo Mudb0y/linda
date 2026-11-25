@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Long comment box fixture</title></head>
+<body>
+<main>
+<h1>A long comment</h1>
+<!-- The comment box of commentBox.html, holding LINES lines already, each in a block of its own as the
+browser puts one after Return, so that its own text is an embedded object character for each. -->
+<div id="comment" contenteditable="true" aria-label="Edit a comment..." dir="auto" spellcheck="false"></div>
+</main>
+<script>
+const LINES = 600;
+const box = document.getElementById("comment");
+for (let line = 1; line <= LINES; line++) {
+	const block = document.createElement("div");
+	block.textContent = `Line ${line}`;
+	box.append(block);
+}
+</script>
+</body></html>

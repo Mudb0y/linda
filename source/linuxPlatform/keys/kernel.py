@@ -1356,7 +1356,11 @@ class KernelKeySource:
 		"""
 		if not state.window or not state.focused:
 			return False
-		return not (state.processID and state.windowProcess and state.processID != state.windowProcess)
+		if not (state.processID and state.windowProcess):
+			return True
+		# A program in a PID namespace of its own, as Flatpak runs one, gives its window its own number
+		# for itself, and the X server knows it by this machine's.
+		return state.processID in (state.windowProcess, state.clientProcess)
 
 	def _putDownKeptModifiers(self, waiting: _Press | None = None) -> None:
 		"""Put down in the X display, before a key passed on reaches it, each Alt or Super kept under the
