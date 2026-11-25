@@ -703,8 +703,8 @@ class AtSpi(NVDAObject):
 	def _get_placeholder(self) -> str | None:
 		"""The hint an empty field shows, which NVDA says on focus in place of its text: Firefox gives a
 		page's placeholder as an object attribute, as IAccessible2 gives it on Windows."""
-		# Speech asks every focus for it; a busy GTK application is not asked once more.
-		if self.toolkit != GECKO:
+		# Speech asks every focus for it; non-editable controls are short-circuited without D-Bus calls.
+		if self.role not in (Role.EDITABLETEXT, Role.COMBOBOX) and "editable" not in self.atspiStates:
 			return None
 		return self.atspiAttributes.get("placeholder-text") or None
 
