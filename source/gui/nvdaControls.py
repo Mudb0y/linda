@@ -6,6 +6,7 @@
 import collections  # noqa: I001
 from ctypes import addressof
 import enum
+import time
 import typing
 from collections import OrderedDict
 import warnings
@@ -40,17 +41,135 @@ __all__ = [
 	"EnhancedInputSlider",
 	"FeatureFlagCombo",
 	"ListCtrlAccessible",
+	"ListCtrlTypeAheadMixin",
 	"MessageDialog",
 	"SelectOnFocusSpinCtrl",
 	"_ContinueCancelDialog",
 ]
 
 
-class AutoWidthColumnListCtrl(wx.ListCtrl, listmix.ListCtrlAutoWidthMixin):
+if wx.Platform == "__WXMSW__":
+	class ListCtrlTypeAheadMixin:
+		"""
+		Stand-in for the type-ahead mixin on Windows.
+
+		The native Windows list control searches incrementally by itself,
+		so there is nothing to add there: L{_initTypeAhead} does nothing
+		and no event handlers are bound.
+		"""
+
+		def _initTypeAhead(self):
+			return
+
+else:
+	class ListCtrlTypeAheadMixin:
+		"""
+		Adds first-letter navigation (type-ahead) to a L{wx.ListCtrl}.
+
+		The native Windows list control searches incrementally by itself,
+		but the generic wxWidgets control used on other platforms does not:
+		typing a letter there does nothing.
+		This mixin restores the Windows behaviour:
+		typing a printable character focuses and selects the first item
+		whose label in the first column starts with the typed text,
+		typing further characters narrows the search,
+		and repeating the same character cycles through the matching items.
+		The typed prefix is forgotten after L{typeAheadTimeout} milliseconds,
+		or when the control loses focus.
+
+		Call L{_initTypeAhead} once the control has been created, usually from C{__init__}.
+		"""
+
+		#: Time in milliseconds during which typed characters are treated as a single search prefix.
+		typeAheadTimeout = 1000
+
+		def _initTypeAhead(self):
+			self._typeAheadPrefix = ""
+			self._typeAheadLastInputTime = 0.0
+			self._typeAheadLastMatch = -1
+			self.Bind(wx.EVT_CHAR, self._onTypeAheadChar)
+			self.Bind(wx.EVT_KILL_FOCUS, self._onTypeAheadKillFocus)
+
+		def _onTypeAheadKillFocus(self, evt):
+			"""Forget a pending search when the control loses focus."""
+			self._typeAheadPrefix = ""
+			self._typeAheadLastMatch = -1
+			evt.Skip()
+
+		def _onTypeAheadChar(self, evt):
+			if evt.ControlDown() or evt.AltDown():
+				evt.Skip()
+				return
+			key = evt.GetUnicodeKey()
+			if not key or key == wx.WXK_NONE:
+				evt.Skip()
+				return
+			char = chr(key)
+			if not char.isprintable() or char.isspace():
+				evt.Skip()
+				return
+			if self.GetItemCount() == 0:
+				evt.Skip()
+				return
+			now = time.monotonic()
+			if now - self._typeAheadLastInputTime > self.typeAheadTimeout / 1000.0:
+				self._typeAheadPrefix = ""
+			self._typeAheadPrefix += char
+			self._typeAheadLastInputTime = now
+			match = self._findTypeAheadMatch(self._typeAheadPrefix)
+			if match is None:
+				# No item starts with the typed text: swallow the key and start over next time
+				# rather than letting it reach other handlers as an unrelated shortcut.
+				self._typeAheadPrefix = ""
+				return
+			self._typeAheadLastMatch = match
+			self._focusTypeAheadMatch(match)
+
+		def _findTypeAheadMatch(self, prefix):
+			"""
+			Find the next item matching C{prefix}.
+			@return: The index of the matching item, or C{None} if there is no match.
+			"""
+			foldedPrefix = prefix.casefold()
+			count = self.GetItemCount()
+			if len(foldedPrefix) > 1 and len(set(foldedPrefix)) == 1:
+				# The same character typed repeatedly cycles through the items starting with it.
+				pattern = foldedPrefix[0]
+				start = self._typeAheadLastMatch + 1
+			else:
+				pattern = foldedPrefix
+				focusedIndex = self._getTypeAheadFocusedIndex()
+				# The current item is included, so that typing a letter keeps it when it matches.
+				start = focusedIndex if focusedIndex >= 0 else 0
+			for offset in range(count):
+				index = (start + offset) % count
+				if self._getTypeAheadText(index).casefold().startswith(pattern):
+					return index
+			return None
+
+		def _getTypeAheadFocusedIndex(self):
+			index = self.GetNextItem(-1, wx.LIST_NEXT_ALL, wx.LIST_STATE_FOCUSED)
+			if index == -1:
+				index = self.GetNextItem(-1, wx.LIST_NEXT_ALL, wx.LIST_STATE_SELECTED)
+			return index
+
+		def _getTypeAheadText(self, index):
+			if self.IsVirtual():
+				return self.OnGetItemText(index, 0)
+			return self.GetItemText(index, 0)
+
+		def _focusTypeAheadMatch(self, index):
+			self.Select(index)
+			# Focus also scrolls the found item into view.
+			self.Focus(index)
+
+
+class AutoWidthColumnListCtrl(wx.ListCtrl, listmix.ListCtrlAutoWidthMixin, ListCtrlTypeAheadMixin):
 	"""
 	A list control that allows you to specify a column to resize to take up the remaining width of a wx.ListCtrl.
 	It also changes L{OnGetItemText} to call an optionally provided callable,
-	and adds a l{sendListItemFocusedEvent} method.
+	adds a l{sendListItemFocusedEvent} method,
+	and supports first-letter navigation via L{ListCtrlTypeAheadMixin}.
 	"""
 
 	def __init__(
@@ -80,6 +199,7 @@ class AutoWidthColumnListCtrl(wx.ListCtrl, listmix.ListCtrlAutoWidthMixin):
 			self._itemTextCallable = self._super_itemTextCallable
 		wx.ListCtrl.__init__(self, parent, id=id, pos=pos, size=size, style=style)
 		listmix.ListCtrlAutoWidthMixin.__init__(self)
+		self._initTypeAhead()
 		self.setResizeColumn(autoSizeColumn)
 		self.Bind(wx.EVT_WINDOW_DESTROY, source=self, id=self.GetId, handler=self._onDestroy)
 
