@@ -220,6 +220,15 @@ def test_headings(session: Session):
 def test_samePageLinkMovesTheReader(session: Session):
 	step(session, "ctrl+Home", "heading level 1 Welcome")
 	step(session, "k", "the news link")
+	mark = session.desktop.mark()
+	session.desktop.press("Insert+k")
+	waitForRecord(
+		session,
+		lambda spoken: "usable" in spoken and "news" in spoken,
+		since=mark,
+		timeout=STEP_BOUND,
+		what="link destination",
+	)
 	# Firefox moves its caret to the target, and the buffer follows it.
 	step(session, "Return", "heading level 2 News")
 
