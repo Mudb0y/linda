@@ -15,18 +15,23 @@ import api
 import aria
 import browseMode
 import config
+import NVDAHelper
 import queueHandler
 import textInfos
 import tones
 import treeInterceptorHandler
 import ui
+import XMLFormatting
 from controlTypes import IsCurrent, OutputReason, Role, State
 from linuxPlatform import vbufEngine, vbufLib
 from linuxPlatform.atspi import accessibleFor, handler
 from linuxPlatform.atspi.client import Node, NodeGone
+from linuxPlatform.atspi.textSource import TextSource, toolkitOf, unitFor
 from logHandler import log
+from NVDAObjects.AtSpi.textInfo import DEFAULT_ATTRIBUTES_KEPT, _defaultLanguages, formatField
 
 from . import (
+	VBufRemote_nodeHandle_t,
 	VBufStorage_findMatch_notEmpty,
 	VBufStorage_findMatch_word,
 	VirtualBuffer,
@@ -138,6 +143,17 @@ _SORT_STATES = {
 #: The roles NVDA treats as an application inside a document, whose content browse mode leaves alone.
 _APPLICATION_ROLES = (Role.APPLICATION, Role.DIALOG)
 
+#: Formatting options that are off by default; only when at least one is enabled (such as
+#: by NVDA+F) does AtSpiBufferTextInfo query AT-SPI for text attributes.
+_FORMAT_CONFIG_KEYS = (
+	"reportFontName",
+	"reportFontSize",
+	"fontAttributeReporting",
+	"reportColor",
+	"reportStyle",
+	"reportSuperscriptsAndSubscripts",
+)
+
 
 def _role(*roles: Role) -> list[str]:
 	return [str(r.value) for r in roles]
@@ -239,6 +255,102 @@ class AtSpiBufferTextInfo(VirtualBufferTextInfo):
 	def _get_location(self):
 		obj = self._getNVDAObjectFromOffset(self._startOffset)
 		return obj.location if obj else None
+
+	def _atspiTextOffset(self, fieldStart: int, offset: int) -> int:
+		"""Map a virtual-buffer offset inside a control field starting at fieldStart to its
+		offset in that control's AT-SPI Text, counting each direct child control as one
+		embedded-object character."""
+		if offset <= fieldStart:
+			return 0
+		xml = NVDAHelper.localLib.VBuf_getTextInRange(self.obj.VBufHandle, fieldStart, offset, True)
+		if not xml:
+			return offset - fieldStart
+		depth = 0
+		atspiOffset = 0
+		for cmd in XMLFormatting.XMLTextParser().parse(xml):
+			if isinstance(cmd, textInfos.FieldCommand):
+				if cmd.command == "controlStart":
+					if depth == 1:
+						atspiOffset += 1
+					depth += 1
+				elif cmd.command == "controlEnd":
+					depth -= 1
+			elif isinstance(cmd, str) and depth <= 1:
+				atspiOffset += len(cmd)
+		return atspiOffset
+
+	def _getFormatFieldAtOffset(self, offset: int) -> textInfos.FormatField | None:
+		startOffset = ctypes.c_int()
+		endOffset = ctypes.c_int()
+		docHandle = ctypes.c_int()
+		ID = ctypes.c_int()
+		node = VBufRemote_nodeHandle_t()
+		NVDAHelper.localLib.VBuf_locateControlFieldNodeAtOffset(
+			self.obj.VBufHandle,
+			offset,
+			ctypes.byref(startOffset),
+			ctypes.byref(endOffset),
+			ctypes.byref(docHandle),
+			ctypes.byref(ID),
+			ctypes.byref(node),
+		)
+		if not any((docHandle.value, ID.value)):
+			return None
+		obj = self.obj.getNVDAObjectFromIdentifier(docHandle.value, ID.value)
+		fieldStart = startOffset.value
+		walkedUp = False
+		root = self.obj.rootNVDAObject
+		while obj is not None and "Text" not in obj.atspiInterfaces:
+			if obj == root:
+				return None
+			obj = obj.parent
+			walkedUp = True
+		if obj is None or "Text" not in obj.atspiInterfaces:
+			return None
+		if walkedUp:
+			try:
+				fieldStart = self._getOffsetsFromNVDAObjectInBuffer(obj)[0]
+			except LookupError:
+				pass
+		localOffset = self._atspiTextOffset(fieldStart, offset)
+		source = TextSource(obj.node, unitFor(toolkitOf(obj.node)))
+		try:
+			attributes, _runStart, _runEnd = source.attributeRun(localOffset)
+		except NodeGone:
+			return None
+		language = attributes.get("language")
+		defaultLanguage = None
+		if language and language.lower() not in ("c", "posix"):
+			key = obj.node.key
+			if key not in _defaultLanguages:
+				if len(_defaultLanguages) >= DEFAULT_ATTRIBUTES_KEPT:
+					_defaultLanguages.clear()
+				try:
+					_defaultLanguages[key] = source.defaultAttributes().get("language")
+				except NodeGone:
+					pass
+			defaultLanguage = _defaultLanguages.get(key)
+		return formatField(attributes, defaultLanguage)
+
+	def getTextWithFields(self, formatConfig: dict | None = None) -> textInfos.TextInfo.TextWithFieldsT:
+		commands = super().getTextWithFields(formatConfig)
+		if (
+			not formatConfig
+			or not isinstance(commands, list)
+			or self._startOffset == self._endOffset
+			or not any(formatConfig.get(k) for k in _FORMAT_CONFIG_KEYS)
+		):
+			return commands
+		field = self._getFormatFieldAtOffset(self._startOffset)
+		if not field:
+			return commands
+		cmd = textInfos.FieldCommand("formatChange", field)
+		for idx, item in enumerate(commands):
+			if isinstance(item, str):
+				commands.insert(idx, cmd)
+				return commands
+		commands.insert(0, cmd)
+		return commands
 
 
 class AtSpiBuffer(VirtualBuffer):
