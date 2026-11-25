@@ -246,6 +246,19 @@ def roleOfVanished(node: Node) -> str | None:
 	return role
 
 
+def _switchKeyHeld() -> bool:
+	"""Whether Alt is held down, as it is while a window manager's switcher is open, Alt+Tab or
+	Control+Alt+Tab: the window left says it is inactive as the switcher takes the keyboard, and the
+	window chosen takes it only once Alt is let go."""
+	import winUser
+
+	try:
+		return bool(winUser.getKeyState(winUser.VK_MENU) & 0x8000)
+	# Without a key source, as before the keyboard is read or after it is let go, no key is known held.
+	except Exception:  # noqa: BLE001
+		return False
+
+
 def _focusDesktop() -> None:
 	"""Give the focus to the desktop when the window that had it went and no window took its place, as
 	Windows does when the last window closes."""
@@ -1807,6 +1820,10 @@ def pumpAll() -> None:
 				# seconds, and the desktop would have been said before the switcher.
 				_rescansExtended = True
 				_rescans[:] = [now + delay for delay in SHELL_RESCAN_DELAYS_SECONDS]
+			elif not _rescans and _switchKeyHeld():
+				# A switcher is open: the window chosen takes the keyboard once Alt is let go, and until
+				# then no window says it is active, as marco 1.26's switcher does not either.
+				_rescans[:] = [now + delay for delay in RESCAN_DELAYS_SECONDS]
 			elif not _rescans:
 				_focusDesktop()
 	with _queueLock:
