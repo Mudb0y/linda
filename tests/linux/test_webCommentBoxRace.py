@@ -90,3 +90,41 @@ def test_exitIsClean(session: Session):
 	nvda.waitForExit(EXIT_BOUND)
 	assert nvda.process.returncode == 0, nvda.describe()
 	nvda.assertClean(logNames=("nvda.log",))
+
+
+#: A box of LONG_LINES lines, more than the 500 embedded objects once asked whether they held the caret.
+LONG_PAGE = "longCommentBox.html"
+LONG_COMMENT = "Edit a comment..."
+LONG_BOX = f"{LONG_COMMENT} section multi line editable"
+LONG_LINES = 600
+
+
+def test_aLongBoxIsReadWhereTheCaretLands(tmp_path_factory: pytest.TempPathFactory):
+	# Each key asks the paragraphs nearest the one the caret left, and the first and the last, so that the
+	# line the caret lands on is found in a few calls however long the box.
+	webSession.requireBrowseLibraries()
+	directory = tmp_path_factory.mktemp("longFirefox")
+	with DesktopSession(directory / "desktop") as desktop:
+		nvda = desktop.startNVDA(
+			webSession.BROWSE_CONFIG, env={**TIMED_SPEECH, "LINDA_STALE_CARET": LONG_COMMENT}
+		)
+		nvda.waitForLog("NVDA initialized", STARTUP_BOUND)
+		browser = webSession.startFirefox(desktop, LONG_PAGE)
+		session = Session(desktop, nvda, browser, directory)
+		desktop.expect("main landmark heading level 1 A long comment", since=0, timeout=STARTUP_BOUND)
+		desktop.press("Control_L", "ctrl+Home")
+		step(session, "ctrl+Home", "heading level 1 A long comment")
+		step(session, "e", f"{LONG_BOX}\N{HORIZONTAL ELLIPSIS}")
+		step(session, "Return", "Focus mode")
+		step(session, "ctrl+End", f"Line {LONG_LINES}")
+		step(session, "Up", f"Line {LONG_LINES - 1}")
+		step(session, "Up", f"Line {LONG_LINES - 2}")
+		step(session, "Down", f"Line {LONG_LINES - 1}")
+		step(session, "ctrl+Home", "Line 1")
+		step(session, "Down", "Line 2")
+		step(session, "Escape", "Browse mode")
+		step(session, "Insert+q", "Exit Linda\N{HORIZONTAL ELLIPSIS}")
+		desktop.press("Return")
+		nvda.waitForExit(EXIT_BOUND)
+		assert nvda.process.returncode == 0, nvda.describe()
+		nvda.assertClean(logNames=("nvda.log",))
