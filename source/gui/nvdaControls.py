@@ -49,6 +49,7 @@ __all__ = [
 
 
 if wx.Platform == "__WXMSW__":
+
 	class ListCtrlTypeAheadMixin:
 		"""
 		Stand-in for the type-ahead mixin on Windows.
@@ -62,6 +63,7 @@ if wx.Platform == "__WXMSW__":
 			return
 
 else:
+
 	class ListCtrlTypeAheadMixin:
 		"""
 		Adds first-letter navigation (type-ahead) to a L{wx.ListCtrl}.
@@ -90,10 +92,14 @@ else:
 			self.Bind(wx.EVT_CHAR, self._onTypeAheadChar)
 			self.Bind(wx.EVT_KILL_FOCUS, self._onTypeAheadKillFocus)
 
-		def _onTypeAheadKillFocus(self, evt):
-			"""Forget a pending search when the control loses focus."""
+		def _resetTypeAhead(self):
+			"""Forget the current search prefix and its last match."""
 			self._typeAheadPrefix = ""
 			self._typeAheadLastMatch = -1
+
+		def _onTypeAheadKillFocus(self, evt):
+			"""Forget a pending search when the control loses focus."""
+			self._resetTypeAhead()
 			evt.Skip()
 
 		def _onTypeAheadChar(self, evt):
@@ -102,10 +108,14 @@ else:
 				return
 			key = evt.GetUnicodeKey()
 			if not key or key == wx.WXK_NONE:
+				# Navigation keys start no search: forget the one in progress,
+				# so that the next letter searches from wherever focus went.
+				self._resetTypeAhead()
 				evt.Skip()
 				return
 			char = chr(key)
 			if not char.isprintable() or char.isspace():
+				self._resetTypeAhead()
 				evt.Skip()
 				return
 			if self.GetItemCount() == 0:
@@ -120,7 +130,7 @@ else:
 			if match is None:
 				# No item starts with the typed text: swallow the key and start over next time
 				# rather than letting it reach other handlers as an unrelated shortcut.
-				self._typeAheadPrefix = ""
+				self._resetTypeAhead()
 				return
 			self._typeAheadLastMatch = match
 			self._focusTypeAheadMatch(match)
@@ -140,7 +150,7 @@ else:
 				pattern = foldedPrefix
 				focusedIndex = self._getTypeAheadFocusedIndex()
 				# The current item is included, so that typing a letter keeps it when it matches.
-				start = focusedIndex if focusedIndex >= 0 else 0
+				start = max(focusedIndex, 0)
 			for offset in range(count):
 				index = (start + offset) % count
 				if self._getTypeAheadText(index).casefold().startswith(pattern):
