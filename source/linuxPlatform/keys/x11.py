@@ -2404,7 +2404,16 @@ class X11KeySource:
 		if processID and away and processID != away and processID != self._clientPid(window):
 			# NVDA's focus has reached another application's document; its window is where the keys go.
 			return False
-		return self._windowPid(self._focusWindow()) != away
+		return self._otherProcess(window, self._focusWindow())
+
+	def _otherProcess(self, window, other) -> bool:
+		"""Whether other is a window of another process than window: by the processes the windows say they
+		are of, or by those of the X clients that made them. Two programs Flatpak runs both say they are
+		process 2 or so, their numbers in PID namespaces of their own; one program's windows are all of
+		one X client, as a rule, and a test can make windows of other programs as one client."""
+		said, saidOther = self._windowPid(window), self._windowPid(other)
+		client, clientOther = self._clientPid(window), self._clientPid(other)
+		return said != saidOther or (client is not None and clientOther is not None and client != clientOther)
 
 	def _windowPid(self, window) -> int | None:
 		"""The process a window belongs to, by its own _NET_WM_PID or its nearest parent's."""
