@@ -13,8 +13,10 @@ is switched off before NVDA starts, as a desktop has it before any screen reader
 join the accessibility bus is NVDA's switching it on, and it is off again once NVDA has exited.
 """
 
+import http.server
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -520,6 +522,122 @@ class TestChromiumComposer:
 		nvda.waitForExit(EXIT_BOUND)
 		assert nvda.process.returncode == 0, nvda.describe()
 		nvda.assertClean(logNames=("nvda.log",))
+
+
+#: Wait before switching to chunk 2 of a streamed search page so NVDA renders and speaks chunk 1 first.
+CHUNKED_PAUSE_SECONDS = 1.5
+#: HTML chunks modeled on search results streamed while the document is still loading (busy).
+_CHUNKED_SEARCH_CHUNKS = (
+	(
+		"<!doctype html><html><head><meta charset=utf-8><title>Chunked search</title></head><body>"
+		'<div id="wrap"><div id="hdr">'
+		'<a id="skip" href="#main">Skip to main content</a>'
+		'<a href="#help">Accessibility help</a>'
+		"</div>"
+		f"<!-- {'x' * 65536} -->"
+		"<script>document.body.offsetHeight;</script>"
+	),
+	(
+		'<main id="main">'
+		'<h2 id="ai" tabindex="-1">AI Overview</h2>'
+		"<p>Result one.</p>"
+		"<h2>More results</h2>"
+		"<p>Result two.</p>"
+		"</main></div>"
+		"<script>"
+		'document.getElementById("skip").addEventListener("click", (event) => {'
+		"event.preventDefault();"
+		'document.getElementById("ai").focus();'
+		"});"
+		"</script></body></html>"
+	),
+)
+
+
+class _ChunkedSearchHandler(http.server.BaseHTTPRequestHandler):
+	protocol_version = "HTTP/1.1"
+
+	def do_GET(self) -> None:
+		self.send_response(200)
+		self.send_header("Content-Type", "text/html; charset=utf-8")
+		self.send_header("Transfer-Encoding", "chunked")
+		self.end_headers()
+		for index, part in enumerate(_CHUNKED_SEARCH_CHUNKS):
+			if index:
+				time.sleep(CHUNKED_PAUSE_SECONDS)
+			data = part.encode("utf-8")
+			self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
+			self.wfile.flush()
+		self.wfile.write(b"0\r\n\r\n")
+
+	def log_message(self, format: str, *args: object) -> None:
+		pass
+
+
+class TestChromiumChunkedLoad:
+	"""A page streamed in chunks while busy, like search results arriving after the header bar: once
+	Document:LoadComplete fires, the buffer has the late main region so activating the skip link keeps
+	browse mode there instead of bouncing back to the top."""
+
+	def test_chunkedPageLoadUpdatesBufferAndKeepsBrowseMode(self, tmp_path_factory: pytest.TempPathFactory):
+		webSession.requireBrowseLibraries()
+		directory = tmp_path_factory.mktemp("chunked")
+		server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ChunkedSearchHandler)
+		server.daemon_threads = True
+		threading.Thread(target=server.serve_forever, daemon=True).start()
+		url = f"http://127.0.0.1:{server.server_address[1]}/search"
+		try:
+			with DesktopSession(directory / "desktop") as desktop:
+				chromiumSession.clearAccessibilityStatus()
+				nvda = desktop.startNVDA(webSession.BROWSE_CONFIG, env=TIMED_SPEECH)
+				nvda.waitForLog("NVDA initialized", STARTUP_BOUND)
+				browser = chromiumSession.startChromium(desktop, "usable.html")
+				session = Session(desktop, nvda, browser, directory)
+				desktop.expect("heading level 1 Welcome", since=0, timeout=STARTUP_BOUND)
+				desktop.press("Control_L")
+				time.sleep(SETTLE)
+				mark = desktop.mark()
+				desktop.press("ctrl+l")
+				waitForRecord(
+					session,
+					lambda spoken: ADDRESS_BAR in spoken,
+					since=mark,
+					timeout=STEP_BOUND,
+					what="the address bar",
+				)
+				time.sleep(SETTLE)
+				desktop.typeText(url)
+				time.sleep(SETTLE)
+				mark = desktop.mark()
+				desktop.press("Return")
+				desktop.expect("link Skip to main content…", since=mark, timeout=STEP_BOUND * 2)
+				deadline = time.monotonic() + STEP_BOUND * 2
+				while not any(
+					"Update for " in line and "'loadComplete'" in line and url in line
+					for line in nvda.text("nvda.log").splitlines()
+				):
+					assert time.monotonic() < deadline, nvda.describe()
+					time.sleep(0.05)
+				renderedLines = [
+					line
+					for line in nvda.text("nvda.log").splitlines()
+					if "Buffer rendered by the engine" in line and url in line
+				]
+				assert renderedLines and "'busy': True" in renderedLines[0], renderedLines
+				desktop.press("Control_L")
+				time.sleep(SETTLE)
+				step(session, "ctrl+Home", "link Skip to main content…")
+				step(session, "Return", "main landmark AI Overview heading level 2")
+				step(session, "Down", "Result one.")
+				step(session, "h", "More results heading level 2")
+				step(session, "Insert+q", "Exit Linda…")
+				desktop.press("Return")
+				nvda.waitForExit(EXIT_BOUND)
+				assert nvda.process.returncode == 0, nvda.describe()
+				nvda.assertClean(logNames=("nvda.log",))
+		finally:
+			server.shutdown()
+			server.server_close()
 
 
 class TestChromiumStartedFirst:

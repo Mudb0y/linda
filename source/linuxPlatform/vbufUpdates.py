@@ -198,8 +198,9 @@ def _apply(batch, *, hold: bool = True) -> None:
 					_held.setdefault(key, []).append((now, batch))
 					kept = True
 				return
-		if batch.stream is not None and "complete" in batch.events:
-			# The rest of a large page, which replaces the whole document: built here, not on the main thread.
+		if batch.stream is not None and ("complete" in batch.events or "loadComplete" in batch.events):
+			# The rest of a large page, or a whole document walked again on loadComplete: built here,
+			# not on the main thread.
 			batch.stream.replacement = vbufLib.buildReplacement(batch.stream)
 		log.debug(f"Update for {batch.busName} {batch.docPath}: {batch.events} {batch.info}")
 		queueHandler.queueFunction(queueHandler.eventQueue, _applyToBuffer, buffer, batch)
