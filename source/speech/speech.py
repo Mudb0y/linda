@@ -7,6 +7,7 @@
 """High-level functions to speak information."""
 
 import itertools  # noqa: I001
+import sys
 import typing
 import weakref
 import unicodedata
@@ -174,6 +175,11 @@ CHUNK_SEPARATOR = "  "
 
 #: If a chunk of text contains only these characters, it will be considered blank.
 BLANK_CHUNK_CHARS = frozenset((" ", "\n", "\r", "\0", "\xa0"))
+if sys.platform != "win32":
+	# Rich text editors keep an empty line from collapsing with a character that shows nothing: Slate,
+	# which Discord writes messages in, puts a zero-width no-break space there, and others a zero-width
+	# space or a word joiner. The line is blank to the eye, and was read as silence.
+	BLANK_CHUNK_CHARS |= frozenset(("\ufeff", "\u200b", "\u2060"))
 
 
 def isBlank(text):
