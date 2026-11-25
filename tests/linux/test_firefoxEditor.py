@@ -99,10 +99,11 @@ def test_charactersAcrossAParagraphBreak(session: Session):
 
 def test_wordsAcrossAParagraphBreak(session: Session):
 	step(session, "ctrl+Home", FIRST)
-	# Firefox on Linux stops at the end of each word.
+	# Firefox on Linux stops at the end of each word, and the word moved over is read, the last of a
+	# paragraph too.
 	step(session, "ctrl+Right", "Alpha")
 	step(session, "ctrl+Right", "beta")
-	step(session, "ctrl+Right", "blank")
+	step(session, "ctrl+Right", "gamma")
 	step(session, "ctrl+Right", "Second")
 	step(session, "ctrl+Left", "Second")
 	step(session, "ctrl+Left", "gamma")

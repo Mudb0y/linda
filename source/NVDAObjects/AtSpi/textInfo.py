@@ -3,8 +3,10 @@
 Offsets are the toolkit's own. Where it counts code points, as GTK does, encoding is None and offsets
 are str indices; where it counts UTF-16 units, as Qt does, encoding is NVDA's UTF-16 one and
 OffsetsTextInfo converts. Characters and words come from NVDA's own segmentation over the line, so
-that they are the same in every toolkit; lines come from the toolkit, paragraphs from the newlines in
-the text, and sentences from ICU over the paragraph.
+that they are the same in every toolkit, but Firefox's words, which come from Firefox as they do
+through IAccessible2 on Windows: its caret stops where they start and end, at an apostrophe inside a
+word among others. Lines come from the toolkit, paragraphs from the newlines in the text, and sentences
+from ICU over the paragraph.
 """
 
 import unicodedata
@@ -18,6 +20,8 @@ from locationHelper import RectLTWH
 from logHandler import log
 from textInfos.offsets import OffsetsTextInfo, findEndOfLine, findStartOfLine
 
+#: The toolkit name Firefox and Thunderbird give.
+GECKO = "Gecko"
 #: What ends a line when the toolkit leaves it out of the line it gives.
 LINE_SEPARATORS = ("\n", "\r", " ", " ")
 #: What Qt wraps a line at and leaves out of both lines.
@@ -253,6 +257,26 @@ class AtspiTextInfo(OffsetsTextInfo):
 		return (start, end)
 
 	def _getWordOffsets(self, offset: int) -> tuple[int, int]:
+		if getattr(self.obj, "toolkit", None) == GECKO:
+			return self._getGeckoWordOffsets(offset)
+		return self._getOwnWordOffsets(offset)
+
+	def _getGeckoWordOffsets(self, offset: int) -> tuple[int, int]:
+		"""Firefox's own words, as NVDA reads them through IAccessible2 on Windows. Firefox's caret stops
+		inside a word at an apostrophe, a slash or a dash, at "isn" and at "t" of "isn't", and Firefox
+		makes each part a word of its own, where ICU would read the whole word at either stop."""
+		if offset >= self._storyLengthCached():
+			# Past the end, as NVDA's IAccessible2 words have it.
+			return (offset, offset + 1)
+		try:
+			start, end, _text = self.textSource.stringAtOffset(offset, "word")
+		except NodeGone:
+			return (offset, offset + 1)
+		if not start <= offset < end:
+			return self._getOwnWordOffsets(offset)
+		return (start, end)
+
+	def _getOwnWordOffsets(self, offset: int) -> tuple[int, int]:
 		# Word movement across terminals, GTK entries and editors often stops at the end of a word,
 		# on the slash or dash after it, which ICU makes a word of its own: "/usr/bin/bash" was read
 		# as "slash, slash". Punctuation written onto a word goes with that word instead, as the
