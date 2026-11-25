@@ -184,6 +184,7 @@ def _watch(source: KeySource) -> None:
 	global _holding
 	import api
 	import config
+	import core
 	import inputCore
 	import treeInterceptorHandler
 	import watchdog
@@ -214,6 +215,10 @@ def _watch(source: KeySource) -> None:
 			if hold != held:
 				source.holdKeyboard(hold)
 				held = _holding = hold
+				if not hold:
+					# The window that had the keyboard has it back; the AT-SPI handler, which stops looking
+					# for an active window while NVDA holds it, looks again.
+					core.requestPump()
 			focus = api.getFocusObject()
 			_findBound()
 			if _captureBound and _bound[1] != bound and (setBound := getattr(source, "setBoundKeys", None)):
