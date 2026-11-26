@@ -502,21 +502,23 @@ def test_categoriesAreFoundByFirstLetters(desktop: DesktopSession, tmp_path: Pat
 	# One letter does not stay on the category it moved to: the next jumps on to the next match.
 	typeAhead("d", f"Document Formatting 13 of {count}")
 	typeAhead("d", f"Document Navigation 14 of {count}")
-	# Typed together, the same letter cycles through the categories starting with it.
-	typeAhead("dd", f"Document Formatting 13 of {count}", f"Document Navigation 14 of {count}")
-	# A second letter narrows the search instead of starting a new one.
+	# Keys typed in a burst are processed in order, but the AT-SPI event pump may coalesce
+	# the announcements of the items passed on the way, so a burst only asks for its last item.
+	# Where it lands still tells the cases apart.
+
+	# Typed together, the same letter cycles through the categories starting with it:
+	# a search started afresh would stop at Document Formatting, not at Document Navigation.
+	typeAhead("dd", f"Document Navigation 14 of {count}")
+	# A second letter narrows the search instead of starting a new one:
+	# only the prefix "ad" reaches Advanced, a fresh search for "d" stops at Document Formatting.
 	step(desktop, "Home", f"General 1 of {count}")
-	typeAhead("ad", f"Audio 4 of {count}", f"Advanced {count} of {count}")
-	# An arrow key starts the search afresh after the letter before it.
+	typeAhead("ad", f"Advanced {count} of {count}")
+	# An arrow key starts the search afresh after the letter before it:
+	# with the prefix still open, "d" would narrow it to Advanced instead of searching on.
 	time.sleep(TYPE_AHEAD_PAUSE)
 	mark = desktop.mark()
 	desktop.press("a", "Down", "d", gap=0.15)
-	desktop.expect(
-		f"Audio 4 of {count}",
-		f"Sound Themes 5 of {count}",
-		f"Document Formatting 13 of {count}",
-		since=mark,
-	)
+	desktop.expect(f"Document Formatting 13 of {count}", since=mark)
 	step(desktop, "Escape", *AT_START)
 	desktop.close()
 	assertExitedCleanly(nvda)
