@@ -215,3 +215,53 @@ def test_addOnOverridingNvdasReportNewLines(desktop: DesktopSession):
 	assert not after, after
 	step(desktop, "Insert+Up", "$")
 	assertExitedCleanly(desktop, nvda)
+
+
+def test_pythonReplPromptImmediateAndOnFullScreen(desktop: DesktopSession):
+	"""Python REPL prompts are spoken promptly after Enter, and keep being spoken once the terminal is
+	full and scrolling even when bare >>> prompts have appeared on screen (issue 48)."""
+	nvda = startTerminal(desktop, SESSION_CONFIG)
+	prompt = "greater  greater  greater"
+
+	mark = desktop.mark()
+	desktop.typeText("python3")
+	desktop.press("Return")
+	desktop.expect(prompt, since=mark, timeout=10.0)
+	time.sleep(SETTLE)
+
+	def expectPromptSoon(command: str) -> float:
+		desktop.typeText(command)
+		time.sleep(0.2)
+		before = desktop.mark()
+		pressed = time.monotonic()
+		desktop.press("Return", gap=0)
+		desktop.expect(prompt, since=before, timeout=2.0)
+		records = harness.transcriptRecords().readRecords(nvda.directory / "transcript.jsonl")
+		spoke = next(
+			r["t"]
+			for r in records
+			if r["kind"] == "speak"
+			and r["t"] >= pressed
+			and harness.transcriptRecords().spokenText(r) == prompt
+		)
+		return spoke - pressed
+
+	# Screen not full: prompt comes promptly after Return (well under LONG_PAUSE_SECONDS).
+	assert expectPromptSoon("import os") < 0.25
+
+	# Leave bare >>> prompts on screen and fill past the 24-row height so subsequent commands scroll.
+	for _ in range(3):
+		desktop.press("Return")
+		time.sleep(0.05)
+	for index in range(25):
+		desktop.typeText(f"x = {index}")
+		desktop.press("Return")
+		time.sleep(0.04)
+	time.sleep(SETTLE)
+
+	# Full screen scrolling: >>> must still be spoken promptly on repeated commands.
+	assert expectPromptSoon("import os") < 0.25
+	assert expectPromptSoon("import sys") < 0.25
+
+	desktop.press("ctrl+d")
+	assertExitedCleanly(desktop, nvda)

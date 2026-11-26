@@ -214,15 +214,19 @@ def markZone(text: str) -> tuple[str, str, str]:
 	return text[:start], text[start:end], text[end:]
 
 
-def isNewScreen(oldRows: list[str], newRows: list[str]) -> bool:
-	"""Whether most rows with text changed at once, as when a full-screen program starts or ends, or the
-	screen scrolled by its height."""
-	rows = max(len(oldRows), len(newRows))
-	oldRows = oldRows + [""] * (rows - len(oldRows))
-	newRows = newRows + [""] * (rows - len(newRows))
-	changed = sum(old != new for old, new in zip(oldRows, newRows))
-	withText = sum(bool(old or new) for old, new in zip(oldRows, newRows))
-	return changed > IN_PLACE_ROWS and changed > withText // 2
+def isNewScreen(
+	oldRows: list[str],
+	newRows: list[str],
+	opcodes: list[tuple[str, int, int, int, int]] | None = None,
+) -> bool:
+	"""Whether most rows with text were replaced at once, as when a full-screen program starts or ends,
+	or the screen scrolled by most of its height; scrolling by a few lines keeps most rows and is not."""
+	if opcodes is None:
+		opcodes = SequenceMatcher(None, oldRows, newRows, autojunk=False).get_opcodes()
+	kept = sum(bool(oldRows[i]) for tag, i1, i2, _j1, _j2 in opcodes if tag == "equal" for i in range(i1, i2))
+	total = max(sum(bool(row) for row in oldRows), sum(bool(row) for row in newRows))
+	replaced = total - kept
+	return replaced > IN_PLACE_ROWS and replaced > total // 2
 
 
 def inputContentStart(text: str) -> int:
@@ -373,16 +377,23 @@ class ScreenTracker:
 		self.caret = caret
 		if texts == oldTexts:
 			return
+		opcodes = SequenceMatcher(None, oldTexts, texts, autojunk=False).get_opcodes()
+		scrolledTop = (
+			len(opcodes) >= 2
+			and opcodes[0][0] == "delete"
+			and opcodes[0][1] == 0
+			and opcodes[1][0] == "equal"
+			and opcodes[1][1] > opcodes[1][3]
+		)
 		restored: dict[str, str] = {}
-		if isNewScreen(oldTexts, texts):
+		if isNewScreen(oldTexts, texts, opcodes):
 			restored = self._restored(texts)
 			if any(text.strip() for text in oldTexts):
 				self.screensBefore.append({row.text: row.heard for row in old if row.text.strip()})
 		rows: list[Row | None] = [None] * len(texts)
 		edited: list[tuple[int, str]] = []
 		created: list[int] = []
-		matcher = SequenceMatcher(None, oldTexts, texts, autojunk=False)
-		for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+		for opIndex, (tag, i1, i2, j1, j2) in enumerate(opcodes):
 			if tag == "equal":
 				rows[j1:j2] = old[i1:i2]
 				continue
@@ -406,9 +417,10 @@ class ScreenTracker:
 				rows[j] = row
 				edited.append((j, row.text))
 				self._edit(row, texts[j], j, now, key, restored)
-			for i in range(i1, i2):
-				if i not in used:
-					self._vanish(old[i], now)
+			if not (opIndex == 0 and scrolledTop):
+				for i in range(i1, i2):
+					if i not in used:
+						self._vanish(old[i], now)
 		self.rows = rows
 		self._afterEdits(edited, created, now, key)
 
@@ -621,13 +633,10 @@ class ScreenTracker:
 		if (
 			inputRow is not None
 			and self.rows[inputRow].inputAtCaret
-			and key is not None
-			and key.kind == "enter"
-			and now - key.time <= KEY_SECONDS
 			and self.caret is not None
 			and self.caret[0] > inputRow
 		):
-			# Enter took the cursor on under the line typed in: it was a command line, run.
+			# The cursor moved under the command line that was typed in: it was run.
 			self.rows[inputRow].isInput = self.rows[inputRow].inputAtCaret = False
 			self.inputColumn = None
 		newInput = [index for index in created if self.rows[index].isInput]
@@ -682,6 +691,7 @@ class ScreenTracker:
 			if (
 				quiet >= LONG_PAUSE_SECONDS
 				or self._movedOn(index, now)
+				or self._isPromptAtCaret(index, row)
 				or quiet >= PAUSE_SECONDS
 				and (not row.grew or pending.rstrip()[-1:] in ".!?:;)")
 			):
@@ -712,6 +722,18 @@ class ScreenTracker:
 				max(self.speakingUntil, now) + sum(len(line) for line in lines) * SECONDS_PER_CHARACTER
 			)
 		return lines
+
+	def _isPromptAtCaret(self, index: int, row: Row) -> bool:
+		"""Whether row is a newly printed prompt waiting for input at the terminal's cursor, such as
+		">>> ", "... ", "$ " or "Password: ", which needs no pause to see whether a sentence is growing."""
+		if row.heard or self.caret is None or self.isCaretParked():
+			return False
+		caretRow, caretColumn = self.caret
+		return (
+			caretRow == index
+			and caretColumn > len(row.text)
+			and (row.text[-1:] in ">$#%:" or row.text == "...")
+		)
 
 	def _movedOn(self, index: int, now: float) -> bool:
 		"""Whether text was written under a row since it last changed: it has ended."""
