@@ -19,6 +19,17 @@
 <div role="heading" aria-level="4">An ARIA heading</div>
 <p><button aria-details="det">Details button</button></p>
 <div id="det"><p>The details text.</p></div>
+<div id="seek" role="slider" tabindex="0" aria-label="Seek slider" aria-valuemin="0" aria-valuemax="5000" aria-valuenow="4033" aria-valuetext="1 hour, 7 minutes of 1 hour, 23 minutes"></div>
+<script>
+document.getElementById("seek").addEventListener("keydown", (event) => {
+	if (event.key === "ArrowRight") {
+		event.preventDefault();
+		const el = event.currentTarget;
+		el.setAttribute("aria-valuenow", "4038");
+		el.setAttribute("aria-valuetext", "1 hour, 7 minutes 5 seconds of 1 hour, 23 minutes");
+	}
+});
+</script>
 <p>The end.</p>
 </body>
 </html>

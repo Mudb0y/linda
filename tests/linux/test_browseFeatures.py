@@ -451,6 +451,22 @@ class TestSemantics:
 		step(semantics, "Tab", "Details button button")
 		step(semantics, "Insert+space", "Browse mode")
 
+	def test_sliderValueText(self, semantics: Session):
+		"""Focusing a slider with aria-valuetext speaks its valuetext rather than its raw numeric value,
+		and updates speak the new valuetext (issue 50)."""
+		stepSaying(semantics, "Control_L+Home", "Semantics")
+		step(semantics, "b", "Save button Saves the draft")
+		step(semantics, "4", "An ARIA heading heading level 4")
+		step(semantics, "Tab", "Details button button has details")
+		step(
+			semantics,
+			"Tab",
+			"Seek slider slider 1 hour, 7 minutes of 1 hour, 23 minutes",
+			"Focus mode",
+		)
+		step(semantics, "Right", "1 hour, 7 minutes 5 seconds of 1 hour, 23 minutes")
+		step(semantics, "Escape", "Browse mode")
+
 
 class TestFindInPage:
 	"""Firefox's own find bar: the page is not read while the search is typed, and closing the find bar

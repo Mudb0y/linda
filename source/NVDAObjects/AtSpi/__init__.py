@@ -689,16 +689,19 @@ class AtSpi(NVDAObject):
 			if self._comboBoxNamedByChoice:
 				return self.atspiName or None
 			return self.atspiAttributes.get("valuetext") or None
-		if role in VALUE_ROLES and "Value" in self.atspiInterfaces:
-			try:
-				current, minimum, maximum, text = _client().value(self.node)
-			except NodeGone:
-				return None
-			if text:
-				return text
-			if role == Role.PROGRESSBAR and maximum > minimum:
-				return f"{round((current - minimum) * 100 / (maximum - minimum))}%"
-			return str(int(current)) if current == int(current) else f"{current:g}"
+		if role in VALUE_ROLES:
+			if valuetext := self.atspiAttributes.get("valuetext"):
+				return valuetext
+			if "Value" in self.atspiInterfaces:
+				try:
+					current, minimum, maximum, text = _client().value(self.node)
+				except NodeGone:
+					return None
+				if text:
+					return text
+				if role == Role.PROGRESSBAR and maximum > minimum:
+					return f"{round((current - minimum) * 100 / (maximum - minimum))}%"
+				return str(int(current)) if current == int(current) else f"{current:g}"
 		if role == Role.LINK and "Hyperlink" in self.atspiInterfaces:
 			try:
 				return _client().linkUri(self.node) or None
@@ -1257,6 +1260,8 @@ class SpinButton(EditableTextWithoutAutoSelectDetection, AtSpi):
 	"""A GTK spin button: an edit field whose number is its value, spoken as a value on Windows."""
 
 	def _get_value(self) -> str | None:
+		if valuetext := self.atspiAttributes.get("valuetext"):
+			return valuetext
 		try:
 			current, _minimum, _maximum, text = _client().value(self.node)
 		except NodeGone:
