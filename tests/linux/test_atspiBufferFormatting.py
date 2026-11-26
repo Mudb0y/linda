@@ -18,6 +18,7 @@ STEP_BOUND = 5.0
 SETTLE = 0.5
 
 UNIT_TESTS_CHILD = r"""
+import io
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -228,10 +229,11 @@ class TestAtSpiBufferFormatting(unittest.TestCase):
 
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestAtSpiBufferFormatting)
-runner = unittest.TextTestRunner(verbosity=2)
+buf = io.StringIO()
+runner = unittest.TextTestRunner(stream=buf, verbosity=2)
 res = runner.run(suite)
 if not res.wasSuccessful():
-	raise SystemExit(1)
+	raise AssertionError(buf.getvalue())
 result = res.testsRun
 """
 
@@ -271,7 +273,7 @@ def _reportFormatting(desktop: DesktopSession) -> str:
 
 def _assertFormattingInBrowser(desktop: DesktopSession) -> None:
 	_step(desktop, "Control_L+Home", "heading level 1 Formatting")
-	_step(desktop, "Down", "…Plain text…")
+	_step(desktop, "Down", "main landmark Plain text…")
 
 	plainReport = _reportFormatting(desktop)
 	assert "bold" not in plainReport.lower(), plainReport
@@ -337,14 +339,14 @@ def test_firefoxLineReadingWithFormattingSettingsEnabled(tmp_path: Path, formatt
 		nvda.waitForLog("NVDA initialized", STARTUP_BOUND)
 		mark = desktop.mark()
 		webSession.startFirefox(desktop, "featureFormatting.html")
-		desktop.expect("heading level 1 Formatting", since=mark, timeout=LOAD_BOUND)
+		desktop.expect("heading level 1…", since=mark, timeout=LOAD_BOUND)
 		desktop.press("Control_L")
 		time.sleep(SETTLE)
 
-		_step(desktop, "Control_L+Home", "heading level 1 Formatting")
+		_step(desktop, "Control_L+Home", "heading level 1…")
 		lineMark = desktop.mark()
 		desktop.press("Down")
-		desktop.expect("…Plain text…", since=lineMark, timeout=STEP_BOUND)
+		desktop.expect("main landmark…", since=lineMark, timeout=STEP_BOUND)
 		time.sleep(SETTLE)
 		spoken = " ".join(desktop.spokenSince(lineMark)).lower()
 		assert "red" in spoken, spoken
