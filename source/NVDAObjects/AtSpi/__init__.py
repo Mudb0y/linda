@@ -49,6 +49,21 @@ SIBLING_LIMIT = 50
 MENU_SIBLING_LIMIT = 120
 #: Columns read at most to speak a row of a table as a list item with columns.
 ROW_COLUMN_LIMIT = 12
+#: Columns above which a GTK 3 table is a 2D grid such as a spreadsheet, not a list view.
+GTK_ROW_TABLE_COLUMN_LIMIT = 64
+#: AT-SPI document roles inside which a table is a real 2D table or spreadsheet, never a GTK 3 list view.
+_DOCUMENT_RAW_ROLES = frozenset(
+	{
+		"document email",
+		"document frame",
+		"document presentation",
+		"document spreadsheet",
+		"document text",
+		"document web",
+	}
+)
+#: Ancestors walked at most when checking whether a table or cell sits inside a document.
+_DOCUMENT_ANCESTOR_LIMIT = 8
 #: Objects visited at most, and how deep, to name an object from the text inside it.
 DESCENDANT_TEXT_LIMIT = 20
 DESCENDANT_TEXT_DEPTH = 4
@@ -182,12 +197,44 @@ def childNodes(node: Node, states: frozenset[str] | None = None, limit: int = CH
 	return [child for child in (c.childAt(node, i) for i in range(limit)) if child]
 
 
-def _isSingleColumnTable(node: Node) -> bool:
+def _ancestorDocumentRole(node: Node) -> str | None:
+	"""The raw AT-SPI role of the nearest document ancestor of node, if one lies within
+	_DOCUMENT_ANCESTOR_LIMIT levels."""
 	c = _client()
-	if "Table" not in c.interfaces(node):
-		return False
-	_rows, columns = c.tableSize(node)
-	return columns == 1
+	parent = c.parent(node)
+	for _ in range(_DOCUMENT_ANCESTOR_LIMIT):
+		if parent is None:
+			return None
+		role = c.role(parent)
+		if role in _DOCUMENT_RAW_ROLES:
+			return role
+		if role in ("application", "frame", "dialog"):
+			return None
+		parent = c.parent(parent)
+	return None
+
+
+def _gtkRowTableColumns(node: Node, tableRole: str, states: frozenset[str]) -> int | None:
+	"""Column count when node is a GTK 3 tree view (a row-oriented list or tree), or None when it is a
+	real 2D table such as a LibreOffice Calc spreadsheet or a Writer document table."""
+	if tableRole not in ("table", "tree table") or "manages-descendants" not in states:
+		return None
+	c = _client()
+	try:
+		# Native GTK 3 GtkTreeView inherits from GtkWidgetAccessible and sets toolkit=gtk as an
+		# object attribute; custom ATK tables such as LibreOffice's AtkObjectWrapper do not.
+		if c.attributes(node).get("toolkit") != GTK3:
+			return None
+		if _ancestorDocumentRole(node) is not None:
+			return None
+		if "Table" not in c.interfaces(node):
+			return None
+		_rows, columns = c.tableSize(node)
+	except NodeGone:
+		return None
+	if columns > GTK_ROW_TABLE_COLUMN_LIMIT:
+		return None
+	return columns
 
 
 def _descendantText(node: Node) -> str:
@@ -275,7 +322,11 @@ class AtSpi(NVDAObject):
 			clsList.append(ComboBoxButton)
 		if role == Role.SPINBUTTON and "Text" in ifaces and "Value" in ifaces:
 			clsList.append(SpinButton)
-		elif "Text" in ifaces and ("editable" in states or role == Role.EDITABLETEXT):
+		elif (
+			"Text" in ifaces
+			and ("editable" in states or role == Role.EDITABLETEXT)
+			and not self._isSpreadsheetCell
+		):
 			if self._isRichTextEditor:
 				clsList.append(RichTextEditor)
 			elif self._isMonacoEditor:
@@ -292,8 +343,11 @@ class AtSpi(NVDAObject):
 			clsList.append(TableRowItem)
 		elif role == Role.LISTITEM and self.atspiRole == "icon":
 			clsList.append(IconItem)
-		elif role == Role.TABLECELL and "TableCell" in ifaces:
-			clsList.append(TableCell)
+		elif role == Role.TABLECELL:
+			if self._isSpreadsheetCell:
+				clsList.append(SpreadsheetCell)
+			if "TableCell" in ifaces:
+				clsList.append(TableCell)
 		if role == Role.DIALOG and self.atspiRole != "file chooser":
 			# A file chooser's labels are its controls' names, not a message to read as it opens.
 			clsList.append(Dialog)
@@ -470,17 +524,15 @@ class AtSpi(NVDAObject):
 			if parentRole in ("menu bar", "menu", "popup menu") or "selectable" in self.atspiStates:
 				return Role.MENUITEM
 			return Role.POPUPMENU
-		if (
-			raw in ("table", "tree table")
-			and self.toolkit == GTK3
-			and "manages-descendants" in self.atspiStates
-		):
-			# A GTK 3 tree view is what GTK programs use for an ordinary list, and with columns for what
-			# Windows shows as a list view's details, Caja's list view among them; only a one-column
-			# tree is a tree view.
-			if raw == "tree table" and self._isSingleColumnTable:
-				return Role.TREEVIEW
-			return Role.LIST
+		if raw in ("table", "tree table") and self.toolkit == GTK3:
+			columns = _gtkRowTableColumns(self.node, raw, self.atspiStates)
+			if columns is not None:
+				# A GTK 3 tree view is what GTK programs use for an ordinary list, and with columns for what
+				# Windows shows as a list view's details, Caja's list view among them; only a one-column
+				# tree is a tree view.
+				if raw == "tree table" and columns == 1:
+					return Role.TREEVIEW
+				return Role.LIST
 		if raw == "table cell":
 			rowTable = self._rowTable
 			if rowTable is None:
@@ -541,9 +593,12 @@ class AtSpi(NVDAObject):
 		except NodeGone:
 			return False
 
-	def _get__isSingleColumnTable(self) -> bool:
+	def _get__isSpreadsheetCell(self) -> bool:
+		"""Whether this table cell belongs to a spreadsheet document such as LibreOffice Calc."""
+		if self.role != Role.TABLECELL:
+			return False
 		try:
-			return _isSingleColumnTable(self.node)
+			return _ancestorDocumentRole(self.node) == "document spreadsheet"
 		except NodeGone:
 			return False
 
@@ -559,9 +614,14 @@ class AtSpi(NVDAObject):
 		c = _client()
 		try:
 			tableRole = c.role(parent)
+			states = c.states(parent)
+			if toolkit == GTK3:
+				columns = _gtkRowTableColumns(parent, tableRole, states)
+				if columns is None:
+					return None
+				return (parent, tableRole, columns)
 			# A Qt table is a grid whose cells are spoken one at a time, as NVDA speaks a table's.
-			rowRoles = ("table", "tree table") if toolkit == GTK3 else ("tree",)
-			if tableRole not in rowRoles or "manages-descendants" not in c.states(parent):
+			if tableRole != "tree" or "manages-descendants" not in states:
 				return None
 			if "Table" not in c.interfaces(parent):
 				return None
@@ -1456,19 +1516,92 @@ class TableCell(AtSpi):
 		return table.node.key if table else None
 
 	def _get_rowNumber(self) -> int:
-		return _client().cellPosition(self.node)[0] + 1
+		try:
+			row = _client().cellPosition(self.node)[0]
+		except NodeGone:
+			raise NotImplementedError from None
+		if row < 0:
+			raise NotImplementedError
+		return row + 1
 
 	def _get_columnNumber(self) -> int:
-		return _client().cellPosition(self.node)[1] + 1
+		try:
+			column = _client().cellPosition(self.node)[1]
+		except NodeGone:
+			raise NotImplementedError from None
+		if column < 0:
+			raise NotImplementedError
+		return column + 1
 
 	def _get_rowCount(self) -> int:
-		return _client().tableSize(self.table.node)[0]
+		table = self.table
+		if table is None:
+			raise NotImplementedError
+		try:
+			return _client().tableSize(table.node)[0]
+		except NodeGone:
+			raise NotImplementedError from None
 
 	def _get_columnCount(self) -> int:
-		return _client().tableSize(self.table.node)[1]
+		table = self.table
+		if table is None:
+			raise NotImplementedError
+		try:
+			return _client().tableSize(table.node)[1]
+		except NodeGone:
+			raise NotImplementedError from None
 
 	def _get_columnHeaderText(self) -> str:
-		return " ".join(h for h in _client().columnHeaderNames(self.node) if h)
+		try:
+			return " ".join(h for h in _client().columnHeaderNames(self.node) if h)
+		except NodeGone:
+			return ""
+
+
+class SpreadsheetCell(AtSpi):
+	"""A cell of a spreadsheet document such as LibreOffice Calc: speaks the active cell's
+	coordinates from its accessible name rather than redundant row/column numbers, exposes its
+	text content through AtspiTextInfo, and silences the editable, multi-line and single-cell
+	unselected states."""
+
+	def _get_cellCoordsText(self) -> str | None:
+		return self.atspiName or None
+
+	def _get_name(self) -> str:
+		# The accessible name holds the cell's coordinate (e.g. "A1"), spoken via cellCoordsText.
+		return ""
+
+	def _get_value(self) -> str | None:
+		if "Text" in self.atspiInterfaces:
+			try:
+				return _client().text(self.node) or None
+			except NodeGone:
+				return None
+		return super().value
+
+	def _get_TextInfo(self):
+		if "Text" in self.atspiInterfaces:
+			return AtspiTextInfo
+		return super().TextInfo
+
+	def _get_hasSelection(self) -> bool:
+		container = self.selectionContainer
+		return bool(container and container.getSelectedItemsCount(2) > 1)
+
+	def _get_states(self) -> set[State]:
+		states = super().states
+		states.discard(State.MULTILINE)
+		states.discard(State.EDITABLE)
+		if State.SELECTED not in states and State.FOCUSED in states:
+			# LibreOffice Calc omits the selected state on a singly focused cell while keeping
+			# selectable, which would otherwise announce "not selected" on every cell move.
+			if self.hasSelection:
+				states.add(State.SELECTED)
+			else:
+				states.discard(State.SELECTABLE)
+		if self.atspiAttributes.get("Formula") or self.atspiAttributes.get("formula"):
+			states.add(State.HASFORMULA)
+		return states
 
 
 class Desktop(AtSpi):
