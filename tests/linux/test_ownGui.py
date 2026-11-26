@@ -470,6 +470,57 @@ def test_categoriesOutOfViewAreReadWithTheirPlaceInTheWholeList(desktop: Desktop
 	assertExitedCleanly(nvda)
 
 
+#: How long a typed prefix stays open, in seconds: a little over the mixin's typeAheadTimeout.
+TYPE_AHEAD_PAUSE = 1.5
+
+
+def test_categoriesAreFoundByFirstLetters(desktop: DesktopSession, tmp_path: Path):
+	nvda = start(desktop, sessionConfig(tmp_path / "config"))
+	desktop.expect(*AT_START, since=0, timeout=STARTUP_BOUND)
+	count = len(CATEGORY_NAMES)
+	step(desktop, "Insert+n", "Preferences sub Menu P 1 of 9")
+	step(desktop, "Return", "Settings... S 1 of 4")
+	step(
+		desktop,
+		"Return",
+		"Linda Settings: General (normal configuration) dialog",
+		"Categories: list",
+		f"General 1 of {count}",
+	)
+
+	def typeAhead(letters: str, *expected: str) -> None:
+		# A prefix lasts a second, so wait it out before searching afresh.
+		time.sleep(TYPE_AHEAD_PAUSE)
+		mark = desktop.mark()
+		desktop.press(*letters, gap=0.15)
+		desktop.expect(*expected, since=mark)
+
+	# A letter jumps to the next category starting with it, past General, and wraps round the list.
+	typeAhead("k", f"Keyboard 7 of {count}")
+	typeAhead("s", f"Speech 2 of {count}")
+	# One letter does not stay on the category it moved to: the next jumps on to the next match.
+	typeAhead("d", f"Document Formatting 12 of {count}")
+	typeAhead("d", f"Document Navigation 13 of {count}")
+	# Typed together, the same letter cycles through the categories starting with it.
+	typeAhead("dd", f"Document Formatting 12 of {count}", f"Document Navigation 13 of {count}")
+	# A second letter narrows the search instead of starting a new one.
+	step(desktop, "Home", f"General 1 of {count}")
+	typeAhead("ad", f"Audio 4 of {count}", f"Advanced {count} of {count}")
+	# An arrow key starts the search afresh after the letter before it.
+	time.sleep(TYPE_AHEAD_PAUSE)
+	mark = desktop.mark()
+	desktop.press("a", "Down", "d", gap=0.15)
+	desktop.expect(
+		f"Audio 4 of {count}",
+		f"Privacy and Security 5 of {count}",
+		f"Document Formatting 12 of {count}",
+		since=mark,
+	)
+	step(desktop, "Escape", *AT_START)
+	desktop.close()
+	assertExitedCleanly(nvda)
+
+
 #: Symbols read past the few the symbol pronunciation dialog's list shows at once.
 SYMBOLS_READ = 20
 

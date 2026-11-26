@@ -6,7 +6,7 @@
 import collections  # noqa: I001
 from ctypes import addressof
 import enum
-import time
+import sys
 import typing
 from collections import OrderedDict
 import warnings
@@ -48,21 +48,8 @@ __all__ = [
 ]
 
 
-if wx.Platform == "__WXMSW__":
-
-	class ListCtrlTypeAheadMixin:
-		"""
-		Stand-in for the type-ahead mixin on Windows.
-
-		The native Windows list control searches incrementally by itself,
-		so there is nothing to add there: L{_initTypeAhead} does nothing
-		and no event handlers are bound.
-		"""
-
-		def _initTypeAhead(self):
-			return
-
-else:
+if sys.platform != "win32":
+	import time
 
 	class ListCtrlTypeAheadMixin:
 		"""
@@ -72,7 +59,7 @@ else:
 		but the generic wxWidgets control used on other platforms does not:
 		typing a letter there does nothing.
 		This mixin restores the Windows behaviour:
-		typing a printable character focuses and selects the first item
+		typing a printable character focuses and selects the next item
 		whose label in the first column starts with the typed text,
 		typing further characters narrows the search,
 		and repeating the same character cycles through the matching items.
@@ -142,15 +129,28 @@ else:
 			"""
 			foldedPrefix = prefix.casefold()
 			count = self.GetItemCount()
+			if not count:
+				return None
 			if len(foldedPrefix) > 1 and len(set(foldedPrefix)) == 1:
 				# The same character typed repeatedly cycles through the items starting with it.
 				pattern = foldedPrefix[0]
 				start = self._typeAheadLastMatch + 1
+			elif len(foldedPrefix) > 1:
+				# A longer prefix narrows the search, and the focused item stays a candidate,
+				# so that typing more of its label keeps it.
+				pattern = foldedPrefix
+				start = max(self._getTypeAheadFocusedIndex(), 0)
 			else:
+				# A fresh single character goes on to the next match, as the Windows list control
+				# does: the circular search comes back to the focused item only when it is the sole match.
 				pattern = foldedPrefix
 				focusedIndex = self._getTypeAheadFocusedIndex()
-				# The current item is included, so that typing a letter keeps it when it matches.
-				start = max(focusedIndex, 0)
+				start = (focusedIndex + 1) % count if focusedIndex != -1 else 0
+			return self._scanTypeAhead(pattern, start)
+
+		def _scanTypeAhead(self, pattern, start):
+			"""The first item from C{start} on, cyclically, whose label starts with C{pattern}."""
+			count = self.GetItemCount()
 			for offset in range(count):
 				index = (start + offset) % count
 				if self._getTypeAheadText(index).casefold().startswith(pattern):
@@ -169,9 +169,37 @@ else:
 			return self.GetItemText(index, 0)
 
 		def _focusTypeAheadMatch(self, index):
+			if not (self.GetWindowStyleFlag() & wx.LC_SINGLE_SEL):
+				# Select() adds to the selection, so every item searched past would stay selected.
+				for selected in self._getTypeAheadSelectedIndexes():
+					self.Select(selected, 0)
 			self.Select(index)
 			# Focus also scrolls the found item into view.
 			self.Focus(index)
+
+		def _getTypeAheadSelectedIndexes(self):
+			"""The indexes of the items selected now."""
+			indexes = []
+			index = self.GetNextItem(-1, wx.LIST_NEXT_ALL, wx.LIST_STATE_SELECTED)
+			while index != -1:
+				indexes.append(index)
+				index = self.GetNextItem(index, wx.LIST_NEXT_ALL, wx.LIST_STATE_SELECTED)
+			return indexes
+
+
+else:
+
+	class ListCtrlTypeAheadMixin:
+		"""
+		Stand-in for the type-ahead mixin on Windows.
+
+		The native Windows list control searches incrementally by itself,
+		so there is nothing to add there: L{_initTypeAhead} does nothing
+		and no event handlers are bound.
+		"""
+
+		def _initTypeAhead(self):
+			return
 
 
 class AutoWidthColumnListCtrl(wx.ListCtrl, listmix.ListCtrlAutoWidthMixin, ListCtrlTypeAheadMixin):
