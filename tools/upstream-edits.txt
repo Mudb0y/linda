@@ -651,6 +651,16 @@ source/gui/message.py
   the two annotations naming wx.html2 quoted: on GTK the extension links
   WebKitGTK, GStreamer and PulseAudio, which every start loaded although
   nothing makes a WebView until an HTML message is shown
+source/gui/nvdaControls.py
+  Linux runtime: ListCtrlTypeAheadMixin adds first-letter navigation to
+  AutoWidthColumnListCtrl, which the generic list control wxGTK uses lacks:
+  typing a letter there does nothing, where the native Windows control
+  searches incrementally by itself.
+  every platform: the mixin is defined on Windows as a stand-in whose
+  _initTypeAhead does nothing, and AutoWidthColumnListCtrl lists it among
+  its bases and calls _initTypeAhead; import time moved into the Linux
+  branch, and import sys, which Windows needs for its test of sys.platform,
+  stands at the top with the module's other imports
 source/gui/settingsDialogs.py
   every platform: the scratchpad directory opens through startfile from
   linuxPlatform.windowsOnly, which is os.startfile on Windows and on Linux
