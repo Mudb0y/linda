@@ -23,7 +23,7 @@ from .client import Node, NodeGone
 
 Unit = Literal["codepoints", "utf16"]
 
-#: The granularities stringAtOffset takes. Word and sentence are left out on purpose.
+#: The granularities stringAtOffset takes. Sentence is left out on purpose.
 GRANULARITIES = {
 	"char": Atspi.TextGranularity.CHAR,
 	"word": Atspi.TextGranularity.WORD,

@@ -392,9 +392,7 @@ class AtSpiBufferTextInfo(VirtualBufferTextInfo):
 				cache[cacheKey] = target
 		if target is None:
 			return (
-				[textInfos.FieldCommand("formatChange", baseFormatField), text]
-				if baseFormatField
-				else [text]
+				[textInfos.FieldCommand("formatChange", baseFormatField), text] if baseFormatField else [text]
 			)
 		obj, targetDocHandle, targetID, fieldStart, source = target
 		localOffset = self._atspiTextOffset(fieldStart, bufOffset, targetDocHandle, targetID)
