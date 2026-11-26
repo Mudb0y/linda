@@ -21,429 +21,443 @@
 
   outputs = { self, nixpkgs, nixpkgs-ruff, nixpkgs-25_11, nixpkgs-26_05, openevv }:
     let
-      system = "x86_64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
       lib = nixpkgs.lib;
-      inherit (nixpkgs-ruff.legacyPackages.${system}) ruff;
+      systems = [ "x86_64-linux" "aarch64-linux" ];
+      forAllSystems = lib.genAttrs systems;
 
-      # NVDA pins Python 3.13. Staying on it keeps the imported code, and the
-      # add-ons written against it, on the interpreter they were tested with
-      # rather than on whatever python3 currently is.
-      pythonInterpreter = pkgs.python313.override {
-        self = pythonInterpreter;
-        packageOverrides = import ./nix/python-packages.nix;
-      };
+      perSystem = system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit (nixpkgs-ruff.legacyPackages.${system}) ruff;
 
-      # wxPython is 4.3 where this NVDA release pins 4.2: under 4.2 on GTK a
-      # list control reaches AT-SPI as an empty panel, so its items cannot be
-      # read at all.
-      pythonPackages = ps: with ps; [
-        bleak
-        # The BRLTTY driver's client; BRLTTY itself is the system's.
-        brlapi
-        configobj
-        cryptography
-        dbus-fast
-        detect-secrets
-        diff-match-patch
-        fast-diff-match-patch
-        fuzzysearch
-        # With markdown-link-attr-modifier, mdx-gh-links, mdx-truly-sane-lists
-        # and pymdown-extensions, the Markdown extensions md2html converts the
-        # user guide with.
-        l2m4m
-        louis
-        lxml
-        markdown
-        markdown-link-attr-modifier
-        mdx-gh-links
-        mdx-truly-sane-lists
-        nh3
-        parameterized
-        psutil
-        pygobject3
-        pymdown-extensions
-        pyphen
-        # The Qt 6 fixture's toolkit.
-        pyqt6
-        pyserial
-        pytest
-        # The X key source: XI2 events and grabs, and the XKB keymap that turns
-        # them into characters.
-        python-xlib
-        # The keymap a Wayland compositor gives its clients, which a Wayland
-        # session's keys are read in; the rig's Wayland clients speak the
-        # protocol through it too. Optional: meson.build only warns of its
-        # lack, and without it the desktop's layout names alone are read.
-        pywayland
-        regex
-        requests
-        rpyc
-        schedule
-        unittest-xml-reporting
-        url-normalize
-        wxpython_4_3
-        xkbcommon
-      ];
-      mathcat = pkgs.callPackage ./nix/mathcat.nix { python = pythonInterpreter; };
-      python = pythonInterpreter.withPackages (ps: pythonPackages ps ++ [ mathcat ]);
+          # NVDA pins Python 3.13. Staying on it keeps the imported code, and the
+          # add-ons written against it, on the interpreter they were tested with
+          # rather than on whatever python3 currently is.
+          pythonInterpreter = pkgs.python313.override {
+            self = pythonInterpreter;
+            packageOverrides = import ./nix/python-packages.nix;
+          };
 
-      louisTables = pkgs.callPackage ./nix/louis-tables.nix { };
-      cargoVendorDir = pkgs.rustPlatform.importCargoLock { lockFile = ./engine/Cargo.lock; };
-      nvdaCldr = pkgs.callPackage ./nix/nvda-cldr.nix { };
-      espeak = pkgs.callPackage ./nix/espeak-ng.nix { };
-
-      # What git describe says of the locked revision, which a flake input
-      # does not record; evaluation stops until it is set again for a new one.
-      openevvVersion = "0.7-0-g7ffd754";
-      openevvLibeci =
-        assert lib.assertMsg (lib.hasSuffix openevv.shortRev openevvVersion)
-          "openevvVersion is not of ${openevv.rev}: set it to what git describe says of that commit";
-        pkgs.callPackage ./nix/openevv-libeci.nix {
-          src = openevv;
-          version = openevvVersion;
-        };
-      openevvDriver = pkgs.callPackage ./nix/openevv-driver.nix {
-        src = openevv;
-        version = openevvVersion;
-        libeci = openevvLibeci;
-      };
-
-      # The LINDA_ variables naming the native libraries and data Linux
-      # code loads, which the dev shell sets and the package's Meson build
-      # fixes in linuxPlatform/installPaths.py, where its install check
-      # holds them to these. The code finds them through these rather than
-      # through the loader's search path, so that what it loads is exactly
-      # what the flake pins.
-      runtimeEnv = {
-        LINDA_ICU_LIB_DIR = "${lib.getLib pkgs.icu}/lib";
-        # ICU exports every C symbol with this suffix, as in ubrk_open_78.
-        LINDA_ICU_VERSION_MAJOR = lib.versions.major pkgs.icu.version;
-        LINDA_ESPEAK_LIB = "${espeak}/lib/libespeak-ng.so.1";
-        LINDA_ESPEAK_DATA_DIR = "${espeak}/share/espeak-ng-data";
-        # linuxPlatform.synthDriverPaths puts it on NVDA's driver search path.
-        LINDA_OPENEVV_DRIVER_DIR = "${openevvDriver}";
-      };
-
-      # The Meson build's two shapes. The libraries, browse mode's storage and renderer and the
-      # PipeWire sink, with the key capture helper, are a package of their own, which the dev shell
-      # names as well; the program installs them from it, so that a change to the Python tree
-      # rebuilds neither them nor the shell.
-      libraries = pkgs.callPackage ./nix/linda.nix {
-        inherit cargoVendorDir;
-        python = pythonInterpreter.withPackages pythonPackages;
-        librariesOnly = true;
-        keydService = true;
-      };
-      linda = pkgs.callPackage ./nix/linda.nix {
-        inherit
-          python
-          cargoVendorDir
-          runtimeEnv
-          louisTables
-          nvdaCldr
-          espeak
-          libraries
-          ;
-        inherit openevvDriver;
-      };
-      # linda-keyd for other distributions. Its version is the reader's with the commit's date and
-      # short hash, so that each format orders a later commit's package after an earlier one's.
-      keydPackages = import ./nix/keyd-packages.nix {
-        inherit lib pkgs;
-        version = "${linda.version}+git${self.lastModifiedDate}.${
-          self.shortRev or (lib.replaceStrings [ "-" ] [ "." ] self.dirtyShortRev)
-        }";
-        sourceDateEpoch = self.lastModified;
-      };
-      app = name: description: {
-        type = "app";
-        program = "${linda}/bin/${name}";
-        meta = { inherit description; };
-      };
-
-      bench = pkgs.rustPlatform.buildRustPackage {
-        pname = "linda-bench";
-        inherit ((lib.importTOML ./engine/Cargo.toml).workspace.package) version;
-        src = lib.fileset.toSource {
-          root = ./engine;
-          fileset = lib.fileset.unions [
-            ./engine/Cargo.toml
-            ./engine/Cargo.lock
-            ./engine/crates
+          # wxPython is 4.3 where this NVDA release pins 4.2: under 4.2 on GTK a
+          # list control reaches AT-SPI as an empty panel, so its items cannot be
+          # read at all.
+          pythonPackages = ps: with ps; [
+            bleak
+            # The BRLTTY driver's client; BRLTTY itself is the system's.
+            brlapi
+            configobj
+            cryptography
+            dbus-fast
+            detect-secrets
+            diff-match-patch
+            fast-diff-match-patch
+            fuzzysearch
+            # With markdown-link-attr-modifier, mdx-gh-links, mdx-truly-sane-lists
+            # and pymdown-extensions, the Markdown extensions md2html converts the
+            # user guide with.
+            l2m4m
+            louis
+            lxml
+            markdown
+            markdown-link-attr-modifier
+            mdx-gh-links
+            mdx-truly-sane-lists
+            nh3
+            parameterized
+            psutil
+            pygobject3
+            pymdown-extensions
+            pyphen
+            # The Qt 6 fixture's toolkit.
+            pyqt6
+            pyserial
+            pytest
+            # The X key source: XI2 events and grabs, and the XKB keymap that turns
+            # them into characters.
+            python-xlib
+            # The keymap a Wayland compositor gives its clients, which a Wayland
+            # session's keys are read in; the rig's Wayland clients speak the
+            # protocol through it too. Optional: meson.build only warns of its
+            # lack, and without it the desktop's layout names alone are read.
+            pywayland
+            regex
+            requests
+            rpyc
+            schedule
+            unittest-xml-reporting
+            url-normalize
+            wxpython_4_3
+            xkbcommon
           ];
+          mathcat = pkgs.callPackage ./nix/mathcat.nix { python = pythonInterpreter; };
+          python = pythonInterpreter.withPackages (ps: pythonPackages ps ++ [ mathcat ]);
+
+          louisTables = pkgs.callPackage ./nix/louis-tables.nix { };
+          cargoVendorDir = pkgs.rustPlatform.importCargoLock { lockFile = ./engine/Cargo.lock; };
+          nvdaCldr = pkgs.callPackage ./nix/nvda-cldr.nix { };
+          espeak = pkgs.callPackage ./nix/espeak-ng.nix { };
+
+          # What git describe says of the locked revision, which a flake input
+          # does not record; evaluation stops until it is set again for a new one.
+          openevvVersion = "0.7-0-g7ffd754";
+          openevvLibeci =
+            assert lib.assertMsg (lib.hasSuffix openevv.shortRev openevvVersion)
+              "openevvVersion is not of ${openevv.rev}: set it to what git describe says of that commit";
+            pkgs.callPackage ./nix/openevv-libeci.nix {
+              src = openevv;
+              version = openevvVersion;
+            };
+          openevvDriver = pkgs.callPackage ./nix/openevv-driver.nix {
+            src = openevv;
+            version = openevvVersion;
+            libeci = openevvLibeci;
+          };
+
+          # The LINDA_ variables naming the native libraries and data Linux
+          # code loads, which the dev shell sets and the package's Meson build
+          # fixes in linuxPlatform/installPaths.py, where its install check
+          # holds them to these. The code finds them through these rather than
+          # through the loader's search path, so that what it loads is exactly
+          # what the flake pins.
+          runtimeEnv = {
+            LINDA_ICU_LIB_DIR = "${lib.getLib pkgs.icu}/lib";
+            # ICU exports every C symbol with this suffix, as in ubrk_open_78.
+            LINDA_ICU_VERSION_MAJOR = lib.versions.major pkgs.icu.version;
+            LINDA_ESPEAK_LIB = "${espeak}/lib/libespeak-ng.so.1";
+            LINDA_ESPEAK_DATA_DIR = "${espeak}/share/espeak-ng-data";
+            # linuxPlatform.synthDriverPaths puts it on NVDA's driver search path.
+            LINDA_OPENEVV_DRIVER_DIR = "${openevvDriver}";
+          };
+
+          # The Meson build's two shapes. The libraries, browse mode's storage and renderer and the
+          # PipeWire sink, with the key capture helper, are a package of their own, which the dev shell
+          # names as well; the program installs them from it, so that a change to the Python tree
+          # rebuilds neither them nor the shell.
+          libraries = pkgs.callPackage ./nix/linda.nix {
+            inherit cargoVendorDir;
+            python = pythonInterpreter.withPackages pythonPackages;
+            librariesOnly = true;
+            keydService = true;
+          };
+          linda = pkgs.callPackage ./nix/linda.nix {
+            inherit
+              python
+              cargoVendorDir
+              runtimeEnv
+              louisTables
+              nvdaCldr
+              espeak
+              libraries
+              ;
+            inherit openevvDriver;
+          };
+          # linda-keyd for other distributions. Its version is the reader's with the commit's date and
+          # short hash, so that each format orders a later commit's package after an earlier one's.
+          keydPackages = import ./nix/keyd-packages.nix {
+            inherit lib pkgs;
+            version = "${linda.version}+git${self.lastModifiedDate}.${
+              self.shortRev or (lib.replaceStrings [ "-" ] [ "." ] self.dirtyShortRev)
+            }";
+            sourceDateEpoch = self.lastModified;
+          };
+          app = name: description: {
+            type = "app";
+            program = "${linda}/bin/${name}";
+            meta = { inherit description; };
+          };
+
+          bench = pkgs.rustPlatform.buildRustPackage {
+            pname = "linda-bench";
+            inherit ((lib.importTOML ./engine/Cargo.toml).workspace.package) version;
+            src = lib.fileset.toSource {
+              root = ./engine;
+              fileset = lib.fileset.unions [
+                ./engine/Cargo.toml
+                ./engine/Cargo.lock
+                ./engine/crates
+              ];
+            };
+            cargoLock.lockFile = ./engine/Cargo.lock;
+            cargoBuildFlags = [ "--package" "linda-bench" ];
+            # The engine's tests speak D-Bus and refuse to run outside tests/linux/rig,
+            # which a Nix build cannot enter; cargo test in engine/ runs them there.
+            doCheck = false;
+          };
+        in
+        {
+          apps =
+            {
+              default = app "linda" "Start Linda";
+            }
+            // lib.optionalAttrs (linda.programs ? linda-say) {
+              say = app "linda-say" "Speak a sentence through Linda's speech and audio, then exit";
+            };
+
+          packages = {
+            default = linda;
+            inherit linda;
+            inherit (pythonInterpreter.pkgs)
+              brlapi
+              configobj
+              fast-diff-match-patch
+              fuzzysearch
+              l2m4m
+              louis
+              markdown-link-attr-modifier
+              mdx-gh-links
+              ;
+            louis-tables = louisTables;
+            nvda-cldr = nvdaCldr;
+            linda-bench = bench;
+            espeak-ng = espeak;
+            openevv-libeci = openevvLibeci;
+            openevv-driver = openevvDriver;
+            linda-libraries = libraries;
+            linda-keyd-static = keydPackages.helper;
+            linda-keyd-deb = keydPackages.deb;
+            linda-keyd-rpm = keydPackages.rpm;
+            linda-keyd-arch = keydPackages.arch;
+          };
+
+          checks = import ./tests/linux/vm {
+            inherit pkgs lib linda;
+            keydModule = self.nixosModules.linda-keyd;
+            releases = {
+              "25.11" = nixpkgs-25_11.legacyPackages.${system};
+              "26.05" = nixpkgs-26_05.legacyPackages.${system};
+            };
+          };
+
+          devShells.default = pkgs.mkShell (runtimeEnv // {
+            nativeBuildInputs = with pkgs; [
+              # The program's own; a let binding takes precedence over with.
+              python
+              cargo
+              rustc
+              clippy
+              rustfmt
+              maturin
+              # The pinned ruff: a let binding takes precedence over with.
+              ruff
+              pkg-config
+              # The Meson build, which installs Linda as a distribution would, and
+              # the validators of its desktop entry and metadata.
+              meson
+              ninja
+              desktop-file-utils
+              appstream
+              gobject-introspection
+              gettext
+              dbus
+              xvfb
+              xprop
+              firefox
+              # Browse mode in Chromium and in programs built on it.
+              chromium
+              electron
+              # The desktop the tests drive: a window manager, the programs that
+              # put windows, keys and layouts on the rig's display, and MATE's own
+              # programs and a Qt editor to read.
+              marco
+              xdotool
+              wmctrl
+              setxkbmap
+              caja
+              pluma
+              mate-terminal
+              mate-panel
+              mate-notification-daemon
+              # MATE's session manager, which tests/linux/test_mateSession.py
+              # starts Linda from as a sign-in does.
+              mate-session-manager
+              libnotify
+              featherpad
+              # Another program's side of the clipboard, for the clipboard tests,
+              # on X and on Wayland.
+              xclip
+              wl-clipboard
+              # tests/linux/rig builds its sandbox with this, and gives it the
+              # internet on request through pasta, in a namespace it makes and
+              # enters with util-linux and whose routes it sets with ip.
+              bubblewrap
+              # Flatpak's proxy of the accessibility bus, which
+              # tests/linux/test_sandboxedBrowser.py puts between a browser and
+              # the bus as Flatpak does.
+              xdg-dbus-proxy
+              passt
+              iproute2
+              util-linux
+              git
+              # libclang, for crates whose bindings bindgen generates.
+              rustPlatform.bindgenHook
+            ];
+
+            # PipeWire's headers and pkg-config file, for crates that link
+            # libpipewire, and those of the libraries the Meson build looks for. Named here rather than listed as an input, because
+            # stdenv puts every input's bin directory on PATH, and so on the rig's
+            # PATH, which is this shell's own. Tests reach PipeWire's programs
+            # only through the two variables below, and a host without them gets
+            # none from this shell.
+            PKG_CONFIG_PATH = lib.makeSearchPath "lib/pkgconfig" (
+              map lib.getDev (with pkgs; [ pipewire icu liblouis at-spi2-core ])
+            );
+            # For tests that start a private daemon and session manager inside the
+            # rig.
+            LINDA_PIPEWIRE_BIN = "${lib.getBin pkgs.pipewire}/bin";
+            LINDA_WIREPLUMBER_BIN = "${lib.getBin pkgs.wireplumber}/bin";
+            LINDA_PULSEAUDIO_BIN = "${lib.getBin pkgs.pulseaudio}/bin";
+            LINDA_PULSE_LIB = "${pkgs.pulseaudio}/lib/libpulse.so.0";
+            # The library the PipeWire sink loads, the same file the package's wrappers name, and the
+            # recorder its tests listen with. The shell does not choose the sink: a run that wants
+            # PipeWire sets LINDA_AUDIO_SINK itself.
+            LINDA_PWSINK_LIB = "${libraries}/lib/linda/libpwsink.so";
+            LINDA_PWMON = "${libraries.pwmon}/bin/pwmon";
+            # The daemon tests/linux/test_brltty.py drives a stand-in display with, from the build
+            # the brlapi module comes from.
+            LINDA_BRLTTY = "${pythonInterpreter.pkgs.brlapi.brltty}/bin/brltty";
+            # The private daemon tests/linux/test_speechDispatcher.py starts with this package's own
+            # configuration. Named rather than put on PATH, where the driver looks for the user's.
+            LINDA_SPEECHD = "${pkgs.speechd}/bin/speech-dispatcher";
+
+            # setup.sh would put $out/lib first in every RUNPATH the linker
+            # writes, and in a shell $out is outputs/out under the working
+            # directory: a library built here would load whatever was dropped
+            # there ahead of the store's copies.
+            NIX_NO_SELF_RPATH = true;
+
+            # Listed as build inputs so the gobject-introspection hook puts their
+            # typelibs on GI_TYPELIB_PATH.
+            buildInputs = with pkgs; [
+              at-spi2-core
+              gtk3
+              gtk4
+              # Gtk-4.0's typelib imports Graphene's, which gtk4 does not bring.
+              graphene
+              # Its gdk-pixbuf loader is how GTK draws its own symbolic icons.
+              librsvg
+            ];
+
+            # Not on PATH in any package; tests/linux/rig starts it by hand so the
+            # private accessibility bus never depends on D-Bus activation files
+            # the host may or may not have.
+            AT_SPI_BUS_LAUNCHER = "${pkgs.at-spi2-core}/libexec/at-spi-bus-launcher";
+
+            # tools/build-artifacts takes the tables and the CLDR data from these.
+            LINDA_LOUIS_TABLES_DIR = "${louisTables}";
+            # The crates engine/Cargo.lock names, for a Meson build that must not fetch them.
+            LINDA_CARGO_VENDOR_DIR = "${cargoVendorDir}";
+            LINDA_NVDA_CLDR_DIR = "${nvdaCldr}";
+            # tools/check-upstream-edits compares it with the release upstream's
+            # include/liblouis submodule pins.
+            LINDA_LIBLOUIS_VERSION = pkgs.liblouis.version;
+
+            # Where tests/linux/bench/run finds the bench once nix build
+            # .#linda-bench has built it. Stripped of its dependency on the
+            # package, so that entering the shell never builds the engine.
+            LINDA_BENCH_BIN = builtins.unsafeDiscardStringContext "${bench}/bin/linda-bench";
+
+            # The Qt fixture sets QT_PLUGIN_PATH from it, so that a test needs no
+            # rig env to give Qt its X platform plugin. PyQt6's own Qt.
+            LINDA_QT6_PLUGIN_PATH = "${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}";
+
+            # A JDK and the Java ATK wrapper, which nixpkgs does not have, for the Swing
+            # fixture of tests/linux/test_javaMenus.py: Java programs reach AT-SPI
+            # through the wrapper alone.
+            LINDA_JAVA = "${pkgs.jdk}/bin/java";
+            LINDA_JAVA_ATK_WRAPPER = "${pkgs.callPackage ./nix/java-atk-wrapper.nix { }}";
+
+            # The X servers tests/linux/test_screenCurtain.py starts inside the rig,
+            # off PATH: Xorg with the dummy driver, which has a CRTC's gamma ramps
+            # as a graphics card's driver does, and Xephyr, which has none.
+            LINDA_XORG_BIN = "${pkgs.xorg-server}/bin";
+            LINDA_XORG_MODULE_PATH = "${pkgs.xf86-video-dummy}/lib/xorg/modules,${pkgs.xorg-server}/lib/xorg/modules";
+
+            # The schema of MATE's choice of screen reader, which linda
+            # --register-desktop writes and mate-session reads, for
+            # tests/linux/test_mateSession.py. mate-session finds it through its
+            # own wrapper; Linda's code under test is given it here.
+            LINDA_MATE_DESKTOP_SCHEMAS = pkgs.glib.getSchemaPath pkgs.mate-desktop;
+
+            # The compositors of the rig's Wayland mode, LINDA_RIG_COMPOSITOR, off PATH so that
+            # the X mode's sandbox stays as it was: Mutter headless on a virtual monitor, with its
+            # own schemas, and Mesa's software renderer, which libglvnd finds on a NixOS host only
+            # under /run, empty in the rig; and sway, unwrapped because the wrapper only adds the
+            # session's own variables, whose programs the rig puts on PATH in that mode alone.
+            LINDA_MUTTER = "${pkgs.mutter}/bin/mutter";
+            LINDA_MUTTER_SCHEMAS = "${pkgs.mutter}/share/gsettings-schemas/${pkgs.mutter.name}";
+            LINDA_MESA = "${pkgs.mesa}";
+            LINDA_SWAY_BIN = "${pkgs.sway-unwrapped}/bin";
+            # The protocol the sway injector types through, from the wlroots sway is built on;
+            # pywayland's own bindings do not have it.
+            LINDA_VIRTUAL_KEYBOARD_PROTOCOL = "${pkgs.wlroots_0_20.src}/protocol/virtual-keyboard-unstable-v1.xml";
+
+            # The terminal fixture's shell. The bash on PATH is stdenv's, built
+            # without readline, so arrows and Control with them would type escape
+            # sequences instead of editing the line.
+            LINDA_BASH = "${pkgs.bashInteractive}/bin/bash";
+
+            # Every locale, so that which ones the tests can set does not depend
+            # on the ones the host happens to have built.
+            LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
+
+            # The fonts tests/linux/rig gives its sandbox, so that where a
+            # fixture's lines wrap does not depend on the host's /etc/fonts and
+            # /usr/share/fonts: the ones a NixOS desktop has for its default
+            # families, DejaVu, and for emoji, Noto Color Emoji, with fontconfig's
+            # own rules. For the rig alone: as FONTCONFIG_FILE it would change the
+            # fonts of everything started from this shell.
+            LINDA_RIG_FONTCONFIG_FILE = pkgs.makeFontsConf {
+              fontDirectories = with pkgs; [ dejavu_fonts noto-fonts-color-emoji ];
+              impureFontDirectories = [ ];
+              includes = [ "${pkgs.fontconfig.out}/etc/fonts/conf.d" ];
+            };
+
+            # The host session exports one pointing at its own alsa-lib and
+            # PipeWire's libjack. Inherited, it would put host audio libraries
+            # ahead of the pinned ones in every process started from here,
+            # including those under the rig.
+            shellHook = ''
+              unset LD_LIBRARY_PATH
+              # What this shell itself provides, without what nix develop
+              # appended from the calling session. tests/linux/rig gives its
+              # sandbox only these, so that nothing under test depends on the
+              # host's desktop.
+              export LINDA_RIG_PATH=''${PATH%"''${nix_saved_PATH:+:$nix_saved_PATH}"}
+              export LINDA_RIG_XDG_DATA_DIRS=''${XDG_DATA_DIRS%"''${nix_saved_XDG_DATA_DIRS:+:$nix_saved_XDG_DATA_DIRS}"}
+              # GTK's file and directory choosers abort without GSettings schemas
+              # for themselves, which the outputs on XDG_DATA_DIRS lack, and warn
+              # on standard error without hicolor, the icon theme every desktop
+              # falls back on.
+              LINDA_RIG_XDG_DATA_DIRS=$GSETTINGS_SCHEMAS_PATH:${pkgs.hicolor-icon-theme}/share:$LINDA_RIG_XDG_DATA_DIRS
+              # Browse mode's libraries, as the package's wrappers name them. Set here rather than as
+              # attributes, which nix develop would put over the caller's own: a run that names a
+              # library built in the checkout keeps it.
+              export LINDA_VBUF_LIB=''${LINDA_VBUF_LIB:-${libraries}/lib/linda/libnvdaVbuf.so}
+              export LINDA_VBUF_ENGINE=''${LINDA_VBUF_ENGINE:-${libraries}/lib/linda/libbre_vbuf.so}
+              # The search path the build inputs' hooks made, for tests/linux/test_mesonInstall.py, which
+              # configures the Meson build inside the rig, where only LINDA_ variables get in.
+              export LINDA_PKG_CONFIG_PATH=$PKG_CONFIG_PATH
+            '';
+          });
         };
-        cargoLock.lockFile = ./engine/Cargo.lock;
-        cargoBuildFlags = [ "--package" "linda-bench" ];
-        # The engine's tests speak D-Bus and refuse to run outside tests/linux/rig,
-        # which a Nix build cannot enter; cargo test in engine/ runs them there.
-        doCheck = false;
-      };
+
+      allSystems = forAllSystems perSystem;
     in
     {
-      apps.${system} =
-        {
-          default = app "linda" "Start Linda";
-        }
-        // lib.optionalAttrs (linda.programs ? linda-say) {
-          say = app "linda-say" "Speak a sentence through Linda's speech and audio, then exit";
-        };
-
-      packages.${system} = {
-        default = linda;
-        inherit linda;
-        inherit (pythonInterpreter.pkgs)
-          brlapi
-          configobj
-          fast-diff-match-patch
-          fuzzysearch
-          l2m4m
-          louis
-          markdown-link-attr-modifier
-          mdx-gh-links
-          ;
-        louis-tables = louisTables;
-        nvda-cldr = nvdaCldr;
-        linda-bench = bench;
-        espeak-ng = espeak;
-        openevv-libeci = openevvLibeci;
-        openevv-driver = openevvDriver;
-        linda-libraries = libraries;
-        linda-keyd-static = keydPackages.helper;
-        linda-keyd-deb = keydPackages.deb;
-        linda-keyd-rpm = keydPackages.rpm;
-        linda-keyd-arch = keydPackages.arch;
-      };
+      apps = forAllSystems (system: allSystems.${system}.apps);
+      packages = forAllSystems (system: allSystems.${system}.packages);
+      checks = forAllSystems (system: allSystems.${system}.checks);
+      devShells = forAllSystems (system: allSystems.${system}.devShells);
 
       # linda-keyd as a service, turned on with services.linda-keyd.enable.
       nixosModules = {
-        linda-keyd = {
-          imports = [ ./nix/keyd-module.nix ];
-          services.linda-keyd.package = lib.mkDefault libraries;
-        };
+        linda-keyd =
+          { pkgs, ... }:
+          {
+            imports = [ ./nix/keyd-module.nix ];
+            services.linda-keyd.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.linda-libraries;
+          };
         default = self.nixosModules.linda-keyd;
       };
-
-      # The key capture tests in virtual machines: nix build .#checks.x86_64-linux.vm
-      checks.${system} = import ./tests/linux/vm {
-        inherit pkgs lib linda;
-        keydModule = self.nixosModules.linda-keyd;
-        releases = {
-          "25.11" = nixpkgs-25_11.legacyPackages.${system};
-          "26.05" = nixpkgs-26_05.legacyPackages.${system};
-        };
-      };
-
-      devShells.${system}.default = pkgs.mkShell (runtimeEnv // {
-        nativeBuildInputs = with pkgs; [
-          # The program's own; a let binding takes precedence over with.
-          python
-          cargo
-          rustc
-          clippy
-          rustfmt
-          maturin
-          # The pinned ruff: a let binding takes precedence over with.
-          ruff
-          pkg-config
-          # The Meson build, which installs Linda as a distribution would, and
-          # the validators of its desktop entry and metadata.
-          meson
-          ninja
-          desktop-file-utils
-          appstream
-          gobject-introspection
-          gettext
-          dbus
-          xvfb
-          xprop
-          firefox
-          # Browse mode in Chromium and in programs built on it.
-          chromium
-          electron
-          # The desktop the tests drive: a window manager, the programs that
-          # put windows, keys and layouts on the rig's display, and MATE's own
-          # programs and a Qt editor to read.
-          marco
-          xdotool
-          wmctrl
-          setxkbmap
-          caja
-          pluma
-          mate-terminal
-          mate-panel
-          mate-notification-daemon
-          # MATE's session manager, which tests/linux/test_mateSession.py
-          # starts Linda from as a sign-in does.
-          mate-session-manager
-          libnotify
-          featherpad
-          # Another program's side of the clipboard, for the clipboard tests,
-          # on X and on Wayland.
-          xclip
-          wl-clipboard
-          # tests/linux/rig builds its sandbox with this, and gives it the
-          # internet on request through pasta, in a namespace it makes and
-          # enters with util-linux and whose routes it sets with ip.
-          bubblewrap
-          # Flatpak's proxy of the accessibility bus, which
-          # tests/linux/test_sandboxedBrowser.py puts between a browser and
-          # the bus as Flatpak does.
-          xdg-dbus-proxy
-          passt
-          iproute2
-          util-linux
-          git
-          # libclang, for crates whose bindings bindgen generates.
-          rustPlatform.bindgenHook
-        ];
-
-        # PipeWire's headers and pkg-config file, for crates that link
-        # libpipewire, and those of the libraries the Meson build looks for. Named here rather than listed as an input, because
-        # stdenv puts every input's bin directory on PATH, and so on the rig's
-        # PATH, which is this shell's own. Tests reach PipeWire's programs
-        # only through the two variables below, and a host without them gets
-        # none from this shell.
-        PKG_CONFIG_PATH = lib.makeSearchPath "lib/pkgconfig" (
-          map lib.getDev (with pkgs; [ pipewire icu liblouis at-spi2-core ])
-        );
-        # For tests that start a private daemon and session manager inside the
-        # rig.
-        LINDA_PIPEWIRE_BIN = "${lib.getBin pkgs.pipewire}/bin";
-        LINDA_WIREPLUMBER_BIN = "${lib.getBin pkgs.wireplumber}/bin";
-        LINDA_PULSEAUDIO_BIN = "${lib.getBin pkgs.pulseaudio}/bin";
-        LINDA_PULSE_LIB = "${pkgs.pulseaudio}/lib/libpulse.so.0";
-        # The library the PipeWire sink loads, the same file the package's wrappers name, and the
-        # recorder its tests listen with. The shell does not choose the sink: a run that wants
-        # PipeWire sets LINDA_AUDIO_SINK itself.
-        LINDA_PWSINK_LIB = "${libraries}/lib/linda/libpwsink.so";
-        LINDA_PWMON = "${libraries.pwmon}/bin/pwmon";
-        # The daemon tests/linux/test_brltty.py drives a stand-in display with, from the build
-        # the brlapi module comes from.
-        LINDA_BRLTTY = "${pythonInterpreter.pkgs.brlapi.brltty}/bin/brltty";
-        # The private daemon tests/linux/test_speechDispatcher.py starts with this package's own
-        # configuration. Named rather than put on PATH, where the driver looks for the user's.
-        LINDA_SPEECHD = "${pkgs.speechd}/bin/speech-dispatcher";
-
-        # setup.sh would put $out/lib first in every RUNPATH the linker
-        # writes, and in a shell $out is outputs/out under the working
-        # directory: a library built here would load whatever was dropped
-        # there ahead of the store's copies.
-        NIX_NO_SELF_RPATH = true;
-
-        # Listed as build inputs so the gobject-introspection hook puts their
-        # typelibs on GI_TYPELIB_PATH.
-        buildInputs = with pkgs; [
-          at-spi2-core
-          gtk3
-          gtk4
-          # Gtk-4.0's typelib imports Graphene's, which gtk4 does not bring.
-          graphene
-          # Its gdk-pixbuf loader is how GTK draws its own symbolic icons.
-          librsvg
-        ];
-
-        # Not on PATH in any package; tests/linux/rig starts it by hand so the
-        # private accessibility bus never depends on D-Bus activation files
-        # the host may or may not have.
-        AT_SPI_BUS_LAUNCHER = "${pkgs.at-spi2-core}/libexec/at-spi-bus-launcher";
-
-        # tools/build-artifacts takes the tables and the CLDR data from these.
-        LINDA_LOUIS_TABLES_DIR = "${louisTables}";
-        # The crates engine/Cargo.lock names, for a Meson build that must not fetch them.
-        LINDA_CARGO_VENDOR_DIR = "${cargoVendorDir}";
-        LINDA_NVDA_CLDR_DIR = "${nvdaCldr}";
-        # tools/check-upstream-edits compares it with the release upstream's
-        # include/liblouis submodule pins.
-        LINDA_LIBLOUIS_VERSION = pkgs.liblouis.version;
-
-        # Where tests/linux/bench/run finds the bench once nix build
-        # .#linda-bench has built it. Stripped of its dependency on the
-        # package, so that entering the shell never builds the engine.
-        LINDA_BENCH_BIN = builtins.unsafeDiscardStringContext "${bench}/bin/linda-bench";
-
-        # The Qt fixture sets QT_PLUGIN_PATH from it, so that a test needs no
-        # rig env to give Qt its X platform plugin. PyQt6's own Qt.
-        LINDA_QT6_PLUGIN_PATH = "${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}";
-
-        # A JDK and the Java ATK wrapper, which nixpkgs does not have, for the Swing
-        # fixture of tests/linux/test_javaMenus.py: Java programs reach AT-SPI
-        # through the wrapper alone.
-        LINDA_JAVA = "${pkgs.jdk}/bin/java";
-        LINDA_JAVA_ATK_WRAPPER = "${pkgs.callPackage ./nix/java-atk-wrapper.nix { }}";
-
-        # The X servers tests/linux/test_screenCurtain.py starts inside the rig,
-        # off PATH: Xorg with the dummy driver, which has a CRTC's gamma ramps
-        # as a graphics card's driver does, and Xephyr, which has none.
-        LINDA_XORG_BIN = "${pkgs.xorg-server}/bin";
-        LINDA_XORG_MODULE_PATH = "${pkgs.xf86-video-dummy}/lib/xorg/modules,${pkgs.xorg-server}/lib/xorg/modules";
-
-        # The schema of MATE's choice of screen reader, which linda
-        # --register-desktop writes and mate-session reads, for
-        # tests/linux/test_mateSession.py. mate-session finds it through its
-        # own wrapper; Linda's code under test is given it here.
-        LINDA_MATE_DESKTOP_SCHEMAS = pkgs.glib.getSchemaPath pkgs.mate-desktop;
-
-        # The compositors of the rig's Wayland mode, LINDA_RIG_COMPOSITOR, off PATH so that
-        # the X mode's sandbox stays as it was: Mutter headless on a virtual monitor, with its
-        # own schemas, and Mesa's software renderer, which libglvnd finds on a NixOS host only
-        # under /run, empty in the rig; and sway, unwrapped because the wrapper only adds the
-        # session's own variables, whose programs the rig puts on PATH in that mode alone.
-        LINDA_MUTTER = "${pkgs.mutter}/bin/mutter";
-        LINDA_MUTTER_SCHEMAS = "${pkgs.mutter}/share/gsettings-schemas/${pkgs.mutter.name}";
-        LINDA_MESA = "${pkgs.mesa}";
-        LINDA_SWAY_BIN = "${pkgs.sway-unwrapped}/bin";
-        # The protocol the sway injector types through, from the wlroots sway is built on;
-        # pywayland's own bindings do not have it.
-        LINDA_VIRTUAL_KEYBOARD_PROTOCOL = "${pkgs.wlroots_0_20.src}/protocol/virtual-keyboard-unstable-v1.xml";
-
-        # The terminal fixture's shell. The bash on PATH is stdenv's, built
-        # without readline, so arrows and Control with them would type escape
-        # sequences instead of editing the line.
-        LINDA_BASH = "${pkgs.bashInteractive}/bin/bash";
-
-        # Every locale, so that which ones the tests can set does not depend
-        # on the ones the host happens to have built.
-        LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
-
-        # The fonts tests/linux/rig gives its sandbox, so that where a
-        # fixture's lines wrap does not depend on the host's /etc/fonts and
-        # /usr/share/fonts: the ones a NixOS desktop has for its default
-        # families, DejaVu, and for emoji, Noto Color Emoji, with fontconfig's
-        # own rules. For the rig alone: as FONTCONFIG_FILE it would change the
-        # fonts of everything started from this shell.
-        LINDA_RIG_FONTCONFIG_FILE = pkgs.makeFontsConf {
-          fontDirectories = with pkgs; [ dejavu_fonts noto-fonts-color-emoji ];
-          impureFontDirectories = [ ];
-          includes = [ "${pkgs.fontconfig.out}/etc/fonts/conf.d" ];
-        };
-
-        # The host session exports one pointing at its own alsa-lib and
-        # PipeWire's libjack. Inherited, it would put host audio libraries
-        # ahead of the pinned ones in every process started from here,
-        # including those under the rig.
-        shellHook = ''
-          unset LD_LIBRARY_PATH
-          # What this shell itself provides, without what nix develop
-          # appended from the calling session. tests/linux/rig gives its
-          # sandbox only these, so that nothing under test depends on the
-          # host's desktop.
-          export LINDA_RIG_PATH=''${PATH%"''${nix_saved_PATH:+:$nix_saved_PATH}"}
-          export LINDA_RIG_XDG_DATA_DIRS=''${XDG_DATA_DIRS%"''${nix_saved_XDG_DATA_DIRS:+:$nix_saved_XDG_DATA_DIRS}"}
-          # GTK's file and directory choosers abort without GSettings schemas
-          # for themselves, which the outputs on XDG_DATA_DIRS lack, and warn
-          # on standard error without hicolor, the icon theme every desktop
-          # falls back on.
-          LINDA_RIG_XDG_DATA_DIRS=$GSETTINGS_SCHEMAS_PATH:${pkgs.hicolor-icon-theme}/share:$LINDA_RIG_XDG_DATA_DIRS
-          # Browse mode's libraries, as the package's wrappers name them. Set here rather than as
-          # attributes, which nix develop would put over the caller's own: a run that names a
-          # library built in the checkout keeps it.
-          export LINDA_VBUF_LIB=''${LINDA_VBUF_LIB:-${libraries}/lib/linda/libnvdaVbuf.so}
-          export LINDA_VBUF_ENGINE=''${LINDA_VBUF_ENGINE:-${libraries}/lib/linda/libbre_vbuf.so}
-          # The search path the build inputs' hooks made, for tests/linux/test_mesonInstall.py, which
-          # configures the Meson build inside the rig, where only LINDA_ variables get in.
-          export LINDA_PKG_CONFIG_PATH=$PKG_CONFIG_PATH
-        '';
-      });
     };
 }

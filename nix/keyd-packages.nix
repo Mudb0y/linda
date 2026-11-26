@@ -65,8 +65,10 @@ let
 
   # Each format, with the library directory Meson takes by default on its distributions with prefix
   # /usr, where the Meson build puts the helper.
+  isAarch64 = pkgs.stdenv.hostPlatform.isAarch64;
+  nfpmArch = if isAarch64 then "arm64" else "amd64";
   formats = {
-    deb = "lib/x86_64-linux-gnu";
+    deb = if isAarch64 then "lib/aarch64-linux-gnu" else "lib/x86_64-linux-gnu";
     rpm = "lib64";
     archlinux = "lib";
   };
@@ -117,6 +119,7 @@ let
         cd packaging
         mkdir $out
         SOURCE_DATE_EPOCH=${toString sourceDateEpoch} \
+        LINDA_KEYD_ARCH=${nfpmArch} \
         LINDA_KEYD_VERSION=${version} \
         LINDA_KEYD_ROOT=${installed libdir} \
         LINDA_KEYD_LIBDIR=/usr/${libdir} \

@@ -1,5 +1,6 @@
 # linda-keyd for Debian and Ubuntu, Fedora and Arch Linux, as nfpm packs it. nix/keyd-packages.nix
 # runs nfpm once for each format with these set:
+#   LINDA_KEYD_ARCH     package architecture (amd64 or arm64)
 #   LINDA_KEYD_VERSION  Linda's version with the commit's date and short hash
 #   LINDA_KEYD_ROOT     the Meson build's install with keyd_service, made with that distribution's
 #                       library directory, and the static helper in it
@@ -7,7 +8,7 @@
 # The files are those the Meson install lays down, where it lays them, so that the unit's ExecStart
 # names the helper where the package puts it.
 name: linda-keyd
-arch: amd64
+arch: ${LINDA_KEYD_ARCH}
 platform: linux
 version: ${LINDA_KEYD_VERSION}
 # Taken as written: the semver parser would move the part after + into build metadata, which deb and

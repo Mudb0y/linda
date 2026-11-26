@@ -41,5 +41,5 @@ stdenvNoCC.mkDerivation {
     runHook postInstall
   '';
 
-  meta.platforms = [ "x86_64-linux" ];
+  meta.platforms = [ "x86_64-linux" "aarch64-linux" ];
 }
