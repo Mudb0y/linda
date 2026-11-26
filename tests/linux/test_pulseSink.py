@@ -313,3 +313,139 @@ def test_pulseSinkRecoversAfterDaemonRestart(pulse: PulseFixture, tmp_path: Path
 		done = runPulseChild(tmp_path, code, {**pulse.childEnv(), **steps.env()})
 		assert done.value["failedWhileDead"] is True
 		assert done.value["playedAfterRestart"] is True
+
+
+def test_pulseSinkContinuousEspeakSayAllNeverStalls(pulse: PulseFixture, tmp_path: Path):
+	"""Continuous high-rate eSpeak Say All through PulseAudio never hits ENOBUFS or stalls."""
+	monitor = pulse.monitor()
+	code = """
+		import characterProcessing
+		import config
+		import languageHandler
+		import queueHandler
+		import speech
+		import speechDictHandler
+		import synthDriverHandler
+		from speech.commands import CallbackCommand, EndUtteranceCommand
+		from speech.speechWithoutPauses import SpeechWithoutPauses
+
+		languageHandler.setLanguage("en")
+		speechDictHandler.initialize()
+		characterProcessing.initialize()
+		config.conf["speech"]["synth"] = "espeak"
+		speech.initialize()
+		synth = synthDriverHandler.getSynth()
+		assert synth.name == "espeak", synth.name
+		synth.rate = 60
+		synth.rateBoost = True
+
+		feedErrors = []
+		origFeed = wasapi.wasPlay_feed
+
+		def tracedFeed(player, data, size, feedId):
+			try:
+				return origFeed(player, data, size, feedId)
+			except Exception as e:
+				feedErrors.append(repr(e))
+				raise
+
+		wasapi.wasPlay_feed = tracedFeed
+
+		reached = []
+		finished = threading.Event()
+		totalLines = 12
+		swp = SpeechWithoutPauses(speakFunc=speech.speak)
+
+		def onLineDone(idx):
+			reached.append(idx)
+			if idx == totalLines:
+				finished.set()
+
+		lines = [
+			f"Line {i} describes how continuous reading moves smoothly from one sentence to the next."
+			for i in range(1, totalLines + 1)
+		]
+		for idx, text in enumerate(lines, start=1):
+			swp.speakWithoutPauses([text, CallbackCommand(lambda i=idx: onLineDone(i)), EndUtteranceCommand()])
+		swp.speakWithoutPauses(None)
+
+		deadline = time.monotonic() + 25.0
+		while not finished.is_set() and time.monotonic() < deadline:
+			queueHandler.pumpAll()
+			time.sleep(0.005)
+
+		wasapi.wasPlay_feed = origFeed
+		synthDriverHandler.setSynth(None)
+		result = {
+			"finished": finished.is_set(),
+			"feedErrors": feedErrors,
+			"reached": reached,
+			"expected": list(range(1, totalLines + 1)),
+		}
+	"""
+	done = runPulseChild(tmp_path, code, pulse.childEnv(), timeout=40)
+	value = done.value
+	assert value["feedErrors"] == [], value
+	assert value["finished"] is True, value
+	assert value["reached"] == value["expected"], value
+	sounds = monitor.eventsOf("sound")
+	silences = monitor.eventsOf("silence")
+	assert sounds, "PulseAudio monitor heard no speech"
+	# Check no multi-second silence gaps appeared between speech bursts.
+	events = sorted(
+		[(e["graph_ns"], e["event"]) for e in sounds + silences],
+		key=lambda item: item[0],
+	)
+	gaps = []
+	lastSilence = None
+	for ns, kind in events:
+		if kind == "silence":
+			lastSilence = ns
+		elif kind == "sound" and lastSilence is not None:
+			gaps.append((ns - lastSilence) / 1e9)
+			lastSilence = None
+	assert not gaps or max(gaps) < 1.0, (
+		f"Unexpected silence gap during Say All: {sorted(gaps, reverse=True)[:5]}"
+	)
+
+
+def test_pulseSinkPauseResumeAndUnderrun(pulse: PulseFixture, tmp_path: Path):
+	"""Pause/resume preserves playback progress and an uncorked underrun does not skip subsequent writes."""
+	_ = pulse.monitor()
+	code = """
+		fmt = StreamFormat(1, 1, 22050, 16)
+		player = nvwave.WavePlayer(1, 22050, 16, wantDucking=False, purpose=nvwave.AudioPurpose.SPEECH)
+		player.enableTrimmingLeadingSilence(False)
+
+		# 1. Pause mid-chunk, wait, resume, and verify completion.
+		done1 = threading.Event()
+		player.feed(tone(fmt, 0.35), onDone=done1.set)
+		time.sleep(0.1)
+		player.pause(True)
+		time.sleep(0.15)
+		resumeAt = time.monotonic()
+		player.pause(False)
+		player.sync()
+		resumeElapsed = time.monotonic() - resumeAt
+		assert done1.is_set(), "callback did not fire after pause/resume"
+		player.idle()
+
+		# 2. Drain while started (sync without idle), sleep through an underrun, then feed a second chunk.
+		done2 = threading.Event()
+		player.feed(tone(fmt, 0.12), onDone=done2.set)
+		player.sync()
+		assert done2.is_set()
+		time.sleep(0.2)
+		done3 = threading.Event()
+		secondStart = time.monotonic()
+		player.feed(tone(fmt, 0.25), onDone=done3.set)
+		player.sync()
+		secondElapsed = time.monotonic() - secondStart
+		assert done3.is_set(), "callback after underrun did not fire"
+		player.idle()
+
+		result = {"resumeElapsed": resumeElapsed, "secondElapsed": secondElapsed}
+	"""
+	done = runPulseChild(tmp_path, code, pulse.childEnv(), timeout=30)
+	assert done.value["resumeElapsed"] < 1.5, done.value
+	assert done.value["secondElapsed"] >= 0.15, done.value

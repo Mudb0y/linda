@@ -76,6 +76,11 @@ PA_STREAM_NOT_MONOTONIC = 0x0004
 PA_STREAM_AUTO_TIMING_UPDATE = 0x0008
 PA_STREAM_ADJUST_LATENCY = 0x2000
 
+# Operation states
+PA_OPERATION_RUNNING = 0
+PA_OPERATION_DONE = 1
+PA_OPERATION_CANCELLED = 2
+
 PA_SEEK_RELATIVE = 0
 
 
@@ -248,12 +253,18 @@ def _loadLibrary() -> ctypes.CDLL:
 	]
 	lib.pa_stream_writable_size.restype = ctypes.c_size_t
 	lib.pa_stream_writable_size.argtypes = [handle]
+	lib.pa_stream_get_buffer_attr.restype = ctypes.POINTER(pa_buffer_attr)
+	lib.pa_stream_get_buffer_attr.argtypes = [handle]
 	lib.pa_stream_cork.restype = handle
 	lib.pa_stream_cork.argtypes = [handle, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
 	lib.pa_stream_flush.restype = handle
 	lib.pa_stream_flush.argtypes = [handle, ctypes.c_void_p, ctypes.c_void_p]
 	lib.pa_stream_get_time.restype = ctypes.c_int
 	lib.pa_stream_get_time.argtypes = [handle, ctypes.POINTER(ctypes.c_uint64)]
+	lib.pa_operation_get_state.restype = ctypes.c_int
+	lib.pa_operation_get_state.argtypes = [handle]
+	lib.pa_operation_cancel.restype = None
+	lib.pa_operation_cancel.argtypes = [handle]
 	lib.pa_operation_unref.restype = None
 	lib.pa_operation_unref.argtypes = [handle]
 
@@ -285,6 +296,7 @@ class PulseStream(SinkStream):
 		streamHandle: ctypes.c_void_p,
 		fmt: StreamFormat,
 		wake: Callable[[], None],
+		bufferFrames: int,
 	) -> None:
 		self._sink = sink
 		self._lib = lib
@@ -292,16 +304,29 @@ class PulseStream(SinkStream):
 		self.handle = streamHandle
 		self.format = fmt
 		self._wake = wake
-		self.bufferFrames = fmt.samplesPerSec * BUFFER_MS // 1000
+		self.bufferFrames = bufferFrames
 		self.volumes = [1.0] * fmt.channels
 
 		self._writtenFrames = 0
 		self._playedHigh = 0
+		self._playBaseFrames = 0
 		self._playBaseUsec: int | None = None
 		self._isStarted = False
 		self._isAborted = False
 		self._startTime: float | None = None
 		self._closed = False
+
+	def _checkLiveLocked(self) -> ctypes.c_void_p:
+		if self._closed or not self.handle:
+			raise OSError(errno.EBADF, "the stream is closed")
+		if self._sink.context:
+			ctxState = self._lib.pa_context_get_state(self._sink.context)
+			if ctxState in (PA_CONTEXT_FAILED, PA_CONTEXT_TERMINATED):
+				raise StreamLost("PulseAudio context failed or terminated")
+		state = self._lib.pa_stream_get_state(self.handle)
+		if state in (PA_STREAM_FAILED, PA_STREAM_TERMINATED):
+			raise StreamLost("PulseAudio stream terminated or failed")
+		return self.handle
 
 	def _checkLive(self) -> ctypes.c_void_p:
 		if self._closed or not self.handle:
@@ -310,19 +335,37 @@ class PulseStream(SinkStream):
 			raise StreamLost("PulseAudio mainloop is not running")
 		self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
 		try:
-			if self._sink.context:
-				ctxState = self._lib.pa_context_get_state(self._sink.context)
-				if ctxState in (PA_CONTEXT_FAILED, PA_CONTEXT_TERMINATED):
-					raise StreamLost("PulseAudio context failed or terminated")
-			state = self._lib.pa_stream_get_state(self.handle)
-			if state in (PA_STREAM_FAILED, PA_STREAM_TERMINATED):
-				raise StreamLost("PulseAudio stream terminated or failed")
+			return self._checkLiveLocked()
 		finally:
 			self._lib.pa_threaded_mainloop_unlock(self._sink.mainloop)
-		return self.handle
+
+	def _updatePlayedLocked(self, handle: ctypes.c_void_p) -> int:
+		if not self._isStarted:
+			return self._playedHigh
+		usec = ctypes.c_uint64(0)
+		res = self._lib.pa_stream_get_time(handle, ctypes.byref(usec))
+		if res == 0:
+			if self._playBaseUsec is None:
+				if self._startTime is not None:
+					elapsedSec = time.monotonic() - self._startTime
+					self._playBaseUsec = max(0, usec.value - int(elapsedSec * 1_000_000))
+				else:
+					self._playBaseUsec = usec.value
+			elapsedUsec = max(0, usec.value - self._playBaseUsec)
+			frames = self._playBaseFrames + int(elapsedUsec * self.format.samplesPerSec / 1_000_000)
+			self._playedHigh = min(self._writtenFrames, max(self._playedHigh, frames))
+		elif self._startTime is not None:
+			# Interpolate by monotonic clock if time query is still settling
+			elapsed = time.monotonic() - self._startTime
+			elapsedFrames = self._playBaseFrames + int(elapsed * self.format.samplesPerSec)
+			self._playedHigh = min(self._writtenFrames, max(self._playedHigh, elapsedFrames))
+		return self._playedHigh
 
 	def write(self, data: bytes) -> None:
-		handle = self._checkLive()
+		if self._closed or not self.handle:
+			raise OSError(errno.EBADF, "the stream is closed")
+		if not self._sink.mainloop:
+			raise StreamLost("PulseAudio mainloop is not running")
 		if self._isAborted:
 			return
 		frames = len(data) // self.format.blockAlign
@@ -332,6 +375,7 @@ class PulseStream(SinkStream):
 
 		self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
 		try:
+			handle = self._checkLiveLocked()
 			if self._isAborted:
 				return
 			writable = self._lib.pa_stream_writable_size(handle)
@@ -339,6 +383,18 @@ class PulseStream(SinkStream):
 				raise StreamLost("PulseAudio stream is disconnected or failed")
 			if len(data) > writable:
 				raise OSError(errno.ENOBUFS, "the stream's buffer is full")
+			if self._isStarted:
+				# Re-anchor after an underrun so silence elapsed while empty is not counted as
+				# frames already played out of the new write.
+				self._updatePlayedLocked(handle)
+				if self._playedHigh >= self._writtenFrames:
+					self._playBaseFrames = self._writtenFrames
+					usec = ctypes.c_uint64(0)
+					if self._lib.pa_stream_get_time(handle, ctypes.byref(usec)) == 0:
+						self._playBaseUsec = usec.value
+					else:
+						self._playBaseUsec = None
+					self._startTime = time.monotonic()
 			result = self._lib.pa_stream_write(handle, data, len(data), None, 0, PA_SEEK_RELATIVE)
 			if result < 0:
 				raise StreamLost(f"pa_stream_write failed with code {result}")
@@ -349,59 +405,63 @@ class PulseStream(SinkStream):
 		self._sink._noteDelivered(frames)
 
 	def bufferedFrames(self) -> int:
-		self._checkLive()
-		return max(0, self._writtenFrames - self.playedFrames())
+		if self._closed or not self.handle:
+			raise OSError(errno.EBADF, "the stream is closed")
+		if not self._sink.mainloop:
+			raise StreamLost("PulseAudio mainloop is not running")
+		self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
+		try:
+			handle = self._checkLiveLocked()
+			writable = self._lib.pa_stream_writable_size(handle)
+			if writable == ctypes.c_size_t(-1).value:
+				raise StreamLost("PulseAudio stream is disconnected or failed")
+			played = self._updatePlayedLocked(handle)
+		finally:
+			self._lib.pa_threaded_mainloop_unlock(self._sink.mainloop)
+		writableFrames = writable // self.format.blockAlign
+		# Account for both unplayed frames and the server's actual writable window so the
+		# player never schedules a write larger than pa_stream_writable_size.
+		byWritable = max(0, self.bufferFrames - writableFrames)
+		byPlayed = max(0, self._writtenFrames - played)
+		return max(byWritable, byPlayed)
 
 	def playedFrames(self) -> int:
 		if self._closed or not self.handle:
 			return self._playedHigh
-		self._checkLive()
-		if not self._isStarted:
-			return self._playedHigh
-
-		usec = ctypes.c_uint64(0)
+		if not self._sink.mainloop:
+			raise StreamLost("PulseAudio mainloop is not running")
 		self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
 		try:
-			res = self._lib.pa_stream_get_time(self.handle, ctypes.byref(usec))
+			handle = self._checkLiveLocked()
+			return self._updatePlayedLocked(handle)
 		finally:
 			self._lib.pa_threaded_mainloop_unlock(self._sink.mainloop)
 
-		if res == 0:
-			if self._playBaseUsec is None:
-				if self._startTime is not None:
-					elapsedSec = time.monotonic() - self._startTime
-					self._playBaseUsec = max(0, usec.value - int(elapsedSec * 1_000_000))
-				else:
-					self._playBaseUsec = usec.value
-			elapsedUsec = max(0, usec.value - self._playBaseUsec)
-			frames = int(elapsedUsec * self.format.samplesPerSec / 1_000_000)
-			self._playedHigh = min(self._writtenFrames, max(self._playedHigh, frames))
-		elif self._startTime is not None:
-			# Interpolate by monotonic clock if time query is still settling
-			elapsed = time.monotonic() - self._startTime
-			elapsedFrames = int(elapsed * self.format.samplesPerSec)
-			self._playedHigh = min(self._writtenFrames, max(self._playedHigh, elapsedFrames))
-
-		return self._playedHigh
-
 	def start(self) -> None:
-		handle = self._checkLive()
+		if self._closed or not self.handle:
+			raise OSError(errno.EBADF, "the stream is closed")
+		if not self._sink.mainloop:
+			raise StreamLost("PulseAudio mainloop is not running")
 		if self._isAborted or self._isStarted:
 			return
 		self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
 		try:
+			handle = self._checkLiveLocked()
 			if self._isAborted:
 				return
 			op = self._lib.pa_stream_cork(handle, 0, None, None)
 			if op:
 				self._lib.pa_operation_unref(op)
-			usec = ctypes.c_uint64(0)
-			if self._lib.pa_stream_get_time(handle, ctypes.byref(usec)) == 0:
-				self._playBaseUsec = usec.value
-			else:
-				self._playBaseUsec = None
+			if self._playBaseUsec is None:
+				# On first start (or after reset), anchor to PulseAudio's current stream time.
+				# On resume after stop(), pa_stream_get_time() froze while corked, so keeping the
+				# existing anchor preserves frames played before the pause.
+				self._playBaseFrames = self._playedHigh
+				usec = ctypes.c_uint64(0)
+				if self._lib.pa_stream_get_time(handle, ctypes.byref(usec)) == 0:
+					self._playBaseUsec = usec.value
+				self._startTime = time.monotonic()
 			self._isStarted = True
-			self._startTime = time.monotonic()
 		finally:
 			self._lib.pa_threaded_mainloop_unlock(self._sink.mainloop)
 
@@ -421,11 +481,37 @@ class PulseStream(SinkStream):
 	def reset(self) -> None:
 		handle = self.handle
 		if handle and not self._closed and self._sink.mainloop:
-			self._silencers.abort(self._sink.mainloop, handle)
+			self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
+			try:
+				op1 = self._lib.pa_stream_cork(handle, 1, None, None)
+				if op1:
+					self._lib.pa_operation_unref(op1)
+				op2 = self._lib.pa_stream_flush(handle, self._sink._streamSuccessCb, None)
+				if op2:
+					try:
+						while self._lib.pa_operation_get_state(op2) == PA_OPERATION_RUNNING:
+							if self._sink.context and self._lib.pa_context_get_state(self._sink.context) in (
+								PA_CONTEXT_FAILED,
+								PA_CONTEXT_TERMINATED,
+							):
+								self._lib.pa_operation_cancel(op2)
+								break
+							if self._lib.pa_stream_get_state(handle) in (
+								PA_STREAM_FAILED,
+								PA_STREAM_TERMINATED,
+							):
+								self._lib.pa_operation_cancel(op2)
+								break
+							self._lib.pa_threaded_mainloop_wait(self._sink.mainloop)
+					finally:
+						self._lib.pa_operation_unref(op2)
+			finally:
+				self._lib.pa_threaded_mainloop_unlock(self._sink.mainloop)
 		self._isAborted = False
 		self._isStarted = False
 		self._writtenFrames = 0
 		self._playedHigh = 0
+		self._playBaseFrames = 0
 		self._playBaseUsec = None
 		self._startTime = None
 
@@ -444,6 +530,7 @@ class PulseStream(SinkStream):
 			self._lib.pa_threaded_mainloop_lock(self._sink.mainloop)
 			try:
 				self._lib.pa_stream_set_state_callback(handle, None, None)
+				self._lib.pa_stream_set_write_callback(handle, None, None)
 				self._lib.pa_stream_disconnect(handle)
 				self._lib.pa_stream_unref(handle)
 			finally:
@@ -474,6 +561,9 @@ class PulseSink(Sink):
 
 		self.api = self.lib.pa_threaded_mainloop_get_api(self.mainloop)
 		self._contextCallback = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)(self._onContextState)
+		self._streamSuccessCb = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p)(
+			self._onStreamSuccess
+		)
 
 		if self.lib.pa_threaded_mainloop_start(self.mainloop) < 0:
 			self._cleanup()
@@ -551,7 +641,20 @@ class PulseSink(Sink):
 
 		targetSink = deviceId.encode() if deviceId else None
 
+		targetFrames = fmt.samplesPerSec * BUFFER_MS // 1000
+		bufferFrames = targetFrames
 		streamHandle = None
+		streamStateCb = None
+		streamWriteCb = None
+
+		def onStreamState(streamPtr: ctypes.c_void_p, userdata: ctypes.c_void_p) -> None:
+			self.lib.pa_threaded_mainloop_signal(self.mainloop, 0)
+			if self.lib.pa_stream_get_state(streamPtr) in (PA_STREAM_FAILED, PA_STREAM_TERMINATED):
+				wake()
+
+		def onStreamWrite(streamPtr: ctypes.c_void_p, nbytes: int, userdata: ctypes.c_void_p) -> None:
+			wake()
+
 		self.lib.pa_threaded_mainloop_lock(self.mainloop)
 		try:
 			self._ensureReadyContext()
@@ -559,11 +662,11 @@ class PulseSink(Sink):
 			if not streamHandle:
 				raise OSError(errno.ENOMEM, "could not create PulseAudio stream")
 
-			streamStateCb = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)(self._onStreamState)
+			streamStateCb = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)(onStreamState)
 			self.lib.pa_stream_set_state_callback(streamHandle, streamStateCb, None)
 
 			# Target latency and buffer match BUFFER_MS (400 ms); maxlength default (-1)
-			tlengthBytes = fmt.samplesPerSec * BUFFER_MS // 1000 * fmt.blockAlign
+			tlengthBytes = targetFrames * fmt.blockAlign
 			attr = pa_buffer_attr(
 				maxlength=ctypes.c_uint32(-1).value,
 				tlength=tlengthBytes,
@@ -592,21 +695,34 @@ class PulseSink(Sink):
 				if state in (PA_STREAM_FAILED, PA_STREAM_TERMINATED):
 					raise NoDevice("PulseAudio stream failed to initialize")
 				self.lib.pa_threaded_mainloop_wait(self.mainloop)
+
+			actualAttr = self.lib.pa_stream_get_buffer_attr(streamHandle)
+			if actualAttr:
+				actualFrames = actualAttr.contents.tlength // fmt.blockAlign
+				if actualFrames > 0:
+					bufferFrames = min(targetFrames, actualFrames)
+
+			streamWriteCb = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p)(
+				onStreamWrite
+			)
+			self.lib.pa_stream_set_write_callback(streamHandle, streamWriteCb, None)
 		except BaseException:
 			if streamHandle:
 				self.lib.pa_stream_set_state_callback(streamHandle, None, None)
+				self.lib.pa_stream_set_write_callback(streamHandle, None, None)
 				self.lib.pa_stream_disconnect(streamHandle)
 				self.lib.pa_stream_unref(streamHandle)
 			raise
 		finally:
 			self.lib.pa_threaded_mainloop_unlock(self.mainloop)
 
-		stream = PulseStream(self, self.lib, self._silencers, streamHandle, fmt, wake)
+		stream = PulseStream(self, self.lib, self._silencers, streamHandle, fmt, wake, bufferFrames)
 		# Keep stream callback references alive on stream object
 		stream._streamStateCb = streamStateCb
+		stream._streamWriteCb = streamWriteCb
 		return stream
 
-	def _onStreamState(self, stream: ctypes.c_void_p, userdata: ctypes.c_void_p) -> None:
+	def _onStreamSuccess(self, stream: ctypes.c_void_p, success: int, userdata: ctypes.c_void_p) -> None:
 		self.lib.pa_threaded_mainloop_signal(self.mainloop, 0)
 
 	def devices(self) -> list[tuple[str, str]]:
