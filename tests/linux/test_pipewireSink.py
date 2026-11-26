@@ -36,6 +36,7 @@ from pipewireFixture import RATE, Monitor, PipewireFixture, assertCleanThroughPi
 
 CRATE = harness.ROOT / "engine" / "crates" / "pwsink"
 WAVES = harness.SOURCE / "waves"
+ONJ_WAVES = harness.SOURCE / "linuxPlatform" / "soundThemes" / "onj"
 MS = 1_000_000
 #: Stops and starts timed at each quantum and rate.
 STOP_ROUNDS = int(os.environ.get("BENCH_PWSINK_ROUNDS", "30"))
@@ -2195,7 +2196,10 @@ def test_nvdasSoundsAreHeardAtTheirLevelAndARepeatStartsAtOnce(pipewire: Pipewir
 	failures = []
 	levels = {}
 	for play in value["plays"]:
-		energies, peak, _lead = _fileLevels(WAVES / play["name"])
+		sourceFile = (
+			ONJ_WAVES / play["name"] if (ONJ_WAVES / play["name"]).is_file() else WAVES / play["name"]
+		)
+		energies, peak, _lead = _fileLevels(sourceFile)
 		left, right = monitor.samples(play["start"], play["end"] + 30 * MS)
 		for name, heard, expected in (("left", left, energies[0]), ("right", right, energies[-1])):
 			off = 10 * math.log10(energy(heard) / expected)
@@ -2220,7 +2224,7 @@ def test_nvdasSoundsAreHeardAtTheirLevelAndARepeatStartsAtOnce(pipewire: Pipewir
 			failures.append(f"beep {name}: {off:+.2f} dB")
 	report("level heard against the source, dB", levels)
 	assert not failures, failures
-	_energies, _peak, lead = _fileLevels(WAVES / "error.wav")
+	_energies, _peak, lead = _fileLevels(ONJ_WAVES / "error.wav")
 	leadNs = lead * 1_000_000_000 // RATE
 	starts = [(monitor.soundAfter(start) - start - leadNs) / MS for start in value["repeats"]]
 	report("repeated error.wav, call to sound, ms", summary(starts[1:]))

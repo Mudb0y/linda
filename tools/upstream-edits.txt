@@ -455,7 +455,11 @@ source/config/configSpec.py
   always on. keyboard has a keyRoute key, auto by default, which says
   whether keys come from linda-keyd, the helper that takes the keyboard
   in the kernel, when it admits NVDA, or from the X display alone; see
-  linuxPlatform.keys.route
+  linuxPlatform.keys.route. documentNavigation has a
+  swapLineAndParagraphNavigation key, false by default, which swaps line
+  and paragraph navigation in CursorManager. soundThemes holds the active
+  sound theme (onj by default) and per-sound overrides; see
+  linuxPlatform.soundThemes
 source/config/registry.py
   every platform: winreg comes from linuxPlatform.windowsOnly, so
   _deleteKeyAndSubkeys raises NoLinuxImplementation on Linux
@@ -668,6 +672,10 @@ source/gui/settingsDialogs.py
   Linux runtime: the Advanced category has a choice of where keys come
   from, linda-keyd or the X display, made in linuxPlatform.keyRouteChoice
   and saved, restored to its default and compared with it with the rest
+  Linux runtime: the Document Navigation category has a check box to swap
+  line and paragraph navigation in browse mode, and NVDASettingsDialog adds
+  a Sound Themes category after Audio whose controls come from
+  linuxPlatform.soundThemes.gui
 source/gui/startupDialogs.py
   Linux runtime: the welcome dialog's "Start NVDA after I sign in" is
   enabled outside secure mode, installed copy or not, as an XDG autostart
@@ -782,10 +790,12 @@ source/mouseHandler.py
   whether the X pointer mapping swaps the buttons, where Windows asks
   GetSystemMetrics
 source/nvwave.py
-  Linux runtime: playWaveFile stops the previous file's player through a
-  copy of fileWavePlayer read once per pass, before upstream's loop, which
-  reads the global twice; the previous file's thread can set it to None in
-  between, and the AttributeError that follows loses the new file
+  Linux runtime: playWaveFile resolves built-in wave paths through
+  linuxPlatform.soundThemes (returning early if muted) and stops the
+  previous file's player through a copy of fileWavePlayer read once per
+  pass, before upstream's loop, which reads the global twice; the previous
+  file's thread can set it to None in between, and the AttributeError that
+  follows loses the new file
 source/oleacc.py
   import safety: on Linux the oleacc type library's names come from the
   comInterfaces.Accessibility stand-in, since comtypes.client.GetModule
@@ -1011,7 +1021,9 @@ source/cursorManager.py
   Linux runtime: the find dialog's OK and Cancel end its modal loop and
   script_find destroys it once ShowModal returns, because wxGTK's ShowModal
   still uses the dialog's window after its loop ends and NVDA crashed when
-  that window was destroyed inside the loop
+  that window was destroyed inside the loop. When
+  documentNavigation.swapLineAndParagraphNavigation is enabled, line and
+  paragraph movement and selection scripts swap roles
 source/versionInfo.py
   Linux runtime: the long name is Linda Is Non-visual Desktop Access, the
   copyright notice keeps NVDA's name, and the About message, from

@@ -581,3 +581,20 @@ if sys.platform != "win32":
 	# Where keys come from: linda-keyd when it admits NVDA and the X display otherwise, or the X
 	# display alone; see linuxPlatform.keys.route.
 	confspec["keyboard"]["keyRoute"] = 'option("auto", "x11", default="auto")'
+	# Swap line (Up/Down) and paragraph (Ctrl+Up/Down) navigation in browse mode / CursorManager.
+	confspec["documentNavigation"]["swapLineAndParagraphNavigation"] = "boolean(default=false)"
+	# Sound themes and per-sound overrides; see linuxPlatform.soundThemes.
+	confspec.merge(
+		ConfigObj(
+			StringIO(
+				"""
+[soundThemes]
+	theme = string(default="onj")
+	[[sounds]]
+		__many__ = string(default="theme")
+""",
+			),
+			list_values=False,
+			encoding="UTF-8",
+		),
+	)

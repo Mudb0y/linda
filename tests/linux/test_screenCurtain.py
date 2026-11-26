@@ -498,9 +498,9 @@ def test_theSettingsCheckBoxMakesTheScreenBlackAfterTheWarning(desktop: DesktopS
 		"Return",
 		"Linda Settings: General (normal configuration) dialog",
 		"Categories: list",
-		"General 1 of 17",
+		"General 1 of 18",
 	)
-	for category in ("Speech", "Braille", "Audio", "Privacy and Security"):
+	for category in ("Speech", "Braille", "Audio", "Sound Themes", "Privacy and Security"):
 		say(desktop, "Down", f"{category}…")
 	say(desktop, "Tab", "Screen Curtain grouping…")
 	desktop.expect("Make screen black (immediate effect) check box not checked", since=0)

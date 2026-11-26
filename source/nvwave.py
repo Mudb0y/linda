@@ -91,6 +91,13 @@ def playWaveFile(
 	:param isSpeechWaveFileCommand: whether this wave is played as part of a speech sequence.
 	"""
 	global fileWavePlayer, fileWavePlayerThread
+	if sys.platform != "win32":
+		from linuxPlatform import soundThemes
+
+		resolved = soundThemes.resolveWaveFile(fileName)
+		if resolved is None:
+			return
+		fileName = resolved
 	f = wave.open(fileName, "r")  # noqa: SIM115
 	if f is None:
 		raise RuntimeError("can not open file %s" % fileName)  # noqa: UP031

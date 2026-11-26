@@ -483,13 +483,14 @@ def test_focusAndSpeechAreTheSameWithAndWithoutIt(tmp_path: Path):
 
 
 CATEGORIES = [
-	f"{name} {index} of 17"
+	f"{name} {index} of 18"
 	for index, name in enumerate(
 		(
 			"General",
 			"Speech",
 			"Braille",
 			"Audio",
+			"Sound Themes",
 			"Privacy and Security",
 			"Vision",
 			"Keyboard",
@@ -519,7 +520,7 @@ def openVisionSettings(desktop: DesktopSession) -> None:
 		"Categories: list",
 		CATEGORIES[0],
 	)
-	for category in CATEGORIES[1:6]:
+	for category in CATEGORIES[1:7]:
 		step(desktop, "Down", category)
 
 

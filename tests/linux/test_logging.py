@@ -646,7 +646,7 @@ def test_lateErrorLeavesTheExitSoundWhole(launches, tmp_path: Path):
 	result = json.loads(resultPath.read_text(encoding="utf-8"))
 	# The late error did ask for the sound, so the test exercised what it is about.
 	assert ["error.wav", "logHandler.errorSound"] in result["plays"], result
-	with wave.open(str(harness.SOURCE / "waves" / "exit.wav"), "rb") as w:
+	with wave.open(str(harness.SOURCE / "linuxPlatform" / "soundThemes" / "onj" / "exit.wav"), "rb") as w:
 		exitSound = w.readframes(w.getnframes())
 	heard = {}
 	for path in sorted(capture.iterdir()):

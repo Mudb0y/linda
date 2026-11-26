@@ -17,6 +17,7 @@ from pathlib import Path
 import harness
 
 WAVES = harness.SOURCE / "waves"
+ONJ_WAVES = harness.SOURCE / "linuxPlatform" / "soundThemes" / "onj"
 
 #: Opens nvwave the way core.main does, and notes what could sound before any audio plays. The harness
 #: fails a run that loads a sound library, opens a sound device or reaches a sound server; this keeps the
@@ -353,6 +354,8 @@ def test_waveFilesPlayToCaptureFrameForFrame(tmp_path: Path):
 	captureDir = tmp_path / "capture"
 	captureDir.mkdir()
 	syncFile, asyncFile = WAVES / "browseMode.wav", WAVES / "clipboardPush.wav"
+	# Default theme is Onj, which overrides browseMode.wav while falling back to legacy for clipboardPush.wav.
+	expectedFiles = (ONJ_WAVES / "browseMode.wav", asyncFile)
 	value = runAudio(
 		tmp_path,
 		f"""
@@ -370,12 +373,12 @@ def test_waveFilesPlayToCaptureFrameForFrame(tmp_path: Path):
 		""",
 		captureDir=captureDir,
 	)
-	assert 0.164 <= value["syncTook"] <= 1.0
+	assert 0.10 <= value["syncTook"] <= 1.0
 	assert value["asyncReturned"] < 0.3
 	assert 0.3 <= value["asyncTook"] <= 1.2
 	files = captured(captureDir)
 	assert len(files) == 2
-	for source, got in zip((syncFile, asyncFile), files):
+	for source, got in zip(expectedFiles, files):
 		with wave.open(str(source), "rb") as w:
 			expected = (w.getnchannels(), w.getframerate(), w.getsampwidth(), w.readframes(w.getnframes()))
 		assert (got["channels"], got["rate"], got["width"]) == expected[:3]

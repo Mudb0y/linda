@@ -449,11 +449,17 @@ class CursorManager(documentBase.TextContainerObject, baseObject.ScriptableObjec
 		self._caretMovementScriptHelper(gesture, textInfos.UNIT_WORD, 1, extraDetail=True, handleSymbols=True)
 
 	def script_moveByLine_back(self, gesture):
+		if sys.platform != "win32" and config.conf["documentNavigation"]["swapLineAndParagraphNavigation"]:
+			self._handleParagraphNavigation(gesture, False)
+			return
 		self._caretMovementScriptHelper(gesture, textInfos.UNIT_LINE, -1)
 
 	script_moveByLine_back.resumeSayAllMode = sayAll.CURSOR.CARET
 
 	def script_moveByLine_forward(self, gesture):
+		if sys.platform != "win32" and config.conf["documentNavigation"]["swapLineAndParagraphNavigation"]:
+			self._handleParagraphNavigation(gesture, True)
+			return
 		self._caretMovementScriptHelper(gesture, textInfos.UNIT_LINE, 1)
 
 	script_moveByLine_forward.resumeSayAllMode = sayAll.CURSOR.CARET
@@ -507,11 +513,17 @@ class CursorManager(documentBase.TextContainerObject, baseObject.ScriptableObjec
 			log.error(f"Unexpected ParagraphNavigationFlag value {flag.value}")
 
 	def script_moveByParagraph_back(self, gesture: InputGesture):
+		if sys.platform != "win32" and config.conf["documentNavigation"]["swapLineAndParagraphNavigation"]:
+			self._caretMovementScriptHelper(gesture, textInfos.UNIT_LINE, -1)
+			return
 		self._handleParagraphNavigation(gesture, False)
 
 	script_moveByParagraph_back.resumeSayAllMode = sayAll.CURSOR.CARET
 
 	def script_moveByParagraph_forward(self, gesture: InputGesture):
+		if sys.platform != "win32" and config.conf["documentNavigation"]["swapLineAndParagraphNavigation"]:
+			self._caretMovementScriptHelper(gesture, textInfos.UNIT_LINE, 1)
+			return
 		self._handleParagraphNavigation(gesture, True)
 
 	script_moveByParagraph_forward.resumeSayAllMode = sayAll.CURSOR.CARET
@@ -617,9 +629,15 @@ class CursorManager(documentBase.TextContainerObject, baseObject.ScriptableObjec
 		self._selectionMovementScriptHelper(unit=textInfos.UNIT_WORD, direction=-1)
 
 	def script_selectLine_forward(self, gesture):
+		if sys.platform != "win32" and config.conf["documentNavigation"]["swapLineAndParagraphNavigation"]:
+			self._selectionMovementScriptHelper(unit=textInfos.UNIT_PARAGRAPH, direction=1)
+			return
 		self._selectionMovementScriptHelper(unit=textInfos.UNIT_LINE, direction=1)
 
 	def script_selectLine_back(self, gesture):
+		if sys.platform != "win32" and config.conf["documentNavigation"]["swapLineAndParagraphNavigation"]:
+			self._selectionMovementScriptHelper(unit=textInfos.UNIT_PARAGRAPH, direction=-1)
+			return
 		self._selectionMovementScriptHelper(unit=textInfos.UNIT_LINE, direction=-1)
 
 	def script_selectPage_forward(self, gesture):
@@ -635,9 +653,15 @@ class CursorManager(documentBase.TextContainerObject, baseObject.ScriptableObjec
 		)
 
 	def script_selectParagraph_forward(self, gesture):
+		if sys.platform != "win32" and config.conf["documentNavigation"]["swapLineAndParagraphNavigation"]:
+			self._selectionMovementScriptHelper(unit=textInfos.UNIT_LINE, direction=1)
+			return
 		self._selectionMovementScriptHelper(unit=textInfos.UNIT_PARAGRAPH, direction=1)
 
 	def script_selectParagraph_back(self, gesture):
+		if sys.platform != "win32" and config.conf["documentNavigation"]["swapLineAndParagraphNavigation"]:
+			self._selectionMovementScriptHelper(unit=textInfos.UNIT_LINE, direction=-1)
+			return
 		self._selectionMovementScriptHelper(unit=textInfos.UNIT_PARAGRAPH, direction=-1)
 
 	def script_selectToBeginningOfLine(self, gesture):

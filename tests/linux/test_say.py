@@ -424,7 +424,7 @@ def test_soundsFollowTheText(home: Home):
 	run.assertSpoke()
 	run.assertClean()
 	audio = home.captured()
-	waves = HERE.parent.parent / "source" / "waves"
+	waves = HERE.parent.parent / "source" / "linuxPlatform" / "soundThemes" / "onj"
 	expected = []
 	for name in ("start.wav", "error.wav"):
 		with wave.open(str(waves / name), "rb") as f:

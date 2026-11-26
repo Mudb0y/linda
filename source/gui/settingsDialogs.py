@@ -98,6 +98,7 @@ from . import guiHelper
 
 if sys.platform != "win32":
 	from linuxPlatform import keyRouteChoice, nvdaAddonStore
+	from linuxPlatform.soundThemes import gui as soundThemesGui
 
 try:
 	import updateCheck
@@ -3650,6 +3651,17 @@ class DocumentNavigationPanel(SettingsPanel):
 		)
 		self.bindHelpEvent("ParagraphStyle", self.paragraphStyleCombo)
 
+		if sys.platform != "win32":
+			# Translators: Label for a checkbox in Document Navigation settings that swaps
+			# Up/Down line navigation with Control+Up/Down paragraph navigation in browse mode.
+			swapLineAndParagraphLabel = _("&Swap line and paragraph navigation")
+			self.swapLineAndParagraphCheckBox = sHelper.addItem(
+				wx.CheckBox(self, label=swapLineAndParagraphLabel),
+			)
+			self.swapLineAndParagraphCheckBox.SetValue(
+				config.conf["documentNavigation"]["swapLineAndParagraphNavigation"],
+			)
+
 		# Translators: This is a label for the word segmentation standard in the document navigation dialog
 		wordNavigationUnitLabel = _("&Word Segmentation Standard:")
 		self.wordSegCombo: nvdaControls.FeatureFlagCombo = sHelper.addLabeledControl(
@@ -3662,6 +3674,10 @@ class DocumentNavigationPanel(SettingsPanel):
 
 	def onSave(self) -> None:
 		self.paragraphStyleCombo.saveCurrentValueToConf()
+		if sys.platform != "win32":
+			config.conf["documentNavigation"]["swapLineAndParagraphNavigation"] = (
+				self.swapLineAndParagraphCheckBox.IsChecked()
+			)
 		self.wordSegCombo.saveCurrentValueToConf()
 
 	def postSave(self) -> None:
@@ -3846,6 +3862,24 @@ class AudioPanel(SettingsPanel):
 			)
 			return False
 		return super().isValid()
+
+
+if sys.platform != "win32":
+
+	class SoundThemesPanel(SettingsPanel):
+		# Translators: This is the label for the sound themes settings panel.
+		title = _("Sound Themes")
+
+		def makeSettings(self, settingsSizer: wx.BoxSizer) -> None:
+			self._soundThemes = soundThemesGui.SoundThemesControls(self, settingsSizer)
+
+		def isValid(self) -> bool:
+			if not self._soundThemes.isValid():
+				return False
+			return super().isValid()
+
+		def onSave(self) -> None:
+			self._soundThemes.save()
 
 
 class AddonStorePanel(SettingsPanel):
@@ -6735,6 +6769,8 @@ class NVDASettingsDialog(MultiCategorySettingsDialog):
 		DocumentNavigationPanel,
 		RemoteSettingsPanel,
 	]
+	if sys.platform != "win32":
+		categoryClasses.insert(categoryClasses.index(AudioPanel) + 1, SoundThemesPanel)
 	# The whole of each of these panels is a feature some platforms lack. Visual Highlight is the only
 	# vision enhancement provider NVDA comes with.
 	for panel, feature in (

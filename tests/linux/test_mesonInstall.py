@@ -162,6 +162,8 @@ def test_installsTheLayoutAndNothingElse(installed: Installed):
 		"louis/tables/en-us-g2.ctb",
 		"louis/tables/No-No-g0.utb",
 		"waves/start.wav",
+		"linuxPlatform/soundThemes/onj/start.wav",
+		"linuxPlatform/soundThemes/onj/browseMode.wav",
 		"images",
 	):
 		assert (appDir / relative).exists(), relative
