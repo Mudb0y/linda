@@ -256,30 +256,41 @@ class AtSpiBufferTextInfo(VirtualBufferTextInfo):
 		obj = self._getNVDAObjectFromOffset(self._startOffset)
 		return obj.location if obj else None
 
-	def _atspiTextOffset(self, fieldStart: int, offset: int) -> int:
-		"""Map a virtual-buffer offset inside a control field starting at fieldStart to its
-		offset in that control's AT-SPI Text, counting each direct child control as one
-		embedded-object character."""
+	def _atspiTextOffset(self, fieldStart: int, offset: int, docHandle: int, ID: int) -> int:
+		"""Map a virtual-buffer offset inside the control field (docHandle, ID) starting at
+		fieldStart to its offset in that control's AT-SPI Text, counting each direct child
+		control as one embedded-object character."""
 		if offset <= fieldStart:
 			return 0
 		xml = NVDAHelper.localLib.VBuf_getTextInRange(self.obj.VBufHandle, fieldStart, offset, True)
 		if not xml:
 			return offset - fieldStart
 		depth = 0
+		targetDepth: int | None = None
 		atspiOffset = 0
+		targetDocHandle = str(docHandle)
+		targetID = str(ID)
 		for cmd in XMLFormatting.XMLTextParser().parse(xml):
 			if isinstance(cmd, textInfos.FieldCommand):
 				if cmd.command == "controlStart":
-					if depth == 1:
+					if targetDepth is None:
+						if (
+							cmd.field.get("controlIdentifier_docHandle") == targetDocHandle
+							and cmd.field.get("controlIdentifier_ID") == targetID
+						):
+							targetDepth = depth + 1
+					elif depth == targetDepth:
 						atspiOffset += 1
 					depth += 1
 				elif cmd.command == "controlEnd":
 					depth -= 1
-			elif isinstance(cmd, str) and depth <= 1:
+					if targetDepth is not None and depth < targetDepth:
+						break
+			elif isinstance(cmd, str) and targetDepth is not None and depth == targetDepth:
 				atspiOffset += len(cmd)
 		return atspiOffset
 
-	def _getFormatFieldAtOffset(self, offset: int) -> textInfos.FormatField | None:
+	def _locateControlAtOffset(self, offset: int) -> tuple[int, int, int] | None:
 		startOffset = ctypes.c_int()
 		endOffset = ctypes.c_int()
 		docHandle = ctypes.c_int()
@@ -296,8 +307,28 @@ class AtSpiBufferTextInfo(VirtualBufferTextInfo):
 		)
 		if not any((docHandle.value, ID.value)):
 			return None
-		obj = self.obj.getNVDAObjectFromIdentifier(docHandle.value, ID.value)
-		fieldStart = startOffset.value
+		return docHandle.value, ID.value, startOffset.value
+
+	def _resolveTextTarget(
+		self,
+		offset: int,
+		controlField: textInfos.ControlField | None,
+	) -> tuple[object, int, int, int, TextSource] | None:
+		docHandle: int | None = None
+		ID: int | None = None
+		fieldStart: int | None = None
+		if controlField is not None:
+			rawDoc = controlField.get("controlIdentifier_docHandle")
+			rawID = controlField.get("controlIdentifier_ID")
+			if rawDoc is not None and rawID is not None:
+				docHandle = int(rawDoc)
+				ID = int(rawID)
+		if docHandle is None or ID is None:
+			located = self._locateControlAtOffset(offset)
+			if located is None:
+				return None
+			docHandle, ID, fieldStart = located
+		obj = self.obj.getNVDAObjectFromIdentifier(docHandle, ID)
 		walkedUp = False
 		root = self.obj.rootNVDAObject
 		while obj is not None and "Text" not in obj.atspiInterfaces:
@@ -307,17 +338,24 @@ class AtSpiBufferTextInfo(VirtualBufferTextInfo):
 			walkedUp = True
 		if obj is None or "Text" not in obj.atspiInterfaces:
 			return None
+		targetDocHandle, targetID = docHandle, ID
 		if walkedUp:
+			targetDocHandle, targetID = self.obj.getIdentifierFromNVDAObject(obj)
+			fieldStart = None
+		if fieldStart is None:
 			try:
-				fieldStart = self._getOffsetsFromNVDAObjectInBuffer(obj)[0]
+				fieldStart = self._getOffsetsFromFieldIdentifier(targetDocHandle, targetID)[0]
 			except LookupError:
-				pass
-		localOffset = self._atspiTextOffset(fieldStart, offset)
+				fieldStart = offset
 		source = TextSource(obj.node, unitFor(toolkitOf(obj.node)))
-		try:
-			attributes, _runStart, _runEnd = source.attributeRun(localOffset)
-		except NodeGone:
-			return None
+		return obj, targetDocHandle, targetID, fieldStart, source
+
+	def _formatFieldForAttributes(
+		self,
+		obj,
+		source: TextSource,
+		attributes: dict[str, str],
+	) -> textInfos.FormatField:
 		language = attributes.get("language")
 		defaultLanguage = None
 		if language and language.lower() not in ("c", "posix"):
@@ -332,6 +370,56 @@ class AtSpiBufferTextInfo(VirtualBufferTextInfo):
 			defaultLanguage = _defaultLanguages.get(key)
 		return formatField(attributes, defaultLanguage)
 
+	def _splitFormattedText(
+		self,
+		text: str,
+		bufOffset: int,
+		controlField: textInfos.ControlField | None,
+		baseFormatField: textInfos.FormatField | None,
+		cache: dict,
+	) -> list[textInfos.FieldCommand | str]:
+		cacheKey = None
+		if controlField is not None:
+			rawDoc = controlField.get("controlIdentifier_docHandle")
+			rawID = controlField.get("controlIdentifier_ID")
+			if rawDoc is not None and rawID is not None:
+				cacheKey = (int(rawDoc), int(rawID))
+		if cacheKey is not None and cacheKey in cache:
+			target = cache[cacheKey]
+		else:
+			target = self._resolveTextTarget(bufOffset, controlField)
+			if cacheKey is not None:
+				cache[cacheKey] = target
+		if target is None:
+			return (
+				[textInfos.FieldCommand("formatChange", baseFormatField), text]
+				if baseFormatField
+				else [text]
+			)
+		obj, targetDocHandle, targetID, fieldStart, source = target
+		localOffset = self._atspiTextOffset(fieldStart, bufOffset, targetDocHandle, targetID)
+		out: list[textInfos.FieldCommand | str] = []
+		pos = 0
+		textLen = len(text)
+		while pos < textLen:
+			try:
+				attributes, _runStart, runEnd = source.attributeRun(localOffset)
+			except NodeGone:
+				if baseFormatField:
+					out.append(textInfos.FieldCommand("formatChange", baseFormatField))
+				out.append(text[pos:])
+				break
+			atspiField = self._formatFieldForAttributes(obj, source, attributes)
+			merged = textInfos.FormatField(baseFormatField) if baseFormatField else textInfos.FormatField()
+			merged.update(atspiField)
+			chunkLen = textLen - pos if runEnd <= localOffset else min(textLen - pos, runEnd - localOffset)
+			if merged:
+				out.append(textInfos.FieldCommand("formatChange", merged))
+			out.append(text[pos : pos + chunkLen])
+			pos += chunkLen
+			localOffset += chunkLen
+		return out
+
 	def getTextWithFields(self, formatConfig: dict | None = None) -> textInfos.TextInfo.TextWithFieldsT:
 		commands = super().getTextWithFields(formatConfig)
 		if (
@@ -341,16 +429,52 @@ class AtSpiBufferTextInfo(VirtualBufferTextInfo):
 			or not any(formatConfig.get(k) for k in _FORMAT_CONFIG_KEYS)
 		):
 			return commands
-		field = self._getFormatFieldAtOffset(self._startOffset)
-		if not field:
-			return commands
-		cmd = textInfos.FieldCommand("formatChange", field)
-		for idx, item in enumerate(commands):
-			if isinstance(item, str):
-				commands.insert(idx, cmd)
-				return commands
-		commands.insert(0, cmd)
-		return commands
+		result: textInfos.TextInfo.TextWithFieldsT = []
+		controlStack: list[textInfos.ControlField] = []
+		pendingFormatField: textInfos.FormatField | None = None
+		cache: dict = {}
+		bufOffset = self._startOffset
+		for item in commands:
+			if isinstance(item, textInfos.FieldCommand):
+				if item.command == "formatChange":
+					if pendingFormatField is not None:
+						result.append(textInfos.FieldCommand("formatChange", pendingFormatField))
+					pendingFormatField = item.field
+					continue
+				if pendingFormatField is not None:
+					result.append(textInfos.FieldCommand("formatChange", pendingFormatField))
+					pendingFormatField = None
+				if item.command == "controlStart":
+					controlStack.append(item.field)
+				elif item.command == "controlEnd" and controlStack:
+					controlStack.pop()
+				result.append(item)
+			elif isinstance(item, str):
+				if not item:
+					if pendingFormatField is not None:
+						result.append(textInfos.FieldCommand("formatChange", pendingFormatField))
+						pendingFormatField = None
+					result.append(item)
+					continue
+				result.extend(
+					self._splitFormattedText(
+						item,
+						bufOffset,
+						controlStack[-1] if controlStack else None,
+						pendingFormatField,
+						cache,
+					),
+				)
+				pendingFormatField = None
+				bufOffset += sum(2 if ord(ch) > 0xFFFF else 1 for ch in item)
+			else:
+				if pendingFormatField is not None:
+					result.append(textInfos.FieldCommand("formatChange", pendingFormatField))
+					pendingFormatField = None
+				result.append(item)
+		if pendingFormatField is not None:
+			result.append(textInfos.FieldCommand("formatChange", pendingFormatField))
+		return result
 
 
 class AtSpiBuffer(VirtualBuffer):
