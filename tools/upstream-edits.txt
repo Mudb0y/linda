@@ -136,6 +136,9 @@ source/NVDAObjects/AtSpi/terminal.py
 source/NVDAObjects/AtSpi/textInfo.py
   Linux runtime: added. The TextInfo of AT-SPI accessibles with the Text
   interface, which only Linux imports
+source/NVDAObjects/AtSpi/words.py
+  Linux runtime: added. Word movement in Firefox's fields, whose caret stops
+  at the end of a word on Linux, which only Linux imports
 source/NVDAObjects/__init__.py
   Linux runtime: getPossibleAPIClasses yields only NVDAObjects.AtSpi.AtSpi
   on Linux, where there are no window handles and every object of another

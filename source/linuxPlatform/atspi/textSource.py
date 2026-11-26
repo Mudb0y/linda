@@ -7,7 +7,8 @@ of the text can later stand behind the same methods without the TextInfo changin
 
 Two calls are never made: GetCharacterAtOffset, which hands out the real characters of a GTK 4
 password field and the UTF-8 bytes of a Qt 5 one, and the toolkit's own words and sentences, of
-which one call at the end of a Qt 5 line edit never returns and takes the application with it.
+which one call at the end of a Qt 5 line edit never returns and takes the application with it. The
+words of Firefox alone are asked for, which its caret movement follows.
 """
 
 from typing import Literal
@@ -25,6 +26,7 @@ Unit = Literal["codepoints", "utf16"]
 #: The granularities stringAtOffset takes. Word and sentence are left out on purpose.
 GRANULARITIES = {
 	"char": Atspi.TextGranularity.CHAR,
+	"word": Atspi.TextGranularity.WORD,
 	"line": Atspi.TextGranularity.LINE,
 	"paragraph": Atspi.TextGranularity.PARAGRAPH,
 }
@@ -66,7 +68,8 @@ class TextSource:
 		return _call(self.node, Atspi.Text.get_text, self.node.ref, start, end) or ""
 
 	def stringAtOffset(self, offset: int, granularity: str) -> tuple[int, int, str]:
-		"""The unit of granularity ("char", "line" or "paragraph") around offset, as (start, end, text)."""
+		"""The unit of granularity ("char", "word", "line" or "paragraph") around offset, as (start, end,
+		text)."""
 		r = _call(
 			self.node,
 			Atspi.Text.get_string_at_offset,

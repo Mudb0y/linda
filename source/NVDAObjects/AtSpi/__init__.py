@@ -28,6 +28,7 @@ from NVDAObjects import NVDAObject
 from NVDAObjects.AtSpi.deletion import DeletionEcho, JavaTypedOver
 from NVDAObjects.AtSpi.terminal import VteTerminal
 from NVDAObjects.AtSpi.textInfo import AtspiTextInfo
+from NVDAObjects.AtSpi.words import GeckoWordMovement
 from NVDAObjects.behaviors import (
 	Dialog,
 	EditableTextWithAutoSelectDetection,
@@ -281,6 +282,8 @@ class AtSpi(NVDAObject):
 				clsList.append(MonacoEditor)
 			if self.toolkit == JAVA:
 				clsList.append(JavaTypedOver)
+			elif self.toolkit == GECKO:
+				clsList.append(GeckoWordMovement)
 			clsList.append(DeletionEcho)
 			clsList.append(EditableTextWithAutoSelectDetection)
 		elif role == Role.TERMINAL and "Text" in ifaces:
