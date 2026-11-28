@@ -160,3 +160,52 @@ def test_noWorkWhileTheKeyboardIsHeld(tmp_path: Path, how: str):
 		desktop.close()
 		assert nvda.process.returncode == 0, nvda.describe()
 		nvda.assertClean(logNames=("nvda.log",))
+
+
+def test_duplicateTitlesSpokenOnEveryTab(tmp_path: Path):
+	"""Alt+Tab through windows that share the exact same title speaks the title on every Tab press,
+	and speaks distinct titles once without duplication (issue 59)."""
+	same = "Same Title"
+	other = "Other Title"
+	windowScript = tmp_path / "window.py"
+	windowScript.write_text(
+		"import sys, gi\n"
+		'gi.require_version("Gtk", "3.0")\n'
+		"from gi.repository import Gtk\n"
+		"w = Gtk.Window(title=sys.argv[1])\n"
+		"w.set_default_size(300, 200)\n"
+		'w.add(Gtk.Button(label="OK"))\n'
+		'w.connect("destroy", Gtk.main_quit)\n'
+		"w.show_all()\n"
+		'print("ready", flush=True)\n'
+		"Gtk.main()\n",
+	)
+	with DesktopSession(tmp_path / "desktop") as desktop:
+		first = desktop.startApp(["python3", str(windowScript), same], title=same)
+		assert first.stdout.readline() == "ready\n"
+		second = desktop.startApp(["python3", str(windowScript), same], title=same)
+		assert second.stdout.readline() == "ready\n"
+		third = desktop.startApp(["python3", str(windowScript), other], title=other)
+		assert third.stdout.readline() == "ready\n"
+		desktopSession.activate(other)
+		nvda = desktop.startNVDA(SESSION_CONFIG)
+		desktop.expect(other, since=0, timeout=STARTUP_BOUND)
+		time.sleep(SETTLE)
+
+		spokenSteps: list[list[str]] = []
+		subprocess.run(["xdotool", "keydown", "alt"], check=True)
+		try:
+			for expected in (same, same, other, same, same):
+				mark = desktop.mark()
+				subprocess.run(["xdotool", "key", "Tab"], check=True)
+				desktop.expect(expected, since=mark, timeout=3.0)
+				time.sleep(0.25)
+				spokenSteps.append(desktop.spokenSince(mark))
+		finally:
+			subprocess.run(["xdotool", "keyup", "alt"], check=True)
+		time.sleep(SETTLE)
+
+		assert spokenSteps == [[same], [same], [other], [same], [same]], spokenSteps
+		desktop.close()
+		assert nvda.process.returncode == 0, nvda.describe()
+		nvda.assertClean(logNames=("nvda.log",))
