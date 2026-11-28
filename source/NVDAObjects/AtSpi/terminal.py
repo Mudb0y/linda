@@ -336,11 +336,14 @@ class ScreenTracker:
 		self.inputColumn: int | None = None
 		#: The last typing key whose character showed in the line typed in.
 		self.typedKey: Key | None = None
+		#: The Enter key time already answered when a full screen of identical prompts scrolled onto itself.
+		self._repeatedPromptKeyTime: float | None = None
 
 	def reset(self, texts: list[str], caret: tuple[int, int] | None, now: float) -> None:
 		"""Start from a screen, all of it heard, as when the terminal gains the focus."""
 		self.rows = [Row(text.rstrip(), now, heard=text.rstrip()) for text in texts]
 		self.caret = caret
+		self._repeatedPromptKeyTime = None
 		typedIn = [
 			index
 			for index in range(len(self.rows))
@@ -376,8 +379,32 @@ class ScreenTracker:
 		oldTexts = [row.text for row in old]
 		self.caret = caret
 		if texts == oldTexts:
+			# Pressing Enter on a full screen of identical bare prompts (e.g. ">>> " on every row)
+			# scrolls the screen into an identical copy of itself, yet VTE still wakes the monitor.
+			if (
+				key is not None
+				and key.kind == "enter"
+				and now - key.time <= KEY_SECONDS
+				and key.time != self._repeatedPromptKeyTime
+				and caret is not None
+				and caret[0] < len(old)
+				and self._isPromptTextAtCaret(caret[0], old[caret[0]])
+			):
+				self._repeatedPromptKeyTime = key.time
+				row = old[caret[0]]
+				row.heard = ""
+				row.changedAt = now
+				row.pendingSince = now
 			return
-		opcodes = SequenceMatcher(None, oldTexts, texts, autojunk=False).get_opcodes()
+		# Exclude trailing blank rows from diffing so appending an identical prompt line (e.g. bare
+		# Enter at ">>> ") keeps existing prompts matched above and marks the new prompt at the caret.
+		oldEnd = len(oldTexts)
+		while oldEnd > 0 and not oldTexts[oldEnd - 1]:
+			oldEnd -= 1
+		newEnd = len(texts)
+		while newEnd > 0 and not texts[newEnd - 1]:
+			newEnd -= 1
+		opcodes = SequenceMatcher(None, oldTexts[:oldEnd], texts[:newEnd], autojunk=False).get_opcodes()
 		scrolledTop = (
 			len(opcodes) >= 2
 			and opcodes[0][0] == "delete"
@@ -421,6 +448,8 @@ class ScreenTracker:
 				for i in range(i1, i2):
 					if i not in used:
 						self._vanish(old[i], now)
+		for j in range(newEnd, len(texts)):
+			rows[j] = old[j] if j < len(old) and not old[j].text else Row("", 0.0)
 		self.rows = rows
 		self._afterEdits(edited, created, now, key)
 
@@ -723,10 +752,8 @@ class ScreenTracker:
 			)
 		return lines
 
-	def _isPromptAtCaret(self, index: int, row: Row) -> bool:
-		"""Whether row is a newly printed prompt waiting for input at the terminal's cursor, such as
-		">>> ", "... ", "$ " or "Password: ", which needs no pause to see whether a sentence is growing."""
-		if row.heard or self.caret is None or self.isCaretParked():
+	def _isPromptTextAtCaret(self, index: int, row: Row) -> bool:
+		if self.caret is None or self.isCaretParked():
 			return False
 		caretRow, caretColumn = self.caret
 		return (
@@ -734,6 +761,11 @@ class ScreenTracker:
 			and caretColumn > len(row.text)
 			and (row.text[-1:] in ">$#%:" or row.text == "...")
 		)
+
+	def _isPromptAtCaret(self, index: int, row: Row) -> bool:
+		"""Whether row is a newly printed prompt waiting for input at the terminal's cursor, such as
+		">>> ", "... ", "$ " or "Password: ", which needs no pause to see whether a sentence is growing."""
+		return not row.heard and self._isPromptTextAtCaret(index, row)
 
 	def _movedOn(self, index: int, now: float) -> bool:
 		"""Whether text was written under a row since it last changed: it has ended."""

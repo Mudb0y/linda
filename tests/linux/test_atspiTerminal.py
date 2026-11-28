@@ -229,9 +229,10 @@ def test_pythonReplPromptImmediateAndOnFullScreen(desktop: DesktopSession):
 	desktop.expect(prompt, since=mark, timeout=10.0)
 	time.sleep(SETTLE)
 
-	def expectPromptSoon(command: str) -> float:
-		desktop.typeText(command)
-		time.sleep(0.2)
+	def expectPromptSoon(command: str = "") -> float:
+		if command:
+			desktop.typeText(command)
+			time.sleep(0.2)
 		before = desktop.mark()
 		pressed = time.monotonic()
 		desktop.press("Return", gap=0)
@@ -246,20 +247,22 @@ def test_pythonReplPromptImmediateAndOnFullScreen(desktop: DesktopSession):
 		)
 		return spoke - pressed
 
-	# Screen not full: prompt comes promptly after Return (well under LONG_PAUSE_SECONDS).
+	# Screen not full: both command Enters and bare Enters speak >>> promptly (well under LONG_PAUSE_SECONDS).
 	assert expectPromptSoon("import os") < 0.25
+	assert expectPromptSoon() < 0.25
+	assert expectPromptSoon() < 0.25
 
-	# Leave bare >>> prompts on screen and fill past the 24-row height so subsequent commands scroll.
-	for _ in range(3):
+	# Fill the whole 24-row screen with bare >>> prompts so every row is identical and scrolls onto itself.
+	for _ in range(25):
 		desktop.press("Return")
 		time.sleep(0.05)
-	for index in range(25):
-		desktop.typeText(f"x = {index}")
-		desktop.press("Return")
-		time.sleep(0.04)
 	time.sleep(SETTLE)
 
-	# Full screen scrolling: >>> must still be spoken promptly on repeated commands.
+	# Full screen of identical bare >>> prompts: bare Enter still speaks >>> promptly.
+	assert expectPromptSoon() < 0.25
+	assert expectPromptSoon() < 0.25
+
+	# Commands scrolling a full screen keep speaking >>> promptly as well.
 	assert expectPromptSoon("import os") < 0.25
 	assert expectPromptSoon("import sys") < 0.25
 
