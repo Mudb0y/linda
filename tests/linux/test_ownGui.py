@@ -496,27 +496,46 @@ def test_categoriesAreFoundByFirstLetters(desktop: DesktopSession, tmp_path: Pat
 		desktop.press(*letters, gap=0.15)
 		desktop.expect(*expected, since=mark)
 
+	def burst(*letters: str) -> None:
+		"""Type letters of one search window, without listening for them.
+
+		What a burst lands on cannot be heard: every selection rebuilds the settings panel,
+		which floods the AT-SPI event pump, and the pump keeps only a handful of the newest
+		events of an application, so the announcements of the items a burst passes are
+		coalesced away or dropped altogether. The first letter typed after the prefix has
+		expired searches on from where the burst stopped, and that one key is heard.
+		"""
+		time.sleep(TYPE_AHEAD_PAUSE)
+		desktop.press(*letters, gap=0.15)
+
 	# A letter jumps to the next category starting with it, past General, and wraps round the list.
 	typeAhead("k", f"Keyboard 8 of {count}")
 	typeAhead("s", f"Speech 2 of {count}")
 	# One letter does not stay on the category it moved to: the next jumps on to the next match.
 	typeAhead("d", f"Document Formatting 13 of {count}")
 	typeAhead("d", f"Document Navigation 14 of {count}")
-	# Typed together, the same letter cycles through the categories starting with it.
-	typeAhead("dd", f"Document Formatting 13 of {count}", f"Document Navigation 14 of {count}")
-	# A second letter narrows the search instead of starting a new one.
+
+	# Typed together, the same letter cycles through the categories starting with it, rather than
+	# narrowing the search to the text "dd": nothing starts with "dd", while the repeated letter
+	# moves on from Document Formatting and wraps round to Document Navigation.
+	burst("d", "d")
+	# The burst stopped on Document Navigation, so a letter typed afresh comes back round to
+	# Document Formatting; had "dd" been read as a literal prefix with no match, it would ask for
+	# Document Navigation instead.
+	typeAhead("d", f"Document Formatting 13 of {count}")
+	# A second letter narrows the search instead of starting a new one: the "a" lands on Audio,
+	# and only the prefix "ad", narrowed, reaches Advanced from there.
 	step(desktop, "Home", f"General 1 of {count}")
-	typeAhead("ad", f"Audio 4 of {count}", f"Advanced {count} of {count}")
-	# An arrow key starts the search afresh after the letter before it.
-	time.sleep(TYPE_AHEAD_PAUSE)
-	mark = desktop.mark()
-	desktop.press("a", "Down", "d", gap=0.15)
-	desktop.expect(
-		f"Audio 4 of {count}",
-		f"Sound Themes 5 of {count}",
-		f"Document Formatting 13 of {count}",
-		since=mark,
-	)
+	burst("a", "d")
+	# The burst stopped on Advanced, and a letter typed afresh wraps round to Document Formatting;
+	# had the "d" started a search of its own from Audio, it would stop on Document Formatting and
+	# this letter would ask for Document Navigation instead.
+	typeAhead("d", f"Document Formatting 13 of {count}")
+	# An arrow key starts the search afresh after the letter before it: with the prefix "a" still
+	# open, "d" would narrow it to Advanced, while a search of its own from Advanced wraps round to
+	# Document Formatting and asks this letter for Document Navigation.
+	burst("a", "Down", "d")
+	typeAhead("d", f"Document Navigation 14 of {count}")
 	step(desktop, "Escape", *AT_START)
 	desktop.close()
 	assertExitedCleanly(nvda)
