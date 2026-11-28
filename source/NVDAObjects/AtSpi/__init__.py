@@ -28,7 +28,7 @@ from NVDAObjects import NVDAObject
 from NVDAObjects.AtSpi.deletion import DeletionEcho, JavaTypedOver
 from NVDAObjects.AtSpi.terminal import VteTerminal
 from NVDAObjects.AtSpi.textInfo import AtspiTextInfo
-from NVDAObjects.AtSpi.words import GeckoWordMovement
+from NVDAObjects.AtSpi.words import EndOfWordMovement
 from NVDAObjects.behaviors import (
 	Dialog,
 	EditableTextWithAutoSelectDetection,
@@ -83,6 +83,8 @@ CHROMIUM = "Chromium"
 MONACO_INPUT_CLASSES = frozenset({"native-edit-context", "inputarea"})
 #: Java's Swing, through the Java ATK wrapper, as in JetBrains' IDEs.
 JAVA = "J2SE-access-bridge"
+#: Toolkits whose Control+Right stops at the end of the word moved over on Linux.
+_END_OF_WORD_TOOLKITS = frozenset({GECKO, CHROMIUM, GTK3, GTK4})
 
 #: Roles whose number comes from the Value interface.
 VALUE_ROLES = frozenset({Role.SLIDER, Role.SPINBUTTON, Role.SCROLLBAR, Role.PROGRESSBAR, Role.DIAL})
@@ -333,8 +335,8 @@ class AtSpi(NVDAObject):
 				clsList.append(MonacoEditor)
 			if self.toolkit == JAVA:
 				clsList.append(JavaTypedOver)
-			elif self.toolkit == GECKO:
-				clsList.append(GeckoWordMovement)
+			elif self.toolkit in _END_OF_WORD_TOOLKITS:
+				clsList.append(EndOfWordMovement)
 			clsList.append(DeletionEcho)
 			clsList.append(EditableTextWithAutoSelectDetection)
 		elif role == Role.TERMINAL and "Text" in ifaces:

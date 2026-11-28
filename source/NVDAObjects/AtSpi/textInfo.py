@@ -22,6 +22,8 @@ from textInfos.offsets import OffsetsTextInfo, findEndOfLine, findStartOfLine
 
 #: The toolkit name Firefox and Thunderbird give.
 GECKO = "Gecko"
+#: The toolkit name Chromium and Electron give.
+CHROMIUM = "Chromium"
 #: What ends a line when the toolkit leaves it out of the line it gives.
 LINE_SEPARATORS = ("\n", "\r", " ", " ")
 #: What Qt wraps a line at and leaves out of both lines.
@@ -257,14 +259,15 @@ class AtspiTextInfo(OffsetsTextInfo):
 		return (start, end)
 
 	def _getWordOffsets(self, offset: int) -> tuple[int, int]:
-		if getattr(self.obj, "toolkit", None) == GECKO:
-			return self._getGeckoWordOffsets(offset)
+		toolkit = getattr(self.obj, "toolkit", None)
+		if toolkit == GECKO or (toolkit == CHROMIUM and not getattr(self.obj, "_isMonacoEditor", False)):
+			return self._getToolkitWordOffsets(offset)
 		return self._getOwnWordOffsets(offset)
 
-	def _getGeckoWordOffsets(self, offset: int) -> tuple[int, int]:
-		"""Firefox's own words, as NVDA reads them through IAccessible2 on Windows. Firefox's caret stops
-		inside a word at an apostrophe, a slash or a dash, at "isn" and at "t" of "isn't", and Firefox
-		makes each part a word of its own, where ICU would read the whole word at either stop."""
+	def _getToolkitWordOffsets(self, offset: int) -> tuple[int, int]:
+		"""The toolkit's own words (Firefox and Chromium), matching the stops their Control+Right and
+		Control+Left make: Firefox splits at apostrophes, slashes and dashes, and Chromium splits at
+		punctuation such as hyphens, commas and question marks (issue #66)."""
 		if offset >= self._storyLengthCached():
 			# Past the end, as NVDA's IAccessible2 words have it.
 			return (offset, offset + 1)

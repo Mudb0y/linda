@@ -1,4 +1,4 @@
-"""Word movement in Firefox's fields, whose caret stops at the end of a word on Linux."""
+"""Word movement in toolkits whose caret stops at the end of a word on Linux."""
 
 import eventHandler
 import speech
@@ -7,14 +7,35 @@ from controlTypes import OutputReason
 from scriptHandler import isScriptWaiting, willSayAllResume
 
 
-class GeckoWordMovement:
-	"""A field of Firefox's, in which Control+Right stops at the end of the word it moves over on Linux,
-	where it stops at the start of the next word on Windows; Control+Left stops at the start of a word on
-	both. NVDA reads the word the caret comes to, which on Windows is the one Control+Right moved onto;
-	here it is the word the caret passed, after Control+Right as before it. At the end of "isn" of
-	"isn't", where Firefox stops as it does at the end of a word, the word at the caret is "t" already,
-	and at the end of a line it is none, which NVDA said as blank.
+class EndOfWordMovement:
+	"""A field whose Control+Right stops at the end of the word it moves over on Linux (Gecko,
+	Chromium/Electron, and GTK), where on Windows it stops at the start of the next word; Control+Left
+	stops at the start of a word on both. NVDA reads the word the caret comes to, which on Windows is
+	the one Control+Right moved onto; here it is the word the caret passed, after Control+Right as
+	before it. Without this, moving over the last word of a line lands past its end and speaks "blank"
+	instead of the word (issue #66), and at the end of "isn" of "isn't" in Firefox the word at the
+	caret is already "t".
 	"""
+
+	def event_gainFocus(self) -> None:
+		self._lastWordMovementBookmark = None
+		super().event_gainFocus()
+
+	def event_typedCharacter(self, ch: str) -> None:
+		self._lastWordMovementBookmark = None
+		super().event_typedCharacter(ch=ch)
+
+	def event_textChange(self) -> None:
+		self._lastWordMovementBookmark = None
+		super().event_textChange()
+
+	def _caretScriptPostMovedHelper(self, speakUnit, gesture, info=None) -> None:
+		super()._caretScriptPostMovedHelper(speakUnit, gesture, info)
+		if info is not None:
+			try:
+				self._lastWordMovementBookmark = info.bookmark
+			except (RuntimeError, NotImplementedError):
+				self._lastWordMovementBookmark = None
 
 	def _caretMovementScriptHelper(self, gesture, unit) -> None:
 		if unit != textInfos.UNIT_WORD:
@@ -30,7 +51,25 @@ class GeckoWordMovement:
 		moved, info = self._hasCaretMoved(bookmark)
 		if not moved and self.shouldFireCaretMovementFailedEvents:
 			eventHandler.executeEvent("caretMovementFailed", self, gesture=gesture)
-		passed = _wordPassed(info) if moved and info is not None and _forward(gesture, before, info) else None
+		# On Linux the arrow key reaches the application in parallel with NVDA. In editors whose caret
+		# move is detected by bookmark alone (such as MonacoEditor), the caret may already have moved
+		# before `before` was read; compare against the last caret position seen by a caret script.
+		alreadyMoved = False
+		if (
+			not moved
+			and info is not None
+			and not self.caretMovementDetectionUsesEvents
+			and getattr(self, "_lastWordMovementBookmark", None) is not None
+		):
+			try:
+				alreadyMoved = info.bookmark != self._lastWordMovementBookmark
+			except (RuntimeError, NotImplementedError):
+				alreadyMoved = False
+		passed = (
+			_wordPassed(info)
+			if (moved or alreadyMoved) and info is not None and _forward(gesture, before, info)
+			else None
+		)
 		if passed is None:
 			self._caretScriptPostMovedHelper(unit, gesture, info)
 			return
@@ -38,6 +77,10 @@ class GeckoWordMovement:
 		self._caretScriptPostMovedHelper(None, gesture, info)
 		if not isScriptWaiting() and not willSayAllResume(gesture):
 			speech.speakTextInfo(passed, unit=unit, reason=OutputReason.CARET)
+
+
+#: Backwards-compatible alias for earlier callers.
+GeckoWordMovement = EndOfWordMovement
 
 
 def _wordPassed(caret: textInfos.TextInfo) -> textInfos.TextInfo | None:

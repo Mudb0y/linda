@@ -127,6 +127,39 @@ def test_noObjectReplacementCharacterWasSpoken(session: Session):
 	assert not [record for record in spoken if EMBEDDED_OBJECT in record], spoken
 
 
+def test_ctrlRightReadsLastWordWithPunctuation(session: Session):
+	"""Control+Right in a text area reads the last word rather than 'blank', including across
+	hyphens, commas and question marks, in both Firefox and Chromium (issue 66)."""
+	step(session, "Escape", "Browse mode")
+	step(session, "shift+e", "Notes edit…")
+	step(session, "Return", "Focus mode")
+	for text, lastWord, maxSteps in (
+		("one two three", "three", 3),
+		("a-b-c", "c", 5),
+		("hello, world? test", "test", 5),
+	):
+		session.desktop.press("ctrl+a", "BackSpace")
+		time.sleep(SETTLE)
+		session.desktop.typeText(text)
+		time.sleep(SETTLE)
+		session.desktop.press("Home")
+		time.sleep(SETTLE)
+		heard: list[str] = []
+		for _ in range(maxSteps):
+			mark = session.desktop.mark()
+			session.desktop.press("ctrl+Right")
+			deadline = time.monotonic() + 3.0
+			while not session.desktop.spokenSince(mark) and time.monotonic() < deadline:
+				time.sleep(0.05)
+			time.sleep(SETTLE)
+			chunk = [s for s in session.desktop.spokenSince(mark) if s.strip()]
+			heard.extend(chunk)
+			if chunk and chunk[-1] == lastWord:
+				break
+		assert heard and heard[-1] == lastWord, (text, heard)
+		assert "blank" not in heard, (text, heard)
+
+
 def test_exitIsClean(session: Session):
 	step(session, "Escape", "Browse mode")
 	step(session, "Insert+q", "Exit Linda…")

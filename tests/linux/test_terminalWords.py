@@ -38,16 +38,18 @@ TERMINAL_WORDS = (
 	),
 	("one two three", ["one", "two", "three"], ["three", "two", "one"]),
 )
-#: The same in a GTK entry: GTK also stops at the end of a word, and the end of the entry is blank.
+#: The same in a GTK entry: GTK also stops at the end of a word, and EndOfWordMovement speaks the
+#: word passed including the last word of the line (issue 66).
 ENTRY_WORDS = (
-	("/usr/bin/bash", ["usr slash", "bin slash", "blank"], ["bash", "bin slash", "usr slash"]),
+	("/usr/bin/bash", ["usr slash", "bin slash", "bash"], ["bash", "bin slash", "usr slash"]),
 	(
 		"foo.bar.baz",
-		["foo dot bar dot baz", "foo dot bar dot baz", "blank"],
+		["foo dot bar dot baz"] * 3,
 		["foo dot bar dot baz"] * 3,
 	),
-	("foo-bar-baz", ["foo-", "bar-", "blank"], ["baz", "bar-", "foo-"]),
-	("one two three", ["one", "two", "blank"], ["three", "two", "one"]),
+	("foo-bar-baz", ["foo-", "bar-", "baz"], ["baz", "bar-", "foo-"]),
+	("one two three", ["one", "two", "three"], ["three", "two", "one"]),
+	("a-b-c", ["a-", "b-", "c"], ["c", "b-", "a-"]),
 )
 
 
