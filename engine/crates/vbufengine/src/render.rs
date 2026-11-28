@@ -424,6 +424,14 @@ impl<'a> Renderer<'a> {
                 name = full_text.trim().to_owned();
             }
             text = "";
+        } else if raw_name == "static"
+            && (tag.is_some() || !o.children.is_empty())
+            && !has(raw, ATSPI_EDITABLE)
+        {
+            // Inline HTML elements (span, abbr, b, code, ...) have ATK_ROLE_STATIC in Gecko where
+            // IAccessible2 gives them IA2_ROLE_TEXT_FRAME: their children and text are content
+            // rather than replaced by an explicit name such as a title attribute.
+            role = ROLE_TEXTFRAME;
         } else if raw_name == "text" || raw_name == "static" {
             role = if has(raw, ATSPI_EDITABLE) {
                 ROLE_EDITABLETEXT
@@ -1066,6 +1074,51 @@ mod tests {
         );
         // The replaced field is MAX_DEPTH - 2 deep already.
         assert_eq!(deepest, 4);
+    }
+
+    #[test]
+    fn a_static_inline_element_with_explicit_name_still_renders_its_children_and_text() {
+        let mut objs = HashMap::new();
+        objs.insert(
+            "/a/1".into(),
+            obj(95, None, Some("\u{fffc}\u{fffc}\u{fffc}"), &["/a/2", "/a/4", "/a/5"]),
+        );
+        // <span title="span title"><a href="...">Info</a></span> in Gecko: role 116 ("static").
+        let mut span_link = obj(116, Some("/a/1"), Some("\u{fffc}"), &["/a/3"]);
+        span_link.name = "span title".into();
+        span_link.attributes.push(("tag".into(), "span".into()));
+        span_link.attributes.push(("display".into(), "inline".into()));
+        span_link.attributes.push(("explicit-name".into(), "true".into()));
+        objs.insert("/a/2".into(), span_link);
+
+        let mut link = obj(88, Some("/a/2"), Some("Info"), &[]);
+        link.name = "Info".into();
+        link.attributes.push(("tag".into(), "a".into()));
+        objs.insert("/a/3".into(), link);
+
+        // <span title="plain title">Plain text</span>
+        let mut span_text = obj(116, Some("/a/1"), Some("Plain text"), &[]);
+        span_text.name = "plain title".into();
+        span_text.attributes.push(("tag".into(), "span".into()));
+        span_text.attributes.push(("explicit-name".into(), "true".into()));
+        objs.insert("/a/4".into(), span_text);
+
+        // <span title="empty title"></span> falls back to its explicit name.
+        let mut span_empty = obj(116, Some("/a/1"), Some(""), &[]);
+        span_empty.name = "empty title".into();
+        span_empty.attributes.push(("tag".into(), "span".into()));
+        span_empty.attributes.push(("explicit-name".into(), "true".into()));
+        objs.insert("/a/5".into(), span_empty);
+
+        let none = HashSet::new();
+        let mut r = Renderer::new(&objs, 7, "/a/1", false, &none);
+        r.render("/a/1", Ctx::default());
+        let s = decoded(&r.out);
+        assert!(s.contains("C7,3,"), "link child must be rendered: {s}");
+        assert!(s.contains("T4:Info0;"), "link text must be rendered: {s}");
+        assert!(!s.contains("T10:span title0;"), "span title must not replace child link: {s}");
+        assert!(s.contains("T10:Plain text0;"), "span text must be rendered: {s}");
+        assert!(s.contains("T11:empty title0;"), "empty span must fall back to name: {s}");
     }
 
     #[test]

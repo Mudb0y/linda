@@ -452,6 +452,28 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 """
 
 
+def test_spanWithTitleDoesNotHideItsChildLink(desktop: DesktopSession, tmp_path: Path):
+	"""An inline span with a title attribute renders its child link and text rather than replacing
+	them with its title, and Tabbing onto the link keeps browse mode working (issue 72)."""
+	nvda = browse(
+		desktop,
+		tmp_path,
+		"spanTitleLink.html",
+		"Span title with link",
+		"heading level 1 Span title with link test",
+		"After.",
+	)
+	step(desktop, "control+Home", "heading level 1 Span title with link test")
+	step(desktop, "Down", "link Info")
+	step(desktop, "Down", "Plain text")
+	step(desktop, "Down", "empty title")
+	step(desktop, "control+Home", "heading level 1 Span title with link test")
+	step(desktop, "Tab", "Info link link title")
+	# Browse mode stays on the link and keeps moving by line.
+	step(desktop, "Down", "Plain text")
+	quit(desktop, nvda)
+
+
 def test_aDocumentTheEngineCannotRenderIsReadWithoutBrowseMode(desktop: DesktopSession, tmp_path: Path):
 	webSession.requireBrowseLibraries()
 	hooks = hooksDirectory(desktop.directory)
