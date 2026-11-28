@@ -840,14 +840,14 @@ class KernelKeySource:
 	def inject(self, vkCode: int, scanCode: int, extended: bool, isUp: bool) -> None:
 		"""Send a key as passed already, with TYPE_INJECT: no KEY comes back for it, so NVDA does not have
 		its own key again."""
-		keycode = self._keycodeToType(vkCode, extended)
+		keycode = self._keycodeToType(vkCode, extended, scanCode)
 		if keycode is not None:
 			vk = keyMap.GENERIC_MODIFIERS.get(vkCode, vkCode)
 			self._post(lambda: self._inject(keycode, vk, isUp))
 
-	def typeKey(self, vkCode: int, extended: bool, isUp: bool) -> None:
+	def typeKey(self, vkCode: int, extended: bool, isUp: bool, scanCode: int | None = None) -> None:
 		"""Type a key with TYPE_DECIDE: it comes back as a key to decide, which NVDA has as injected."""
-		keycode = self._keycodeToType(vkCode, extended)
+		keycode = self._keycodeToType(vkCode, extended, scanCode)
 		if keycode is not None:
 			self._post(lambda: self._typeKey(keycode, vkCode, extended, isUp))
 
@@ -855,12 +855,12 @@ class KernelKeySource:
 		if self.canType:
 			self._post(self._releaseTyped)
 
-	def _keycodeToType(self, vkCode: int, extended: bool) -> int | None:
+	def _keycodeToType(self, vkCode: int, extended: bool, scanCode: int | None = None) -> int | None:
 		"""The key code that sends vkCode, or None when there is none to send or nothing to send it by."""
 		if not self.canType:
 			return None
 		with self._queryLock:
-			keycode = self._query.keycodeFor(vkCode, extended) if self._query is not None else None
+			keycode = self._query.keycodeFor(vkCode, extended, scanCode) if self._query is not None else None
 		if keycode is None or keycode - 8 not in TYPEABLE:
 			log.debugWarning("No key on this keyboard sends the virtual key asked for")
 			return None

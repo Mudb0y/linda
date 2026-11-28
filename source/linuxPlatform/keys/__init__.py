@@ -120,7 +120,7 @@ class KeySource(Protocol):
 	def inject(self, vkCode: int, scanCode: int, extended: bool, isUp: bool) -> None:
 		"""Send a key as if typed. Its own echo is not delivered."""
 
-	def typeKey(self, vkCode: int, extended: bool, isUp: bool) -> None:
+	def typeKey(self, vkCode: int, extended: bool, isUp: bool, scanCode: int | None = None) -> None:
 		"""Press or release a key as a keyboard does, as Remote Access does with the keys of the
 		computer controlling this one: unlike inject, the key comes to NVDA as any key does, marked
 		injected, and NVDA's grabs take it, so that a chord with the NVDA key runs NVDA's command."""

@@ -635,3 +635,105 @@ result = {
 	assert done.value["keys"] == [{"vk_code": 40, "extended": False, "pressed": True, "scan_code": 116}]
 	assert done.value["other"] == []
 	assert done.value["queuedCount"] == 1
+
+
+def test_controlledComputerTypesGermanOemKeys(desktop: DesktopSession, tmp_path: Path):
+	"""OEM keys whose Windows virtual-key codes differ from US positions use the sender's scan code
+	so a Windows German leader types the right characters on a Linux German follower (issue 68)."""
+	subprocess.run(["setxkbmap", "de"], check=True)
+	try:
+		controlled = Controlled(desktop, tmp_path)
+		try:
+			peer = controlled.peer
+
+			def tap(vk: int, scan: int) -> None:
+				peer.key(vk, True, False, scan)
+				time.sleep(GAP)
+				peer.key(vk, False, False, scan)
+				time.sleep(GAP)
+
+			# Exact (vk, scan) pairs Windows reports on a German (QWERTZ) keyboard layout:
+			# ö, ä, #, -, ß, ü, +, y, z, ´+e (é), ^+a (â).
+			for vk, scan in (
+				(0xC0, 0x27),  # ö (VK_OEM_3)
+				(0xDE, 0x28),  # ä (VK_OEM_7)
+				(0xBF, 0x2B),  # # (VK_OEM_2)
+				(0xBD, 0x35),  # - (VK_OEM_MINUS)
+				(0xDB, 0x0C),  # ß (VK_OEM_4)
+				(0xBA, 0x1A),  # ü (VK_OEM_1)
+				(0xBB, 0x1B),  # + (VK_OEM_PLUS)
+				(ord("Y"), 0x2C),  # y
+				(ord("Z"), 0x15),  # z
+				(0xDD, 0x0D),  # ´ (VK_OEM_6, dead_acute)
+				(ord("E"), 0x12),  # e -> é
+				(0xDC, 0x29),  # ^ (VK_OEM_5, dead_circumflex)
+				(ord("A"), 0x1E),  # a -> â
+			):
+				tap(vk, scan)
+			# AltGr+ß (\) and AltGr++ (~), as Windows reports AltGr.
+			for vk, scan in ((0xDB, 0x0C), (0xBB, 0x1B)):
+				for k, extended, pressed, sc in (
+					(VK_LCONTROL, False, True, ALTGR_CONTROL_SCAN),
+					(VK_RMENU, True, True, 0x38),
+					(vk, False, True, scan),
+					(vk, False, False, scan),
+					(VK_LCONTROL, False, False, ALTGR_CONTROL_SCAN),
+					(VK_RMENU, True, False, 0x38),
+				):
+					peer.key(k, pressed, extended, sc)
+					time.sleep(GAP)
+			waitForEntry("öä#-ßü+yzéâ\\~")
+			waitForNoKeysDown()
+		finally:
+			launch = controlled.close()
+		launch.assertClean(logNames=("nvda.log",))
+	finally:
+		subprocess.run(["setxkbmap", "us"], check=True)
+
+
+def test_keycodeForUsesScanCodeForOemKeys(tmp_path: Path):
+	"""Translator.keycodeFor resolves OEM keys by scan code when given, including VK_OEM_8, while
+	still resolving letters by the active layout."""
+	code = """
+from xkbcommon import xkb
+from linuxPlatform.keys import keyMap
+
+ctx = xkb.Context()
+keymap = ctx.keymap_new_from_names(layout="de")
+translator = keyMap.Translator(keymap, keymap.state_new())
+
+result = {
+	"de_oe": translator.keycodeFor(keyMap.VK["OEM_3"], False, 0x27),
+	"de_ss": translator.keycodeFor(keyMap.VK["OEM_4"], False, 0x0C),
+	"de_ue": translator.keycodeFor(keyMap.VK["OEM_1"], False, 0x1A),
+	"de_plus": translator.keycodeFor(keyMap.VK["OEM_PLUS"], False, 0x1B),
+	"de_minus": translator.keycodeFor(keyMap.VK["OEM_MINUS"], False, 0x35),
+	"de_hash": translator.keycodeFor(keyMap.VK["OEM_2"], False, 0x2B),
+	"de_caret": translator.keycodeFor(keyMap.VK["OEM_5"], False, 0x29),
+	"de_acute": translator.keycodeFor(keyMap.VK["OEM_6"], False, 0x0D),
+	"uk_oem8": translator.keycodeFor(keyMap.VK["OEM_8"], False, 0x29),
+	"oem8_no_scan": translator.keycodeFor(keyMap.VK["OEM_8"], False),
+	"de_y_from_us_scan": translator.keycodeFor(ord("Y"), False, 0x15),
+	"de_z_from_us_scan": translator.keycodeFor(ord("Z"), False, 0x2C),
+	"extended_ignores_scan": translator.keycodeFor(keyMap.VK["OEM_4"], True, 0x0C),
+}
+"""
+	done = harness.runChild(tmp_path, code, timeout=60)
+	assert done.error is None, f"{done.error}\n{done.stderr[-4000:]}"
+	assert done.value == {
+		"de_oe": 39 + 8,
+		"de_ss": 12 + 8,
+		"de_ue": 26 + 8,
+		"de_plus": 27 + 8,
+		"de_minus": 53 + 8,
+		"de_hash": 43 + 8,
+		"de_caret": 41 + 8,
+		"de_acute": 13 + 8,
+		"uk_oem8": 41 + 8,
+		"oem8_no_scan": None,
+		# Y and Z follow the active German layout (evdev 44 and 21), not the US scan code.
+		"de_y_from_us_scan": 44 + 8,
+		"de_z_from_us_scan": 21 + 8,
+		# Extended flag does not use the alphanumeric scan-code shortcut.
+		"extended_ignores_scan": 26 + 8,
+	}

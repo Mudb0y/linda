@@ -595,7 +595,7 @@ def typeKey(vk: int, extended: bool, isUp: bool, scan: int | None = None) -> Non
 		return
 	if not _canSend():
 		return
-	_source.typeKey(vk, extended, isUp)
+	_source.typeKey(vk, extended, isUp, scan)
 
 
 def releaseTypedKeys() -> None:

@@ -893,14 +893,14 @@ class X11KeySource:
 
 	def inject(self, vkCode: int, scanCode: int, extended: bool, isUp: bool) -> None:
 		with self._lock:
-			keycode = self._translator.keycodeFor(vkCode, extended) if self._translator else None
+			keycode = self._translator.keycodeFor(vkCode, extended, scanCode) if self._translator else None
 			if keycode is None:
 				log.debugWarning("No key on this keyboard sends the virtual key asked for")
 				return
 		self._post(lambda: self._fake(keycode, isUp))
 
-	def typeKey(self, vkCode: int, extended: bool, isUp: bool) -> None:
-		self._post(lambda: self._typeKey(vkCode, extended, isUp))
+	def typeKey(self, vkCode: int, extended: bool, isUp: bool, scanCode: int | None = None) -> None:
+		self._post(lambda: self._typeKey(vkCode, extended, isUp, scanCode))
 
 	def releaseTypedKeys(self) -> None:
 		self._post(self._releaseTypedKeys)
@@ -2682,12 +2682,12 @@ class X11KeySource:
 				code for code in sorted(self._keyboardDown) if translator.translate(code)[0] in MODIFIER_VKS
 			)
 
-	def _typeKey(self, vkCode: int, extended: bool, isUp: bool) -> None:
+	def _typeKey(self, vkCode: int, extended: bool, isUp: bool, scanCode: int | None = None) -> None:
 		"""Press or release a key as a keyboard of the X server's would, so that the grabs take it and
 		NVDA has it as it has any key, as Windows' hook has a key another program sends."""
 		with self._lock:
 			translator = self._translator
-			keycode = translator.keycodeFor(vkCode, extended) if translator else None
+			keycode = translator.keycodeFor(vkCode, extended, scanCode) if translator else None
 		if keycode is None:
 			log.debugWarning("No key on this keyboard sends the virtual key asked for")
 			return

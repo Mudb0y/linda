@@ -285,9 +285,9 @@ class RoutedKeySource:
 		if (source := self._sender()) is not None:
 			source.inject(vkCode, scanCode, extended, isUp)
 
-	def typeKey(self, vkCode: int, extended: bool, isUp: bool) -> None:
+	def typeKey(self, vkCode: int, extended: bool, isUp: bool, scanCode: int | None = None) -> None:
 		if (source := self._sender()) is not None:
-			source.typeKey(vkCode, extended, isUp)
+			source.typeKey(vkCode, extended, isUp, scanCode)
 
 	def releaseTypedKeys(self) -> None:
 		if (source := self._sender()) is not None:

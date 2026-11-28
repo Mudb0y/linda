@@ -85,10 +85,32 @@ VK = {
 	"OEM_5": 0xDC,
 	"OEM_6": 0xDD,
 	"OEM_7": 0xDE,
+	"OEM_8": 0xDF,
 	"OEM_102": 0xE2,
 	"PACKET": 0xE7,
 	"NONE": 0xFF,
 }
+
+#: Virtual-key codes whose physical key varies with the keyboard layout (punctuation and dead keys),
+#: so a PC set 1 scan code from the sender locates the key directly when one is given (issue 68).
+OEM_VKS = frozenset(
+	{
+		VK["OEM_1"],
+		VK["OEM_PLUS"],
+		VK["OEM_COMMA"],
+		VK["OEM_MINUS"],
+		VK["OEM_PERIOD"],
+		VK["OEM_2"],
+		VK["OEM_3"],
+		VK["ABNT_C1"],
+		VK["OEM_4"],
+		VK["OEM_5"],
+		VK["OEM_6"],
+		VK["OEM_7"],
+		VK["OEM_8"],
+		VK["OEM_102"],
+	},
+)
 
 #: evdev code: (set 1 scan code, extended, virtual-key code), for keys whose code is their position.
 FIXED: dict[int, tuple[int, bool, int]] = {
@@ -205,6 +227,9 @@ LAYOUT.update({16 + i: (0x10 + i, ord(c)) for i, c in enumerate("QWERTYUIOP")})
 LAYOUT.update({30 + i: (0x1E + i, ord(c)) for i, c in enumerate("ASDFGHJKL")})
 LAYOUT.update({44 + i: (0x2C + i, ord(c)) for i, c in enumerate("ZXCVBNM")})
 
+#: PC set 1 scan code: evdev code for the alphanumeric block.
+_LAYOUT_BY_SCAN: dict[int, int] = {scan: evdev for evdev, (scan, _vk) in LAYOUT.items()}
+
 #: The vk a key injected for a generic modifier is sent as.
 GENERIC_MODIFIERS = {VK["SHIFT"]: VK["LSHIFT"], VK["CONTROL"]: VK["LCONTROL"], VK["MENU"]: VK["LMENU"]}
 
@@ -318,9 +343,11 @@ class Translator:
 				return state.serialize_mods(xkb.StateComponent.XKB_STATE_MODS_DEPRESSED) & 0xFF
 		return 0
 
-	def keycodeFor(self, vk: int, extended: bool) -> int | None:
+	def keycodeFor(self, vk: int, extended: bool, scan: int | None = None) -> int | None:
 		"""The X key code that gives vk, for injecting it."""
 		vk = GENERIC_MODIFIERS.get(vk, vk)
+		if scan and not extended and vk in OEM_VKS and scan in _LAYOUT_BY_SCAN:
+			return _LAYOUT_BY_SCAN[scan] + 8
 		for evdev, (_scan, fixedExtended, fixedVk) in FIXED.items():
 			if fixedVk == vk and fixedExtended == extended:
 				return evdev + 8
