@@ -43,6 +43,84 @@ _listeners: list["_Listener"] = []
 _connections: set["_Connection"] = set()
 _pendingAddons: list[str] = []
 _installingAddon = False
+_pendingRemoteUrls: list[str] = []
+_handlingRemoteUrl = False
+_REMOTE_URL_PREFIX = "nvdaremote://"
+#: Valid `mode=` values in nvdaremote:// URLs, matching _remoteClient.connectionInfo.ConnectionMode.
+_REMOTE_URL_MODES = frozenset({"master", "slave"})
+
+
+def validateRemoteUrl(url: str) -> str | None:
+	"""Validate an nvdaremote:// URL using only the standard library; return an error reason or None."""
+	import urllib.parse
+
+	if "\n" in url or "\r" in url:
+		return "Remote Access URL cannot contain newline"
+	if not url.lower().startswith(_REMOTE_URL_PREFIX):
+		return "URL must start with nvdaremote://"
+	parsed = urllib.parse.urlparse(url)
+	try:
+		_port = parsed.port
+	except ValueError as e:
+		return f"invalid Remote Access URL: {e}"
+	if not parsed.hostname:
+		return "invalid Remote Access URL: No hostname provided"
+	query = urllib.parse.parse_qs(parsed.query)
+	if not query.get("key", [""])[0]:
+		return "invalid Remote Access URL: No key provided"
+	mode = query.get("mode", [""])[0].lower()
+	if not mode:
+		return "invalid Remote Access URL: No mode provided"
+	if mode not in _REMOTE_URL_MODES:
+		return f"invalid Remote Access URL: Invalid mode provided: {mode!r}"
+	return None
+
+
+def queueRemoteUrl(url: str) -> None:
+	"""Queue an nvdaremote:// URL connection request sequentially to prevent modal dialog collisions."""
+	from logHandler import log
+
+	log.info("Requesting Remote Access connection from nvdaremote URL")
+	_pendingRemoteUrls.append(url)
+	_processNextRemoteUrl()
+
+
+def _processNextRemoteUrl() -> None:
+	global _handlingRemoteUrl
+	if _handlingRemoteUrl or not _pendingRemoteUrls:
+		return
+	_handlingRemoteUrl = True
+	url = _pendingRemoteUrls.pop(0)
+	try:
+		from _remoteClient import _remoteClient as remoteClient
+		from _remoteClient import connectionInfo
+
+		if remoteClient is None:
+			import ui
+			from logHandler import log
+
+			log.warning("Remote Access is disabled; ignoring nvdaremote URL")
+			ui.message(
+				# Translators: Said when opening an nvdaremote:// URL while Remote Access is disabled.
+				_("Remote Access is disabled. Enable it in settings before opening a Remote Access link."),
+			)
+			return
+		conInfo = connectionInfo.ConnectionInfo.fromURL(url)
+		remoteClient.verifyAndConnect(conInfo)
+	except Exception:
+		from logHandler import log
+
+		log.exception("Error handling Remote Access URL")
+	finally:
+		_handlingRemoteUrl = False
+		if _pendingRemoteUrls:
+			import wx
+
+			wx.CallAfter(_processNextRemoteUrl)
+
+
+def _isValidRemoteUrl(url: str) -> bool:
+	return validateRemoteUrl(url) is None
 
 
 def queueAddonInstall(path: str) -> None:
@@ -229,8 +307,10 @@ class _Connection:
 			self._received += self._socket.recv(4096)
 		except OSError:
 			pass
-		return self._received == REQUEST or (
-			self._received.startswith(b"install-addon ") and self._received.endswith(b"\n")
+		return (
+			self._received == REQUEST
+			or (self._received.startswith(b"install-addon ") and self._received.endswith(b"\n"))
+			or (self._received.startswith(b"open-remote-url ") and self._received.endswith(b"\n"))
 		)
 
 	def hasTakeKeyboardRequest(self) -> bool:
@@ -245,6 +325,28 @@ class _Connection:
 
 	def _answer(self) -> None:
 		from logHandler import log
+
+		if self._received.startswith(b"open-remote-url "):
+			rawUrl = self._received.removeprefix(b"open-remote-url ").rstrip(b"\r\n")
+			try:
+				url = rawUrl.decode("utf-8")
+			except UnicodeDecodeError:
+				url = ""
+			from utils.security import isLockScreenModeActive, isRunningOnSecureDesktop
+
+			if isRunningOnSecureDesktop() or isLockScreenModeActive() or not _isValidRemoteUrl(url):
+				log.debugWarning("Remote Access URL request rejected")
+				reply = FAILED_REPLY
+			else:
+				import wx
+
+				wx.CallAfter(queueRemoteUrl, url)
+				reply = REPLY_OK
+			try:
+				self._socket.send(reply)
+			except OSError:
+				pass
+			return
 
 		if self._received.startswith(b"install-addon "):
 			rawPath = self._received.removeprefix(b"install-addon ").rstrip(b"\r\n")

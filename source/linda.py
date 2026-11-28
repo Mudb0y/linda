@@ -70,6 +70,8 @@ def _handOverToOutsideOption(option: str) -> NoReturn:
 
 
 _startupAddonHandlers: list[object] = []
+#: URL scheme for Remote Access connection links (issue #62).
+REMOTE_URL_PREFIX = "nvdaremote://"
 
 
 def _normalizeAddonPath(pathOrUri: str, cwd: str) -> str:
@@ -90,6 +92,13 @@ def _installAddon(path: str) -> None:
 	from linuxPlatform import controlSocket
 
 	wx.CallAfter(controlSocket.queueAddonInstall, path)
+
+
+def _openRemoteUrl(url: str) -> None:
+	import wx
+	from linuxPlatform import controlSocket
+
+	wx.CallAfter(controlSocket.queueRemoteUrl, url)
 
 
 def main() -> NoReturn:
@@ -159,20 +168,27 @@ def main() -> NoReturn:
 	appArgs = globalVars.appArgs
 
 	installAddons: list[str] = []
+	remoteUrls: list[str] = []
 	if appArgs.installAddons:
 		for arg in appArgs.installAddons:
 			installAddons.append(_normalizeAddonPath(arg, originalCwd))
 	remainingUnknownArgs = []
 	for arg in globalVars.unknownAppArgs:
-		normalized = _normalizeAddonPath(arg, originalCwd)
-		if normalized.lower().endswith(".nvda-addon"):
-			installAddons.append(normalized)
+		if arg.lower().startswith(REMOTE_URL_PREFIX):
+			remoteUrls.append(arg)
 		else:
-			remainingUnknownArgs.append(arg)
+			normalized = _normalizeAddonPath(arg, originalCwd)
+			if normalized.lower().endswith(".nvda-addon"):
+				installAddons.append(normalized)
+			else:
+				remainingUnknownArgs.append(arg)
 	globalVars.unknownAppArgs = remainingUnknownArgs
 	if installAddons and (appArgs.quit or appArgs.check_running):
 		option = "--quit" if appArgs.quit else "--check-running"
 		_fail(f"{option} cannot be combined with add-on installation")
+	if remoteUrls and (appArgs.quit or appArgs.check_running):
+		option = "--quit" if appArgs.quit else "--check-running"
+		_fail(f"{option} cannot be combined with a Remote Access URL")
 	if appArgs.launcher:
 		# The dialog it shows offers to install NVDA or make a portable copy, both through Windows' installer.
 		_fail("--launcher is how NVDA's Windows installer starts it, and Linux has no such installer")
@@ -208,12 +224,16 @@ def main() -> NoReturn:
 			_fail(f"there is no display to start on, as the session kind is {displayServer.reason()}")
 		# wx would fail later with a line that names only X.
 		_fail("neither WAYLAND_DISPLAY nor DISPLAY names a display")
-	if installAddons:
+	if installAddons or remoteUrls:
 		for path in installAddons:
 			if "\n" in path or "\r" in path:
 				_fail(f"add-on path cannot contain newline: {path!r}")
 			if not os.path.isfile(path):
 				_fail(f"add-on package not found: {path}")
+		if remoteUrls:
+			for url in remoteUrls:
+				if error := controlSocket.validateRemoteUrl(url):
+					_fail(error)
 		if isAlreadyRunning:
 			import time
 
@@ -229,6 +249,15 @@ def main() -> NoReturn:
 					time.sleep(singleInstance._POLL_INTERVAL)
 				if outcome != controlSocket.ANSWERED:
 					_fail(f"could not install {absPath} in running Linda ({outcome})")
+			for url in remoteUrls:
+				outcome = controlSocket.UNREACHABLE
+				while time.monotonic() < deadline:
+					outcome = controlSocket.ask(socketPaths, request=f"open-remote-url {url}\n".encode())
+					if outcome != controlSocket.UNREACHABLE:
+						break
+					time.sleep(singleInstance._POLL_INTERVAL)
+				if outcome != controlSocket.ANSWERED:
+					_fail(f"could not open Remote Access URL in running Linda ({outcome})")
 			sys.exit(0)
 	if isAlreadyRunning and not appArgs.easeOfAccess:
 		if appArgs.check_running:
@@ -331,6 +360,14 @@ def main() -> NoReturn:
 
 			_startupAddonHandlers.append(_installStartupAddons)
 			core.postNvdaStartup.register(_installStartupAddons)
+		if remoteUrls and not appArgs.secure:
+
+			def _openStartupRemoteUrls() -> None:
+				for url in remoteUrls:
+					_openRemoteUrl(url)
+
+			_startupAddonHandlers.append(_openStartupRemoteUrls)
+			core.postNvdaStartup.register(_openStartupRemoteUrls)
 		core.main()
 	except BaseException as e:
 		# As nvda.pyw does, SystemExit included: wx raises it when there is no display to open.

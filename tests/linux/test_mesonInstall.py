@@ -453,9 +453,9 @@ def test_desktopEntryAndMetadataSayWhatLindaIs(installed: Installed):
 	for line in (
 		"Type=Application",
 		"Name=Linda",
-		"Exec=linda %F",
+		"Exec=linda %U",
 		"Categories=Utility;Accessibility;",
-		"MimeType=application/x-nvda-addon;",
+		"MimeType=application/x-nvda-addon;x-scheme-handler/nvdaremote;",
 	):
 		assert line in lines, entry
 	assert any(line.startswith("Comment=") for line in lines), entry
