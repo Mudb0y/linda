@@ -144,7 +144,7 @@ class AtspiTextInfo(OffsetsTextInfo):
 		if source is None:
 			obj = self.obj
 			toolkit = getattr(obj, "toolkit", None) or toolkitOf(obj.node)
-			source = self.textSourceCache = TextSource(obj.node, unitFor(toolkit))
+			source = self.textSourceCache = TextSource(obj.node, unitFor(toolkit), toolkit)
 		return source
 
 	def _get_encoding(self) -> str | None:

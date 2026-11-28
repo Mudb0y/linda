@@ -57,9 +57,11 @@ class TextSource:
 	"""An accessible's Text interface. Every method raises NodeGone when the accessible is gone or its
 	application does not answer."""
 
-	def __init__(self, node: Node, unit: Unit) -> None:
+	def __init__(self, node: Node, unit: Unit, toolkit: str = "") -> None:
 		self.node = node
 		self.unit = unit
+		#: The application's ToolkitName, as unitFor takes it.
+		self.toolkit = toolkit
 
 	def characterCount(self) -> int:
 		return _call(self.node, Atspi.Text.get_character_count, self.node.ref)
@@ -101,6 +103,8 @@ class TextSource:
 			return self.setCaretOffset(start)
 		ref = self.node.ref
 		replace = (Atspi.Text.set_selection, ref, 0, start, end)
+		if self._addSelectionCrashes():
+			return _call(self.node, *replace)
 		add = (Atspi.Text.add_selection, ref, start, end)
 		# GTK 3 and the GTK 4 entry refuse to set a selection that does not exist yet and want one
 		# added; the GTK 4 text view and Qt refuse to add one and want the first set.
@@ -111,6 +115,18 @@ class TextSource:
 		except NodeGone:
 			pass
 		return _call(self.node, *second)
+
+	def _addSelectionCrashes(self) -> bool:
+		"""Whether AddSelection would take the application down: GTK 4 asks the widget for its
+		selections without wanting them, which VTE before 0.85 does not allow for and crashes on
+		(VTE issue 2959, fixed in commit 56bad78b). AT-SPI does not say which VTE an application has,
+		so no GTK 4 terminal is asked. Its SetSelection does not crash, though it selects nothing."""
+		if self.toolkit != "GTK":
+			return False
+		try:
+			return _call(self.node, Atspi.Accessible.get_role, self.node.ref) == Atspi.Role.TERMINAL
+		except NodeGone:
+			return True
 
 	def characterExtents(self, offset: int) -> tuple[int, int, int, int]:
 		"""The character's x, y, width and height, in the space the client gives the accessible's own in:

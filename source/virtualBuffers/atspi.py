@@ -347,7 +347,8 @@ class AtSpiBufferTextInfo(VirtualBufferTextInfo):
 				fieldStart = self._getOffsetsFromFieldIdentifier(targetDocHandle, targetID)[0]
 			except LookupError:
 				fieldStart = offset
-		source = TextSource(obj.node, unitFor(toolkitOf(obj.node)))
+		toolkit = toolkitOf(obj.node)
+		source = TextSource(obj.node, unitFor(toolkit), toolkit)
 		return obj, targetDocHandle, targetID, fieldStart, source
 
 	def _formatFieldForAttributes(
