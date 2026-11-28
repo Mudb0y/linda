@@ -683,12 +683,22 @@ class Client:
 	def listen(self, eventTypes: list[str], callback: Callable[..., None]) -> None:
 		"""Call callback(type, node, detail1, detail2, anyData) for each event, on the main thread,
 		whenever GLib's default context runs, which is inside wx's main loop and inside wx.Yield."""
+		registered = tuple(eventTypes)
 
 		def onEvent(event) -> None:
-			anyData = event.any_data
-			if isinstance(anyData, Atspi.Accessible):
-				anyData = self.node(anyData)
-			callback(event.type, self.node(event.source), event.detail1, event.detail2, anyData)
+			eventType = event.type
+			if not eventType or not _matchesEventTypes(eventType, registered):
+				return
+			anyData = None
+			if _needsAnyData(eventType):
+				try:
+					anyData = event.any_data
+				except TypeError:
+					# An unset GValue (G_TYPE_INVALID) raises TypeError in PyGObject.
+					anyData = None
+				if isinstance(anyData, Atspi.Accessible):
+					anyData = self.node(anyData)
+			callback(eventType, self.node(event.source), event.detail1, event.detail2, anyData)
 
 		if _hasNoBus:
 			return
@@ -705,6 +715,29 @@ class Client:
 					# A registry too busy to answer in time; the registration ends with NVDA's connection.
 					break
 			self._listener = None
+
+
+#: Event types whose any_data GValue carries data NVDA uses. Reading event.any_data on every bus
+#: event (at-spi2-core 2.62 delivers unregistered events such as children-changed and bounds-changed
+#: as well) is unnecessary and exposes PyGObject to uninitialized or transient GValues (issue 70).
+_ANY_DATA_EXACT = frozenset(
+	{
+		"object:active-descendant-changed",
+		"object:property-change:accessible-name",
+		"object:announcement",
+	},
+)
+
+
+def _needsAnyData(eventType: str) -> bool:
+	return eventType in _ANY_DATA_EXACT or eventType.startswith("object:text-changed:")
+
+
+def _matchesEventTypes(eventType: str, registered: tuple[str, ...]) -> bool:
+	return any(
+		eventType == kind or eventType.startswith(kind if kind.endswith(":") else f"{kind}:")
+		for kind in registered
+	)
 
 
 def _actionName(ref, index: int) -> str:
